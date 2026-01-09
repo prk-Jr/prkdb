@@ -292,11 +292,9 @@ impl AsyncLogSegment {
 
             // Deserialize to get offset
             let config = bincode::config::standard();
-            match bincode::decode_from_slice::<LogRecord, _>(&record_buf, config) {
-                Ok((record, _)) => {
-                    last_offset = record.offset;
-                }
-                Err(_) => {}
+            if let Ok((record, _)) = bincode::decode_from_slice::<LogRecord, _>(&record_buf, config)
+            {
+                last_offset = record.offset;
             }
         }
 

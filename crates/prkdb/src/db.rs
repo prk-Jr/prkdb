@@ -89,7 +89,7 @@ impl PrkDb {
             log_dir: storage_path.join("meta"),
             ..WalConfig::default()
         };
-        let storage = Arc::new(WalStorageAdapter::new(wal_config).map_err(|e| Error::Storage(e))?);
+        let storage = Arc::new(WalStorageAdapter::new(wal_config).map_err(Error::Storage)?);
 
         // Create consumer coordinator
         let offset_store = Arc::new(crate::consumer::StorageOffsetStore::new(storage.clone()));
@@ -221,7 +221,7 @@ impl PrkDb {
             }
 
             if let Some(storage) = pm.get_partition_storage(partition_id) {
-                storage.get(key).await.map_err(|e| Error::Storage(e))
+                storage.get(key).await.map_err(Error::Storage)
             } else {
                 Err(Error::Storage(prkdb_types::error::StorageError::Internal(
                     format!("Partition {} storage not found", partition_id),
@@ -229,7 +229,7 @@ impl PrkDb {
             }
         } else {
             // Local read
-            self.storage.get(key).await.map_err(|e| Error::Storage(e))
+            self.storage.get(key).await.map_err(Error::Storage)
         }
     }
 
@@ -244,7 +244,7 @@ impl PrkDb {
 
             if let Some(storage) = pm.get_partition_storage(partition_id) {
                 // Direct read without ReadIndex - may be stale
-                storage.get(key).await.map_err(|e| Error::Storage(e))
+                storage.get(key).await.map_err(Error::Storage)
             } else {
                 Err(Error::Storage(prkdb_types::error::StorageError::Internal(
                     format!("Partition {} storage not found", partition_id),
@@ -252,7 +252,7 @@ impl PrkDb {
             }
         } else {
             // Local single-node mode - same as regular get
-            self.storage.get(key).await.map_err(|e| Error::Storage(e))
+            self.storage.get(key).await.map_err(Error::Storage)
         }
     }
 
@@ -288,7 +288,7 @@ impl PrkDb {
             }
 
             if let Some(storage) = pm.get_partition_storage(partition_id) {
-                storage.get(key).await.map_err(|e| Error::Storage(e))
+                storage.get(key).await.map_err(Error::Storage)
             } else {
                 Err(Error::Storage(prkdb_types::error::StorageError::Internal(
                     format!("Partition {} storage not found", partition_id),
@@ -296,7 +296,7 @@ impl PrkDb {
             }
         } else {
             // Local single-node mode - same as regular get
-            self.storage.get(key).await.map_err(|e| Error::Storage(e))
+            self.storage.get(key).await.map_err(Error::Storage)
         }
     }
 
@@ -397,7 +397,6 @@ impl PrkDb {
     }
 
     /// Get collection names from registered collections
-
     /// Get collection statistics (count and size)
     pub async fn get_collection_stats(&self, collection_name: &str) -> Result<(u64, u64), Error> {
         // Scan storage for all keys belonging to this collection
@@ -881,7 +880,7 @@ impl PrkDb {
 
                     node_data
                         .entry(node_id.to_string())
-                        .or_insert_with(std::collections::HashMap::new)
+                        .or_default()
                         .insert(field.to_string(), value_str.to_string());
                 }
             }
@@ -934,7 +933,7 @@ impl PrkDb {
 
                     node_lag
                         .entry(node_id.to_string())
-                        .or_insert_with(std::collections::HashMap::new)
+                        .or_default()
                         .insert(field.to_string(), value_str.to_string());
                 }
             }
@@ -1042,10 +1041,7 @@ impl PrkDb {
                 // Scan keys starting with "meta:col:"
                 let prefix = b"meta:col:";
                 // scan_prefix is async, so await it!
-                let keys = storage
-                    .scan_prefix(prefix)
-                    .await
-                    .map_err(|e| Error::Storage(e))?;
+                let keys = storage.scan_prefix(prefix).await.map_err(Error::Storage)?;
 
                 for (key, _) in keys {
                     if let Ok(key_str) = String::from_utf8(key) {
@@ -1066,7 +1062,7 @@ impl PrkDb {
                 .storage
                 .scan_prefix(prefix)
                 .await
-                .map_err(|e| Error::Storage(e))?;
+                .map_err(Error::Storage)?;
             for (key, _) in keys {
                 if let Ok(key_str) = String::from_utf8(key) {
                     if let Some(name) = key_str.strip_prefix("meta:col:") {

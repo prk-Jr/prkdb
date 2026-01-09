@@ -216,7 +216,7 @@ impl MmapLogSegment {
             drop(mmap);
             // Calculate needed size
             let needed = (current_pos + total_size) as u64;
-            let new_size = ((needed + GROWTH_STEP - 1) / GROWTH_STEP) * GROWTH_STEP;
+            let new_size = needed.div_ceil(GROWTH_STEP) * GROWTH_STEP;
             self.resize(new_size).await?;
             mmap = self.mmap.lock().await;
         }
@@ -224,15 +224,12 @@ impl MmapLogSegment {
         // Verify bounds after potential resize to prevent panic
         let mmap_len = mmap.len();
         if current_pos + total_size > mmap_len {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!(
-                    "mmap bounds error: need {}..{} but len={}",
-                    current_pos,
-                    current_pos + total_size,
-                    mmap_len
-                ),
-            ));
+            return Err(std::io::Error::other(format!(
+                "mmap bounds error: need {}..{} but len={}",
+                current_pos,
+                current_pos + total_size,
+                mmap_len
+            )));
         }
 
         // OPTIMIZATION 3: Single memcpy to mmap
@@ -259,7 +256,7 @@ impl MmapLogSegment {
         // Only flush every 10 batches to amortize I/O cost
         // This reduces OS page flushing overhead (identified as 50ms bottleneck)
         let batches = self.batches_since_fsync.fetch_add(1, Ordering::SeqCst);
-        if batches % 10 == 0 {
+        if batches.is_multiple_of(10) {
             mmap.flush_async()?;
         }
 

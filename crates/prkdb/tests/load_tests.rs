@@ -1,8 +1,6 @@
 mod load_test_utils;
 
 use load_test_utils::LoadTestHarness;
-use prkdb::prelude::*;
-use prkdb::storage::WalStorageAdapter;
 use prkdb_types::storage::StorageAdapter;
 use std::time::Duration;
 

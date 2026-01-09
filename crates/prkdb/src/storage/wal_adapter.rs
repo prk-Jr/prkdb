@@ -114,7 +114,7 @@ fn write_batch(wal: &Arc<MmapParallelWal>, batch: &mut Vec<WriteRequest>) {
     // Write to WAL using Tokio runtime for async WAL API
     // (WAL is async but we're calling from sync thread)
     let result = tokio::runtime::Handle::try_current()
-        .and_then(|handle| Ok(handle.block_on(wal.append_batch(records))))
+        .map(|handle| handle.block_on(wal.append_batch(records)))
         .unwrap_or_else(|_| {
             // No runtime available, create temporary one
             tokio::runtime::Runtime::new()

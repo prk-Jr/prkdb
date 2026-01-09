@@ -346,13 +346,13 @@ where
     ours.sort_by(|(k1, _), (k2, _)| {
         let seq1 = k1
             .split(':')
-            .last()
+            .next_back()
             .unwrap_or("0")
             .parse::<u64>()
             .unwrap_or(0);
         let seq2 = k2
             .split(':')
-            .last()
+            .next_back()
             .unwrap_or("0")
             .parse::<u64>()
             .unwrap_or(0);

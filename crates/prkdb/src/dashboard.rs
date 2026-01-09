@@ -182,16 +182,9 @@ where
     }
 }
 
+#[derive(Default)]
 struct MessageVisitor {
     message: String,
-}
-
-impl Default for MessageVisitor {
-    fn default() -> Self {
-        Self {
-            message: String::new(),
-        }
-    }
 }
 
 impl tracing::field::Visit for MessageVisitor {
@@ -317,10 +310,7 @@ pub fn spawn_if_env(db: Arc<PrkDb>) -> Option<tokio::task::JoinHandle<()>> {
 /// If `PRKDB_DASHBOARD_REGISTRY` is set, periodically send this DB's summary to the registry
 /// so a shared dashboard instance can list it.
 pub fn spawn_peer_heartbeat(db: Arc<PrkDb>) -> Option<tokio::task::JoinHandle<()>> {
-    let registry = match std::env::var("PRKDB_DASHBOARD_REGISTRY").ok() {
-        Some(url) => url,
-        None => return None,
-    };
+    let registry = std::env::var("PRKDB_DASHBOARD_REGISTRY").ok()?;
     let client = match reqwest::Client::builder().build() {
         Ok(c) => c,
         Err(e) => {
@@ -422,14 +412,7 @@ async fn logs_stream(
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
     let rx = state.log_tx.subscribe();
     let stream = BroadcastStream::new(rx)
-        .filter_map(|res| {
-            // Ignore lag errors
-            if let Ok(entry) = res {
-                Some(entry)
-            } else {
-                None
-            }
-        })
+        .filter_map(|res| res.ok())
         .map(|entry| {
             let ev = Event::default()
                 .json_data(&entry)

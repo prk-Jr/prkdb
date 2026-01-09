@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity)]
 //! # IndexedStorage - High-Performance Storage with Secondary Indexes
 //!
 //! This module provides a generic storage adapter with secondary index support,
@@ -152,9 +153,9 @@ impl MemoryIndex {
     fn add(&mut self, field: &str, value: Vec<u8>, primary_key: Vec<u8>) {
         self.indexes
             .entry(field.to_string())
-            .or_insert_with(BTreeMap::new)
+            .or_default()
             .entry(value)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(primary_key);
     }
 
@@ -219,9 +220,9 @@ impl MemoryIndex {
     fn add_compound(&mut self, index_name: &str, composite_value: Vec<u8>, primary_key: Vec<u8>) {
         self.compound_indexes
             .entry(index_name.to_string())
-            .or_insert_with(BTreeMap::new)
+            .or_default()
             .entry(composite_value)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(primary_key);
     }
 
@@ -252,9 +253,9 @@ impl MemoryIndex {
         let mut total_entries = 0;
         let mut total_keys = 0;
 
-        for (_, index) in &self.indexes {
+        for index in self.indexes.values() {
             total_keys += index.len();
-            for (_, pks) in index {
+            for pks in index.values() {
                 total_entries += pks.len();
             }
         }
@@ -683,7 +684,7 @@ where
         F: Fn(&T) -> V,
     {
         let records = self.collect().await?;
-        Ok(records.iter().map(|r| field_fn(r)).collect())
+        Ok(records.iter().map(field_fn).collect())
     }
 
     /// Partition records by a predicate
@@ -1399,14 +1400,11 @@ impl<'a, S: StorageAdapter + 'static> Transaction<'a, S> {
                         .storage
                         .lock_free_indexes
                         .entry(collection.clone())
-                        .or_insert_with(DashMap::new);
+                        .or_default();
 
                     for (field, value) in index_values {
-                        let field_idx = col_idx.entry(field).or_insert_with(DashMap::new);
-                        field_idx
-                            .entry(value)
-                            .or_insert_with(Vec::new)
-                            .push(key.clone());
+                        let field_idx = col_idx.entry(field).or_default();
+                        field_idx.entry(value).or_default().push(key.clone());
                     }
                 }
                 TxOperation::Delete {
@@ -1759,13 +1757,10 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
 
         for (col_name, mem_index) in &persisted.collections {
             // Restore field values indexes
-            let col_idx = self
-                .lock_free_indexes
-                .entry(col_name.clone())
-                .or_insert_with(DashMap::new);
+            let col_idx = self.lock_free_indexes.entry(col_name.clone()).or_default();
 
             for (field, values) in &mem_index.indexes {
-                let field_idx = col_idx.entry(field.clone()).or_insert_with(DashMap::new);
+                let field_idx = col_idx.entry(field.clone()).or_default();
                 for (val, keys) in values {
                     field_idx.insert(val.clone(), keys.clone());
                 }
@@ -1775,12 +1770,10 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
             let text_col_idx = self
                 .lock_free_text_indexes
                 .entry(col_name.clone())
-                .or_insert_with(DashMap::new);
+                .or_default();
 
             for (field, tokens) in &mem_index.text_indexes {
-                let field_idx = text_col_idx
-                    .entry(field.clone())
-                    .or_insert_with(DashMap::new);
+                let field_idx = text_col_idx.entry(field.clone()).or_default();
                 for (token, keys) in tokens {
                     field_idx.insert(token.clone(), keys.clone());
                 }
@@ -1925,15 +1918,13 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         let collection_idx = self
             .lock_free_indexes
             .entry(collection_name.clone())
-            .or_insert_with(DashMap::new);
+            .or_default();
 
         for (field, value) in record.index_values() {
-            let field_idx = collection_idx
-                .entry(field.to_string())
-                .or_insert_with(DashMap::new);
+            let field_idx = collection_idx.entry(field.to_string()).or_default();
             field_idx
                 .entry(value)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(primary_key.clone());
         }
 
@@ -1970,9 +1961,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         T: Indexed + Collection + prkdb_types::Hooks,
     {
         // Call before_insert hook
-        record
-            .before_insert()
-            .map_err(|e| StorageError::Validation(e))?;
+        record.before_insert().map_err(StorageError::Validation)?;
 
         // Insert the record
         self.insert(record).await?;
@@ -1989,9 +1978,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         T: Indexed + Collection + prkdb_types::Hooks,
     {
         // Call before_delete hook
-        record
-            .before_delete()
-            .map_err(|e| StorageError::Validation(e))?;
+        record.before_delete().map_err(StorageError::Validation)?;
 
         // Delete the record
         self.delete(record).await?;
@@ -2649,19 +2636,14 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         self.storage.put_batch(wal_entries).await?;
 
         // Step 3: Lock-free index updates using DashMap
-        let collection_idx = self
-            .lock_free_indexes
-            .entry(collection_name)
-            .or_insert_with(DashMap::new);
+        let collection_idx = self.lock_free_indexes.entry(collection_name).or_default();
 
         for (primary_key, _data, index_values) in &serialized {
             for (field, value) in index_values {
-                let field_idx = collection_idx
-                    .entry(field.clone())
-                    .or_insert_with(DashMap::new);
+                let field_idx = collection_idx.entry(field.clone()).or_default();
                 field_idx
                     .entry(value.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(primary_key.clone());
             }
         }

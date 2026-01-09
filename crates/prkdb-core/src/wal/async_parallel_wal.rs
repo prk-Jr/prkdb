@@ -39,11 +39,11 @@ impl AsyncParallelWal {
 
             tokio::fs::create_dir_all(&segment_config.log_dir)
                 .await
-                .map_err(|e| WalError::Io(e))?;
+                .map_err(WalError::Io)?;
 
             let wal = AsyncLogSegment::create(&segment_config.log_dir, 0, 4096)
                 .await
-                .map_err(|e| WalError::Io(e))?;
+                .map_err(WalError::Io)?;
 
             segments.push(Arc::new(Mutex::new(wal)));
         }
@@ -71,7 +71,7 @@ impl AsyncParallelWal {
 
             let wal = AsyncLogSegment::open(&segment_config.log_dir, 0, 4096)
                 .await
-                .map_err(|e| WalError::Io(e))?;
+                .map_err(WalError::Io)?;
 
             segments.push(Arc::new(Mutex::new(wal)));
         }
@@ -93,7 +93,7 @@ impl AsyncParallelWal {
             .await
             .append(record)
             .await
-            .map_err(|e| WalError::Io(e))?;
+            .map_err(WalError::Io)?;
 
         Ok((segment_id, offset))
     }
@@ -137,7 +137,7 @@ impl AsyncParallelWal {
                     .await
                     .append_batch(segment_records)
                     .await
-                    .map_err(|e| WalError::Io(e))?;
+                    .map_err(WalError::Io)?;
                 Ok::<(usize, u64), WalError>((segment_id, offset))
             };
             futures.push(fut);
@@ -174,7 +174,7 @@ impl AsyncParallelWal {
             .await
             .read(offset)
             .await
-            .map_err(|e| WalError::Io(e))
+            .map_err(WalError::Io)
     }
 
     /// Get the number of parallel segments

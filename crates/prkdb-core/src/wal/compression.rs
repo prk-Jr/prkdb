@@ -144,7 +144,7 @@ pub fn compress(data: &[u8], config: &CompressionConfig) -> Result<Vec<u8>, Comp
                 .map_err(|e| CompressionError::CompressionFailed(e.to_string()))?;
 
             encoder.write_all(data)?;
-            encoder.finish().map_err(|e| CompressionError::Io(e))
+            encoder.finish().map_err(CompressionError::Io)
         }
     }
 }

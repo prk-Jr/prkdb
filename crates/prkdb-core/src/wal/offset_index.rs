@@ -80,7 +80,7 @@ impl OffsetIndex {
     /// Add an index entry
     pub fn append(&mut self, offset: u64, position: u64) -> io::Result<()> {
         if self.entries.len() >= self.max_entries {
-            return Err(io::Error::new(io::ErrorKind::Other, "index full"));
+            return Err(io::Error::other("index full"));
         }
 
         let entry = IndexEntry {

@@ -76,10 +76,7 @@ impl TtlIndex {
         }
 
         // Add new expiry
-        self.by_expiry
-            .entry(expires_at)
-            .or_insert_with(Vec::new)
-            .push(key);
+        self.by_expiry.entry(expires_at).or_default().push(key);
     }
 
     /// Remove TTL for a key

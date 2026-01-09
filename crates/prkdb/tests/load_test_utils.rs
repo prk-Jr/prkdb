@@ -33,10 +33,12 @@ impl LatencyTracker {
         samples[index.min(samples.len() - 1)]
     }
 
+    #[allow(dead_code)]
     pub async fn count(&self) -> usize {
         self.samples.lock().await.len()
     }
 
+    #[allow(dead_code)]
     pub async fn clear(&self) {
         self.samples.lock().await.clear();
     }

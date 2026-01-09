@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 
 thread_local! {
-    static BUFFER_POOL: RefCell<Vec<Vec<u8>>> = RefCell::new(Vec::new());
+    static BUFFER_POOL: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
 }
 
 /// A pooled buffer that returns itself to the pool when dropped

@@ -42,7 +42,7 @@ impl MmapParallelWal {
 
             tokio::fs::create_dir_all(&segment_config.log_dir)
                 .await
-                .map_err(|e| WalError::Io(e))?;
+                .map_err(WalError::Io)?;
 
             // Encode segment ID in high 16 bits of offset
             // Start at 1 to avoid 0 ambiguity
@@ -50,7 +50,7 @@ impl MmapParallelWal {
 
             let wal = MmapLogSegment::create(&segment_config.log_dir, base_offset, 4096)
                 .await
-                .map_err(|e| WalError::Io(e))?;
+                .map_err(WalError::Io)?;
 
             segments.push(Arc::new(Mutex::new(wal)));
         }
@@ -89,7 +89,7 @@ impl MmapParallelWal {
 
             let wal = MmapLogSegment::open(&segment_config.log_dir, base_offset, 4096)
                 .await
-                .map_err(|e| WalError::Io(e))?;
+                .map_err(WalError::Io)?;
 
             segments.push(Arc::new(Mutex::new(wal)));
         }
@@ -119,7 +119,7 @@ impl MmapParallelWal {
             .await
             .append(record)
             .await
-            .map_err(|e| WalError::Io(e))?;
+            .map_err(WalError::Io)?;
 
         self.metrics.record_op(start.elapsed());
         Ok((segment_id, offset))
@@ -161,7 +161,7 @@ impl MmapParallelWal {
                     .await
                     .append_batch(segment_records)
                     .await
-                    .map_err(|e| WalError::Io(e))?;
+                    .map_err(WalError::Io)?;
                 Ok::<(usize, u64), WalError>((segment_id, offset))
             };
             futures.push(fut);

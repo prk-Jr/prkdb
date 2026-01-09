@@ -311,8 +311,8 @@ impl StorageAdapter for CollectionPartitionedAdapter {
             .observe(duration);
 
         // Track cache hit/miss (heuristic: Some = hit, None = miss)
-        if result.is_ok() {
-            if result.as_ref().unwrap().is_some() {
+        if let Ok(entry) = &result {
+            if entry.is_some() {
                 crate::prometheus_metrics::CACHE_HITS_TOTAL
                     .with_label_values(&["local"])
                     .inc();

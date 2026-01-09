@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity)]
 use super::config::{ClusterConfig, NodeId};
 use dashmap::DashMap;
 use std::collections::{HashMap, VecDeque};
@@ -324,10 +325,7 @@ impl RaftNode {
         }
 
         // Slow path: Register waiter
-        self.commit_waiters
-            .entry(index)
-            .or_insert_with(Vec::new)
-            .push(tx);
+        self.commit_waiters.entry(index).or_default().push(tx);
 
         // Double check to avoid race (commit happened while we were registering)
         if *self.commit_index.read().await >= index {
@@ -704,7 +702,6 @@ impl RaftNode {
                     if new_commit_index > old_commit {
                         drop(commit_index); // Release lock before notify
                         self.commit_notify.notify_waiters();
-                        return;
                     }
                 }
             }
@@ -1182,11 +1179,7 @@ impl RaftNode {
                 // Apply entries from last_applied + 1 to commit_index
                 for idx in (*last_applied + 1)..=commit_index {
                     let log = self.log.read().await;
-                    let entry_data = if let Some(entry) = log.get((idx - 1) as usize) {
-                        Some(entry.data.clone())
-                    } else {
-                        None
-                    };
+                    let entry_data = log.get((idx - 1) as usize).map(|entry| entry.data.clone());
                     drop(log); // Release lock before async call
 
                     if let Some(data) = entry_data {

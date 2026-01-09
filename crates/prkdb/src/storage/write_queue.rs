@@ -41,11 +41,12 @@ pub struct WriteQueue {
 }
 
 impl WriteQueue {
-    /// Create a new write queue
+    /// Create a sender/receiver pair for a write queue
     ///
     /// Returns a tuple of (sender, receiver) for the queue.
     /// The sender can be cloned and shared across async tasks.
     /// The receiver should be used by the dedicated writer thread.
+    #[allow(clippy::new_ret_no_self)]
     pub fn new() -> (Sender<WriteRequest>, Receiver<WriteRequest>) {
         unbounded()
     }

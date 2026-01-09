@@ -308,7 +308,7 @@ where
                 }
             };
 
-            let item_bytes = match encode_to_vec(&item, config::standard()) {
+            let item_bytes = match encode_to_vec(item, config::standard()) {
                 Ok(b) => b,
                 Err(e) => {
                     results.push(Err(StorageError::Serialization(e.to_string()).into()));

@@ -49,9 +49,7 @@ impl<C: Collection, Db: Send + Sync> ComputeHandler<C, Db> for () {
 impl<C: Collection, Db: Send + Sync> StatefulCompute<C, Db> for () {
     type State = ();
 
-    fn init_state(&self) -> Self::State {
-        ()
-    }
+    fn init_state(&self) -> Self::State {}
     fn state_key(&self) -> String {
         "stub".to_string()
     }

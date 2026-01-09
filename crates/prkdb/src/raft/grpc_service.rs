@@ -619,6 +619,7 @@ impl PrkDbServiceTrait for PrkDbGrpcService {
 }
 
 impl PrkDbGrpcService {
+    #[allow(clippy::result_large_err)]
     fn validate_admin_token(&self, token: &str) -> Result<(), Status> {
         // Debug trace for token validation
         tracing::debug!(
