@@ -106,12 +106,17 @@ mod tests {
         let vec = buf.as_mut_vec();
         vec.resize(100_000, 0u8); // Make it large
 
-        let ptr1 = vec.as_ptr();
         drop(buf);
 
         let buf2 = PooledBuffer::acquire();
-        let ptr2 = buf2.as_slice().as_ptr();
+        let cap2 = buf2.buffer.as_ref().unwrap().capacity();
 
-        assert_ne!(ptr1, ptr2, "Large buffer should not be pooled");
+        // If it was pooled, we'd get the 100k capacity buffer back.
+        // Since it wasn't pooled, we get a fresh 4k capacity buffer.
+        assert!(
+            cap2 < 50000,
+            "Large buffer should not be pooled (capacity was {})",
+            cap2
+        );
     }
 }
