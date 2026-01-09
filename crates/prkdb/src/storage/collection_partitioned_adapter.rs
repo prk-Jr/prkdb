@@ -430,9 +430,9 @@ impl StorageAdapter for CollectionPartitionedAdapter {
         // Write to all collections in PARALLEL! (This is the magic!)
         let futures: Vec<_> = collection_batches
             .into_iter()
-            .map(|(collection, batch)| {
-                let adapter = self.get_or_create_collection(&collection);
-                async move { adapter.put_batch(batch).await }
+            .map(|(collection, batch)| async move {
+                let adapter = self.get_or_create_collection_async(&collection).await;
+                adapter.put_batch(batch).await
             })
             .collect();
 
