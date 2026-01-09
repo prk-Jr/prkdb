@@ -1,0 +1,82 @@
+{
+    "dashboard": {
+        "title": "PrkDB Performance Dashboard",
+        "uid": "prkdb-perf",
+        "timezone": "browser",
+        "schemaVersion": 16,
+        "version": 1,
+        "refresh": "5s",
+        "panels": [
+            {
+                "id": 1,
+                "title": "Server Status",
+                "type": "stat",
+                "targets": [
+                    {
+                        "expr": "prkdb_server_up",
+                        "refId": "A"
+                    }
+                ],
+                "gridPos": {
+                    "h": 4,
+                    "w": 6,
+                    "x": 0,
+                    "y": 0
+                }
+            },
+            {
+                "id": 2,
+                "title": "Raft State",
+                "type": "stat",
+                "targets": [
+                    {
+                        "expr": "prkdb_raft_state",
+                        "refId": "A",
+                        "legendFormat": "{{node_id}}"
+                    }
+                ],
+                "gridPos": {
+                    "h": 4,
+                    "w": 6,
+                    "x": 6,
+                    "y": 0
+                }
+            },
+            {
+                "id": 3,
+                "title": "Raft Proposals Rate",
+                "type": "graph",
+                "targets": [
+                    {
+                        "expr": "rate(prkdb_raft_proposals_total[1m])",
+                        "refId": "A",
+                        "legendFormat": "Proposals/sec"
+                    }
+                ],
+                "gridPos": {
+                    "h": 8,
+                    "w": 12,
+                    "x": 0,
+                    "y": 4
+                }
+            },
+            {
+                "id": 4,
+                "title": "Raft Leader Elections",
+                "type": "graph",
+                "targets": [
+                    {
+                        "expr": "prkdb_raft_leader_elections_total",
+                        "refId": "A"
+                    }
+                ],
+                "gridPos": {
+                    "h": 8,
+                    "w": 12,
+                    "x": 12,
+                    "y": 4
+                }
+            }
+        ]
+    }
+}

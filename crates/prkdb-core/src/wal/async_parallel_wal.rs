@@ -1,0 +1,286 @@
+use super::async_log_segment::AsyncLogSegment;
+use super::{LogRecord, WalConfig, WalError};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+/// Async Parallel Write-Ahead Log combining async I/O with parallel segments
+///
+/// This combines the benefits of:
+/// - True async I/O (tokio::fs::File) - eliminates blocking overhead
+/// - Parallel segments - distributes writes across N independent WALs
+/// - Result: True parallelism with async I/O for maximum throughput
+pub struct AsyncParallelWal {
+    /// Independent async WAL segments
+    segments: Vec<Arc<Mutex<AsyncLogSegment>>>,
+    /// Number of parallel segments
+    segment_count: usize,
+    /// Configuration
+    #[allow(dead_code)]
+    config: WalConfig,
+}
+
+impl AsyncParallelWal {
+    /// Create a new async parallel WAL with the specified number of segments
+    pub async fn create(config: WalConfig, segment_count: usize) -> Result<Self, WalError> {
+        if segment_count == 0 {
+            return Err(WalError::Serialization(
+                "Segment count must be at least 1".to_string(),
+            ));
+        }
+
+        let mut segments = Vec::with_capacity(segment_count);
+
+        for i in 0..segment_count {
+            // Create a separate directory for each parallel segment
+            let mut segment_config = config.clone();
+            segment_config.log_dir = config.log_dir.join(format!("async_segment_{}", i));
+
+            tokio::fs::create_dir_all(&segment_config.log_dir)
+                .await
+                .map_err(|e| WalError::Io(e))?;
+
+            let wal = AsyncLogSegment::create(&segment_config.log_dir, 0, 4096)
+                .await
+                .map_err(|e| WalError::Io(e))?;
+
+            segments.push(Arc::new(Mutex::new(wal)));
+        }
+
+        Ok(Self {
+            segments,
+            segment_count,
+            config,
+        })
+    }
+
+    /// Open an existing async parallel WAL
+    pub async fn open(config: WalConfig, segment_count: usize) -> Result<Self, WalError> {
+        if segment_count == 0 {
+            return Err(WalError::Serialization(
+                "Segment count must be at least 1".to_string(),
+            ));
+        }
+
+        let mut segments = Vec::with_capacity(segment_count);
+
+        for i in 0..segment_count {
+            let mut segment_config = config.clone();
+            segment_config.log_dir = config.log_dir.join(format!("async_segment_{}", i));
+
+            let wal = AsyncLogSegment::open(&segment_config.log_dir, 0, 4096)
+                .await
+                .map_err(|e| WalError::Io(e))?;
+
+            segments.push(Arc::new(Mutex::new(wal)));
+        }
+
+        Ok(Self {
+            segments,
+            segment_count,
+            config,
+        })
+    }
+
+    /// Append a single record (routes to appropriate segment based on hash)
+    pub async fn append(&self, record: LogRecord) -> Result<(usize, u64), WalError> {
+        let segment_id = self.route_record(&record);
+        let segment = &self.segments[segment_id];
+
+        let offset = segment
+            .lock()
+            .await
+            .append(record)
+            .await
+            .map_err(|e| WalError::Io(e))?;
+
+        Ok((segment_id, offset))
+    }
+
+    /// Append multiple records in parallel across segments (KEY OPTIMIZATION)
+    ///
+    /// This is where we get the combined benefit:
+    /// - Records partitioned by segment (parallelism)
+    /// - Each segment uses async I/O (no blocking)
+    /// - All segments write concurrently (true parallelism)
+    pub async fn append_batch(
+        &self,
+        records: Vec<LogRecord>,
+    ) -> Result<Vec<(usize, u64)>, WalError> {
+        if records.is_empty() {
+            return Err(WalError::EmptyBatch);
+        }
+
+        // Partition records by segment
+        let mut partitioned: Vec<Vec<LogRecord>> = vec![Vec::new(); self.segment_count];
+        let mut record_to_segment: Vec<usize> = Vec::with_capacity(records.len());
+
+        for record in records {
+            let segment_id = self.route_record(&record);
+            record_to_segment.push(segment_id);
+            partitioned[segment_id].push(record);
+        }
+
+        // Write to each segment in parallel (async)
+        let mut futures = Vec::new();
+
+        for (segment_id, segment_records) in partitioned.into_iter().enumerate() {
+            if segment_records.is_empty() {
+                continue;
+            }
+
+            let segment = self.segments[segment_id].clone();
+            let fut = async move {
+                let offset = segment
+                    .lock()
+                    .await
+                    .append_batch(segment_records)
+                    .await
+                    .map_err(|e| WalError::Io(e))?;
+                Ok::<(usize, u64), WalError>((segment_id, offset))
+            };
+            futures.push(fut);
+        }
+
+        // Wait for all writes to complete (concurrently)
+        let results = futures::future::try_join_all(futures).await?;
+
+        // Map results back to original record order
+        let mut offsets = Vec::with_capacity(record_to_segment.len());
+        for segment_id in record_to_segment {
+            // Find the result for this segment
+            let (_, offset) = results
+                .iter()
+                .find(|(sid, _)| *sid == segment_id)
+                .ok_or_else(|| WalError::Serialization("Missing segment result".to_string()))?;
+            offsets.push((segment_id, *offset));
+        }
+
+        Ok(offsets)
+    }
+
+    /// Read a record from a specific segment
+    pub async fn read(&self, segment_id: usize, offset: u64) -> Result<LogRecord, WalError> {
+        if segment_id >= self.segment_count {
+            return Err(WalError::Serialization(format!(
+                "Invalid segment ID: {}",
+                segment_id
+            )));
+        }
+
+        self.segments[segment_id]
+            .lock()
+            .await
+            .read(offset)
+            .await
+            .map_err(|e| WalError::Io(e))
+    }
+
+    /// Get the number of parallel segments
+    pub fn segment_count(&self) -> usize {
+        self.segment_count
+    }
+
+    /// Route a record to a segment based on collection name hash
+    fn route_record(&self, record: &LogRecord) -> usize {
+        let collection = match &record.operation {
+            super::LogOperation::Put { collection, .. } => collection,
+            super::LogOperation::Delete { collection, .. } => collection,
+            super::LogOperation::PutBatch { collection, .. } => collection,
+            super::LogOperation::DeleteBatch { collection, .. } => collection,
+            super::LogOperation::CompressedPutBatch { collection, .. } => collection,
+            super::LogOperation::CompressedDeleteBatch { collection, .. } => collection,
+        };
+
+        let mut hasher = DefaultHasher::new();
+        collection.hash(&mut hasher);
+        (hasher.finish() as usize) % self.segment_count
+    }
+
+    /// Get total next offset across all segments
+    pub async fn next_offset(&self) -> u64 {
+        let mut total = 0;
+        for segment in &self.segments {
+            total += segment.lock().await.next_offset();
+        }
+        total
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wal::LogOperation;
+
+    #[tokio::test]
+    async fn test_async_parallel_wal_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            log_dir: dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        };
+
+        let wal = AsyncParallelWal::create(config, 4).await.unwrap();
+        assert_eq!(wal.segment_count(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_async_parallel_wal_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            log_dir: dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        };
+
+        let wal = AsyncParallelWal::create(config, 4).await.unwrap();
+
+        let record = LogRecord::new(LogOperation::Put {
+            collection: "test".to_string(),
+            id: vec![1, 2, 3],
+            data: vec![4, 5, 6],
+        });
+
+        let (segment_id, offset) = wal.append(record.clone()).await.unwrap();
+        assert!(segment_id < 4);
+        assert_eq!(offset, 0);
+
+        // Read it back
+        let read_record = wal.read(segment_id, offset).await.unwrap();
+        assert_eq!(read_record.offset, offset);
+    }
+
+    #[tokio::test]
+    async fn test_async_parallel_wal_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            log_dir: dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        };
+
+        let wal = AsyncParallelWal::create(config, 4).await.unwrap();
+
+        // Create records for different collections to test distribution
+        let mut records = Vec::new();
+        for i in 0..100 {
+            records.push(LogRecord::new(LogOperation::Put {
+                collection: format!("coll_{}", i % 10),
+                id: vec![i as u8],
+                data: vec![i as u8; 100],
+            }));
+        }
+
+        let results = wal.append_batch(records).await.unwrap();
+        assert_eq!(results.len(), 100);
+
+        // Verify records are distributed across segments
+        let mut segment_counts = vec![0; 4];
+        for (segment_id, _) in &results {
+            segment_counts[*segment_id] += 1;
+        }
+
+        // At least 2 segments should have records
+        let used_segments = segment_counts.iter().filter(|&&c| c > 0).count();
+        assert!(used_segments >= 2);
+    }
+}

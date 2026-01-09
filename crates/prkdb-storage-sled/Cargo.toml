@@ -1,0 +1,16 @@
+[package]
+name = "prkdb-storage-sled"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = { workspace = true }
+prkdb-core = { workspace = true }
+sled = "0.34"
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+

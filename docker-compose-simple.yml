@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  # Single PrkDB node for simplicity
+  prkdb:
+    build:
+      context: .
+      args:
+        CACHEBUST: ${CACHEBUST:-1}
+    container_name: prkdb
+    hostname: prkdb
+    network_mode: "host"
+    volumes:
+      - prkdb-data:/data/prkdb
+    environment:
+      - NODE_ID=1
+      - GRPC_PORT=50051
+      - STORAGE_PATH=/data/prkdb
+      - RUST_LOG=info
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    network_mode: "host"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    network_mode: "host"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    restart: unless-stopped
+
+volumes:
+  prkdb-data:
+  prometheus-data:
+  grafana-data:

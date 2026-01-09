@@ -1,0 +1,113 @@
+[package]
+name = "prkdb"
+version = "0.1.0"
+edition = "2021"
+
+[[test]]
+name = "integration_tests"
+
+[[test]]
+name = "load_tests"
+path = "tests/load_tests.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+bincode = { workspace = true }
+bytes = "1.5"  # Zero-copy data handling for performance
+crossbeam-channel = "0.5"  # Lock-free channels for Phase 2 batching optimization
+futures = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+rand = "0.8"
+ahash = "0.8"
+dashmap = { workspace = true}
+papaya = "0.1"  # Lock-free HashMap for Phase 5 optimization (better than flurry)
+prkdb-core = { workspace = true }
+prkdb-metrics = { workspace = true }
+prkdb-orm = { workspace = true }
+prkdb-macros = { workspace = true }
+prkdb-orm-macros = { workspace = true }
+uuid = { workspace = true}
+mimalloc = { workspace = true }  # Fast allocator
+lz4 = { workspace = true }  # Compression
+axum = { workspace = true }
+reqwest = { version = "0.11", features = ["json"] }
+pin-project = "1.1"
+tonic = { version = "0.10", features = ["tls", "tls-roots"] }
+prost = "0.12"
+prost-types = "0.12"
+tokio-stream = { version = "0.1", features = ["time", "sync", "net"] }
+tracing-subscriber = { workspace = true }
+sysinfo = "0.30"
+seahash = "4.1.0"
+prometheus = { workspace = true }
+lazy_static = { workspace = true }
+clap = { version = "4.4", features = ["derive"] }
+
+[features]
+default = ["metrics"]
+metrics = []
+
+[dev-dependencies]
+prkdb-orm-macros = { workspace = true }
+prkdb-storage-sled = { workspace = true }
+prkdb-storage-sql = { workspace = true }
+prkdb-storage-segmented = { workspace = true }
+prkdb-metrics = { workspace = true }
+
+tempfile = "3"
+sqlx = { version = "0.8.2", default-features = false, features = ["runtime-tokio", "sqlite"] }
+criterion = { workspace = true }
+proptest = "1.4"
+
+[[bench]]
+name = "consumer_bench"
+harness = false
+
+[[bench]]
+name = "kv_bench"
+harness = false
+
+[[bench]]
+name = "partitioning_bench"
+harness = false
+
+[[bench]]
+name = "streaming_bench"
+harness = false
+
+[[bench]]
+name = "windowing_bench"
+harness = false
+
+[[bench]]
+name = "joins_bench"
+harness = false
+
+[[bench]]
+name = "replication_bench"
+harness = false
+
+[[bench]]
+name = "append_log_bench"
+harness = false
+
+[[bench]]
+name = "batch_bench"
+harness = false
+
+[[bench]]
+name = "storage_bench"
+harness = false
+
+[[bench]]
+name = "query_bench"
+harness = false
+
+[build-dependencies]
+tonic-build = "0.10"

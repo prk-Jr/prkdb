@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/prkdb",
+    "crates/prkdb-cli",
+    "crates/prkdb-core",
+    "crates/prkdb-macros",
+    "crates/prkdb-metrics",
+    "crates/prkdb-orm", 
+    "crates/prkdb-orm-macros",
+    "crates/prkdb-storage-sled",
+    "crates/prkdb-storage-sql",
+    "crates/prkdb-storage-segmented",
+]
+
+
+[workspace.dependencies]
+anyhow = "1.0"
+async-trait = "0.1.88"
+bincode = { version ="2.0.1", features = ["serde"]}
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0"}
+thiserror = "1.0"
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+chrono = { version = "0.4", features = ["serde", "alloc"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+criterion = { version = "0.5", features = ["async_tokio"] }
+dashmap = "5.5"
+uuid = { version = "*", features = ["v4"] }
+prometheus = "0.13"
+axum = "0.7"
+lazy_static = "1.4"
+crossbeam = "0.8"
+mimalloc = { version = "0.1", default-features = false }  # Fast allocator: 10-15% boost!
+lz4 = "1.24"  # Fast compression: 2-3x for compressible data!
+
+prkdb = { path = "crates/prkdb" }
+prkdb-core = { path = "crates/prkdb-core" }
+prkdb-macros = { path = "crates/prkdb-macros" }
+prkdb-metrics = { path = "crates/prkdb-metrics" }
+prkdb-orm-macros = { path = "crates/prkdb-orm-macros" }
+prkdb-orm = { path = "crates/prkdb-orm" }
+prkdb-storage-sled = { path = "crates/prkdb-storage-sled" }
+prkdb-storage-sql = { path = "crates/prkdb-storage-sql" }
+prkdb-storage-segmented = { path = "crates/prkdb-storage-segmented" }

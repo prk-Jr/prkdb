@@ -1,0 +1,25 @@
+[package]
+name = "prkdb-storage-segmented"
+version = "0.1.0"
+edition = "2021"
+description = "Segmented log storage adapter for prkdb with simple indexing and rotation."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+tokio = { workspace = true }
+async-trait = { workspace = true }
+bytes = "1.7"
+tempfile = "3.10.1"
+prkdb-core = { path = "../prkdb-core" }
+crc32fast = "1.4"
+bincode = "1.3"
+
+[features]
+default = []
+# Placeholder feature to keep API stable; currently delegates to the buffered adapter.
+uring = []
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+rand = "0.8"
+criterion = { workspace = true }

@@ -1,0 +1,130 @@
+version: '3.8'
+
+networks:
+  prkdb-net:
+    driver: bridge
+
+services:
+  node1:
+    build:
+      context: .
+      args:
+        CACHEBUST: ${CACHEBUST:-1}
+    container_name: prkdb-node1
+    hostname: node1
+    networks:
+      - prkdb-net
+    ports:
+      - "50051:50051"  # gRPC data service
+      - "9091:9091"    # Prometheus metrics
+    volumes:
+      - node1-data:/data/prkdb
+    environment:
+      - NODE_ID=1
+      - GRPC_PORT=50051
+      - CLUSTER_NODES=1@node1:50051,2@node2:50052,3@node3:50053
+      - STORAGE_PATH=/data/prkdb
+      - NUM_PARTITIONS=9
+      - RUST_LOG=info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/metrics"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  node2:
+    build:
+      context: .
+      args:
+        CACHEBUST: ${CACHEBUST:-1}
+    container_name: prkdb-node2
+    hostname: node2
+    networks:
+      - prkdb-net
+    ports:
+      - "50052:50052"  # gRPC data service
+      - "9092:9092"    # Prometheus metrics
+    volumes:
+      - node2-data:/data/prkdb
+    environment:
+      - NODE_ID=2
+      - GRPC_PORT=50052
+      - CLUSTER_NODES=1@node1:50051,2@node2:50052,3@node3:50053
+      - STORAGE_PATH=/data/prkdb
+      - NUM_PARTITIONS=9
+      - RUST_LOG=info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9092/metrics"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  node3:
+    build:
+      context: .
+      args:
+        CACHEBUST: ${CACHEBUST:-1}
+    container_name: prkdb-node3
+    hostname: node3
+    networks:
+      - prkdb-net
+    ports:
+      - "50053:50053"  # gRPC data service
+      - "9093:9093"    # Prometheus metrics
+    volumes:
+      - node3-data:/data/prkdb
+    environment:
+      - NODE_ID=3
+      - GRPC_PORT=50053
+      - CLUSTER_NODES=1@node1:50051,2@node2:50052,3@node3:50053
+      - STORAGE_PATH=/data/prkdb
+      - NUM_PARTITIONS=9
+      - RUST_LOG=info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9093/metrics"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    networks:
+      - prkdb-net
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    networks:
+      - prkdb-net
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    restart: unless-stopped
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  prometheus-data:
+  grafana-data:
