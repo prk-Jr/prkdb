@@ -13,6 +13,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
