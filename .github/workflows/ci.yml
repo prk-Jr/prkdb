@@ -28,4 +28,4 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Validate
-        run: ./validate_all.sh
+        run: ./scripts/validate_all.sh
