@@ -27,6 +27,10 @@ pub struct ServeArgs {
     #[arg(short, long, default_value = "8080")]
     pub port: u16,
 
+    /// Port to serve gRPC on (for Admin & Raft)
+    #[arg(long, default_value = "50051")]
+    pub grpc_port: u16,
+
     /// Host to bind to
     #[arg(long, default_value = "127.0.0.1")]
     pub host: String,
@@ -182,6 +186,40 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
 
     if args.prometheus {
         println!("   GET  /metrics       - Prometheus metrics");
+    }
+
+    // Start gRPC server in background
+    let grpc_port = args.grpc_port;
+    // Use the same host as HTTP server (default 127.0.0.1)
+    let grpc_addr_str = format!("{}:{}", args.host, grpc_port);
+    let grpc_addr: SocketAddr = grpc_addr_str
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Failed to parse gRPC address '{}': {}", grpc_addr_str, e))?;
+
+    // Get DB instance for gRPC service
+    if let Ok(db) = crate::database_manager::get_db_instance().await {
+        println!("🚀 Starting PrkDB gRPC server on {}", grpc_addr);
+
+        tokio::spawn(async move {
+            use prkdb::raft::grpc_service::PrkDbGrpcService;
+            use prkdb::raft::rpc::prk_db_service_server::PrkDbServiceServer;
+            use std::sync::Arc;
+            use tonic::transport::Server;
+
+            use std::env;
+            let admin_token = env::var("PRKDB_ADMIN_TOKEN").unwrap_or_default();
+            let service = PrkDbGrpcService::new(Arc::new(db), admin_token);
+
+            if let Err(e) = Server::builder()
+                .add_service(PrkDbServiceServer::new(service))
+                .serve(grpc_addr)
+                .await
+            {
+                eprintln!("❌ gRPC server error: {}", e);
+            }
+        });
+    } else {
+        eprintln!("⚠️ Failed to get database instance for gRPC server");
     }
 
     // Start the server
@@ -448,6 +486,9 @@ async fn execute_collection_command(cmd: CollectionCommands) -> Result<Value> {
         database: std::path::PathBuf::from("./prkdb.db"),
         format: crate::OutputFormat::Json,
         verbose: false,
+        admin_token: None,
+        local: false,
+        server: "http://127.0.0.1:50051".to_string(),
         command: Commands::Collection(cmd.clone()),
     };
 
@@ -464,6 +505,9 @@ async fn execute_collection_command(cmd: CollectionCommands) -> Result<Value> {
             ..
         } => get_collection_data(&name, limit, offset).await,
         CollectionCommands::Sample { name, limit } => get_collection_data(&name, limit, 0).await,
+        _ => Ok(serde_json::json!({
+            "error": "This command is not supported via the HTTP API"
+        })),
     }
 }
 

@@ -303,6 +303,7 @@ impl MemoryIndex {
     }
 
     /// Search full-text index, returns primary keys ranked by match count
+    #[allow(dead_code)]
     fn search_text(&self, field: &str, query: &str) -> Vec<(Vec<u8>, usize)> {
         let tokens = Self::tokenize(query);
         let mut scores: std::collections::HashMap<Vec<u8>, usize> =

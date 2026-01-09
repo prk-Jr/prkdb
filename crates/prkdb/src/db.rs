@@ -397,15 +397,6 @@ impl PrkDb {
     }
 
     /// Get collection names from registered collections
-    pub async fn list_collections(&self) -> Result<Vec<String>, Error> {
-        // Return all registered collection names
-        let collections: Vec<String> = self
-            .collection_registry
-            .iter()
-            .map(|entry| entry.value().clone())
-            .collect();
-        Ok(collections)
-    }
 
     /// Get collection statistics (count and size)
     pub async fn get_collection_stats(&self, collection_name: &str) -> Result<(u64, u64), Error> {
@@ -996,6 +987,127 @@ impl PrkDb {
             self.storage.put(key.as_bytes(), value.as_bytes()).await?;
         }
 
+        Ok(())
+    }
+
+    /// Create a collection (admin op)
+    /// In a distributed setup, this should propagate via Raft.
+    /// Create a collection (admin op)
+    /// In a distributed setup, this propagates via Raft to Partition 0 (Metadata Partition).
+    pub async fn create_collection(&self, name: &str) -> Result<(), Error> {
+        if let Some(pm) = &self.partition_manager {
+            // Distributed mode: Propose to Partition 0 (Metadata Partition)
+            // Convention: Partition 0 stores cluster metadata including collections
+            use crate::raft::command::Command;
+
+            // Get Raft node for Partition 0
+            let partition_id = 0;
+            let raft = pm.get_partition(partition_id).ok_or_else(|| {
+                Error::Storage(prkdb_types::error::StorageError::Internal(
+                    "Metadata partition (0) not found".to_string(),
+                ))
+            })?;
+
+            let cmd = Command::CreateCollection {
+                name: name.to_string(),
+            };
+
+            // Propose and wait for commit
+            let handle = raft.propose(cmd.serialize()).await.map_err(|e| {
+                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
+            })?;
+
+            handle.wait_commit().await.map_err(|e| {
+                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
+            })?;
+        } else {
+            // Local/Single-node mode: Write directly to storage with metadata key
+            // This ensures behavior is consistent with Raft state machine application
+            let metadata_key = format!("meta:col:{}", name).into_bytes();
+            let metadata_value = b"{}".to_vec();
+            self.storage.put(&metadata_key, &metadata_value).await?;
+        }
+
+        Ok(())
+    }
+
+    /// List all collections
+    pub async fn list_collections(&self) -> Result<Vec<String>, Error> {
+        let mut collections = Vec::new();
+
+        if let Some(pm) = &self.partition_manager {
+            // Distributed mode: Read from Partition 0 (Metadata Partition)
+            let partition_id = 0;
+            if let Some(storage) = pm.get_partition_storage(partition_id) {
+                // Scan keys starting with "meta:col:"
+                let prefix = b"meta:col:";
+                // scan_prefix is async, so await it!
+                let keys = storage
+                    .scan_prefix(prefix)
+                    .await
+                    .map_err(|e| Error::Storage(e))?;
+
+                for (key, _) in keys {
+                    if let Ok(key_str) = String::from_utf8(key) {
+                        if let Some(name) = key_str.strip_prefix("meta:col:") {
+                            collections.push(name.to_string());
+                        }
+                    }
+                }
+            } else {
+                return Err(Error::Storage(prkdb_types::error::StorageError::Internal(
+                    "Metadata partition (0) storage not found".to_string(),
+                )));
+            }
+        } else {
+            // Local mode: Scan local storage
+            let prefix = b"meta:col:";
+            let keys = self
+                .storage
+                .scan_prefix(prefix)
+                .await
+                .map_err(|e| Error::Storage(e))?;
+            for (key, _) in keys {
+                if let Ok(key_str) = String::from_utf8(key) {
+                    if let Some(name) = key_str.strip_prefix("meta:col:") {
+                        collections.push(name.to_string());
+                    }
+                }
+            }
+        }
+
+        Ok(collections)
+    }
+
+    /// Drop a collection (admin op)
+    pub async fn drop_collection(&self, name: &str) -> Result<(), Error> {
+        if let Some(pm) = &self.partition_manager {
+            // Distributed mode: Propose to Partition 0
+            use crate::raft::command::Command;
+
+            let partition_id = 0;
+            let raft = pm.get_partition(partition_id).ok_or_else(|| {
+                Error::Storage(prkdb_types::error::StorageError::Internal(
+                    "Metadata partition (0) not found".to_string(),
+                ))
+            })?;
+
+            let cmd = Command::DropCollection {
+                name: name.to_string(),
+            };
+
+            let handle = raft.propose(cmd.serialize()).await.map_err(|e| {
+                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
+            })?;
+
+            handle.wait_commit().await.map_err(|e| {
+                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
+            })?;
+        } else {
+            // Local mode
+            let metadata_key = format!("meta:col:{}", name).into_bytes();
+            self.storage.delete(&metadata_key).await?;
+        }
         Ok(())
     }
 }

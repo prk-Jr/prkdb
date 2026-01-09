@@ -65,6 +65,25 @@ impl StateMachine for PrkDbStateMachine {
                         .await
                         .map_err(StateMachineError::Storage)?;
                 }
+                Command::CreateCollection { name } => {
+                    tracing::info!("Applying CreateCollection command: name={}", name);
+                    // Store collection metadata as a special key
+                    let metadata_key = format!("meta:col:{}", name).into_bytes();
+                    // Value could be schema or config in future, for now just placeholder
+                    let metadata_value = b"{}".to_vec();
+                    self.storage
+                        .put(&metadata_key, &metadata_value)
+                        .await
+                        .map_err(StateMachineError::Storage)?;
+                }
+                Command::DropCollection { name } => {
+                    tracing::info!("Applying DropCollection command: name={}", name);
+                    let metadata_key = format!("meta:col:{}", name).into_bytes();
+                    self.storage
+                        .delete(&metadata_key)
+                        .await
+                        .map_err(StateMachineError::Storage)?;
+                }
             }
         } else {
             tracing::warn!("Failed to deserialize command in state machine");

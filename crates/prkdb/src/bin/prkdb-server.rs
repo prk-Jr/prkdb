@@ -123,7 +123,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Create gRPC service for client data operations
     let db_arc = Arc::new(db);
-    let grpc_service = PrkDbGrpcService::new(db_arc.clone()).into_server();
+    let admin_token = env::var("PRKDB_ADMIN_TOKEN").unwrap_or_default();
+    let grpc_service = PrkDbGrpcService::new(db_arc.clone(), admin_token).into_server();
 
     // Start gRPC data service on port 8080 (like Kafka's binary protocol)
     let grpc_port = env::var("GRPC_PORT").unwrap_or_else(|_| "8080".to_string());

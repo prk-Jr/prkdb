@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 pub enum Command {
     Put { key: Vec<u8>, value: Vec<u8> },
     Delete { key: Vec<u8> },
+    CreateCollection { name: String },
+    DropCollection { name: String },
 }
 
 impl Command {

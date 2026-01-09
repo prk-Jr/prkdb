@@ -11,6 +11,10 @@ pub mod serve;
 
 #[derive(Subcommand, Clone)]
 pub enum CollectionCommands {
+    /// Create a new collection
+    Create { name: String },
+    /// Drop a collection
+    Drop { name: String },
     /// List all collections
     List,
     /// Show collection details

@@ -30,6 +30,18 @@ pub struct Cli {
     #[arg(short, long)]
     pub verbose: bool,
 
+    /// Admin token for secured operations
+    #[arg(long, env = "PRKDB_ADMIN_TOKEN")]
+    pub admin_token: Option<String>,
+
+    /// Use local embedded database instead of remote server
+    #[arg(long)]
+    pub local: bool,
+
+    /// Bootstrap server address (e.g. http://127.0.0.1:50051)
+    #[arg(long, default_value = "http://127.0.0.1:50051", env = "PRKDB_SERVER")]
+    pub server: String,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -77,6 +89,9 @@ pub enum Commands {
         /// Enable real-time WebSocket connections
         #[arg(long)]
         websockets: bool,
+        /// Port to serve gRPC on (for Admin & Raft)
+        #[arg(long, default_value = "50051")]
+        grpc_port: u16,
     },
 
     // --- Data Commands (via prkdb-client) ---
@@ -111,22 +126,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Execute command
     match &cli.command {
-        Commands::Collection(cmd) => {
-            init_database_manager(&cli.database);
-            collection::execute(cmd.clone(), &cli).await
-        }
-        Commands::Consumer(cmd) => {
-            init_database_manager(&cli.database);
-            consumer::execute(cmd.clone(), &cli).await
-        }
-        Commands::Partition(cmd) => {
-            init_database_manager(&cli.database);
-            partition::execute(cmd.clone(), &cli).await
-        }
-        Commands::Replication(cmd) => {
-            init_database_manager(&cli.database);
-            replication::execute(cmd.clone(), &cli).await
-        }
+        Commands::Collection(cmd) => collection::execute(cmd.clone(), &cli).await,
+        Commands::Consumer(cmd) => consumer::execute(cmd.clone(), &cli).await,
+        Commands::Partition(cmd) => partition::execute(cmd.clone(), &cli).await,
+        Commands::Replication(cmd) => replication::execute(cmd.clone(), &cli).await,
         Commands::Metrics(cmd) => {
             init_database_manager(&cli.database);
             metrics::execute(cmd.clone(), &cli).await
@@ -137,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Serve {
             port,
+            grpc_port,
             host,
             prometheus,
             cors,
@@ -145,6 +149,7 @@ async fn main() -> anyhow::Result<()> {
             init_database_manager(&cli.database);
             let args = commands::serve::ServeArgs {
                 port: *port,
+                grpc_port: *grpc_port,
                 host: host.clone(),
                 prometheus: *prometheus,
                 cors: *cors,

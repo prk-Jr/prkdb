@@ -38,6 +38,42 @@ service PrkDbService {
 
     // Batch put for high throughput
     rpc BatchPut (BatchPutRequest) returns (BatchPutResponse);
+
+    // --- Admin Operations ---
+    
+    // Create a new collection
+    rpc CreateCollection (CreateCollectionRequest) returns (CreateCollectionResponse);
+
+    // List all collections
+    rpc ListCollections (ListCollectionsRequest) returns (ListCollectionsResponse);
+
+    // Drop a collection
+    rpc DropCollection (DropCollectionRequest) returns (DropCollectionResponse);
+
+    // List consumer groups
+    rpc ListConsumerGroups (ListConsumerGroupsRequest) returns (ListConsumerGroupsResponse);
+
+    // Describe a consumer group (members, partition assignments, lag)
+    rpc DescribeConsumerGroup (DescribeConsumerGroupRequest) returns (DescribeConsumerGroupResponse);
+
+    // --- Partition Operations ---
+
+    // List partitions for a collection (or all)
+    rpc ListPartitions (ListPartitionsRequest) returns (ListPartitionsResponse);
+
+    // Get partition assignments for a consumer group
+    rpc GetPartitionAssignments (GetPartitionAssignmentsRequest) returns (GetPartitionAssignmentsResponse);
+
+    // --- Replication Operations ---
+
+    // Get replication status (role, leader, followers)
+    rpc GetReplicationStatus (GetReplicationStatusRequest) returns (GetReplicationStatusResponse);
+
+    // List replication nodes  
+    rpc GetReplicationNodes (GetReplicationNodesRequest) returns (GetReplicationNodesResponse);
+
+    // Get replication lag information
+    rpc GetReplicationLag (GetReplicationLagRequest) returns (GetReplicationLagResponse);
 }
 
 message RequestVoteRequest {
@@ -190,4 +226,182 @@ message ReadIndexResponse {
     uint64 term = 1;          // Current term
     bool success = 2;         // True if leader confirmed leadership
     uint64 read_index = 3;    // The commit index at time of request
+}
+
+// Admin messages
+
+message CreateCollectionRequest {
+    string admin_token = 1;
+    string name = 2;
+}
+
+message CreateCollectionResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+message ListCollectionsRequest {
+    string admin_token = 1;
+}
+
+message ListCollectionsResponse {
+    bool success = 1;
+    repeated string collections = 2;
+    string error = 3;
+}
+
+message DropCollectionRequest {
+    string admin_token = 1;
+    string name = 2;
+}
+
+message DropCollectionResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+message ListConsumerGroupsRequest {
+    string admin_token = 1;
+}
+
+message ConsumerGroupSummary {
+    string group_id = 1;
+    uint32 members = 2;
+    string state = 3;
+    uint64 lag = 4;
+    string assignment_strategy = 5;
+}
+
+message ListConsumerGroupsResponse {
+    bool success = 1;
+    repeated ConsumerGroupSummary groups = 2;
+    string error = 3;
+}
+
+message DescribeConsumerGroupRequest {
+    string admin_token = 1;
+    string group_id = 2;
+}
+
+message ConsumerMemberInfo {
+    string consumer_id = 1;
+    string host = 2;
+    repeated uint32 partitions = 3;
+}
+
+message PartitionLagInfo {
+    string collection = 1;
+    uint32 partition = 2;
+    uint64 current_offset = 3;
+    uint64 latest_offset = 4;
+    uint64 lag = 5;
+}
+
+message DescribeConsumerGroupResponse {
+    bool success = 1;
+    string group_id = 2;
+    string state = 3;
+    repeated ConsumerMemberInfo members = 4;
+    repeated PartitionLagInfo partitions = 5;
+    uint64 total_lag = 6;
+    string error = 7;
+}
+
+// --- Partition Messages ---
+
+message ListPartitionsRequest {
+    string admin_token = 1;
+    string collection = 2;  // Optional: filter by collection
+}
+
+message PartitionSummary {
+    string collection = 1;
+    uint32 partition = 2;
+    uint64 size_bytes = 3;
+    uint64 items = 4;
+    string assigned_to = 5;
+    string status = 6;
+}
+
+message ListPartitionsResponse {
+    bool success = 1;
+    repeated PartitionSummary partitions = 2;
+    string error = 3;
+}
+
+message GetPartitionAssignmentsRequest {
+    string admin_token = 1;
+    string group_id = 2;  // Optional: filter by group
+}
+
+message PartitionAssignmentSummary {
+    string group_id = 1;
+    string consumer_id = 2;
+    string collection = 3;
+    uint32 partition = 4;
+    uint64 current_offset = 5;
+    uint64 lag = 6;
+}
+
+message GetPartitionAssignmentsResponse {
+    bool success = 1;
+    repeated PartitionAssignmentSummary assignments = 2;
+    string error = 3;
+}
+
+// --- Replication Messages ---
+
+message GetReplicationStatusRequest {
+    string admin_token = 1;
+}
+
+message GetReplicationStatusResponse {
+    bool success = 1;
+    string node_id = 2;
+    string role = 3;
+    string leader_address = 4;
+    repeated string followers = 5;
+    string state = 6;
+    string last_sync = 7;
+    uint64 total_changes = 8;
+    uint64 changes_applied = 9;
+    string error = 10;
+}
+
+message GetReplicationNodesRequest {
+    string admin_token = 1;
+}
+
+message ReplicationNodeInfo {
+    string node_id = 1;
+    string address = 2;
+    string role = 3;
+    string status = 4;
+    uint64 lag_ms = 5;
+    string last_seen = 6;
+}
+
+message GetReplicationNodesResponse {
+    bool success = 1;
+    repeated ReplicationNodeInfo nodes = 2;
+    string error = 3;
+}
+
+message GetReplicationLagRequest {
+    string admin_token = 1;
+}
+
+message ReplicationLagInfo {
+    string follower_node = 1;
+    uint64 leader_offset = 2;
+    uint64 follower_offset = 3;
+    uint64 lag_records = 4;
+    uint64 lag_ms = 5;
+    string status = 6;
+}
+
+message GetReplicationLagResponse {
+    bool success = 1;
+    repeated ReplicationLagInfo lags = 2;
+    string error = 3;
 }

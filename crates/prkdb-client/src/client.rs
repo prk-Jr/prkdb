@@ -1,4 +1,13 @@
 use prkdb_proto::raft::prk_db_service_client::PrkDbServiceClient;
+use prkdb_proto::raft::{
+    CreateCollectionRequest, CreateCollectionResponse, DescribeConsumerGroupRequest,
+    DescribeConsumerGroupResponse, DropCollectionRequest, DropCollectionResponse,
+    GetPartitionAssignmentsRequest, GetPartitionAssignmentsResponse, GetReplicationLagRequest,
+    GetReplicationLagResponse, GetReplicationNodesRequest, GetReplicationNodesResponse,
+    GetReplicationStatusRequest, GetReplicationStatusResponse, ListCollectionsRequest,
+    ListCollectionsResponse, ListConsumerGroupsRequest, ListConsumerGroupsResponse,
+    ListPartitionsRequest, ListPartitionsResponse,
+};
 use prkdb_proto::{
     BatchPutRequest, DeleteRequest, GetRequest, KvPair, MetadataRequest, PutRequest, ReadMode,
 };
@@ -6,6 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
+use tonic::Response;
 
 /// Read consistency level for get operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -58,6 +68,9 @@ pub struct PrkDbClient {
 
     /// Bootstrap servers for initial connection
     bootstrap_servers: Vec<String>,
+
+    /// Admin token for secured operations
+    admin_token: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -98,12 +111,19 @@ impl PrkDbClient {
         let client = Self {
             metadata: Arc::new(RwLock::new(ClusterMetadata::default())),
             bootstrap_servers,
+            admin_token: None,
         };
 
         // Fetch initial metadata
         client.refresh_metadata().await?;
 
         Ok(client)
+    }
+
+    /// Set the admin token for secured operations
+    pub fn with_admin_token(mut self, token: impl Into<String>) -> Self {
+        self.admin_token = Some(token.into());
+        self
     }
 
     /// Refresh cluster metadata from any available node
@@ -448,6 +468,239 @@ impl PrkDbClient {
     pub fn bootstrap_servers(&self) -> &[String] {
         &self.bootstrap_servers
     }
+
+    /// Helper to get a client to any available node
+    async fn get_any_client(&self) -> anyhow::Result<PrkDbServiceClient<Channel>> {
+        let meta = self.metadata.read().await;
+        if let Some(client) = meta.clients.values().next() {
+            Ok(client.clone())
+        } else {
+            drop(meta);
+            // Try refresh
+            self.refresh_metadata().await?;
+            let meta = self.metadata.read().await;
+            meta.clients
+                .values()
+                .next()
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("No available nodes"))
+        }
+    }
+
+    // --- Admin Operations ---
+
+    /// Create a new collection
+    pub async fn create_collection(&self, name: &str) -> anyhow::Result<()> {
+        let mut client = self.get_any_client().await?;
+        let token = self.admin_token.clone().unwrap_or_default();
+
+        let request = tonic::Request::new(CreateCollectionRequest {
+            admin_token: token,
+            name: name.to_string(),
+        });
+
+        let response: Response<CreateCollectionResponse> =
+            client.create_collection(request).await?;
+        let response = response.into_inner();
+
+        if response.success {
+            Ok(())
+        } else {
+            anyhow::bail!("CreateCollection failed: {}", response.error)
+        }
+    }
+
+    /// List collections
+    pub async fn list_collections(&self) -> anyhow::Result<Vec<String>> {
+        let mut client = self.get_any_client().await?;
+        let token = self.admin_token.clone().unwrap_or_default();
+
+        let request = tonic::Request::new(ListCollectionsRequest { admin_token: token });
+
+        let response: Response<ListCollectionsResponse> = client.list_collections(request).await?;
+        let response = response.into_inner();
+
+        if response.success {
+            Ok(response.collections)
+        } else {
+            anyhow::bail!("ListCollections failed: {}", response.error)
+        }
+    }
+
+    /// Drop a collection
+    pub async fn drop_collection(&self, name: &str) -> anyhow::Result<()> {
+        let mut client = self.get_any_client().await?;
+        let token = self.admin_token.clone().unwrap_or_default();
+
+        let request = tonic::Request::new(DropCollectionRequest {
+            admin_token: token,
+            name: name.to_string(),
+        });
+
+        let response: Response<DropCollectionResponse> = client.drop_collection(request).await?;
+        let response = response.into_inner();
+
+        if response.success {
+            Ok(())
+        } else {
+            anyhow::bail!("DropCollection failed: {}", response.error)
+        }
+    }
+
+    // --- Consumer Group Operations ---
+
+    /// List consumer groups
+    pub async fn list_consumer_groups(
+        &self,
+    ) -> anyhow::Result<Vec<prkdb_proto::raft::ConsumerGroupSummary>> {
+        let mut client = self.get_any_client().await?;
+        let token = self.admin_token.clone().unwrap_or_default();
+
+        let request = tonic::Request::new(ListConsumerGroupsRequest { admin_token: token });
+
+        let response: Response<ListConsumerGroupsResponse> =
+            client.list_consumer_groups(request).await?;
+        let response = response.into_inner();
+
+        if response.success {
+            Ok(response.groups)
+        } else {
+            anyhow::bail!("ListConsumerGroups failed: {}", response.error)
+        }
+    }
+
+    /// Describe a consumer group (members, partition assignments, lag)
+    pub async fn describe_consumer_group(
+        &self,
+        group_id: &str,
+    ) -> anyhow::Result<DescribeConsumerGroupResponse> {
+        let mut client = self.get_any_client().await?;
+        let token = self.admin_token.clone().unwrap_or_default();
+
+        let request = tonic::Request::new(DescribeConsumerGroupRequest {
+            admin_token: token,
+            group_id: group_id.to_string(),
+        });
+
+        let response: Response<DescribeConsumerGroupResponse> =
+            client.describe_consumer_group(request).await?;
+        let response = response.into_inner();
+
+        if response.success {
+            Ok(response)
+        } else {
+            anyhow::bail!("DescribeConsumerGroup failed: {}", response.error)
+        }
+    }
+
+    // --- Partition Operations ---
+
+    /// List partitions for a collection (or all if collection is empty)
+    pub async fn list_partitions(
+        &self,
+        collection: Option<&str>,
+    ) -> anyhow::Result<Vec<prkdb_proto::raft::PartitionSummary>> {
+        let mut client = self.get_any_client().await?;
+        let token = self.admin_token.clone().unwrap_or_default();
+
+        let request = tonic::Request::new(ListPartitionsRequest {
+            admin_token: token,
+            collection: collection.unwrap_or("").to_string(),
+        });
+
+        let response: Response<ListPartitionsResponse> = client.list_partitions(request).await?;
+        let response = response.into_inner();
+
+        if response.success {
+            Ok(response.partitions)
+        } else {
+            anyhow::bail!("ListPartitions failed: {}", response.error)
+        }
+    }
+
+    /// Get partition assignments for a consumer group (or all if group_id is empty)
+    pub async fn get_partition_assignments(
+        &self,
+        group_id: Option<&str>,
+    ) -> anyhow::Result<Vec<prkdb_proto::raft::PartitionAssignmentSummary>> {
+        let mut client = self.get_any_client().await?;
+        let token = self.admin_token.clone().unwrap_or_default();
+
+        let request = tonic::Request::new(GetPartitionAssignmentsRequest {
+            admin_token: token,
+            group_id: group_id.unwrap_or("").to_string(),
+        });
+
+        let response: Response<GetPartitionAssignmentsResponse> =
+            client.get_partition_assignments(request).await?;
+        let response = response.into_inner();
+
+        if response.success {
+            Ok(response.assignments)
+        } else {
+            anyhow::bail!("GetPartitionAssignments failed: {}", response.error)
+        }
+    }
+
+    // --- Replication Operations ---
+
+    /// Get replication status
+    pub async fn get_replication_status(&self) -> anyhow::Result<GetReplicationStatusResponse> {
+        let mut client = self.get_any_client().await?;
+        let token = self.admin_token.clone().unwrap_or_default();
+
+        let request = tonic::Request::new(GetReplicationStatusRequest { admin_token: token });
+
+        let response: Response<GetReplicationStatusResponse> =
+            client.get_replication_status(request).await?;
+        let response = response.into_inner();
+
+        if response.success {
+            Ok(response)
+        } else {
+            anyhow::bail!("GetReplicationStatus failed: {}", response.error)
+        }
+    }
+
+    /// Get replication nodes
+    pub async fn get_replication_nodes(
+        &self,
+    ) -> anyhow::Result<Vec<prkdb_proto::raft::ReplicationNodeInfo>> {
+        let mut client = self.get_any_client().await?;
+        let token = self.admin_token.clone().unwrap_or_default();
+
+        let request = tonic::Request::new(GetReplicationNodesRequest { admin_token: token });
+
+        let response: Response<GetReplicationNodesResponse> =
+            client.get_replication_nodes(request).await?;
+        let response = response.into_inner();
+
+        if response.success {
+            Ok(response.nodes)
+        } else {
+            anyhow::bail!("GetReplicationNodes failed: {}", response.error)
+        }
+    }
+
+    /// Get replication lag
+    pub async fn get_replication_lag(
+        &self,
+    ) -> anyhow::Result<Vec<prkdb_proto::raft::ReplicationLagInfo>> {
+        let mut client = self.get_any_client().await?;
+        let token = self.admin_token.clone().unwrap_or_default();
+
+        let request = tonic::Request::new(GetReplicationLagRequest { admin_token: token });
+
+        let response: Response<GetReplicationLagResponse> =
+            client.get_replication_lag(request).await?;
+        let response = response.into_inner();
+
+        if response.success {
+            Ok(response.lags)
+        } else {
+            anyhow::bail!("GetReplicationLag failed: {}", response.error)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -459,6 +712,7 @@ mod tests {
         let client = PrkDbClient {
             metadata: Arc::new(RwLock::new(ClusterMetadata::default())),
             bootstrap_servers: vec![],
+            admin_token: None,
         };
 
         let key = b"test_key";
@@ -473,6 +727,7 @@ mod tests {
         let client = PrkDbClient {
             metadata: Arc::new(RwLock::new(ClusterMetadata::default())),
             bootstrap_servers: vec![],
+            admin_token: None,
         };
         assert_eq!(client.hash_key(b"any_key", 0), 0);
     }
@@ -482,6 +737,7 @@ mod tests {
         let client = PrkDbClient {
             metadata: Arc::new(RwLock::new(ClusterMetadata::default())),
             bootstrap_servers: vec![],
+            admin_token: None,
         };
 
         let mut counts = [0usize; 10];

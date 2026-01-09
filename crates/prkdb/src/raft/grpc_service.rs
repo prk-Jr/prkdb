@@ -13,11 +13,12 @@ use tonic::{Request, Response, Status};
 /// This is the binary protocol equivalent to Kafka's producer/consumer API
 pub struct PrkDbGrpcService {
     db: Arc<PrkDb>,
+    admin_token: String,
 }
 
 impl PrkDbGrpcService {
-    pub fn new(db: Arc<PrkDb>) -> Self {
-        Self { db }
+    pub fn new(db: Arc<PrkDb>, admin_token: String) -> Self {
+        Self { db, admin_token }
     }
 
     pub fn into_server(self) -> PrkDbServiceServer<Self> {
@@ -71,7 +72,7 @@ impl PrkDbServiceTrait for PrkDbGrpcService {
                     }
                 }
             }
-            ReadMode::Linearizable | _ => {
+            ReadMode::Linearizable => {
                 // Default: linearizable read from leader
                 self.db.get(&req.key).await
             }
@@ -129,6 +130,7 @@ impl PrkDbServiceTrait for PrkDbGrpcService {
         &self,
         _request: Request<crate::raft::rpc::MetadataRequest>,
     ) -> Result<Response<crate::raft::rpc::MetadataResponse>, Status> {
+        tracing::info!("Received Metadata request");
         use crate::raft::rpc::{NodeInfo, PartitionInfo};
 
         // Pre-allocate with reasonable default for typical partition counts
@@ -160,6 +162,19 @@ impl PrkDbServiceTrait for PrkDbGrpcService {
                     }
                 }
             }
+        } else {
+            // Single node mode / No partition manager
+            // Return a default node so clients can connect
+            nodes.push(NodeInfo {
+                node_id: 1,
+                address: "http://127.0.0.1:50051".to_string(), // Default gRPC port
+            });
+            // We can also return a default partition 0 that this node leads
+            partitions.push(PartitionInfo {
+                partition_id: 0,
+                leader_id: 1,
+                replicas: vec![1],
+            });
         }
 
         Ok(Response::new(crate::raft::rpc::MetadataResponse {
@@ -195,5 +210,434 @@ impl PrkDbServiceTrait for PrkDbGrpcService {
             failed_count,
             errors,
         }))
+    }
+    async fn create_collection(
+        &self,
+        request: Request<crate::raft::rpc::CreateCollectionRequest>,
+    ) -> Result<Response<crate::raft::rpc::CreateCollectionResponse>, Status> {
+        let req = request.into_inner();
+
+        // Security check
+        self.validate_admin_token(&req.admin_token)?;
+
+        tracing::info!("Admin: CreateCollection '{}'", req.name);
+
+        // Delegate to PrkDb, which handles distributed proposal (via Raft to Partition 0)
+        // or local execution depending on configuration.
+
+        let result = self.db.create_collection(&req.name).await;
+
+        match result {
+            Ok(_) => Ok(Response::new(crate::raft::rpc::CreateCollectionResponse {
+                success: true,
+                error: "".to_string(),
+            })),
+            Err(e) => Ok(Response::new(crate::raft::rpc::CreateCollectionResponse {
+                success: false,
+                error: e.to_string(),
+            })),
+        }
+    }
+
+    async fn list_collections(
+        &self,
+        request: Request<crate::raft::rpc::ListCollectionsRequest>,
+    ) -> Result<Response<crate::raft::rpc::ListCollectionsResponse>, Status> {
+        let req = request.into_inner();
+        self.validate_admin_token(&req.admin_token)?;
+
+        let collections = self
+            .db
+            .list_collections()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(crate::raft::rpc::ListCollectionsResponse {
+            success: true,
+            collections,
+            error: "".to_string(),
+        }))
+    }
+
+    async fn drop_collection(
+        &self,
+        request: Request<crate::raft::rpc::DropCollectionRequest>,
+    ) -> Result<Response<crate::raft::rpc::DropCollectionResponse>, Status> {
+        let req = request.into_inner();
+        self.validate_admin_token(&req.admin_token)?;
+
+        tracing::info!("Admin: DropCollection '{}'", req.name);
+
+        match self.db.drop_collection(&req.name).await {
+            Ok(_) => Ok(Response::new(crate::raft::rpc::DropCollectionResponse {
+                success: true,
+                error: "".to_string(),
+            })),
+            Err(e) => Ok(Response::new(crate::raft::rpc::DropCollectionResponse {
+                success: false,
+                error: e.to_string(),
+            })),
+        }
+    }
+
+    async fn list_consumer_groups(
+        &self,
+        request: Request<crate::raft::rpc::ListConsumerGroupsRequest>,
+    ) -> Result<Response<crate::raft::rpc::ListConsumerGroupsResponse>, Status> {
+        let req = request.into_inner();
+        self.validate_admin_token(&req.admin_token)?;
+
+        let group_ids = self
+            .db
+            .list_consumer_groups()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let mut groups = Vec::new();
+        for group_id in group_ids {
+            let active_consumers = self.db.get_active_consumers(&group_id);
+            let members = active_consumers.len() as u32;
+            let state = if members > 0 { "Stable" } else { "Empty" };
+            let lag = self
+                .db
+                .get_group_lag_info(&group_id)
+                .await
+                .map(|infos| infos.iter().map(|(_, _, _, _, l)| l).sum())
+                .unwrap_or(0);
+
+            groups.push(crate::raft::rpc::ConsumerGroupSummary {
+                group_id,
+                members,
+                state: state.to_string(),
+                lag,
+                assignment_strategy: "Range".to_string(),
+            });
+        }
+
+        Ok(Response::new(
+            crate::raft::rpc::ListConsumerGroupsResponse {
+                success: true,
+                groups,
+                error: "".to_string(),
+            },
+        ))
+    }
+
+    async fn describe_consumer_group(
+        &self,
+        request: Request<crate::raft::rpc::DescribeConsumerGroupRequest>,
+    ) -> Result<Response<crate::raft::rpc::DescribeConsumerGroupResponse>, Status> {
+        let req = request.into_inner();
+        self.validate_admin_token(&req.admin_token)?;
+
+        let group_id = req.group_id;
+
+        // Check if group exists
+        let group_ids = self
+            .db
+            .list_consumer_groups()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        if !group_ids.contains(&group_id) {
+            return Ok(Response::new(
+                crate::raft::rpc::DescribeConsumerGroupResponse {
+                    success: false,
+                    group_id: group_id.clone(),
+                    state: "".to_string(),
+                    members: vec![],
+                    partitions: vec![],
+                    total_lag: 0,
+                    error: format!("Consumer group '{}' not found", group_id),
+                },
+            ));
+        }
+
+        let active_consumer_ids = self.db.get_active_consumers(&group_id);
+        let assignment = self.db.get_consumer_group_assignment(&group_id);
+
+        let members: Vec<crate::raft::rpc::ConsumerMemberInfo> = active_consumer_ids
+            .into_iter()
+            .map(|consumer_id| {
+                let partitions = assignment
+                    .as_ref()
+                    .map(|a| a.get_partitions(&consumer_id))
+                    .unwrap_or_default();
+                crate::raft::rpc::ConsumerMemberInfo {
+                    consumer_id,
+                    host: "unknown".to_string(),
+                    partitions,
+                }
+            })
+            .collect();
+
+        let is_empty = members.is_empty();
+        let state = if is_empty { "Empty" } else { "Stable" };
+
+        let lag_infos = self
+            .db
+            .get_group_lag_info(&group_id)
+            .await
+            .unwrap_or_default();
+
+        let partitions: Vec<crate::raft::rpc::PartitionLagInfo> = lag_infos
+            .iter()
+            .map(
+                |(collection, partition, current_offset, latest_offset, lag)| {
+                    crate::raft::rpc::PartitionLagInfo {
+                        collection: collection.clone(),
+                        partition: *partition,
+                        current_offset: *current_offset,
+                        latest_offset: *latest_offset,
+                        lag: *lag,
+                    }
+                },
+            )
+            .collect();
+
+        let total_lag: u64 = lag_infos.iter().map(|(_, _, _, _, lag)| lag).sum();
+
+        Ok(Response::new(
+            crate::raft::rpc::DescribeConsumerGroupResponse {
+                success: true,
+                group_id,
+                state: state.to_string(),
+                members,
+                partitions,
+                total_lag,
+                error: "".to_string(),
+            },
+        ))
+    }
+
+    async fn list_partitions(
+        &self,
+        request: Request<crate::raft::rpc::ListPartitionsRequest>,
+    ) -> Result<Response<crate::raft::rpc::ListPartitionsResponse>, Status> {
+        let req = request.into_inner();
+        self.validate_admin_token(&req.admin_token)?;
+
+        let collection_filter = if req.collection.is_empty() {
+            None
+        } else {
+            Some(req.collection.as_str())
+        };
+
+        let collections = self
+            .db
+            .list_collections()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let target_collections: Vec<String> = match collection_filter {
+            Some(name) => {
+                if collections.contains(&name.to_string()) {
+                    vec![name.to_string()]
+                } else {
+                    vec![]
+                }
+            }
+            None => collections,
+        };
+
+        let mut partitions = Vec::new();
+        for collection_name in target_collections {
+            if let Ok(partition_data) = self.db.get_partitions(&collection_name).await {
+                for (partition, items, size_bytes) in partition_data {
+                    partitions.push(crate::raft::rpc::PartitionSummary {
+                        collection: collection_name.clone(),
+                        partition,
+                        size_bytes,
+                        items,
+                        assigned_to: "default-consumer".to_string(),
+                        status: "active".to_string(),
+                    });
+                }
+            }
+        }
+
+        Ok(Response::new(crate::raft::rpc::ListPartitionsResponse {
+            success: true,
+            partitions,
+            error: "".to_string(),
+        }))
+    }
+
+    async fn get_partition_assignments(
+        &self,
+        request: Request<crate::raft::rpc::GetPartitionAssignmentsRequest>,
+    ) -> Result<Response<crate::raft::rpc::GetPartitionAssignmentsResponse>, Status> {
+        let req = request.into_inner();
+        self.validate_admin_token(&req.admin_token)?;
+
+        let group_filter = if req.group_id.is_empty() {
+            None
+        } else {
+            Some(req.group_id.as_str())
+        };
+
+        let assignment_data = self
+            .db
+            .get_partition_assignments(group_filter)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let assignments: Vec<crate::raft::rpc::PartitionAssignmentSummary> = assignment_data
+            .into_iter()
+            .map(
+                |(group_id, consumer_id, collection, partition, current_offset, lag)| {
+                    crate::raft::rpc::PartitionAssignmentSummary {
+                        group_id,
+                        consumer_id,
+                        collection,
+                        partition,
+                        current_offset,
+                        lag,
+                    }
+                },
+            )
+            .collect();
+
+        Ok(Response::new(
+            crate::raft::rpc::GetPartitionAssignmentsResponse {
+                success: true,
+                assignments,
+                error: "".to_string(),
+            },
+        ))
+    }
+
+    async fn get_replication_status(
+        &self,
+        request: Request<crate::raft::rpc::GetReplicationStatusRequest>,
+    ) -> Result<Response<crate::raft::rpc::GetReplicationStatusResponse>, Status> {
+        let req = request.into_inner();
+        self.validate_admin_token(&req.admin_token)?;
+
+        let (
+            node_id,
+            role,
+            leader_address,
+            followers,
+            state,
+            last_sync,
+            total_changes,
+            changes_applied,
+        ) = self
+            .db
+            .get_replication_status()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(
+            crate::raft::rpc::GetReplicationStatusResponse {
+                success: true,
+                node_id,
+                role,
+                leader_address: leader_address.unwrap_or_default(),
+                followers,
+                state,
+                last_sync,
+                total_changes,
+                changes_applied,
+                error: "".to_string(),
+            },
+        ))
+    }
+
+    async fn get_replication_nodes(
+        &self,
+        request: Request<crate::raft::rpc::GetReplicationNodesRequest>,
+    ) -> Result<Response<crate::raft::rpc::GetReplicationNodesResponse>, Status> {
+        let req = request.into_inner();
+        self.validate_admin_token(&req.admin_token)?;
+
+        let node_data = self
+            .db
+            .get_replication_nodes()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let nodes: Vec<crate::raft::rpc::ReplicationNodeInfo> = node_data
+            .into_iter()
+            .map(|(node_id, address, role, status, lag_ms, last_seen)| {
+                crate::raft::rpc::ReplicationNodeInfo {
+                    node_id,
+                    address,
+                    role,
+                    status,
+                    lag_ms,
+                    last_seen,
+                }
+            })
+            .collect();
+
+        Ok(Response::new(
+            crate::raft::rpc::GetReplicationNodesResponse {
+                success: true,
+                nodes,
+                error: "".to_string(),
+            },
+        ))
+    }
+
+    async fn get_replication_lag(
+        &self,
+        request: Request<crate::raft::rpc::GetReplicationLagRequest>,
+    ) -> Result<Response<crate::raft::rpc::GetReplicationLagResponse>, Status> {
+        let req = request.into_inner();
+        self.validate_admin_token(&req.admin_token)?;
+
+        let lag_data = self
+            .db
+            .get_replication_lag()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let lags: Vec<crate::raft::rpc::ReplicationLagInfo> = lag_data
+            .into_iter()
+            .map(
+                |(follower_node, leader_offset, follower_offset, lag_records, lag_ms, status)| {
+                    crate::raft::rpc::ReplicationLagInfo {
+                        follower_node,
+                        leader_offset,
+                        follower_offset,
+                        lag_records,
+                        lag_ms,
+                        status,
+                    }
+                },
+            )
+            .collect();
+
+        Ok(Response::new(crate::raft::rpc::GetReplicationLagResponse {
+            success: true,
+            lags,
+            error: "".to_string(),
+        }))
+    }
+}
+
+impl PrkDbGrpcService {
+    fn validate_admin_token(&self, token: &str) -> Result<(), Status> {
+        // Debug trace for token validation
+        tracing::debug!(
+            "validate_admin_token: received='{}', expected='{}'",
+            token,
+            self.admin_token
+        );
+
+        if self.admin_token.is_empty() {
+            // If no token configured on server, deny all admin ops
+            return Err(Status::unauthenticated(
+                "Server has no admin token configured",
+            ));
+        }
+
+        if token != self.admin_token {
+            return Err(Status::unauthenticated("Invalid admin token"));
+        }
+
+        Ok(())
     }
 }

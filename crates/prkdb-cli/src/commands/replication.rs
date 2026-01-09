@@ -1,9 +1,8 @@
 use crate::commands::ReplicationCommands;
-use crate::output::{display_single, info, success, OutputDisplay};
+use crate::output::{display_single, info, success, warning, OutputDisplay};
 use crate::Cli;
 use anyhow::Result;
-use prkdb::prelude::*;
-use prkdb_storage_sled::SledAdapter;
+use prkdb_client::PrkDbClient;
 use serde::Serialize;
 use tabled::Tabled;
 
@@ -40,6 +39,13 @@ struct ReplicationLag {
 }
 
 pub async fn execute(cmd: ReplicationCommands, cli: &Cli) -> Result<()> {
+    if cli.local {
+        // Local mode: use embedded database
+        crate::init_database_manager(&cli.database);
+        return execute_local(cmd, cli).await;
+    }
+
+    // Remote mode: use prkdb-client
     match cmd {
         ReplicationCommands::Status => show_replication_status(cli).await,
         ReplicationCommands::Nodes => list_replication_nodes(cli).await,
@@ -48,39 +54,99 @@ pub async fn execute(cmd: ReplicationCommands, cli: &Cli) -> Result<()> {
     }
 }
 
-async fn create_db(cli: &Cli) -> Result<PrkDb> {
-    let storage = SledAdapter::open(&cli.database)?;
-    let db = PrkDb::builder().with_storage(storage).build()?;
-    Ok(db)
+async fn execute_local(cmd: ReplicationCommands, _cli: &Cli) -> Result<()> {
+    use crate::database_manager::with_database_read;
+
+    match cmd {
+        ReplicationCommands::Status => {
+            info("Fetching replication status (local mode)...");
+            let status = with_database_read(|db| async move {
+                db.get_replication_status()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))
+            })
+            .await?;
+            let (node_id, role, leader, followers, state, last_sync, total, applied) = status;
+            println!("Node ID: {}", node_id);
+            println!("Role: {}", role);
+            println!("Leader: {}", leader.unwrap_or_else(|| "none".to_string()));
+            println!("Followers: {:?}", followers);
+            println!("State: {}", state);
+            println!("Last sync: {}", last_sync);
+            println!("Changes: {}/{}", applied, total);
+            Ok(())
+        }
+        ReplicationCommands::Nodes => {
+            info("Listing replication nodes (local mode)...");
+            let nodes = with_database_read(|db| async move {
+                db.get_replication_nodes()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))
+            })
+            .await?;
+            for (node_id, addr, role, status, lag, last_seen) in nodes {
+                println!(
+                    "  {}: {} ({}) - {} lag: {}ms last_seen: {}",
+                    node_id, addr, role, status, lag, last_seen
+                );
+            }
+            Ok(())
+        }
+        ReplicationCommands::Lag => {
+            info("Checking replication lag (local mode)...");
+            let lags = with_database_read(|db| async move {
+                db.get_replication_lag()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))
+            })
+            .await?;
+            for (node, leader_off, follower_off, lag_records, lag_ms, status) in lags {
+                println!(
+                    "  {}: leader={} follower={} lag={} records ({}ms) - {}",
+                    node, leader_off, follower_off, lag_records, lag_ms, status
+                );
+            }
+            Ok(())
+        }
+        ReplicationCommands::Start { config } => {
+            warning(&format!(
+                "Start replication not implemented in local mode. Config: {}",
+                config
+            ));
+            Ok(())
+        }
+    }
+}
+
+async fn create_client(cli: &Cli) -> Result<PrkDbClient> {
+    let client = PrkDbClient::new(vec![cli.server.clone()]).await?;
+    let client = if let Some(token) = &cli.admin_token {
+        client.with_admin_token(token)
+    } else {
+        client
+    };
+    Ok(client)
 }
 
 async fn show_replication_status(cli: &Cli) -> Result<()> {
     info("Fetching replication status...");
 
-    // Create database instance to get real replication status
-    let db = create_db(cli).await?;
-
-    // Get real replication status from database
-    let (
-        node_id,
-        role,
-        leader_address,
-        followers,
-        state,
-        last_sync,
-        total_changes,
-        changes_applied,
-    ) = db.get_replication_status().await?;
+    let client = create_client(cli).await?;
+    let response = client.get_replication_status().await?;
 
     let status = ReplicationStatus {
-        node_id,
-        role,
-        leader_address,
-        followers,
-        state,
-        last_sync,
-        total_changes,
-        changes_applied,
+        node_id: response.node_id,
+        role: response.role,
+        leader_address: if response.leader_address.is_empty() {
+            None
+        } else {
+            Some(response.leader_address)
+        },
+        followers: response.followers,
+        state: response.state,
+        last_sync: response.last_sync,
+        total_changes: response.total_changes,
+        changes_applied: response.changes_applied,
     };
 
     display_single(&status, cli)?;
@@ -95,28 +161,24 @@ async fn show_replication_status(cli: &Cli) -> Result<()> {
 async fn list_replication_nodes(cli: &Cli) -> Result<()> {
     info("Listing replication nodes...");
 
-    let db = create_db(cli).await?;
+    let client = create_client(cli).await?;
+    let nodes_data = client.get_replication_nodes().await?;
 
-    // Get real replication nodes from database
-    let node_data = db.get_replication_nodes().await?;
-    let nodes: Vec<ReplicationNode> = node_data
-        .into_iter()
-        .map(
-            |(node_id, address, role, status, lag_ms, last_seen)| ReplicationNode {
-                node_id,
-                address,
-                role,
-                status,
-                lag_ms,
-                last_seen,
-            },
-        )
-        .collect();
-
-    if nodes.is_empty() {
+    if nodes_data.is_empty() {
         info("No replication nodes found. Replication is not currently configured.");
         info("To configure replication, use the 'replication start' command with a configuration file.");
     } else {
+        let nodes: Vec<ReplicationNode> = nodes_data
+            .into_iter()
+            .map(|n| ReplicationNode {
+                node_id: n.node_id,
+                address: n.address,
+                role: n.role,
+                status: n.status,
+                lag_ms: n.lag_ms,
+                last_seen: n.last_seen,
+            })
+            .collect();
         nodes.display(cli)?;
     }
 
@@ -126,43 +188,35 @@ async fn list_replication_nodes(cli: &Cli) -> Result<()> {
 async fn show_replication_lag(cli: &Cli) -> Result<()> {
     info("Checking replication lag...");
 
-    let db = create_db(cli).await?;
+    let client = create_client(cli).await?;
+    let lag_data = client.get_replication_lag().await?;
 
-    // Get real replication lag information from database
-    let lag_data = db.get_replication_lag().await?;
-    let lag_info: Vec<ReplicationLag> = lag_data
-        .into_iter()
-        .map(
-            |(follower_node, leader_offset, follower_offset, lag_records, lag_ms, status)| {
-                ReplicationLag {
-                    follower_node,
-                    leader_offset,
-                    follower_offset,
-                    lag_records,
-                    lag_ms,
-                    status,
-                }
-            },
-        )
-        .collect();
-
-    if lag_info.is_empty() {
+    if lag_data.is_empty() {
         info("No replication lag information found. Replication is not currently configured.");
         info("Lag information is available when followers are actively replicating from a leader.");
     } else {
+        let lag_info: Vec<ReplicationLag> = lag_data
+            .into_iter()
+            .map(|l| ReplicationLag {
+                follower_node: l.follower_node,
+                leader_offset: l.leader_offset,
+                follower_offset: l.follower_offset,
+                lag_records: l.lag_records,
+                lag_ms: l.lag_ms,
+                status: l.status,
+            })
+            .collect();
         lag_info.display(cli)?;
     }
 
     Ok(())
 }
 
-async fn start_replication(config_path: &str, cli: &Cli) -> Result<()> {
+async fn start_replication(config_path: &str, _cli: &Cli) -> Result<()> {
     info(&format!(
         "Starting replication with config: {}",
         config_path
     ));
-
-    let db = create_db(cli).await?;
 
     // Check if configuration file exists
     if !std::path::Path::new(config_path).exists() {
@@ -179,21 +233,11 @@ async fn start_replication(config_path: &str, cli: &Cli) -> Result<()> {
         config_content.len()
     ));
 
-    // In a real implementation, we would:
-    // 1. Parse the configuration file (JSON/YAML)
-    // 2. Validate the configuration
-    // 3. Store replication settings in the database
-    // 4. Initialize the replication manager
-    // 5. Start replication processes
+    // TODO: Implement remote start replication RPC
+    warning("Note: Remote replication start is not yet implemented.");
+    warning("Please start replication locally via the server configuration.");
 
-    // Store basic configuration markers in the database
-    // to make replication status queries return real data
-
-    // Store replication configuration in database using proper API
-    db.initialize_replication("repl-node-1", "Leader").await?;
-
-    success("Replication configuration stored successfully");
-    info("Replication manager initialized with configuration from file");
+    success("Replication configuration loaded successfully");
     info(
         "Note: Full replication functionality requires additional setup and network configuration",
     );

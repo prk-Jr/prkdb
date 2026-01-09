@@ -67,6 +67,11 @@ impl DatabaseManager {
         Ok(conn_guard.as_ref().unwrap().clone())
     }
 
+    /// Get direct access to the database instance (for gRPC server)
+    pub async fn get_db_instance(&self) -> Result<PrkDb> {
+        self.get_connection().await
+    }
+
     /// Execute a read-only operation with proper error handling
     pub async fn with_read_only<T, F, Fut>(&self, operation: F) -> Result<T>
     where
@@ -156,4 +161,9 @@ where
 /// Helper function to scan storage
 pub async fn scan_storage() -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
     get_database_manager().scan_storage().await
+}
+
+/// Helper function to get database instance directly
+pub async fn get_db_instance() -> Result<PrkDb> {
+    get_database_manager().get_db_instance().await
 }

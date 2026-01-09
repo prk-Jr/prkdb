@@ -44,106 +44,103 @@ struct FieldInfo {
     sample_values: Vec<String>,
 }
 
+use prkdb_client::PrkDbClient;
+
 pub async fn execute(cmd: CollectionCommands, cli: &Cli) -> Result<()> {
     match cmd {
+        CollectionCommands::Create { name } => create_collection(&name, cli).await,
+        CollectionCommands::Drop { name } => drop_collection(&name, cli).await,
         CollectionCommands::List => list_collections(cli).await,
-        CollectionCommands::Describe { name } => describe_collection(&name, cli).await,
-        CollectionCommands::Count { name } => count_collection(&name, cli).await,
-        CollectionCommands::Sample { name, limit } => sample_collection(&name, limit, cli).await,
+
+        // Legacy commands requiring local DB access
+        CollectionCommands::Describe { name } => {
+            crate::init_database_manager(&cli.database);
+            describe_collection(&name, cli).await
+        }
+        CollectionCommands::Count { name } => {
+            crate::init_database_manager(&cli.database);
+            count_collection(&name, cli).await
+        }
+        CollectionCommands::Sample { name, limit } => {
+            crate::init_database_manager(&cli.database);
+            sample_collection(&name, limit, cli).await
+        }
         CollectionCommands::Data {
             name,
             limit,
             offset,
             filter,
             sort,
-        } => browse_collection_data(&name, limit, offset, filter, sort, cli).await,
+        } => {
+            crate::init_database_manager(&cli.database);
+            browse_collection_data(&name, limit, offset, filter, sort, cli).await
+        }
     }
 }
 
-async fn list_collections(cli: &Cli) -> Result<()> {
-    info("Listing collections...");
-
-    // Get real collections by scanning storage directly
-    let all_entries_result = scan_storage().await;
-
-    let collections = match all_entries_result {
-        Ok(all_entries) => {
-            if all_entries.is_empty() {
-                info("No collections found.");
-                info("Collections are registered when you define them in your code using PrkDb::builder().register_collection::<YourCollection>()");
-                return Ok(());
-            }
-
-            // Group entries by collection type prefix to discover real collections
-            let mut collection_stats = std::collections::HashMap::new();
-
-            for (key, value) in &all_entries {
-                let key_str = String::from_utf8_lossy(key);
-
-                // Handle both formats: "collection:id" and "collection::Type:id"
-                let collection_name = if key_str.contains("::") {
-                    // Format: "collection::Type:id" -> extract "collection"
-                    key_str.split(':').next()
-                } else {
-                    // Format: "collection:id" -> extract "collection"
-                    key_str.split(':').next()
-                };
-
-                if let Some(collection_type) = collection_name {
-                    // Skip metadata keys when counting business collections
-                    if !collection_type.starts_with("__prkdb_metadata") {
-                        let entry = collection_stats
-                            .entry(collection_type.to_string())
-                            .or_insert((0u64, 0u64));
-                        entry.0 += 1; // item count
-                        entry.1 += (key.len() + value.len()) as u64; // size in bytes
-                    }
-                }
-            }
-
-            // Create collection info structs with real storage metrics
-            let mut collections = Vec::new();
-
-            // Track metadata for all discovered collections
-            if let Ok(storage) = SledAdapter::open(&cli.database) {
-                for (name, (items, size_bytes)) in &collection_stats {
-                    // Ensure metadata exists for this collection
-                    let _ = get_or_create_collection_metadata(&storage, name).await;
-
-                    collections.push(CollectionInfo {
-                        name: name.clone(),
-                        items: *items,
-                        size_bytes: *size_bytes,
-                        partitions: 1, // Single partition for now
-                    });
-                }
-            } else {
-                // Fallback without metadata tracking
-                for (name, (items, size_bytes)) in collection_stats {
-                    collections.push(CollectionInfo {
-                        name,
-                        items,
-                        size_bytes,
-                        partitions: 1, // Single partition for now
-                    });
-                }
-            }
-
-            collections
-        }
-        Err(e) => {
-            info(&format!("Unable to scan collections: {}", e));
-            info("This may happen when the database is busy. Please try again in a moment.");
-            return Ok(());
-        }
+async fn create_collection(name: &str, cli: &Cli) -> Result<()> {
+    let client = PrkDbClient::new(vec![cli.server.clone()]).await?;
+    let client = if let Some(token) = &cli.admin_token {
+        client.with_admin_token(token)
+    } else {
+        client
     };
+
+    client.create_collection(name).await?;
+    success(&format!("Collection '{}' created successfully", name));
+    Ok(())
+}
+
+async fn drop_collection(name: &str, cli: &Cli) -> Result<()> {
+    let client = PrkDbClient::new(vec![cli.server.clone()]).await?;
+    let client = if let Some(token) = &cli.admin_token {
+        client.with_admin_token(token)
+    } else {
+        client
+    };
+
+    client.drop_collection(name).await?;
+    success(&format!("Collection '{}' dropped successfully", name));
+    Ok(())
+}
+
+async fn list_collections(cli: &Cli) -> Result<()> {
+    let client = PrkDbClient::new(vec![cli.server.clone()]).await?;
+    let client = if let Some(token) = &cli.admin_token {
+        client.with_admin_token(token)
+    } else {
+        client
+    };
+
+    let collections = client.list_collections().await?;
 
     if collections.is_empty() {
         info("No collections found.");
-        return Ok(());
+    } else {
+        match cli.format {
+            crate::OutputFormat::Table => {
+                // Construct table-compatible output or just list
+                let mut rows = Vec::new();
+                for name in collections {
+                    rows.push(CollectionInfo {
+                        name,
+                        items: 0, // Remote list doesn't return count yet
+                        size_bytes: 0,
+                        partitions: 1, // Placeholder
+                    });
+                }
+                rows.display(cli)?;
+            }
+            _ => {
+                // Json/Yaml
+                let output = serde_json::json!({
+                    "collections": collections
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
+        }
     }
 
-    collections.display(cli)?;
     Ok(())
 }
 
