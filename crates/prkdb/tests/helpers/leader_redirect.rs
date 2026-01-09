@@ -92,11 +92,8 @@ pub async fn write_with_redirect(
                             );
                             sleep(Duration::from_millis(500)).await;
                             // Try next node
-                            current_node_id = if current_node_id >= 3 {
-                                1
-                            } else {
-                                current_node_id + 1
-                            };
+                            // Try next node
+                            current_node_id = (current_node_id % cluster.node_count() as u64) + 1;
                             continue;
                         }
 
@@ -112,11 +109,7 @@ pub async fn write_with_redirect(
                     e
                 );
                 // Try next node
-                current_node_id = if current_node_id >= 3 {
-                    1
-                } else {
-                    current_node_id + 1
-                };
+                current_node_id = (current_node_id % cluster.node_count() as u64) + 1;
                 sleep(Duration::from_millis(500)).await;
                 continue;
             }
@@ -186,11 +179,8 @@ pub async fn read_with_redirect(
                             );
                             sleep(Duration::from_millis(500)).await;
                             // Try next node in sequence
-                            current_node_id = if current_node_id >= 3 {
-                                1
-                            } else {
-                                current_node_id + 1
-                            };
+                            // Try next node in sequence
+                            current_node_id = (current_node_id % cluster.node_count() as u64) + 1;
                             continue;
                         }
 
@@ -206,11 +196,7 @@ pub async fn read_with_redirect(
                     e
                 );
                 // Try next node
-                current_node_id = if current_node_id >= 3 {
-                    1
-                } else {
-                    current_node_id + 1
-                };
+                current_node_id = (current_node_id % cluster.node_count() as u64) + 1;
                 sleep(Duration::from_millis(500)).await;
                 continue;
             }

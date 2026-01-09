@@ -128,17 +128,41 @@ impl TestCluster {
         let log_file = std::fs::File::create(&node.log_file)?;
 
         // Find the binary by checking current dir and parent dirs
-        let mut binary_path = std::env::current_dir()?.join("target/release/prkdb-server");
+        // Find the binary by checking likely locations
+        let mut binary_path = PathBuf::new();
+        let profiles = ["debug", "release"];
+        let locations = ["target", "../target", "../../target"];
 
-        if !binary_path.exists() {
-            // Try going up two levels (workspace root)
+        let mut found = false;
+        'outer: for profile in profiles {
+            for loc in locations {
+                if let Ok(cwd) = std::env::current_dir() {
+                    let path = cwd.join(loc).join(profile).join("prkdb-server");
+                    if path.exists() {
+                        binary_path = path;
+                        found = true;
+                        break 'outer;
+                    }
+                }
+            }
+        }
+
+        if !found {
+            // Try explicit workspace root search as fallback
             let cwd = std::env::current_dir()?;
-            let workspace_root = cwd
-                .parent()
-                .and_then(|p| p.parent())
-                .ok_or_else(|| anyhow::anyhow!("Could not find workspace root"))?;
-
-            binary_path = workspace_root.join("target/release/prkdb-server");
+            if let Some(workspace_root) = cwd.parent().and_then(|p| p.parent()) {
+                for profile in profiles {
+                    let path = workspace_root
+                        .join("target")
+                        .join(profile)
+                        .join("prkdb-server");
+                    if path.exists() {
+                        binary_path = path;
+                        found = true;
+                        break;
+                    }
+                }
+            }
         }
 
         if !binary_path.exists() {
