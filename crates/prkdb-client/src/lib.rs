@@ -44,7 +44,7 @@
 
 mod client;
 
-pub use client::PrkDbClient;
+pub use client::{PrkDbClient, ReadConsistency};
 
 // Re-export commonly used types from prkdb-proto for convenience
 pub use prkdb_proto::{

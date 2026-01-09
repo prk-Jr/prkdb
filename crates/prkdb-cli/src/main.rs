@@ -78,6 +78,19 @@ pub enum Commands {
         #[arg(long)]
         websockets: bool,
     },
+
+    // --- Data Commands (via prkdb-client) ---
+    /// Get a value by key
+    Get(data::GetArgs),
+
+    /// Put a key-value pair
+    Put(data::PutArgs),
+
+    /// Delete a key
+    Delete(data::DeleteArgs),
+
+    /// Batch put from file
+    BatchPut(data::BatchPutArgs),
 }
 
 #[derive(clap::ValueEnum, Clone)]
@@ -91,9 +104,6 @@ pub enum OutputFormat {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Initialize the database manager
-    init_database_manager(&cli.database);
-
     // Initialize logging based on verbosity
     if cli.verbose {
         tracing_subscriber::fmt::init();
@@ -101,12 +111,30 @@ async fn main() -> anyhow::Result<()> {
 
     // Execute command
     match &cli.command {
-        Commands::Collection(cmd) => collection::execute(cmd.clone(), &cli).await,
-        Commands::Consumer(cmd) => consumer::execute(cmd.clone(), &cli).await,
-        Commands::Partition(cmd) => partition::execute(cmd.clone(), &cli).await,
-        Commands::Replication(cmd) => replication::execute(cmd.clone(), &cli).await,
-        Commands::Metrics(cmd) => metrics::execute(cmd.clone(), &cli).await,
-        Commands::Database(cmd) => database::execute(cmd.clone(), &cli).await,
+        Commands::Collection(cmd) => {
+            init_database_manager(&cli.database);
+            collection::execute(cmd.clone(), &cli).await
+        }
+        Commands::Consumer(cmd) => {
+            init_database_manager(&cli.database);
+            consumer::execute(cmd.clone(), &cli).await
+        }
+        Commands::Partition(cmd) => {
+            init_database_manager(&cli.database);
+            partition::execute(cmd.clone(), &cli).await
+        }
+        Commands::Replication(cmd) => {
+            init_database_manager(&cli.database);
+            replication::execute(cmd.clone(), &cli).await
+        }
+        Commands::Metrics(cmd) => {
+            init_database_manager(&cli.database);
+            metrics::execute(cmd.clone(), &cli).await
+        }
+        Commands::Database(cmd) => {
+            init_database_manager(&cli.database);
+            database::execute(cmd.clone(), &cli).await
+        }
         Commands::Serve {
             port,
             host,
@@ -114,6 +142,7 @@ async fn main() -> anyhow::Result<()> {
             cors,
             websockets,
         } => {
+            init_database_manager(&cli.database);
             let args = commands::serve::ServeArgs {
                 port: *port,
                 host: host.clone(),
@@ -123,5 +152,10 @@ async fn main() -> anyhow::Result<()> {
             };
             commands::serve::handle_serve(args).await
         }
+        // Client commands - DO NOT init database manager (pure remote)
+        Commands::Get(args) => data::handle_get(args.clone()).await,
+        Commands::Put(args) => data::handle_put(args.clone()).await,
+        Commands::Delete(args) => data::handle_delete(args.clone()).await,
+        Commands::BatchPut(args) => data::handle_batch_put(args.clone()).await,
     }
 }

@@ -1333,7 +1333,7 @@ impl StorageAdapter for WalStorageAdapter {
     /// ```rust
     /// use prkdb::storage::WalStorageAdapter;
     /// use prkdb_core::wal::WalConfig;
-    /// use prkdb_core::storage::StorageAdapter;
+    /// use prkdb::prelude::*;
     /// use std::sync::Arc;
     ///
     /// # tokio::runtime::Runtime::new().unwrap().block_on(async {

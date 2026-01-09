@@ -15,6 +15,7 @@ tokio = { workspace = true }
 tonic = { version = "0.10", features = ["transport", "channel"] }
 tracing = { workspace = true }
 seahash = "4.1.0"
+futures = "0.3"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

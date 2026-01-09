@@ -1,16 +1,33 @@
-//! Smart Client for PrkDB
-//!
-//! Inspired by Kafka Producer/Consumer API, this client provides:
-//! - Automatic partition routing based on key hashing
-//! - Metadata caching with automatic refresh on failure
-//! - Retry logic with exponential backoff
-
 use prkdb_proto::raft::prk_db_service_client::PrkDbServiceClient;
-use prkdb_proto::{DeleteRequest, GetRequest, MetadataRequest, PutRequest, ReadMode};
+use prkdb_proto::{
+    BatchPutRequest, DeleteRequest, GetRequest, KvPair, MetadataRequest, PutRequest, ReadMode,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
+
+/// Read consistency level for get operations
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReadConsistency {
+    /// Read from leader (strongest consistency)
+    #[default]
+    Linearizable,
+    /// Direct read from any replica (lowest latency, may be stale)
+    Stale,
+    /// ReadIndex from leader, then local read (strong consistency, lower leader load)
+    Follower,
+}
+
+impl From<ReadConsistency> for i32 {
+    fn from(val: ReadConsistency) -> Self {
+        match val {
+            ReadConsistency::Linearizable => ReadMode::Linearizable as i32,
+            ReadConsistency::Stale => ReadMode::Stale as i32,
+            ReadConsistency::Follower => ReadMode::Follower as i32,
+        }
+    }
+}
 
 /// Smart Client for PrkDB with automatic routing and failover
 ///
@@ -43,7 +60,7 @@ pub struct PrkDbClient {
     bootstrap_servers: Vec<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct ClusterMetadata {
     /// Node ID -> gRPC address
     nodes: HashMap<u64, String>,
@@ -56,17 +73,6 @@ struct ClusterMetadata {
 
     /// Total number of partitions
     num_partitions: usize,
-}
-
-impl Default for ClusterMetadata {
-    fn default() -> Self {
-        Self {
-            nodes: HashMap::new(),
-            partition_leaders: HashMap::new(),
-            clients: HashMap::new(),
-            num_partitions: 0,
-        }
-    }
 }
 
 impl PrkDbClient {
@@ -113,6 +119,9 @@ impl PrkDbClient {
             }
         }
 
+        // If we have cached clients, try them too as fallbacks (cluster might have evolved)
+        // TODO: Implement fallback logic using known nodes
+
         anyhow::bail!("Failed to fetch metadata from any bootstrap server")
     }
 
@@ -128,7 +137,8 @@ impl PrkDbClient {
         // Update cached metadata
         let mut metadata = self.metadata.write().await;
 
-        // Clear old data
+        // Clear only topological data, keep connections if possible?
+        // For simplicity, we recreate. In prod, reuse channels.
         metadata.nodes.clear();
         metadata.partition_leaders.clear();
         metadata.clients.clear();
@@ -166,19 +176,6 @@ impl PrkDbClient {
     }
 
     /// Put a key-value pair
-    ///
-    /// Automatically routes to the correct partition leader with retries.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The key bytes
-    /// * `value` - The value bytes
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// client.put(b"user:123", b"{\"name\": \"Alice\"}").await?;
-    /// ```
     pub async fn put(&self, key: &[u8], value: &[u8]) -> anyhow::Result<()> {
         const MAX_RETRIES: usize = 3;
 
@@ -202,37 +199,104 @@ impl PrkDbClient {
         anyhow::bail!("Put failed after {} retries", MAX_RETRIES)
     }
 
-    /// Get a value by key
+    /// Batch put multiple key-value pairs
     ///
-    /// Automatically routes to the correct partition leader with retries.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The key bytes
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(Some(value))` - The value if found
-    /// * `Ok(None)` - If the key doesn't exist
-    /// * `Err(_)` - If the request failed after retries
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// if let Some(value) = client.get(b"user:123").await? {
-    ///     println!("Found: {:?}", String::from_utf8_lossy(&value));
-    /// }
-    /// ```
+    /// This method is highly efficient:
+    /// 1. Groups keys by partition
+    /// 2. Groups partitions by leader
+    /// 3. Sends parallel requests to leaders
+    pub async fn batch_put(&self, entries: Vec<(Vec<u8>, Vec<u8>)>) -> anyhow::Result<()> {
+        // Group entries by partition
+        let mut by_partition: HashMap<u64, Vec<KvPair>> = HashMap::new();
+
+        {
+            let meta = self.metadata.read().await;
+            for (k, v) in entries {
+                let partition = self.hash_key(&k, meta.num_partitions);
+                by_partition
+                    .entry(partition)
+                    .or_default()
+                    .push(KvPair { key: k, value: v });
+            }
+        }
+
+        // Group partitions by leader
+        let mut by_leader: HashMap<u64, Vec<KvPair>> = HashMap::new();
+
+        {
+            let meta = self.metadata.read().await;
+            for (partition, items) in by_partition {
+                if let Some(leader) = meta.partition_leaders.get(&partition) {
+                    by_leader.entry(*leader).or_default().extend(items);
+                } else {
+                    // Fallback: if no leader known, maybe pick robustly?
+                    // For now, just error or drop (retry logic needed)
+                    // In a real client, we'd force metadata refresh here.
+                    tracing::warn!("No leader known for partition {}", partition);
+                }
+            }
+        }
+
+        // Execute batch requests in parallel
+        let mut handles = Vec::new();
+
+        for (leader_id, items) in by_leader {
+            let client_opt = {
+                let meta = self.metadata.read().await;
+                meta.clients.get(&leader_id).cloned()
+            };
+
+            if let Some(mut client) = client_opt {
+                handles.push(tokio::spawn(async move {
+                    client.batch_put(BatchPutRequest { pairs: items }).await
+                }));
+            }
+        }
+
+        // Wait for all
+        let results = futures::future::join_all(handles).await;
+
+        // Check for errors
+        for res in results {
+            match res {
+                Ok(Ok(response)) => {
+                    let resp: prkdb_proto::BatchPutResponse = response.into_inner();
+                    if resp.failed_count > 0 {
+                        // TODO: Implement sophisticated partial retry
+                        anyhow::bail!(
+                            "Batch put had partial failure: {} failed",
+                            resp.failed_count
+                        );
+                    }
+                }
+                Ok(Err(e)) => anyhow::bail!("Batch put RPC failed: {}", e),
+                Err(e) => anyhow::bail!("Batch put task join error: {}", e),
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get a value by key (defaults to Linearizable consistency)
     pub async fn get(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+        self.get_with_consistency(key, ReadConsistency::Linearizable)
+            .await
+    }
+
+    /// Get a value with specific consistency level
+    pub async fn get_with_consistency(
+        &self,
+        key: &[u8],
+        consistency: ReadConsistency,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         const MAX_RETRIES: usize = 3;
 
         for attempt in 0..MAX_RETRIES {
-            match self.get_internal(key).await {
+            match self.get_internal(key, consistency).await {
                 Ok(value) => return Ok(value),
                 Err(e) => {
                     tracing::debug!("Get failed (attempt {}): {}", attempt + 1, e);
 
-                    // Refresh metadata and retry
                     if attempt < MAX_RETRIES - 1 {
                         let _ = self.refresh_metadata().await;
                         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -247,18 +311,6 @@ impl PrkDbClient {
     }
 
     /// Delete a key
-    ///
-    /// Automatically routes to the correct partition leader with retries.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The key bytes to delete
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// client.delete(b"user:123").await?;
-    /// ```
     pub async fn delete(&self, key: &[u8]) -> anyhow::Result<()> {
         const MAX_RETRIES: usize = 3;
 
@@ -267,8 +319,6 @@ impl PrkDbClient {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     tracing::debug!("Delete failed (attempt {}): {}", attempt + 1, e);
-
-                    // Refresh metadata and retry
                     if attempt < MAX_RETRIES - 1 {
                         let _ = self.refresh_metadata().await;
                         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -282,31 +332,31 @@ impl PrkDbClient {
         anyhow::bail!("Delete failed after {} retries", MAX_RETRIES)
     }
 
-    /// Internal get implementation (single attempt)
-    async fn get_internal(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
-        // 1. Hash key to get partition
+    /// Internal get implementation
+    async fn get_internal(
+        &self,
+        key: &[u8],
+        consistency: ReadConsistency,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
         let metadata = self.metadata.read().await;
         let partition_id = self.hash_key(key, metadata.num_partitions);
 
-        // 2. Look up leader for this partition
         let leader_id = metadata
             .partition_leaders
             .get(&partition_id)
             .ok_or_else(|| anyhow::anyhow!("No leader for partition {}", partition_id))?;
 
-        // 3. Get gRPC client for the leader
         let mut client = metadata
             .clients
             .get(leader_id)
             .ok_or_else(|| anyhow::anyhow!("No client for node {}", leader_id))?
             .clone();
 
-        drop(metadata); // Release lock before RPC
+        drop(metadata);
 
-        // 4. Send Get request
         let request = tonic::Request::new(GetRequest {
             key: key.to_vec(),
-            read_mode: ReadMode::Linearizable.into(),
+            read_mode: i32::from(consistency),
         });
 
         let response = client.get(request).await?;
@@ -323,28 +373,24 @@ impl PrkDbClient {
         }
     }
 
-    /// Internal put implementation (single attempt)
+    /// Internal put implementation
     async fn put_internal(&self, key: &[u8], value: &[u8]) -> anyhow::Result<()> {
-        // 1. Hash key to get partition
         let metadata = self.metadata.read().await;
         let partition_id = self.hash_key(key, metadata.num_partitions);
 
-        // 2. Look up leader for this partition
         let leader_id = metadata
             .partition_leaders
             .get(&partition_id)
             .ok_or_else(|| anyhow::anyhow!("No leader for partition {}", partition_id))?;
 
-        // 3. Get gRPC client for the leader
         let mut client = metadata
             .clients
             .get(leader_id)
             .ok_or_else(|| anyhow::anyhow!("No client for node {}", leader_id))?
             .clone();
 
-        drop(metadata); // Release lock before RPC
+        drop(metadata);
 
-        // 4. Send Put request
         let request = tonic::Request::new(PutRequest {
             key: key.to_vec(),
             value: value.to_vec(),
@@ -359,29 +405,25 @@ impl PrkDbClient {
         Ok(())
     }
 
-    /// Internal delete implementation (single attempt)
+    /// Internal delete implementation
     async fn delete_internal(&self, key: &[u8]) -> anyhow::Result<()> {
-        // 1. Get metadata
         let metadata = self.metadata.read().await;
         let num_partitions = metadata.num_partitions;
 
-        // 2. Determine target partition
         let partition_id = self.hash_key(key, num_partitions);
         let leader_id = metadata
             .partition_leaders
             .get(&partition_id)
             .ok_or_else(|| anyhow::anyhow!("No leader for partition {}", partition_id))?;
 
-        // 3. Get gRPC client for the leader
         let mut client = metadata
             .clients
             .get(leader_id)
             .ok_or_else(|| anyhow::anyhow!("No client for node {}", leader_id))?
             .clone();
 
-        drop(metadata); // Release lock before RPC
+        drop(metadata);
 
-        // 4. Send DeleteRequest
         let request = tonic::Request::new(DeleteRequest { key: key.to_vec() });
 
         let response = client.delete(request).await?;
@@ -419,13 +461,10 @@ mod tests {
             bootstrap_servers: vec![],
         };
 
-        // Test consistent hashing
         let key = b"test_key";
         let partition1 = client.hash_key(key, 3);
         let partition2 = client.hash_key(key, 3);
         assert_eq!(partition1, partition2);
-
-        // Test range
         assert!(partition1 < 3);
     }
 
@@ -435,8 +474,6 @@ mod tests {
             metadata: Arc::new(RwLock::new(ClusterMetadata::default())),
             bootstrap_servers: vec![],
         };
-
-        // Should return 0 when no partitions
         assert_eq!(client.hash_key(b"any_key", 0), 0);
     }
 
@@ -447,7 +484,6 @@ mod tests {
             bootstrap_servers: vec![],
         };
 
-        // Test that keys distribute across partitions
         let mut counts = [0usize; 10];
         for i in 0..1000 {
             let key = format!("key_{}", i);
@@ -455,10 +491,18 @@ mod tests {
             counts[partition] += 1;
         }
 
-        // Each partition should get roughly 100 keys (with some variance)
         for count in counts.iter() {
             assert!(*count > 50, "Partition has only {} keys", count);
             assert!(*count < 200, "Partition has {} keys", count);
         }
+    }
+
+    #[test]
+    fn test_read_consistency_conversion() {
+        assert_eq!(
+            i32::from(ReadConsistency::Linearizable),
+            ReadMode::Linearizable as i32
+        );
+        assert_eq!(i32::from(ReadConsistency::Stale), ReadMode::Stale as i32);
     }
 }

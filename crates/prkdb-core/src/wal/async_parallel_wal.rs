@@ -274,7 +274,7 @@ mod tests {
         assert_eq!(results.len(), 100);
 
         // Verify records are distributed across segments
-        let mut segment_counts = vec![0; 4];
+        let mut segment_counts = [0; 4];
         for (segment_id, _) in &results {
             segment_counts[*segment_id] += 1;
         }

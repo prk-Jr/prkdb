@@ -2,6 +2,7 @@ use clap::Subcommand;
 
 pub mod collection;
 pub mod consumer;
+pub mod data;
 pub mod database;
 pub mod metrics;
 pub mod partition;
