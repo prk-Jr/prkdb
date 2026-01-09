@@ -298,7 +298,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cluster_lifecycle() {
-        let mut cluster = TestCluster::new(3).await.unwrap();
+        let cluster = TestCluster::new(3).await.unwrap();
 
         // Initially no nodes running
         assert!(!cluster.is_node_running(1));

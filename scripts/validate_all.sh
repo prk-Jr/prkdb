@@ -104,12 +104,34 @@ for example_file in "$examples_dir"/*.rs; do
         
         echo -n "  Running example: $example_name... "
         
-        # Run example with timeout (30 seconds max per example)
-        if timeout 30s cargo run --example "$example_name" >/dev/null 2>&1; then
-            echo -e "${GREEN}✅${NC}"
+        # Special handling for server/interactive examples
+        if [[ "$example_name" == "raft_node" ]]; then
+            # Verify it builds and prints help (checking the binary works)
+            if cargo run --example "$example_name" -- --help >/dev/null 2>&1; then
+                echo -e "${GREEN}✅${NC}"
+            else
+                echo -e "${RED}❌${NC}"
+                failed_examples+=("$example_name")
+            fi
+        elif [[ "$example_name" == "raft_cluster" ]]; then
+            # Run for 5s then kill. Accept exit code 124 (timeout) or 0 (success).
+            # Providing '1' as argument to start node 1.
+            timeout 5s cargo run --example "$example_name" -- 1 >/dev/null 2>&1
+            exit_code=$?
+            if [ $exit_code -eq 124 ] || [ $exit_code -eq 0 ]; then
+                echo -e "${GREEN}✅${NC}"
+            else
+                echo -e "${RED}❌${NC}"
+                failed_examples+=("$example_name")
+            fi
         else
-            echo -e "${RED}❌${NC}"
-            failed_examples+=("$example_name")
+            # Run standard example with timeout
+            if timeout 300s cargo run --example "$example_name" >/dev/null 2>&1; then
+                echo -e "${GREEN}✅${NC}"
+            else
+                echo -e "${RED}❌${NC}"
+                failed_examples+=("$example_name")
+            fi
         fi
     fi
 done

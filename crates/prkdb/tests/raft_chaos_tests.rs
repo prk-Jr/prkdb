@@ -6,8 +6,7 @@
 mod helpers;
 
 use helpers::leader_redirect::{connect_with_retry, read_with_redirect, write_with_redirect};
-use helpers::{NetworkSimulator, TestCluster};
-use prkdb::raft::rpc::prk_db_service_client::PrkDbServiceClient;
+use helpers::TestCluster;
 use prkdb::raft::rpc::{GetRequest, PutRequest};
 use std::time::Duration;
 use tokio::time::sleep;
@@ -192,7 +191,7 @@ async fn test_leader_crash_during_write() {
     sleep(Duration::from_secs(5)).await;
 
     // Connect to node 1 (likely leader after election)
-    let mut client = connect_with_retry(format!(
+    let _client = connect_with_retry(format!(
         "http://127.0.0.1:{}",
         cluster.get_node(1).unwrap().data_port
     ))
@@ -254,7 +253,6 @@ async fn test_leader_crash_during_write() {
 /// 5. Restart follower
 /// 6. Verify follower catches up (via AppendEntries or InstallSnapshot)
 #[tokio::test]
-#[ignore]
 async fn test_follower_crash_and_recovery() {
     let mut cluster = TestCluster::new(3).await.unwrap();
     cluster.start_all().await.unwrap();
@@ -541,7 +539,7 @@ async fn test_snapshot_recovery() {
         let mut cluster = TestCluster::new(3).await?;
 
         // Start cluster
-        cluster.start_all().await;
+        let _ = cluster.start_all().await;
         sleep(Duration::from_secs(5)).await; // Wait for election
 
         println!("Writing initial batch of data...");

@@ -13,7 +13,6 @@ members = [
     "crates/prkdb-storage-segmented",
 ]
 
-
 [workspace.dependencies]
 anyhow = "1.0"
 async-trait = "0.1.88"
@@ -45,3 +44,11 @@ prkdb-orm = { path = "crates/prkdb-orm" }
 prkdb-storage-sled = { path = "crates/prkdb-storage-sled" }
 prkdb-storage-sql = { path = "crates/prkdb-storage-sql" }
 prkdb-storage-segmented = { path = "crates/prkdb-storage-segmented" }
+
+# Optimize for CI to avoid Linker OOM (Bus Error signal 7)
+# Reduces debug info for dependencies in dev/test builds
+[profile.dev.package."*"]
+debug = 0
+
+[profile.test.package."*"]
+debug = 0
