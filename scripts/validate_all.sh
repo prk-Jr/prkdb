@@ -62,23 +62,24 @@ else
     print_warning "Clippy found issues (continuing anyway)"
 fi
 
-# 2. Unit and integration tests
+# 2. Build check (Required for integration tests)
+print_step "Build Verification"
+echo "Building release version..."
+# Explicitly build the server binary first as it's needed for chaos tests
+if cargo build --release --bin prkdb-server --all-features && cargo build --release --all-features; then
+    print_success "Release build successful"
+else
+    print_error "Release build failed"
+    exit 1
+fi
+
+# 3. Unit and integration tests
 print_step "Running Unit & Integration Tests"
 echo "Running cargo test..."
 if cargo test --all --all-features; then
     print_success "All tests passed"
 else
     print_error "Some tests failed"
-    exit 1
-fi
-
-# 3. Build check
-print_step "Build Verification"
-echo "Building release version..."
-if cargo build --release --all-features; then
-    print_success "Release build successful"
-else
-    print_error "Release build failed"
     exit 1
 fi
 

@@ -10,8 +10,6 @@
 
 **Build from source**:
 ```bash
-git clone https://github.com/yourusername/prkdb.git
-cd prkdb
 cargo build --release
 ```
 

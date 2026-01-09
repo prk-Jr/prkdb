@@ -10,20 +10,29 @@ use tokio::time::sleep;
 use tonic::transport::Channel;
 
 /// Connect to a gRPC endpoint with retry logic
-pub async fn connect_with_retry(addr: String) -> PrkDbServiceClient<Channel> {
+pub async fn connect_with_retry(
+    addr: String,
+) -> Result<PrkDbServiceClient<Channel>, tonic::transport::Error> {
     for attempt in 0..10 {
         match PrkDbServiceClient::connect(addr.clone()).await {
-            Ok(client) => return client,
+            Ok(client) => return Ok(client),
             Err(e) if attempt < 9 => {
                 tracing::warn!("Connection attempt {} failed: {}", attempt + 1, e);
-                sleep(Duration::from_millis(500)).await;
+                sleep(Duration::from_millis(100)).await;
             }
-            Err(e) => panic!("Failed to connect after 10 attempts: {}", e),
+            Err(e) => return Err(e),
         }
     }
     unreachable!()
 }
 
+/// Write a key-value pair with automatic leader redirect
+///
+/// This function will:
+/// - Attempt to write to the current known leader
+/// - Parse NotLeader errors and redirect to the actual leader
+/// - Retry on connection errors
+/// - Return error after max_retries attempts
 /// Write a key-value pair with automatic leader redirect
 ///
 /// This function will:
@@ -45,53 +54,71 @@ pub async fn write_with_redirect(
             cluster.get_node(current_node_id).unwrap().data_port
         );
 
-        let mut client = connect_with_retry(addr).await;
+        match connect_with_retry(addr).await {
+            Ok(mut client) => {
+                let req = tonic::Request::new(PutRequest {
+                    key: key.clone(),
+                    value: value.clone(),
+                });
 
-        let req = tonic::Request::new(PutRequest {
-            key: key.clone(),
-            value: value.clone(),
-        });
+                match client.put(req).await {
+                    Ok(response) => {
+                        if response.into_inner().success {
+                            return Ok(());
+                        }
+                        return Err("Put returned success=false".to_string());
+                    }
+                    Err(status) => {
+                        let msg = status.message();
 
-        match client.put(req).await {
-            Ok(response) => {
-                if response.into_inner().success {
-                    return Ok(());
+                        // Check for leader redirect
+                        if let Some(leader_id) = parse_leader_id(msg) {
+                            tracing::info!(
+                                "Attempt {}: Redirecting from node {} to leader {}",
+                                attempt + 1,
+                                current_node_id,
+                                leader_id
+                            );
+                            current_node_id = leader_id;
+                            continue;
+                        }
+
+                        // Handle connection errors within gRPC
+                        if msg.contains("transport error") || msg.contains("h2 protocol error") {
+                            tracing::warn!(
+                                "Attempt {}: Connection error (gRPC), will retry: {}",
+                                attempt + 1,
+                                msg
+                            );
+                            sleep(Duration::from_millis(500)).await;
+                            // Try next node
+                            current_node_id = if current_node_id >= 3 {
+                                1
+                            } else {
+                                current_node_id + 1
+                            };
+                            continue;
+                        }
+
+                        return Err(format!("Put failed: {}", msg));
+                    }
                 }
-                return Err("Put returned success=false".to_string());
             }
-            Err(status) => {
-                let msg = status.message();
-
-                // Check for leader redirect
-                if let Some(leader_id) = parse_leader_id(msg) {
-                    tracing::info!(
-                        "Attempt {}: Redirecting from node {} to leader {}",
-                        attempt + 1,
-                        current_node_id,
-                        leader_id
-                    );
-                    current_node_id = leader_id;
-                    continue;
-                }
-
-                // Handle connection errors (node might be down)
-                if msg.contains("transport error") || msg.contains("h2 protocol error") {
-                    tracing::warn!(
-                        "Attempt {}: Connection error, will retry: {}",
-                        attempt + 1,
-                        msg
-                    );
-                    sleep(Duration::from_millis(500)).await;
-                    // Try next node in sequence
-                    current_node_id = if current_node_id >= 3 {
-                        1
-                    } else {
-                        current_node_id + 1
-                    };
-                    continue;
-                }
-
-                return Err(format!("Put failed: {}", msg));
+            Err(e) => {
+                tracing::warn!(
+                    "Attempt {}: Failed to connect to node {}: {}",
+                    attempt + 1,
+                    current_node_id,
+                    e
+                );
+                // Try next node
+                current_node_id = if current_node_id >= 3 {
+                    1
+                } else {
+                    current_node_id + 1
+                };
+                sleep(Duration::from_millis(500)).await;
+                continue;
             }
         }
     }
@@ -119,55 +146,73 @@ pub async fn read_with_redirect(
             cluster.get_node(current_node_id).unwrap().data_port
         );
 
-        let mut client = connect_with_retry(addr).await;
+        match connect_with_retry(addr).await {
+            Ok(mut client) => {
+                let req = tonic::Request::new(GetRequest {
+                    key: key.clone(),
+                    read_mode: prkdb::raft::rpc::ReadMode::Linearizable.into(),
+                });
 
-        let req = tonic::Request::new(GetRequest {
-            key: key.clone(),
-            read_mode: prkdb::raft::rpc::ReadMode::Linearizable.into(),
-        });
+                match client.get(req).await {
+                    Ok(response) => {
+                        let inner = response.into_inner();
+                        if inner.found {
+                            return Ok(inner.value);
+                        } else {
+                            return Err("Key not found".to_string());
+                        }
+                    }
+                    Err(status) => {
+                        let msg = status.message();
 
-        match client.get(req).await {
-            Ok(response) => {
-                let inner = response.into_inner();
-                if inner.found {
-                    return Ok(inner.value);
-                } else {
-                    return Err("Key not found".to_string());
+                        // Check for leader redirect
+                        if let Some(leader_id) = parse_leader_id(msg) {
+                            tracing::info!(
+                                "Attempt {}: Redirecting read from node {} to leader {}",
+                                attempt + 1,
+                                current_node_id,
+                                leader_id
+                            );
+                            current_node_id = leader_id;
+                            continue;
+                        }
+
+                        // Handle connection errors
+                        if msg.contains("transport error") || msg.contains("h2 protocol error") {
+                            tracing::warn!(
+                                "Attempt {}: Connection error, will retry: {}",
+                                attempt + 1,
+                                msg
+                            );
+                            sleep(Duration::from_millis(500)).await;
+                            // Try next node in sequence
+                            current_node_id = if current_node_id >= 3 {
+                                1
+                            } else {
+                                current_node_id + 1
+                            };
+                            continue;
+                        }
+
+                        return Err(format!("Get failed: {}", msg));
+                    }
                 }
             }
-            Err(status) => {
-                let msg = status.message();
-
-                // Check for leader redirect
-                if let Some(leader_id) = parse_leader_id(msg) {
-                    tracing::info!(
-                        "Attempt {}: Redirecting read from node {} to leader {}",
-                        attempt + 1,
-                        current_node_id,
-                        leader_id
-                    );
-                    current_node_id = leader_id;
-                    continue;
-                }
-
-                // Handle connection errors
-                if msg.contains("transport error") || msg.contains("h2 protocol error") {
-                    tracing::warn!(
-                        "Attempt {}: Connection error, will retry: {}",
-                        attempt + 1,
-                        msg
-                    );
-                    sleep(Duration::from_millis(500)).await;
-                    // Try next node in sequence
-                    current_node_id = if current_node_id >= 3 {
-                        1
-                    } else {
-                        current_node_id + 1
-                    };
-                    continue;
-                }
-
-                return Err(format!("Get failed: {}", msg));
+            Err(e) => {
+                tracing::warn!(
+                    "Attempt {}: Failed to connect to node {}: {}",
+                    attempt + 1,
+                    current_node_id,
+                    e
+                );
+                // Try next node
+                current_node_id = if current_node_id >= 3 {
+                    1
+                } else {
+                    current_node_id + 1
+                };
+                sleep(Duration::from_millis(500)).await;
+                continue;
             }
         }
     }

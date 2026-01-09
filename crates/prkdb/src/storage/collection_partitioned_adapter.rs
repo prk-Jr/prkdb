@@ -182,48 +182,6 @@ impl CollectionPartitionedAdapter {
         adapter
     }
 
-    /// Synchronous version (deprecated - may deadlock)
-    #[instrument(skip(self), fields(collection = %collection_name))]
-    fn get_or_create_collection(&self, collection_name: &str) -> Arc<WalStorageAdapter> {
-        self.collections
-            .entry(collection_name.to_string())
-            .or_insert_with(|| {
-                info!("Creating new collection WAL: {}", collection_name);
-
-                // Each collection gets its own directory
-                let collection_dir = self.base_dir.join("collections").join(collection_name);
-
-                let collection_config = WalConfig {
-                    log_dir: collection_dir,
-                    ..self.base_config.clone()
-                };
-
-                // Create the WAL adapter for this collection
-                let adapter = Arc::new(
-                    WalStorageAdapter::new(collection_config)
-                        .expect("Failed to create collection WAL"),
-                );
-
-                // Track metrics
-                self.metrics
-                    .total_collections
-                    .fetch_add(1, Ordering::Relaxed);
-
-                // Update active collections gauge for Grafana
-                let active_count = self.collections.len() as f64;
-                crate::prometheus_metrics::COLLECTIONS_ACTIVE
-                    .with_label_values(&["local"])
-                    .set(active_count);
-
-                self.metrics
-                    .per_collection_metrics
-                    .insert(collection_name.to_string(), Arc::new(StorageMetrics::new()));
-
-                adapter
-            })
-            .clone()
-    }
-
     /// Parse a key into (collection_name, actual_key)
     ///
     /// Key format: "{collection_name}:{actual_key}" (binary safe)
@@ -304,7 +262,7 @@ impl CollectionPartitionedAdapter {
     /// Reads from multiple collections in parallel for maximum throughput.
     ///
     /// # Example
-    /// ```
+    /// ```ignore
     /// let queries = vec![
     ///     ("users".to_string(), b"john".to_vec()),
     ///     ("orders".to_string(), b"order_123".to_vec()),
@@ -320,9 +278,9 @@ impl CollectionPartitionedAdapter {
     ) -> Result<Vec<Option<Vec<u8>>>, StorageError> {
         let futures: Vec<_> = queries
             .into_iter()
-            .map(|(collection, key)| {
-                let adapter = self.get_or_create_collection(&collection);
-                async move { adapter.get(&key).await }
+            .map(|(collection, key)| async move {
+                let adapter = self.get_or_create_collection_async(&collection).await;
+                adapter.get(&key).await
             })
             .collect();
 
