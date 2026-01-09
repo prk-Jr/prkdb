@@ -21,7 +21,7 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
     - name: Install Rust toolchain
-      uses: dtolnay/rust-action@stable
+      uses: dtolnay/rust-toolchain@stable
       with:
         components: clippy, rustfmt
 
@@ -61,7 +61,7 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
     - name: Install Rust toolchain
-      uses: dtolnay/rust-action@stable
+      uses: dtolnay/rust-toolchain@stable
 
     - name: Cache Cargo dependencies
       uses: Swatinem/rust-cache@v2
