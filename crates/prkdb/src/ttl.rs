@@ -31,8 +31,8 @@
 //! - Background cleanup is async and non-blocking
 
 use crate::storage::WalStorageAdapter;
-use prkdb_core::error::StorageError;
-use prkdb_core::storage::StorageAdapter;
+use prkdb_types::error::StorageError;
+use prkdb_types::storage::StorageAdapter;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

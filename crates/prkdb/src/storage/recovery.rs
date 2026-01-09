@@ -1,5 +1,5 @@
-use prkdb_core::error::StorageError;
 use prkdb_core::wal::mmap_parallel_wal::MmapParallelWal;
+use prkdb_types::error::StorageError;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, instrument, warn};

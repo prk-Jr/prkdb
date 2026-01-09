@@ -32,7 +32,7 @@ impl StatefulCompute<Evt, PrkDb> for H {
         _item: &Evt,
         s: &mut S,
         _ctx: &Context<PrkDb>,
-    ) -> Result<(), prkdb_core::error::ComputeError> {
+    ) -> Result<(), prkdb_types::error::ComputeError> {
         s.n += 1;
         Ok(())
     }
@@ -41,7 +41,7 @@ impl StatefulCompute<Evt, PrkDb> for H {
         _id: &u64,
         _s: &mut S,
         _ctx: &Context<PrkDb>,
-    ) -> Result<(), prkdb_core::error::ComputeError> {
+    ) -> Result<(), prkdb_types::error::ComputeError> {
         Ok(())
     }
 }

@@ -1,6 +1,6 @@
-use prkdb::storage::wal_adapter::WalStorageAdapter;
-use prkdb_core::storage::StorageAdapter;
+use prkdb::storage::WalStorageAdapter;
 use prkdb_core::wal::WalConfig;
+use prkdb_types::storage::StorageAdapter;
 use proptest::prelude::*;
 
 // Property: Any key-value pair written should be retrievable

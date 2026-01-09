@@ -3,7 +3,7 @@ use prkdb::compute::Context;
 use prkdb::prelude::*;
 use prkdb::storage::InMemoryAdapter;
 use prkdb::PrkDb;
-use prkdb_core::collection::ChangeEvent;
+use prkdb_types::collection::ChangeEvent;
 use serde::{Deserialize, Serialize};
 use tokio::time::{timeout, Duration};
 
@@ -38,7 +38,7 @@ impl ComputeHandler<User, PrkDb> for UserCounterHandler {
         &self,
         _item: &User,
         ctx: &Context<PrkDb>,
-    ) -> Result<(), prkdb_core::error::ComputeError> {
+    ) -> Result<(), prkdb_types::error::ComputeError> {
         let stats_handle = ctx.db.collection::<UserStats>();
 
         // Try to fetch stats record, increment user_count and persist.
@@ -53,7 +53,7 @@ impl ComputeHandler<User, PrkDb> for UserCounterHandler {
         &self,
         _id: &u32,
         ctx: &Context<PrkDb>,
-    ) -> Result<(), prkdb_core::error::ComputeError> {
+    ) -> Result<(), prkdb_types::error::ComputeError> {
         let stats_handle = ctx.db.collection::<UserStats>();
         if let Ok(Some(mut stats)) = stats_handle.get(&1).await {
             stats.user_count -= 1;
@@ -71,7 +71,7 @@ impl ComputeHandler<User, PrkDb> for AuditLoggerHandler {
         &self,
         item: &User,
         ctx: &Context<PrkDb>,
-    ) -> Result<(), prkdb_core::error::ComputeError> {
+    ) -> Result<(), prkdb_types::error::ComputeError> {
         let log_message = format!("User {} was created/updated.", item.name);
         let log_id = item.id as u64;
         ctx.db
@@ -88,7 +88,7 @@ impl ComputeHandler<User, PrkDb> for AuditLoggerHandler {
         &self,
         id: &u32,
         ctx: &Context<PrkDb>,
-    ) -> Result<(), prkdb_core::error::ComputeError> {
+    ) -> Result<(), prkdb_types::error::ComputeError> {
         let log_message = format!("User with ID {} was deleted.", id);
         let log_id = (*id as u64) + 1_000_000;
         ctx.db

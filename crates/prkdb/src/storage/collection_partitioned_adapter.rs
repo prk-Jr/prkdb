@@ -1,9 +1,9 @@
 use super::wal_adapter::WalStorageAdapter;
 use dashmap::DashMap;
-use prkdb_core::error::StorageError;
-use prkdb_core::storage::StorageAdapter;
 use prkdb_core::wal::WalConfig;
 use prkdb_metrics::storage::StorageMetrics;
+use prkdb_types::error::StorageError;
+use prkdb_types::storage::StorageAdapter;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

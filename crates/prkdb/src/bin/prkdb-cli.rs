@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use prkdb::client::PrkDbClient;
+use prkdb_client::PrkDbClient;
 use std::str::from_utf8;
 
 #[derive(Parser)]

@@ -9,10 +9,10 @@ use crate::collection_handle::CollectionHandle;
 use crate::consumer::ConsumerGroupCoordinator;
 use crate::partitioning::Partitioner;
 use dashmap::DashMap;
-use prkdb_core::collection::Collection;
-use prkdb_core::consumer::OffsetStore;
-use prkdb_core::error::Error;
-use prkdb_core::storage::StorageAdapter;
+use prkdb_types::collection::Collection;
+use prkdb_types::consumer::OffsetStore;
+use prkdb_types::error::Error;
+use prkdb_types::storage::StorageAdapter;
 use std::any::{Any, TypeId};
 use std::hash::Hash;
 // use std::collections::HashMap;
@@ -80,7 +80,7 @@ impl PrkDb {
                 ))
             },
         )
-        .map_err(|e| Error::Storage(prkdb_core::error::StorageError::Internal(e.to_string())))?;
+        .map_err(|e| Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string())))?;
 
         // We need a base storage for the PrkDb instance itself (for metadata etc)
         // or we can just use the first partition's storage?
@@ -122,7 +122,7 @@ impl PrkDb {
     pub async fn wait_for_leaders(&self, timeout: std::time::Duration) -> Result<(), Error> {
         if let Some(pm) = &self.partition_manager {
             pm.wait_for_leaders(timeout).await.map_err(|e| {
-                Error::Storage(prkdb_core::error::StorageError::Internal(e.to_string()))
+                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
             })?;
         }
         Ok(())
@@ -143,11 +143,11 @@ impl PrkDb {
 
             // Propose and wait for commit
             let handle = raft.propose(cmd.serialize()).await.map_err(|e| {
-                Error::Storage(prkdb_core::error::StorageError::Internal(e.to_string()))
+                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
             })?;
 
             handle.wait_commit().await.map_err(|e| {
-                Error::Storage(prkdb_core::error::StorageError::Internal(e.to_string()))
+                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
             })?;
         } else {
             // Local write (legacy/single-node)
@@ -168,11 +168,11 @@ impl PrkDb {
 
             // Propose and wait for commit
             let handle = raft.propose(cmd.serialize()).await.map_err(|e| {
-                Error::Storage(prkdb_core::error::StorageError::Internal(e.to_string()))
+                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
             })?;
 
             handle.wait_commit().await.map_err(|e| {
-                Error::Storage(prkdb_core::error::StorageError::Internal(e.to_string()))
+                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
             })?;
         } else {
             // Local delete
@@ -202,15 +202,18 @@ impl PrkDb {
                     Ok(read_index) => {
                         // Wait for state machine to catch up to read_index
                         if let Err(e) = raft.wait_for_apply(read_index).await {
-                            return Err(Error::Storage(prkdb_core::error::StorageError::Internal(
-                                format!("ReadIndex wait failed: {}", e),
-                            )));
+                            return Err(Error::Storage(
+                                prkdb_types::error::StorageError::Internal(format!(
+                                    "ReadIndex wait failed: {}",
+                                    e
+                                )),
+                            ));
                         }
                     }
                     Err(e) => {
                         // If not leader, we should forward or fail
                         // For now, fail so client can retry with correct leader
-                        return Err(Error::Storage(prkdb_core::error::StorageError::Internal(
+                        return Err(Error::Storage(prkdb_types::error::StorageError::Internal(
                             format!("ReadIndex failed (not leader?): {}", e),
                         )));
                     }
@@ -220,7 +223,7 @@ impl PrkDb {
             if let Some(storage) = pm.get_partition_storage(partition_id) {
                 storage.get(key).await.map_err(|e| Error::Storage(e))
             } else {
-                Err(Error::Storage(prkdb_core::error::StorageError::Internal(
+                Err(Error::Storage(prkdb_types::error::StorageError::Internal(
                     format!("Partition {} storage not found", partition_id),
                 )))
             }
@@ -243,7 +246,7 @@ impl PrkDb {
                 // Direct read without ReadIndex - may be stale
                 storage.get(key).await.map_err(|e| Error::Storage(e))
             } else {
-                Err(Error::Storage(prkdb_core::error::StorageError::Internal(
+                Err(Error::Storage(prkdb_types::error::StorageError::Internal(
                     format!("Partition {} storage not found", partition_id),
                 )))
             }
@@ -268,13 +271,16 @@ impl PrkDb {
                     Ok(read_index) => {
                         // Wait for local state machine to catch up
                         if let Err(e) = raft.wait_for_apply(read_index).await {
-                            return Err(Error::Storage(prkdb_core::error::StorageError::Internal(
-                                format!("Follower read wait failed: {}", e),
-                            )));
+                            return Err(Error::Storage(
+                                prkdb_types::error::StorageError::Internal(format!(
+                                    "Follower read wait failed: {}",
+                                    e
+                                )),
+                            ));
                         }
                     }
                     Err(e) => {
-                        return Err(Error::Storage(prkdb_core::error::StorageError::Internal(
+                        return Err(Error::Storage(prkdb_types::error::StorageError::Internal(
                             format!("ReadIndex failed: {}", e),
                         )));
                     }
@@ -284,7 +290,7 @@ impl PrkDb {
             if let Some(storage) = pm.get_partition_storage(partition_id) {
                 storage.get(key).await.map_err(|e| Error::Storage(e))
             } else {
-                Err(Error::Storage(prkdb_core::error::StorageError::Internal(
+                Err(Error::Storage(prkdb_types::error::StorageError::Internal(
                     format!("Partition {} storage not found", partition_id),
                 )))
             }
@@ -442,7 +448,7 @@ impl PrkDb {
         let current_offset = offset_store
             .get_offset(group_id, collection, partition)
             .await?
-            .unwrap_or(prkdb_core::consumer::Offset(0));
+            .unwrap_or(prkdb_types::consumer::Offset(0));
 
         // Get latest offset by counting items in the collection partition
         let latest_offset = self
@@ -546,7 +552,7 @@ impl PrkDb {
         // Storage-specific backup implementation would go here
         // Indicate that this needs storage-level implementation
         Err(Error::Storage(
-            prkdb_core::error::StorageError::BackendError(
+            prkdb_types::error::StorageError::BackendError(
                 "Backup functionality requires storage-specific implementation".to_string(),
             ),
         ))

@@ -1,8 +1,7 @@
 use async_trait::async_trait;
-use prkdb::prelude::*;
-use prkdb_core::error::StorageError;
-use prkdb_core::storage::StorageAdapter;
 use prkdb_macros::Collection;
+use prkdb_types::error::{Error, StorageError};
+use prkdb_types::storage::StorageAdapter;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 
@@ -81,7 +80,7 @@ struct Widget {
 #[tokio::test]
 async fn custom_adapter_put_get_and_outbox() {
     let adapter = MemoryAdapter::default();
-    let db = PrkDb::builder()
+    let db = prkdb::PrkDb::builder()
         .with_storage(adapter.clone())
         .register_collection::<Widget>()
         .build()

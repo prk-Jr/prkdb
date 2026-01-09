@@ -1,13 +1,13 @@
 use crate::storage::WalStorageAdapter;
 use async_trait::async_trait;
-use prkdb_core::storage::StorageAdapter;
+use prkdb_types::storage::StorageAdapter;
 use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum StateMachineError {
     #[error("Storage error: {0}")]
-    Storage(#[from] prkdb_core::error::StorageError),
+    Storage(#[from] prkdb_types::error::StorageError),
     #[error("Serialization error: {0}")]
     Serialization(String),
 }

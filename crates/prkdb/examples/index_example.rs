@@ -5,9 +5,9 @@
 
 use prkdb::indexed_storage::IndexedWalStorage;
 use prkdb::storage::WalStorageAdapter;
-use prkdb_core::index::Indexed;
 use prkdb_core::wal::WalConfig;
 use prkdb_macros::Collection;
+use prkdb_types::index::Indexed;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 

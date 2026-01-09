@@ -5,7 +5,6 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod batch_accumulator;
 pub mod builder;
 pub mod cache; // LRU cache layer
-pub mod client;
 pub mod collection_handle;
 pub mod compute; // Stub module
 pub mod consumer;
@@ -47,10 +46,11 @@ pub mod prelude {
         TransactionStatus,
     };
     pub use crate::ttl::TtlStorage;
-    pub use prkdb_core::collection::Collection;
-    pub use prkdb_core::index::{IndexDef, Indexed};
-    pub use prkdb_core::storage::StorageAdapter;
+    // Use prkdb-types directly for domain types
     pub use prkdb_macros::Collection;
+    pub use prkdb_types::collection::Collection;
+    pub use prkdb_types::index::{IndexDef, Indexed};
+    pub use prkdb_types::storage::StorageAdapter;
 }
 
 /// Doc example: stateful compute with replay
@@ -74,8 +74,8 @@ pub mod prelude {
 ///   type State = S;
 ///   fn state_key(&self) -> String { "ex:sum".to_string() }
 ///   fn init_state(&self) -> Self::State { S::default() }
-///   async fn on_put(&self, e: &E, s: &mut S, _ctx: &Context<PrkDb>) -> Result<(), prkdb_core::error::ComputeError> { s.sum += e.v; Ok(()) }
-///   async fn on_delete(&self, _id: &u64, _s: &mut S, _ctx: &Context<PrkDb>) -> Result<(), prkdb_core::error::ComputeError> { Ok(()) }
+///   async fn on_put(&self, e: &E, s: &mut S, _ctx: &Context<PrkDb>) -> Result<(), prkdb_types::error::ComputeError> { s.sum += e.v; Ok(()) }
+///   async fn on_delete(&self, _id: &u64, _s: &mut S, _ctx: &Context<PrkDb>) -> Result<(), prkdb_types::error::ComputeError> { Ok(()) }
 /// }
 ///
 /// # #[tokio::main(flavor = "current_thread")]
@@ -94,7 +94,7 @@ pub use crate::storage::InMemoryAdapter;
 #[cfg(test)]
 mod tests {
     use crate::storage::InMemoryAdapter;
-    use prkdb_core::storage::StorageAdapter;
+    use prkdb_types::storage::StorageAdapter;
 
     #[tokio::test]
     async fn in_memory_adapter_put_get() {

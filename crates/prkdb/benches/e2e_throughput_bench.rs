@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 use prkdb::prelude::*;
-use prkdb_core::consumer::{AutoOffsetReset, Consumer, ConsumerConfig};
+use prkdb_types::consumer::{AutoOffsetReset, Consumer, ConsumerConfig, ConsumerRecord};
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 

@@ -1,7 +1,9 @@
 mod load_test_utils;
 
 use load_test_utils::LoadTestHarness;
-use prkdb_core::storage::StorageAdapter;
+use prkdb::prelude::*;
+use prkdb::storage::WalStorageAdapter;
+use prkdb_types::storage::StorageAdapter;
 use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

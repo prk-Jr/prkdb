@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use prkdb::prelude::*;
-use prkdb_core::storage::StorageAdapter;
 use prkdb_storage_sled::SledAdapter;
+use prkdb_types::storage::StorageAdapter;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

@@ -94,4 +94,14 @@ mod tests {
         let key = reverse_index_key("users", b"user-123");
         assert_eq!(key, b"__ridx:users:user-123");
     }
+
+    #[test]
+    fn test_index_def() {
+        let def = IndexDef {
+            field: "email",
+            unique: true,
+        };
+        assert_eq!(def.field, "email");
+        assert!(def.unique);
+    }
 }

@@ -5,13 +5,13 @@ use super::recovery::RecoveryManager;
 
 use papaya::HashMap as LockFreeHashMap; // Phase 5: Lock-free index
 use prkdb_core::batching::adaptive::{AdaptiveBatchAccumulator, AdaptiveBatchConfig};
-use prkdb_core::error::StorageError;
 use prkdb_core::replication::{Change, ReplicationManager};
-use prkdb_core::storage::StorageAdapter;
 use prkdb_core::wal::compaction::{CompactionConfig, Compactor};
 use prkdb_core::wal::mmap_parallel_wal::MmapParallelWal;
 use prkdb_core::wal::{LogOperation, LogRecord, WalConfig};
 use prkdb_metrics::storage::StorageMetrics;
+use prkdb_types::error::StorageError;
+use prkdb_types::storage::StorageAdapter;
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 use std::time::Duration;

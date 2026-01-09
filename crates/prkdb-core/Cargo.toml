@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# Foundation types - re-exported for backward compatibility
+prkdb-types = { workspace = true }
+
 anyhow = { workspace = true }
 async-trait = "0.1" # Updated from workspace = true
 serde = { version = "1.0", features = ["derive"] } # Updated from workspace = true

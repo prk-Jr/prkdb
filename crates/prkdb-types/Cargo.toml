@@ -1,0 +1,24 @@
+[package]
+name = "prkdb-types"
+version = "0.1.0"
+edition = "2021"
+description = "Core domain types and traits for PrkDB - the foundation crate with minimal dependencies"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+bincode = { version = "2.0.1", features = ["serde"] }
+
+# Error handling
+thiserror = "1.0"
+
+# Async traits (user approved)
+async-trait = "0.1"
+
+# Utilities
+dashmap = "5.5"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }

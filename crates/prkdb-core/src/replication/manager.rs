@@ -1,7 +1,7 @@
-use crate::replication::config::{AckLevel, ReplicationConfig};
 use crate::replication::protocol::{ReplicateRequest, ReplicateResponse};
 use crate::replication::replica_client::{ReplicaClient, ReplicaClientError};
 use crate::wal::LogRecord;
+use prkdb_types::replication::{AckLevel, ReplicationConfig};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Semaphore;

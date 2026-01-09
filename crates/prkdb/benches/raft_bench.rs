@@ -1,9 +1,8 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use prkdb::prelude::*;
 use prkdb::raft::{ClusterConfig, PrkDbStateMachine, RaftNode, RpcClientPool};
 use prkdb::storage::WalStorageAdapter;
-use prkdb_core::storage::StorageAdapter;
-use prkdb_core::wal::WalConfig;
-use std::net::SocketAddr;
+use prkdb_types::storage::StorageAdapter;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
@@ -24,11 +23,7 @@ fn bench_raft_writes(c: &mut Criterion) {
 
                 b.to_async(&rt).iter(|| async move {
                     // Setup cluster
-                    let peers = vec![
-                        (1, "127.0.0.1:50091".parse().unwrap()),
-                        (2, "127.0.0.1:50092".parse().unwrap()),
-                        (3, "127.0.0.1:50093".parse().unwrap()),
-                    ];
+                    let peers = vec![1, 2, 3];
 
                     let (node1, _dir1) = create_node(1, 50091, peers.clone()).await;
                     let (node2, _dir2) = create_node(2, 50092, peers.clone()).await;
@@ -98,11 +93,7 @@ fn bench_raft_latency(c: &mut Criterion) {
 
     // Setup cluster once
     let (leader, _dir1, _dir2, _dir3) = rt.block_on(async {
-        let peers = vec![
-            (1, "127.0.0.1:50094".parse().unwrap()),
-            (2, "127.0.0.1:50095".parse().unwrap()),
-            (3, "127.0.0.1:50096".parse().unwrap()),
-        ];
+        let peers = vec![1, 2, 3];
 
         let (node1, dir1) = create_node(1, 50094, peers.clone()).await;
         let (node2, dir2) = create_node(2, 50095, peers.clone()).await;
@@ -129,38 +120,46 @@ fn bench_raft_latency(c: &mut Criterion) {
     });
 }
 
-async fn create_node(
-    id: u64,
-    port: u16,
-    peers: Vec<(u64, SocketAddr)>,
-) -> (Arc<RaftNode>, TempDir) {
-    let temp_dir = TempDir::new().unwrap();
-    let mut wal_config = WalConfig::test_config();
-    wal_config.log_dir = temp_dir.path().to_path_buf();
-    let storage = Arc::new(WalStorageAdapter::new(wal_config).unwrap());
+use prkdb_core::wal::WalConfig;
 
+async fn create_node(id: u64, port: u16, peers: Vec<u64>) -> (Arc<RaftNode>, TempDir) {
+    let dir = tempfile::tempdir().unwrap();
     let listen_addr = format!("127.0.0.1:{}", port).parse().unwrap();
+
+    // Create peer nodes map (id -> addr)
+    let nodes = peers
+        .iter()
+        .map(|&p_id| {
+            (
+                p_id,
+                format!("127.0.0.1:{}", 50090 + p_id as u16)
+                    .parse()
+                    .unwrap(),
+            )
+        })
+        .collect();
+
     let config = ClusterConfig {
         local_node_id: id,
         listen_addr,
-        nodes: peers,
+        nodes,
         election_timeout_min_ms: 150,
         election_timeout_max_ms: 300,
-        heartbeat_interval_ms: 25, // Faster for benchmarks
+        heartbeat_interval_ms: 25,
     };
 
+    let mut wal_config = WalConfig::test_config();
+    wal_config.log_dir = dir.path().to_path_buf();
+
+    // RaftNode expects Arc<WalStorageAdapter> specifically
+    let storage = Arc::new(WalStorageAdapter::new(wal_config).unwrap());
     let state_machine = Arc::new(PrkDbStateMachine::new(storage.clone()));
-    let raft_node = Arc::new(RaftNode::new(config, storage.clone(), state_machine));
-    let rpc_pool = Arc::new(RpcClientPool::new(id));
 
-    let server_node = raft_node.clone();
-    tokio::spawn(async move {
-        let _ = prkdb::raft::server::start_raft_server(server_node, listen_addr).await;
-    });
+    // RaftNode::new is synchronous and returns Self
+    let node = Arc::new(RaftNode::new(config, storage, state_machine));
+    let client_pool = Arc::new(RpcClientPool::new(id));
 
-    raft_node.clone().start(rpc_pool);
-
-    (raft_node, temp_dir)
+    (node, dir)
 }
 
 criterion_group!(

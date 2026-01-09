@@ -18,8 +18,8 @@
 /// Oneshot Ack
 /// ```
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use prkdb_core::error::StorageError;
 use prkdb_core::wal::log_record::LogRecord;
+use prkdb_types::error::StorageError;
 use tokio::sync::oneshot;
 
 /// A request to write a log record to the WAL

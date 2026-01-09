@@ -21,8 +21,8 @@
 //! - Reads within a transaction see uncommitted writes (read-your-writes)
 
 use crate::storage::WalStorageAdapter;
-use prkdb_core::error::StorageError;
-use prkdb_core::storage::StorageAdapter;
+use prkdb_types::error::StorageError;
+use prkdb_types::storage::StorageAdapter;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

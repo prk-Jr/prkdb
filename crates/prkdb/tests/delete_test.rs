@@ -1,6 +1,6 @@
 // Unit test for delete operation
 use prkdb::storage::WalStorageAdapter;
-use prkdb_core::storage::StorageAdapter;
+use prkdb_types::storage::StorageAdapter;
 use tempfile::TempDir;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -31,7 +31,7 @@ impl StatefulCompute<Ev, PrkDb> for CntH {
         _item: &Ev,
         state: &mut Self::State,
         _ctx: &Context<PrkDb>,
-    ) -> Result<(), prkdb_core::error::ComputeError> {
+    ) -> Result<(), prkdb_types::error::ComputeError> {
         state.c += 1;
         Ok(())
     }
@@ -40,7 +40,7 @@ impl StatefulCompute<Ev, PrkDb> for CntH {
         _id: &u64,
         _state: &mut Self::State,
         _ctx: &Context<PrkDb>,
-    ) -> Result<(), prkdb_core::error::ComputeError> {
+    ) -> Result<(), prkdb_types::error::ComputeError> {
         Ok(())
     }
 }

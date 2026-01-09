@@ -1,6 +1,7 @@
 use prkdb::partitioning::DefaultPartitioner;
 use prkdb::prelude::*;
-use prkdb_core::consumer::{AutoOffsetReset, Consumer, ConsumerConfig};
+use prkdb_types::consumer::Consumer;
+use prkdb_types::consumer::{AutoOffsetReset, ConsumerConfig};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,7 +45,8 @@ async fn test_partition_metrics_recording() {
 
     // Configure partitioning for the collection
     let partition_count = 4;
-    let partitioner = Arc::new(DefaultPartitioner::<u32>::new());
+    let partitioner: Arc<dyn prkdb::partitioning::Partitioner<u32>> =
+        Arc::new(DefaultPartitioner::<u32>::new());
     db.register_partitioning::<MRec>(partition_count, partitioner);
 
     let collection = db.collection::<MRec>();
@@ -110,7 +112,8 @@ async fn test_partition_metrics_registry_coordination() {
         .unwrap();
 
     let partition_count = 3;
-    let partitioner = Arc::new(DefaultPartitioner::<u32>::new());
+    let partitioner: Arc<dyn prkdb::partitioning::Partitioner<u32>> =
+        Arc::new(DefaultPartitioner::<u32>::new());
     db.register_partitioning::<MRec>(partition_count, partitioner);
 
     let registry = db.metrics().partition_metrics();
@@ -154,7 +157,8 @@ async fn test_partition_aggregate_statistics() {
         .unwrap();
 
     let partition_count = 4;
-    let partitioner = Arc::new(DefaultPartitioner::<u32>::new());
+    let partitioner: Arc<dyn prkdb::partitioning::Partitioner<u32>> =
+        Arc::new(DefaultPartitioner::<u32>::new());
     db.register_partitioning::<MRec>(partition_count, partitioner);
 
     let collection = db.collection::<MRec>();
@@ -208,7 +212,8 @@ async fn test_partition_metrics_with_consumer() {
         .unwrap();
 
     let partition_count = 2;
-    let partitioner = Arc::new(DefaultPartitioner::<u32>::new());
+    let partitioner: Arc<dyn prkdb::partitioning::Partitioner<u32>> =
+        Arc::new(DefaultPartitioner::<u32>::new());
     db.register_partitioning::<MRec>(partition_count, partitioner);
 
     let collection = db.collection::<MRec>();
@@ -269,7 +274,8 @@ async fn test_partition_metrics_latency_tracking() {
         .build()
         .unwrap();
 
-    let partitioner = Arc::new(DefaultPartitioner::<u32>::new());
+    let partitioner: Arc<dyn prkdb::partitioning::Partitioner<u32>> =
+        Arc::new(DefaultPartitioner::<u32>::new());
     db.register_partitioning::<MRec>(2, partitioner);
     let collection = db.collection::<MRec>();
 

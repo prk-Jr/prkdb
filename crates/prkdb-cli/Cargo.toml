@@ -12,7 +12,9 @@ path = "src/main.rs"
 
 [dependencies]
 prkdb = { path = "../prkdb" }
+prkdb-types = { path = "../prkdb-types" }
 prkdb-core = { path = "../prkdb-core" }
+prkdb-client = { path = "../prkdb-client" }
 prkdb-storage-sled = { path = "../prkdb-storage-sled" }
 
 # CLI framework

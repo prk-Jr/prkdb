@@ -1,6 +1,6 @@
 use anyhow::Result;
-use prkdb_core::storage::StorageAdapter;
 use prkdb_storage_sled::SledAdapter;
+use prkdb_types::storage::StorageAdapter;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const STARTUP_TIMESTAMP_KEY: &[u8] = b"__prkdb_metadata:startup_timestamp";

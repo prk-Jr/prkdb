@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use prkdb_core::collection::Collection;
-use prkdb_core::error::ComputeError;
+use prkdb_types::collection::Collection;
+use prkdb_types::error::ComputeError;
 use serde::{de::DeserializeOwned, Serialize};
 
 pub struct Context<Db> {

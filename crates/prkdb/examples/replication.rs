@@ -10,11 +10,12 @@
 //!
 //! Run with: cargo run -p prkdb --example replication
 
+use prkdb::prelude::*;
 use prkdb::replication::{ReplicaNode, ReplicationConfig, ReplicationManager, ReplicationTiming};
 use prkdb::storage::InMemoryAdapter;
-use prkdb::PrkDb;
-use prkdb_core::collection::Collection;
+use prkdb_core::wal::WalConfig;
 use prkdb_metrics::MetricsServer;
+use prkdb_types::collection::ChangeEvent;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;

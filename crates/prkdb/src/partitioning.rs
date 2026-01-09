@@ -3,7 +3,7 @@
 //! This module provides partitioning functionality to distribute data across
 //! multiple partitions for improved scalability and parallel processing.
 
-use prkdb_core::collection::Collection;
+use prkdb_types::collection::Collection;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};

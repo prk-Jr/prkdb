@@ -73,10 +73,10 @@
 
 use crate::storage::WalStorageAdapter;
 use dashmap::DashMap;
-use prkdb_core::collection::Collection;
-use prkdb_core::error::StorageError;
-use prkdb_core::index::Indexed;
-use prkdb_core::storage::StorageAdapter;
+use prkdb_types::collection::Collection;
+use prkdb_types::error::StorageError;
+use prkdb_types::index::Indexed;
+use prkdb_types::storage::StorageAdapter;
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -414,8 +414,8 @@ pub struct QueryBuilder<'a, S: StorageAdapter, T> {
 
 impl<'a, S: StorageAdapter + 'static, T> QueryBuilder<'a, S, T>
 where
-    T: prkdb_core::index::Indexed
-        + prkdb_core::collection::Collection
+    T: prkdb_types::index::Indexed
+        + prkdb_types::collection::Collection
         + serde::de::DeserializeOwned
         + Clone,
 {
@@ -655,7 +655,7 @@ where
     pub async fn with_computed<C, F>(
         self,
         compute_fn: F,
-    ) -> Result<Vec<prkdb_core::WithComputed<T, C>>, StorageError>
+    ) -> Result<Vec<prkdb_types::collection::WithComputed<T, C>>, StorageError>
     where
         F: Fn(&T) -> C,
     {
@@ -664,7 +664,7 @@ where
             .into_iter()
             .map(|record| {
                 let computed = compute_fn(&record);
-                prkdb_core::WithComputed::new(record, computed)
+                prkdb_types::collection::WithComputed::new(record, computed)
             })
             .collect())
     }
@@ -1211,8 +1211,8 @@ pub struct MappedQueryBuilder<'a, S: StorageAdapter, T, U, F: Fn(T) -> U> {
 
 impl<'a, S: StorageAdapter + 'static, T, U, F> MappedQueryBuilder<'a, S, T, U, F>
 where
-    T: prkdb_core::index::Indexed
-        + prkdb_core::collection::Collection
+    T: prkdb_types::index::Indexed
+        + prkdb_types::collection::Collection
         + serde::de::DeserializeOwned
         + Clone,
     F: Fn(T) -> U,
@@ -1966,7 +1966,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// ```
     pub async fn insert_with_hooks<T>(&self, record: &mut T) -> Result<(), StorageError>
     where
-        T: Indexed + Collection + prkdb_core::Hooks,
+        T: Indexed + Collection + prkdb_types::Hooks,
     {
         // Call before_insert hook
         record
@@ -1985,7 +1985,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Delete a record with lifecycle hooks
     pub async fn delete_with_hooks<T>(&self, record: &T) -> Result<(), StorageError>
     where
-        T: Indexed + Collection + prkdb_core::Hooks,
+        T: Indexed + Collection + prkdb_types::Hooks,
     {
         // Call before_delete hook
         record
@@ -2020,7 +2020,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// ```
     pub async fn insert_validated<T>(&self, record: &T) -> Result<(), StorageError>
     where
-        T: Indexed + Collection + prkdb_core::Validatable,
+        T: Indexed + Collection + prkdb_types::Validatable,
     {
         // Run validation first
         if let Err(errors) = record.validate() {
@@ -2044,7 +2044,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// ```
     pub async fn insert_timestamped<T>(&self, record: &mut T) -> Result<(), StorageError>
     where
-        T: Indexed + Collection + prkdb_core::Timestamped,
+        T: Indexed + Collection + prkdb_types::Timestamped,
     {
         record.init_timestamps();
         self.insert(record).await
@@ -2055,7 +2055,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Sets updated_at to current time, sets created_at only if new record.
     pub async fn upsert_timestamped<T>(&self, record: &mut T) -> Result<bool, StorageError>
     where
-        T: Indexed + Collection + prkdb_core::Timestamped,
+        T: Indexed + Collection + prkdb_types::Timestamped,
     {
         let primary_key = serde_json::to_vec(record.id())
             .map_err(|e| StorageError::Serialization(format!("Failed to serialize id: {}", e)))?;
@@ -2160,7 +2160,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// ```
     pub async fn soft_delete<T>(&self, id: &T::Id) -> Result<bool, StorageError>
     where
-        T: Indexed + Collection + DeserializeOwned + prkdb_core::SoftDeletable,
+        T: Indexed + Collection + DeserializeOwned + prkdb_types::SoftDeletable,
     {
         if let Some(mut record) = self.get::<T>(id).await? {
             record.mark_deleted();
@@ -2180,7 +2180,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// ```
     pub async fn restore<T>(&self, id: &T::Id) -> Result<bool, StorageError>
     where
-        T: Indexed + Collection + DeserializeOwned + prkdb_core::SoftDeletable,
+        T: Indexed + Collection + DeserializeOwned + prkdb_types::SoftDeletable,
     {
         if let Some(mut record) = self.get::<T>(id).await? {
             record.restore();
@@ -2199,7 +2199,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// ```
     pub async fn query_active<T>(&self) -> Result<Vec<T>, StorageError>
     where
-        T: Indexed + Collection + DeserializeOwned + prkdb_core::SoftDeletable,
+        T: Indexed + Collection + DeserializeOwned + prkdb_types::SoftDeletable,
     {
         let all: Vec<T> = self.all().await?;
         Ok(all.into_iter().filter(|r| r.is_active()).collect())

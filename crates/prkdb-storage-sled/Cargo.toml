@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 async-trait = { workspace = true }
 prkdb-core = { workspace = true }
+prkdb-types = { workspace = true }
 sled = "0.34"
 thiserror = { workspace = true }
 tokio = { workspace = true }

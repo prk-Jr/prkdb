@@ -4,8 +4,8 @@ use crate::uptime_tracker::{format_uptime, get_uptime_seconds, record_startup_ti
 use crate::Cli;
 use anyhow::Result;
 use prkdb::prelude::*;
-use prkdb_core::storage::StorageAdapter;
 use prkdb_storage_sled::SledAdapter;
+use prkdb_types::storage::StorageAdapter;
 use serde::Serialize;
 use std::fs;
 

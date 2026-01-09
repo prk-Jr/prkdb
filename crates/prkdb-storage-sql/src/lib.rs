@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use prkdb_core::error::StorageError;
-use prkdb_core::storage::StorageAdapter;
+use prkdb_types::error::StorageError;
+use prkdb_types::storage::StorageAdapter;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Row, SqlitePool};
 use std::str::FromStr;
@@ -223,7 +223,7 @@ impl StorageAdapter for SqliteAdapter {
 #[cfg(test)]
 mod tests {
     use super::SqliteAdapter;
-    use prkdb_core::storage::StorageAdapter;
+    use prkdb_types::storage::StorageAdapter;
     use sqlx::Row;
 
     #[tokio::test]

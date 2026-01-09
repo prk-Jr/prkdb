@@ -1,10 +1,10 @@
 use super::cache::ShardedLruCache;
 use papaya::HashMap as LockFreeHashMap;
-use prkdb_core::error::StorageError;
-use prkdb_core::storage::StorageAdapter;
 use prkdb_core::wal::mmap_parallel_wal::MmapParallelWal;
 use prkdb_core::wal::{LogOperation, LogRecord, WalConfig};
 use prkdb_metrics::storage::StorageMetrics;
+use prkdb_types::error::StorageError;
+use prkdb_types::storage::StorageAdapter;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};

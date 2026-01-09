@@ -189,8 +189,8 @@ async fn test_replicate_change_on_follower_fails() {
     };
     let manager = ReplicationManager::new(db, config);
 
-    let change: prkdb_core::collection::ChangeEvent<TestCollection> =
-        prkdb_core::collection::ChangeEvent::Delete(1);
+    let change: prkdb_types::collection::ChangeEvent<TestCollection> =
+        prkdb_types::collection::ChangeEvent::Delete(1);
 
     let result = manager.replicate_change(&change).await;
     assert!(matches!(
@@ -306,7 +306,7 @@ async fn test_data_replication_insert() {
     sleep(Duration::from_millis(100)).await;
 
     // Create a change event on the leader
-    let change = prkdb_core::collection::ChangeEvent::Put(TestCollection {
+    let change = prkdb_types::collection::ChangeEvent::Put(TestCollection {
         id: 1,
         data: "test data".to_string(),
     });
@@ -333,8 +333,8 @@ async fn test_data_replication_delete() {
     sleep(Duration::from_millis(100)).await;
 
     // Create delete change event with explicit type annotation
-    let change: prkdb_core::collection::ChangeEvent<TestCollection> =
-        prkdb_core::collection::ChangeEvent::Delete(42);
+    let change: prkdb_types::collection::ChangeEvent<TestCollection> =
+        prkdb_types::collection::ChangeEvent::Delete(42);
 
     // Replicate the delete
     let result = leader.replicate_change(&change).await;
@@ -358,15 +358,15 @@ async fn test_multiple_changes_replication() {
 
     // Create multiple changes
     let changes = vec![
-        prkdb_core::collection::ChangeEvent::Put(TestCollection {
+        prkdb_types::collection::ChangeEvent::Put(TestCollection {
             id: 1,
             data: "first".to_string(),
         }),
-        prkdb_core::collection::ChangeEvent::Put(TestCollection {
+        prkdb_types::collection::ChangeEvent::Put(TestCollection {
             id: 2,
             data: "second".to_string(),
         }),
-        prkdb_core::collection::ChangeEvent::Delete(3),
+        prkdb_types::collection::ChangeEvent::Delete(3),
     ];
 
     // Replicate all changes
@@ -393,11 +393,11 @@ async fn test_follower_sync_loop_recovery() {
     sleep(Duration::from_millis(50)).await;
 
     // Create some changes while follower is offline
-    let change1 = prkdb_core::collection::ChangeEvent::Put(TestCollection {
+    let change1 = prkdb_types::collection::ChangeEvent::Put(TestCollection {
         id: 1,
         data: "offline change 1".to_string(),
     });
-    let change2 = prkdb_core::collection::ChangeEvent::Put(TestCollection {
+    let change2 = prkdb_types::collection::ChangeEvent::Put(TestCollection {
         id: 2,
         data: "offline change 2".to_string(),
     });
@@ -428,7 +428,7 @@ async fn test_replication_state_tracking() {
     assert!(initial_state.last_change_id.is_none());
 
     // Apply a change
-    let change = prkdb_core::collection::ChangeEvent::Put(TestCollection {
+    let change = prkdb_types::collection::ChangeEvent::Put(TestCollection {
         id: 99,
         data: "state tracking test".to_string(),
     });
@@ -499,7 +499,7 @@ async fn test_multi_follower_replication() {
     sleep(Duration::from_millis(150)).await;
 
     // Create a change
-    let change = prkdb_core::collection::ChangeEvent::Put(TestCollection {
+    let change = prkdb_types::collection::ChangeEvent::Put(TestCollection {
         id: 100,
         data: "multi-follower test".to_string(),
     });
@@ -528,11 +528,11 @@ async fn test_get_changes_since_with_data() {
     assert!(initial_changes.is_empty());
 
     // Add some changes
-    let change1 = prkdb_core::collection::ChangeEvent::Put(TestCollection {
+    let change1 = prkdb_types::collection::ChangeEvent::Put(TestCollection {
         id: 1,
         data: "change 1".to_string(),
     });
-    let change2 = prkdb_core::collection::ChangeEvent::Put(TestCollection {
+    let change2 = prkdb_types::collection::ChangeEvent::Put(TestCollection {
         id: 2,
         data: "change 2".to_string(),
     });
@@ -553,7 +553,7 @@ async fn test_replication_with_timeout() {
     let _ = follower.clone().start().await;
 
     // Test that replication operations complete within reasonable time
-    let change = prkdb_core::collection::ChangeEvent::Put(TestCollection {
+    let change = prkdb_types::collection::ChangeEvent::Put(TestCollection {
         id: 999,
         data: "timeout test".to_string(),
     });

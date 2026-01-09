@@ -28,10 +28,13 @@ ahash = "0.8"
 dashmap = { workspace = true}
 papaya = "0.1"  # Lock-free HashMap for Phase 5 optimization (better than flurry)
 prkdb-core = { workspace = true }
+prkdb-types = { workspace = true }
 prkdb-metrics = { workspace = true }
 prkdb-orm = { workspace = true }
 prkdb-macros = { workspace = true }
 prkdb-orm-macros = { workspace = true }
+prkdb-proto = { workspace = true }
+prkdb-client = { workspace = true }
 uuid = { workspace = true}
 mimalloc = { workspace = true }  # Fast allocator
 lz4 = { workspace = true }  # Compression
@@ -109,5 +112,3 @@ harness = false
 name = "query_bench"
 harness = false
 
-[build-dependencies]
-tonic-build = "0.10"

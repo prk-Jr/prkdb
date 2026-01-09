@@ -37,7 +37,7 @@ pub struct WindowConfig {
 }
 
 impl<S: Stream> Stream for WindowedStream<S> {
-    type Item = Result<Vec<S::Item>, prkdb_core::error::Error>;
+    type Item = Result<Vec<S::Item>, prkdb_types::error::Error>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = unsafe { self.get_unchecked_mut() };

@@ -13,9 +13,9 @@
 use prkdb::consumer::PrkConsumer;
 use prkdb::storage::InMemoryAdapter;
 use prkdb::PrkDb;
-use prkdb_core::collection::Collection;
-use prkdb_core::consumer::{AutoOffsetReset, Consumer, ConsumerConfig};
 use prkdb_metrics::{ConsumerLagTracker, MetricsServer};
+use prkdb_types::collection::Collection;
+use prkdb_types::consumer::{AutoOffsetReset, Consumer, ConsumerConfig};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;

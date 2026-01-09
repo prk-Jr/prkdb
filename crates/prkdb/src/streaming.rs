@@ -4,14 +4,14 @@
 //! with backpressure support and graceful shutdown handling.
 
 use futures::stream::Stream;
-use prkdb_core::error::Error;
+use prkdb_types::error::Error;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use prkdb_core::collection::Collection;
-use prkdb_core::consumer::{AutoOffsetReset, Consumer, ConsumerConfig, ConsumerRecord};
+use prkdb_types::collection::Collection;
+use prkdb_types::consumer::{AutoOffsetReset, Consumer, ConsumerConfig, ConsumerRecord};
 
 use crate::consumer::ConsumerExt;
 use crate::db::PrkDb;
@@ -90,7 +90,7 @@ pub struct EventStream<C: Collection> {
 
 impl<C: Collection + 'static> EventStream<C> {
     /// Create a new event stream
-    pub async fn new(db: PrkDb, config: StreamConfig) -> Result<Self, prkdb_core::error::Error> {
+    pub async fn new(db: PrkDb, config: StreamConfig) -> Result<Self, prkdb_types::error::Error> {
         let (tx, rx) = mpsc::channel(config.buffer_size);
 
         let consumer_config = ConsumerConfig {
@@ -135,7 +135,7 @@ impl<C: Collection + 'static> EventStream<C> {
     }
 
     /// Create a new event stream with default configuration
-    pub async fn with_defaults(db: PrkDb) -> Result<Self, prkdb_core::error::Error> {
+    pub async fn with_defaults(db: PrkDb) -> Result<Self, prkdb_types::error::Error> {
         Self::new(db, StreamConfig::default()).await
     }
 }
@@ -153,7 +153,7 @@ where
 
 /// Extension trait for adding stream combinators
 pub trait EventStreamExt<C: Collection>:
-    Stream<Item = Result<ConsumerRecord<C>, prkdb_core::error::Error>>
+    Stream<Item = Result<ConsumerRecord<C>, prkdb_types::error::Error>>
 {
     /// Map events to a new type
     fn map_events<F, T>(self, f: F) -> MapEvents<Self, F>
@@ -175,7 +175,7 @@ pub trait EventStreamExt<C: Collection>:
 }
 
 impl<C: Collection, S> EventStreamExt<C> for S where
-    S: Stream<Item = Result<ConsumerRecord<C>, prkdb_core::error::Error>>
+    S: Stream<Item = Result<ConsumerRecord<C>, prkdb_types::error::Error>>
 {
 }
 
@@ -187,11 +187,11 @@ pub struct MapEvents<S, F> {
 
 impl<S, F, C, T> Stream for MapEvents<S, F>
 where
-    S: Stream<Item = Result<ConsumerRecord<C>, prkdb_core::error::Error>>,
+    S: Stream<Item = Result<ConsumerRecord<C>, prkdb_types::error::Error>>,
     C: Collection,
     F: FnMut(C) -> T,
 {
-    type Item = Result<T, prkdb_core::error::Error>;
+    type Item = Result<T, prkdb_types::error::Error>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = unsafe { self.get_unchecked_mut() };
@@ -214,11 +214,11 @@ pub struct FilterEvents<S, F> {
 
 impl<S, F, C> Stream for FilterEvents<S, F>
 where
-    S: Stream<Item = Result<ConsumerRecord<C>, prkdb_core::error::Error>>,
+    S: Stream<Item = Result<ConsumerRecord<C>, prkdb_types::error::Error>>,
     C: Collection,
     F: FnMut(&C) -> bool,
 {
-    type Item = Result<ConsumerRecord<C>, prkdb_core::error::Error>;
+    type Item = Result<ConsumerRecord<C>, prkdb_types::error::Error>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = unsafe { self.get_unchecked_mut() };

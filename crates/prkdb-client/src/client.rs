@@ -1,20 +1,45 @@
-// Smart Client for PrkDB
-// Inspired by Kafka Producer/Consumer API
+//! Smart Client for PrkDB
+//!
+//! Inspired by Kafka Producer/Consumer API, this client provides:
+//! - Automatic partition routing based on key hashing
+//! - Metadata caching with automatic refresh on failure
+//! - Retry logic with exponential backoff
 
-use crate::raft::rpc::prk_db_service_client::PrkDbServiceClient;
-use crate::raft::rpc::{MetadataRequest, PutRequest};
+use prkdb_proto::raft::prk_db_service_client::PrkDbServiceClient;
+use prkdb_proto::{DeleteRequest, GetRequest, MetadataRequest, PutRequest, ReadMode};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
 
 /// Smart Client for PrkDB with automatic routing and failover
+///
+/// This client maintains a cache of cluster metadata and routes requests
+/// to the appropriate partition leader automatically.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use prkdb_client::PrkDbClient;
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let client = PrkDbClient::new(vec![
+///         "http://127.0.0.1:8081".to_string(),
+///     ]).await?;
+///     
+///     client.put(b"key", b"value").await?;
+///     let value = client.get(b"key").await?;
+///     
+///     Ok(())
+/// }
+/// ```
 #[derive(Clone)]
 pub struct PrkDbClient {
     /// Cached metadata
     metadata: Arc<RwLock<ClusterMetadata>>,
 
-    /// Bootstrap servers
+    /// Bootstrap servers for initial connection
     bootstrap_servers: Vec<String>,
 }
 
@@ -47,19 +72,21 @@ impl Default for ClusterMetadata {
 impl PrkDbClient {
     /// Create a new client with bootstrap servers
     ///
-    /// Example:
-    /// ```no_run
-    /// use prkdb::client::PrkDbClient;
+    /// The client will connect to one of the bootstrap servers to fetch
+    /// initial cluster metadata, then cache the topology for future requests.
     ///
-    /// #[tokio::main]
-    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    ///     let client = PrkDbClient::new(vec![
-    ///         "http://127.0.0.1:8081".to_string(),
-    ///         "http://127.0.0.1:8082".to_string(),
-    ///         "http://127.0.0.1:8083".to_string(),
-    ///     ]).await?;
-    ///     Ok(())
-    /// }
+    /// # Arguments
+    ///
+    /// * `bootstrap_servers` - List of server addresses (e.g., "http://127.0.0.1:8081")
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let client = PrkDbClient::new(vec![
+    ///     "http://127.0.0.1:8081".to_string(),
+    ///     "http://127.0.0.1:8082".to_string(),
+    ///     "http://127.0.0.1:8083".to_string(),
+    /// ]).await?;
     /// ```
     pub async fn new(bootstrap_servers: Vec<String>) -> anyhow::Result<Self> {
         let client = Self {
@@ -141,6 +168,17 @@ impl PrkDbClient {
     /// Put a key-value pair
     ///
     /// Automatically routes to the correct partition leader with retries.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key bytes
+    /// * `value` - The value bytes
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// client.put(b"user:123", b"{\"name\": \"Alice\"}").await?;
+    /// ```
     pub async fn put(&self, key: &[u8], value: &[u8]) -> anyhow::Result<()> {
         const MAX_RETRIES: usize = 3;
 
@@ -167,6 +205,24 @@ impl PrkDbClient {
     /// Get a value by key
     ///
     /// Automatically routes to the correct partition leader with retries.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key bytes
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(value))` - The value if found
+    /// * `Ok(None)` - If the key doesn't exist
+    /// * `Err(_)` - If the request failed after retries
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// if let Some(value) = client.get(b"user:123").await? {
+    ///     println!("Found: {:?}", String::from_utf8_lossy(&value));
+    /// }
+    /// ```
     pub async fn get(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
         const MAX_RETRIES: usize = 3;
 
@@ -193,6 +249,16 @@ impl PrkDbClient {
     /// Delete a key
     ///
     /// Automatically routes to the correct partition leader with retries.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key bytes to delete
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// client.delete(b"user:123").await?;
+    /// ```
     pub async fn delete(&self, key: &[u8]) -> anyhow::Result<()> {
         const MAX_RETRIES: usize = 3;
 
@@ -218,8 +284,6 @@ impl PrkDbClient {
 
     /// Internal get implementation (single attempt)
     async fn get_internal(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
-        use crate::raft::rpc::GetRequest;
-
         // 1. Hash key to get partition
         let metadata = self.metadata.read().await;
         let partition_id = self.hash_key(key, metadata.num_partitions);
@@ -242,7 +306,7 @@ impl PrkDbClient {
         // 4. Send Get request
         let request = tonic::Request::new(GetRequest {
             key: key.to_vec(),
-            read_mode: crate::raft::rpc::ReadMode::Linearizable.into(),
+            read_mode: ReadMode::Linearizable.into(),
         });
 
         let response = client.get(request).await?;
@@ -297,8 +361,6 @@ impl PrkDbClient {
 
     /// Internal delete implementation (single attempt)
     async fn delete_internal(&self, key: &[u8]) -> anyhow::Result<()> {
-        use crate::raft::rpc::DeleteRequest;
-
         // 1. Get metadata
         let metadata = self.metadata.read().await;
         let num_partitions = metadata.num_partitions;
@@ -339,6 +401,11 @@ impl PrkDbClient {
         let hash = seahash::hash(key);
         hash % num_partitions as u64
     }
+
+    /// Get list of bootstrap servers
+    pub fn bootstrap_servers(&self) -> &[String] {
+        &self.bootstrap_servers
+    }
 }
 
 #[cfg(test)]
@@ -360,5 +427,38 @@ mod tests {
 
         // Test range
         assert!(partition1 < 3);
+    }
+
+    #[test]
+    fn test_hash_key_zero_partitions() {
+        let client = PrkDbClient {
+            metadata: Arc::new(RwLock::new(ClusterMetadata::default())),
+            bootstrap_servers: vec![],
+        };
+
+        // Should return 0 when no partitions
+        assert_eq!(client.hash_key(b"any_key", 0), 0);
+    }
+
+    #[test]
+    fn test_hash_key_distribution() {
+        let client = PrkDbClient {
+            metadata: Arc::new(RwLock::new(ClusterMetadata::default())),
+            bootstrap_servers: vec![],
+        };
+
+        // Test that keys distribute across partitions
+        let mut counts = [0usize; 10];
+        for i in 0..1000 {
+            let key = format!("key_{}", i);
+            let partition = client.hash_key(key.as_bytes(), 10) as usize;
+            counts[partition] += 1;
+        }
+
+        // Each partition should get roughly 100 keys (with some variance)
+        for count in counts.iter() {
+            assert!(*count > 50, "Partition has only {} keys", count);
+            assert!(*count < 200, "Partition has {} keys", count);
+        }
     }
 }

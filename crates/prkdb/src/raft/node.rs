@@ -21,7 +21,7 @@ pub enum RaftError {
     #[error("Not leader. Leader is {0:?}")]
     NotLeader(Option<NodeId>),
     #[error("Storage error: {0}")]
-    Storage(#[from] prkdb_core::error::StorageError),
+    Storage(#[from] prkdb_types::error::StorageError),
     #[error("Timeout waiting for commit")]
     Timeout,
 }
@@ -39,7 +39,7 @@ impl ProposeHandle {
     /// Wait for the proposal to be committed
     pub async fn wait_commit(self) -> Result<u64, RaftError> {
         self.commit_rx.await.map_err(|_| {
-            RaftError::Storage(prkdb_core::error::StorageError::Internal(
+            RaftError::Storage(prkdb_types::error::StorageError::Internal(
                 "Commit notification dropped".into(),
             ))
         })?
@@ -289,13 +289,13 @@ impl RaftNode {
         // 2. Append to local log (via batching channel)
         let (tx, rx) = oneshot::channel();
         self.proposal_tx.send((data, tx)).await.map_err(|_| {
-            RaftError::Storage(prkdb_core::error::StorageError::Internal(
+            RaftError::Storage(prkdb_types::error::StorageError::Internal(
                 "Proposal channel closed".into(),
             ))
         })?;
 
         let index = rx.await.map_err(|_| {
-            RaftError::Storage(prkdb_core::error::StorageError::Internal(
+            RaftError::Storage(prkdb_types::error::StorageError::Internal(
                 "Proposal dropped".into(),
             ))
         })??;
@@ -474,22 +474,24 @@ impl RaftNode {
             tokio::task::spawn_blocking(move || {
                 let encoded = bincode::encode_to_vec(&snapshot_state, bincode::config::standard())
                     .map_err(|e| {
-                        RaftError::Storage(prkdb_core::error::StorageError::Internal(e.to_string()))
+                        RaftError::Storage(prkdb_types::error::StorageError::Internal(
+                            e.to_string(),
+                        ))
                     })?;
 
                 std::fs::write(&temp_path, encoded).map_err(|e| {
-                    RaftError::Storage(prkdb_core::error::StorageError::Internal(e.to_string()))
+                    RaftError::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
                 })?;
 
                 std::fs::rename(&temp_path, &path).map_err(|e| {
-                    RaftError::Storage(prkdb_core::error::StorageError::Internal(e.to_string()))
+                    RaftError::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
                 })?;
 
                 Ok::<(), RaftError>(())
             })
             .await
             .map_err(|e| {
-                RaftError::Storage(prkdb_core::error::StorageError::Internal(e.to_string()))
+                RaftError::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
             })??;
 
             tracing::info!(
@@ -518,7 +520,7 @@ impl RaftNode {
 
         // Create snapshot
         let snapshot_data = self.state_machine.snapshot().await.map_err(|e| {
-            RaftError::Storage(prkdb_core::error::StorageError::Internal(format!(
+            RaftError::Storage(prkdb_types::error::StorageError::Internal(format!(
                 "Snapshot failed: {}",
                 e
             )))
@@ -1533,7 +1535,7 @@ impl RaftNode {
                     }
                     Err(_) => {
                         let _ = tx.send(Err(RaftError::Storage(
-                            prkdb_core::error::StorageError::Internal("Task join error".into()),
+                            prkdb_types::error::StorageError::Internal("Task join error".into()),
                         )));
                     }
                 }

@@ -1,5 +1,5 @@
 use prkdb::prelude::*;
-use prkdb_core::consumer::{Consumer, ConsumerConfig};
+use prkdb_types::consumer::{Consumer, ConsumerConfig};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::time::sleep;

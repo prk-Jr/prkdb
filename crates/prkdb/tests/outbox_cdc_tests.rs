@@ -30,7 +30,7 @@ impl ComputeHandler<User, PrkDb> for CounterHandler {
         &self,
         _item: &User,
         _ctx: &Context<PrkDb>,
-    ) -> Result<(), prkdb_core::error::ComputeError> {
+    ) -> Result<(), prkdb_types::error::ComputeError> {
         *self.puts.lock().unwrap() += 1;
         Ok(())
     }
@@ -38,7 +38,7 @@ impl ComputeHandler<User, PrkDb> for CounterHandler {
         &self,
         _id: &u64,
         _ctx: &Context<PrkDb>,
-    ) -> Result<(), prkdb_core::error::ComputeError> {
+    ) -> Result<(), prkdb_types::error::ComputeError> {
         *self.dels.lock().unwrap() += 1;
         Ok(())
     }

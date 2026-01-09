@@ -1,8 +1,8 @@
 use prkdb::prelude::*;
-use prkdb_core::consumer::{AutoOffsetReset, Consumer, ConsumerConfig};
 use prkdb_orm::dialect::SqlDialect;
 use prkdb_orm_macros::Table;
 use prkdb_storage_sql::SqliteAdapter;
+use prkdb_types::consumer::{AutoOffsetReset, Consumer, ConsumerConfig};
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 use tokio::time::{sleep, Duration};

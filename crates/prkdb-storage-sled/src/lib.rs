@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use prkdb_core::error::StorageError;
-use prkdb_core::storage::StorageAdapter;
+use prkdb_types::error::StorageError;
+use prkdb_types::storage::StorageAdapter;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -304,7 +304,7 @@ impl StorageAdapter for SledAdapter {
 #[cfg(test)]
 mod tests {
     use super::SledAdapter;
-    use prkdb_core::storage::StorageAdapter;
+    use prkdb_types::storage::StorageAdapter;
     use tempfile::tempdir;
 
     #[tokio::test]

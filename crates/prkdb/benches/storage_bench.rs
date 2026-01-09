@@ -1,7 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use prkdb::storage::wal_adapter::WalStorageAdapter;
-use prkdb_core::storage::StorageAdapter;
+use prkdb::storage::WalStorageAdapter;
 use prkdb_core::wal::WalConfig;
+use prkdb_types::storage::StorageAdapter;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 

@@ -1,10 +1,10 @@
 use prkdb::partitioning::{
     AssignmentStrategy, DefaultPartitioner, PartitionCoordinator, PartitionMetadata, Partitioner,
 };
+use prkdb::prelude::*;
 use prkdb::storage::InMemoryAdapter;
-use prkdb::PrkDb;
-use prkdb_core::collection::Collection;
-use prkdb_core::consumer::{AutoOffsetReset, Consumer, ConsumerConfig, Offset};
+use prkdb_types::collection::Collection;
+use prkdb_types::consumer::{AutoOffsetReset, Consumer, ConsumerConfig, Offset};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 

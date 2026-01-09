@@ -3,9 +3,9 @@ use bincode::{
     config,
     serde::{decode_from_slice, encode_to_vec},
 };
-use prkdb_core::collection::{ChangeEvent, Collection};
-use prkdb_core::error::StorageError;
-use prkdb_core::storage::StorageAdapter;
+use prkdb_types::collection::{ChangeEvent, Collection};
+use prkdb_types::error::StorageError;
+use prkdb_types::storage::StorageAdapter;
 use serde::{de::DeserializeOwned, Serialize};
 use std::any::TypeId;
 use std::sync::atomic::{AtomicU64, Ordering};
