@@ -4,31 +4,70 @@ on:
   push:
     branches: [ main, master ]
   pull_request:
+    branches: [ main, master ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
 
 jobs:
-  test:
+  build-and-test:
     runs-on: ubuntu-latest
-
+    
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-      - name: Install Protoc
-        run: sudo apt-get install -y protobuf-compiler
+    - name: Install Protobuf Compiler
+      run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy, rustfmt
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+    - name: Cache Cargo dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        # Cache key includes Cargo.lock hash
+        shared-key: "prkdb-ci"
+        # Cache target directory and cargo registry
+        cache-targets: true
+        cache-on-failure: true
 
-      - name: Validate
-        run: ./scripts/validate_all.sh
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+
+    - name: Build
+      run: cargo build --all-targets
+
+    - name: Run Clippy
+      run: cargo clippy --all-targets -- -D warnings
+
+    - name: Run tests
+      run: cargo test --all
+
+    - name: Build release (verify optimized build works)
+      run: cargo build --release
+
+  # Optional: Run benchmarks on release
+  benchmarks:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Protobuf Compiler
+      run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache Cargo dependencies
+      uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: "prkdb-bench"
+        cache-targets: true
+
+    - name: Run benchmarks
+      run: cargo bench --no-run
