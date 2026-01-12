@@ -1,5 +1,6 @@
 use clap::Subcommand;
 
+pub mod backup;
 pub mod collection;
 pub mod consumer;
 pub mod data;

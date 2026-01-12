@@ -49,6 +49,8 @@ tracing-subscriber = { workspace = true }
 sysinfo = "0.30"
 seahash = "4.1.0"
 crc32fast = "1.4"  # Fast CRC32 checksums for checkpoint integrity
+flate2 = "1.0"  # Compression for snapshots
+tar = "0.4"     # Archiving for snapshots
 prometheus = { workspace = true }
 lazy_static = { workspace = true }
 clap = { version = "4.4", features = ["derive"] }
@@ -63,6 +65,7 @@ prkdb-storage-sled = { workspace = true }
 prkdb-storage-sql = { workspace = true }
 prkdb-storage-segmented = { workspace = true }
 prkdb-metrics = { workspace = true }
+
 
 tempfile = "3"
 sqlx = { version = "0.8.2", default-features = false, features = ["runtime-tokio", "sqlite"] }

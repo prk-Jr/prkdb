@@ -537,15 +537,24 @@ impl PrkDb {
         Ok(samples)
     }
 
-    /// Backup database to a file path
-    pub async fn backup_database(&self, _backup_path: &str) -> Result<(), Error> {
-        // Storage-specific backup implementation would go here
-        // Indicate that this needs storage-level implementation
-        Err(Error::Storage(
-            prkdb_types::error::StorageError::BackendError(
-                "Backup functionality requires storage-specific implementation".to_string(),
-            ),
-        ))
+    /// Take a snapshot of the database
+    pub async fn take_snapshot(
+        &self,
+        path: &std::path::Path,
+        compression: prkdb_types::snapshot::CompressionType,
+    ) -> Result<u64, Error> {
+        self.storage
+            .take_snapshot(path.to_path_buf(), compression)
+            .await
+            .map_err(Error::Storage)
+    }
+
+    /// Backup database to a file path (legacy/simple wrapper)
+    pub async fn backup_database(&self, backup_path: &str) -> Result<(), Error> {
+        let path = std::path::Path::new(backup_path);
+        // Default to Gzip compression
+        let compression = prkdb_types::snapshot::CompressionType::Gzip;
+        self.take_snapshot(path, compression).await.map(|_| ())
     }
 
     /// Compact database storage

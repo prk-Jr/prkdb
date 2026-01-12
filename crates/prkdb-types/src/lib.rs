@@ -21,6 +21,7 @@ pub mod consumer;
 pub mod error;
 pub mod index;
 pub mod replication;
+pub mod snapshot;
 pub mod storage;
 
 // Re-exports for convenience

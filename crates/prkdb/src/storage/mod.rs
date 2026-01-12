@@ -4,6 +4,7 @@ pub mod collection_partitioned_adapter; // Kafka-style collection partitioning f
 pub mod config;
 pub mod recovery;
 pub mod sharded_wal_adapter; // Phase 2: Multi-WAL sharding for 5-10x performance
+pub mod snapshot;
 pub mod wal_adapter;
 pub mod write_queue; // Phase 2: Dedicated sync writer
 
