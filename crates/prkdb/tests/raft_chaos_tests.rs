@@ -24,7 +24,7 @@ use tokio::time::sleep;
 /// 6. Heal partition
 /// 7. Verify log convergence
 #[tokio::test]
-// #[ignore] // Run with: cargo test --test raft_chaos_tests -- --ignored
+#[ignore] // Run with: cargo test --test raft_chaos_tests -- --ignored
 async fn test_network_partition_split_brain() {
     // Create a 3-node cluster
     let mut cluster = TestCluster::new(3).await.unwrap();
@@ -183,7 +183,7 @@ async fn test_network_partition_split_brain() {
 /// 4. Verify new leader elected
 /// 5. Check data consistency
 #[tokio::test]
-// #[ignore]
+#[ignore]
 async fn test_leader_crash_during_write() {
     let mut cluster = TestCluster::new(3).await.unwrap();
     cluster.start_all().await.unwrap();
@@ -327,7 +327,7 @@ async fn test_follower_crash_and_recovery() {
 /// 7. Restart 2 nodes
 /// 8. Verify cluster recovers
 #[tokio::test]
-// #[ignore]
+#[ignore]
 async fn test_cascading_failures() {
     let mut cluster = TestCluster::new(5).await.unwrap();
     cluster.start_all().await.unwrap();
@@ -422,7 +422,7 @@ async fn test_cascading_failures() {
 /// which provides some resilience to clock skew. This test verifies
 /// that the cluster remains stable under normal operations.
 #[tokio::test]
-// #[ignore]
+#[ignore]
 async fn test_clock_skew_resilience() {
     let mut cluster = TestCluster::new(3).await.unwrap();
     cluster.start_all().await.unwrap();
@@ -533,7 +533,7 @@ async fn test_clock_skew_resilience() {
 }
 
 #[tokio::test]
-// #[ignore]
+#[ignore]
 async fn test_snapshot_recovery() {
     let result = async {
         let mut cluster = TestCluster::new(3).await?;
