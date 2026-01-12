@@ -140,7 +140,6 @@ impl TestCluster {
                     let path = cwd.join(loc).join(profile).join("prkdb-server");
                     if path.exists() {
                         binary_path = path;
-                        found = true;
                         break 'outer;
                     }
                 }

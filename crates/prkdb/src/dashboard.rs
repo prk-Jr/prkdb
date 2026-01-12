@@ -278,6 +278,7 @@ pub async fn serve(db: Arc<PrkDb>, cfg: DashboardConfig<'_>) -> anyhow::Result<(
     let router = Router::new()
         .route("/", get(index))
         .route("/api/collections", get(list_collections))
+        .route("/api/pipelines", get(list_pipelines))
         .route("/api/metrics", get(metrics))
         .route("/api/dbs", get(list_dbs))
         .route("/api/traces", get(list_traces))
@@ -369,6 +370,21 @@ async fn metrics(State(state): State<DashboardState>) -> Json<MetricsSnapshot> {
 
 async fn list_dbs(State(state): State<DashboardState>) -> Json<Vec<DbSummary>> {
     Json(all_db_summaries(&state))
+}
+
+async fn list_pipelines(State(_state): State<DashboardState>) -> Json<Vec<PipelineFlow>> {
+    let pipelines = pipeline::telemetry_snapshots()
+        .into_iter()
+        .map(|p| PipelineFlow {
+            name: p.name,
+            source: p.source,
+            sink: p.sink,
+            delivered: p.delivered,
+            failed: p.failed,
+            retries: p.retries,
+        })
+        .collect();
+    Json(pipelines)
 }
 
 async fn list_traces(State(state): State<DashboardState>) -> Json<Vec<TraceEntry>> {
@@ -796,7 +812,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         try {
           const [colsRes, pipesRes] = await Promise.all([
             fetch('/api/collections'),
-            fetch('/api/collections') // TODO: Pipeline endpoint
+            fetch('/api/pipelines')
           ]);
           
           const cols = await colsRes.json();
@@ -804,10 +820,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
             '<thead><tr><th>Name</th><th>Partitions</th></tr></thead><tbody>' +
             cols.map(c => `<tr><td>${c.name}</td><td>${c.partitions}</td></tr>`).join('') + '</tbody>';
             
-          // Mock pipelines for now as endpoint might be missing
+          const pipes = await pipesRes.json();
           document.getElementById('pipelines').innerHTML = 
-            '<thead><tr><th>Name</th><th>Status</th></tr></thead><tbody>' +
-            '<tr><td>main_pipeline</td><td><span style="color:var(--success)">Running</span></td></tr></tbody>';
+            '<thead><tr><th>Name</th><th>Source</th><th>Dest</th><th>Delivered</th></tr></thead><tbody>' +
+            pipes.map(p => `<tr><td>${p.name}</td><td>${p.source}</td><td>${p.sink}</td><td>${p.delivered}</td></tr>`).join('') + '</tbody>';
 
         } catch (e) { console.error(e); }
       }

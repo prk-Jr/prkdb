@@ -354,10 +354,20 @@ impl MmapLogSegment {
 
     /// Scan all records in this segment sequentially
     pub async fn scan(&self) -> Result<Vec<LogRecord>, WalError> {
+        self.scan_from(self.base_offset).await
+    }
+
+    /// Scan records starting from a specific offset
+    pub async fn scan_from(&self, start_offset: u64) -> Result<Vec<LogRecord>, WalError> {
+        let index = self.index.lock().await;
+        // Use lookup to find the file position for the nearest indexed offset <= start_offset
+        let start_pos = index.lookup(start_offset).unwrap_or(0);
+        drop(index);
+
         let mmap = self.mmap.lock().await;
         let max_pos = self.file_position.load(Ordering::SeqCst) as usize;
         let mut records = Vec::new();
-        let mut current_pos = 0;
+        let mut current_pos = start_pos as usize;
 
         // Loop until we can't read a size prefix
         while current_pos + 8 <= max_pos {
@@ -396,18 +406,19 @@ impl MmapLogSegment {
                             break;
                         }
 
-                        records.push(record);
+                        // Only include records >= start_offset
+                        if record.offset >= start_offset {
+                            records.push(record);
+                        }
                         current_pos = data_end;
                     }
                     Err(_) => {
                         // Corruption detected - stop scanning here
-                        // This enables auto-recovery by truncating at corruption point
                         break;
                     }
                 },
                 Err(_) => {
                     // Corruption detected - stop scanning here
-                    // This enables auto-recovery by truncating at corruption point
                     break;
                 }
             }
@@ -639,5 +650,44 @@ mod tests {
 
         let read = segment.read(99).await.unwrap();
         assert_eq!(read.offset, 99);
+    }
+
+    #[tokio::test]
+    async fn test_scan_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let segment = MmapLogSegment::create(dir.path(), 0, 1024 * 1024)
+            .await
+            .unwrap();
+
+        // Append 100 records
+        for i in 0..100 {
+            let record = LogRecord::new(LogOperation::Put {
+                collection: "test".to_string(),
+                id: vec![i as u8],
+                data: vec![i as u8; 10],
+            });
+            segment.append(record).await.unwrap();
+        }
+
+        // 1. Scan from 0 (Full scan)
+        let all = segment.scan_from(0).await.unwrap();
+        assert_eq!(all.len(), 100);
+        assert_eq!(all[0].offset, 0);
+        assert_eq!(all[99].offset, 99);
+
+        // 2. Scan from 50 (Partial scan)
+        let partial = segment.scan_from(50).await.unwrap();
+        assert_eq!(partial.len(), 50);
+        assert_eq!(partial[0].offset, 50);
+        assert_eq!(partial[49].offset, 99);
+
+        // 3. Scan from 99 (Last record)
+        let last = segment.scan_from(99).await.unwrap();
+        assert_eq!(last.len(), 1);
+        assert_eq!(last[0].offset, 99);
+
+        // 4. Scan from 100 (Past end)
+        let none = segment.scan_from(100).await.unwrap();
+        assert_eq!(none.len(), 0);
     }
 }

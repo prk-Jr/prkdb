@@ -39,7 +39,7 @@ lazy_static = { version = "1.4", optional = true }
 metrics = ["prometheus", "axum", "lazy_static"]
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = { version = "0.5", features = ["async_tokio"] }
 rand = "0.8"
 tempfile = "3"
 tokio = { version = "1.0", features = ["full"] }
@@ -66,6 +66,10 @@ harness = false
 
 [[bench]]
 name = "mmap_parallel_wal_bench"
+harness = false
+
+[[bench]]
+name = "wal_recovery_bench"
 harness = false
 
 
