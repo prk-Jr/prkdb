@@ -12,10 +12,37 @@ use prkdb_proto::{
     BatchPutRequest, DeleteRequest, GetRequest, KvPair, MetadataRequest, PutRequest, ReadMode,
 };
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
 use tonic::Response;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 20: Connection Pooling
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug)]
+struct ConnectionPool {
+    clients: Vec<PrkDbServiceClient<Channel>>,
+    next: AtomicUsize,
+}
+
+impl ConnectionPool {
+    fn new(clients: Vec<PrkDbServiceClient<Channel>>) -> Self {
+        assert!(!clients.is_empty(), "Connection pool cannot be empty");
+        Self {
+            clients,
+            next: AtomicUsize::new(0),
+        }
+    }
+
+    fn get_client(&self) -> PrkDbServiceClient<Channel> {
+        // Round-robin selection
+        let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.clients.len();
+        self.clients[idx].clone()
+    }
+}
 
 /// Read consistency level for get operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -56,6 +83,8 @@ pub struct ClientConfig {
     pub rpc_timeout_ms: u64,
     /// Number of consecutive failures before marking node unhealthy
     pub unhealthy_threshold: u32,
+    /// Maximum number of concurrent connections per node
+    pub max_connections_per_node: usize,
 }
 
 impl Default for ClientConfig {
@@ -66,6 +95,7 @@ impl Default for ClientConfig {
             max_backoff_ms: 5000,
             rpc_timeout_ms: 30000,
             unhealthy_threshold: 3,
+            max_connections_per_node: 4,
         }
     }
 }
@@ -160,8 +190,8 @@ struct ClusterMetadata {
     /// Partition ID -> Leader Node ID
     partition_leaders: HashMap<u64, u64>,
 
-    /// Connection pool: Node ID -> gRPC Client
-    clients: HashMap<u64, PrkDbServiceClient<Channel>>,
+    /// Connection pool: Node ID -> Connection Pool
+    clients: HashMap<u64, Arc<ConnectionPool>>,
 
     /// Total number of partitions
     num_partitions: usize,
@@ -314,9 +344,19 @@ impl PrkDbClient {
                 .nodes
                 .insert(node_info.node_id, node_info.address.clone());
 
-            // Create gRPC client for this node
-            if let Ok(client) = PrkDbServiceClient::connect(node_info.address.clone()).await {
-                metadata.clients.insert(node_info.node_id, client);
+            // Create gRPC client pool for this node
+            let mut node_clients = Vec::new();
+            for _ in 0..self.config.max_connections_per_node {
+                if let Ok(client) = PrkDbServiceClient::connect(node_info.address.clone()).await {
+                    node_clients.push(client);
+                }
+            }
+
+            if !node_clients.is_empty() {
+                metadata.clients.insert(
+                    node_info.node_id,
+                    Arc::new(ConnectionPool::new(node_clients)),
+                );
             }
         }
 
@@ -406,12 +446,13 @@ impl PrkDbClient {
         let mut handles = Vec::new();
 
         for (leader_id, items) in by_leader {
-            let client_opt = {
+            let pool_opt = {
                 let meta = self.metadata.read().await;
                 meta.clients.get(&leader_id).cloned()
             };
 
-            if let Some(mut client) = client_opt {
+            if let Some(pool) = pool_opt {
+                let mut client = pool.get_client();
                 handles.push(tokio::spawn(async move {
                     client.batch_put(BatchPutRequest { pairs: items }).await
                 }));
@@ -556,11 +597,13 @@ impl PrkDbClient {
                 .get(&partition_id)
                 .ok_or_else(|| anyhow::anyhow!("No leader for partition {}", partition_id))?;
 
-            let client = metadata
+            let pool = metadata
                 .clients
                 .get(&leader_id)
                 .ok_or_else(|| anyhow::anyhow!("No client for node {}", leader_id))?
                 .clone();
+
+            let client = pool.get_client(); // Get specific connection from pool
 
             (partition_id, leader_id, client)
         };
@@ -613,11 +656,13 @@ impl PrkDbClient {
                 .get(&partition_id)
                 .ok_or_else(|| anyhow::anyhow!("No leader for partition {}", partition_id))?;
 
-            let client = metadata
+            let pool = metadata
                 .clients
                 .get(&leader_id)
                 .ok_or_else(|| anyhow::anyhow!("No client for node {}", leader_id))?
                 .clone();
+
+            let client = pool.get_client();
 
             (partition_id, leader_id, client)
         };
@@ -663,11 +708,13 @@ impl PrkDbClient {
                 .get(&partition_id)
                 .ok_or_else(|| anyhow::anyhow!("No leader for partition {}", partition_id))?;
 
-            let client = metadata
+            let pool = metadata
                 .clients
                 .get(&leader_id)
                 .ok_or_else(|| anyhow::anyhow!("No client for node {}", leader_id))?
                 .clone();
+
+            let client = pool.get_client();
 
             (partition_id, leader_id, client)
         };
@@ -716,8 +763,8 @@ impl PrkDbClient {
     /// Helper to get a client to any available node
     async fn get_any_client(&self) -> anyhow::Result<PrkDbServiceClient<Channel>> {
         let meta = self.metadata.read().await;
-        if let Some(client) = meta.clients.values().next() {
-            Ok(client.clone())
+        if let Some(pool) = meta.clients.values().next() {
+            Ok(pool.get_client())
         } else {
             drop(meta);
             // Try refresh
@@ -726,7 +773,7 @@ impl PrkDbClient {
             meta.clients
                 .values()
                 .next()
-                .cloned()
+                .map(|pool| pool.get_client())
                 .ok_or_else(|| anyhow::anyhow!("No available nodes"))
         }
     }

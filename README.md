@@ -122,6 +122,45 @@ ttl_storage.expire(b"session:123").await?;
 ttl_storage.persist(b"key").await?;
 ```
 
+## 📡 Watch/Subscribe API
+
+Get real-time notifications when keys match a prefix change.
+
+```rust
+use tokio_stream::StreamExt;
+
+// Subscribe to all keys starting with "user:"
+let mut stream = client.watch(b"user:").await?;
+
+while let Some(event) = stream.next().await {
+    match event? {
+        // PUT event has key and new value
+        e if e.event_type == 0 => println!("Updated: {:?}", e.key),
+        // DELETE event has key only
+        e => println!("Deleted: {:?}", e.key),
+    }
+}
+```
+
+## 🛡️ Smart Client & Resilience
+
+`prkdb-client` is built for production reliability:
+
+- **Connection Pooling**: Maintains a pool of connections per node (default: 4) to maximize concurrency and prevent head-of-line blocking.
+- **Health-Based Routing**: Automatically routes around unhealthy nodes. Tracks success/failure rates and avoids "zombie" leaders.
+- **Retries with Backoff**: Configurable exponential backoff for transient failures.
+- **Topology Awareness**: Caches cluster state (sharding, leadership) and lazily refreshes on errors.
+
+```rust
+let config = ClientConfig {
+    max_retries: 5,
+    max_connections_per_node: 8,
+    unhealthy_threshold: 3,
+    ..Default::default()
+};
+let client = PrkDbClient::with_config(vec!["127.0.0.1:9090".into()], config).await?;
+```
+
 ## Secondary Indexes
 
 Type-safe queries on any field with `#[index]` attribute.
@@ -200,6 +239,28 @@ tokio::spawn(async move {
     }
 });
 ```
+
+## 🛠️ Remote Admin
+
+Manage partitions, consumers, and replication via gRPC.
+
+```bash
+# Set consumer group offset
+prkdb reset-offset my-group --topic user-updates --to-datetime "2023-10-27T10:00:00Z"
+
+# Add replication target (without full Raft reconfiguration)
+prkdb replication add 10.0.0.2:9090
+
+# Check health
+prkdb status
+```
+
+### Admin RPCs
+
+- `ResetConsumerOffset`: Rewind or skip message consumption.
+- `StartReplication`: Direct log replication to non-voting followers.
+- `StopReplication`: Stop replicating to a target.
+- `Metadata`: Get full cluster topology.
 
 ### Compound Indexes
 
