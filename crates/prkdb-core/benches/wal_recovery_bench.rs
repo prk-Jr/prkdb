@@ -1,6 +1,5 @@
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion};
 use prkdb_core::wal::{mmap_log_segment::MmapLogSegment, LogOperation, LogRecord};
-use std::sync::Arc;
 use tempfile::tempdir;
 
 fn wal_recovery_benchmark(c: &mut Criterion) {

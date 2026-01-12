@@ -21,6 +21,7 @@
 - **ORM layer** - SQLite, PostgreSQL, MySQL support
 - **Type-safe collections** - `#[derive(Collection)]` macro
 - **Built-in monitoring** - Prometheus + Grafana dashboards
+- **Checkpoint Recovery** - Fast startup with incremental WAL recovery
 
 ## 🧱 Modular Architecture
 
