@@ -87,6 +87,12 @@ service PrkDbService {
 
     // Stop replication to a target follower
     rpc StopReplication (StopReplicationRequest) returns (StopReplicationResponse);
+
+    // --- Watch/Subscribe API (Phase 19) ---
+
+    // Watch for changes on keys matching a prefix
+    // Returns a stream of WatchEvents for real-time notifications
+    rpc Watch (WatchRequest) returns (stream WatchEvent);
 }
 
 message RequestVoteRequest {
@@ -460,4 +466,28 @@ message StopReplicationRequest {
 message StopReplicationResponse {
     bool success = 1;
     string error = 2;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 19: Watch/Subscribe API
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Request to watch for changes on keys matching a prefix
+message WatchRequest {
+    bytes key_prefix = 1;  // Watch all keys starting with this prefix (empty = all)
+}
+
+// Event sent to client when a watched key changes
+message WatchEvent {
+    // Type of change
+    enum EventType {
+        PUT = 0;     // Key was created or updated
+        DELETE = 1;  // Key was deleted
+    }
+    
+    EventType event_type = 1;
+    bytes key = 2;          // The affected key
+    bytes value = 3;        // New value (empty for DELETE)
+    uint64 offset = 4;      // Log offset of this change
+    uint64 timestamp = 5;   // Unix timestamp in milliseconds
 }

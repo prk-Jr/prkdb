@@ -1037,6 +1037,52 @@ impl PrkDbClient {
             anyhow::bail!("StopReplication failed: {}", response.error)
         }
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Phase 19: Watch/Subscribe API
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Watch for changes on keys matching a prefix
+    ///
+    /// Returns a stream of `WatchEvent` items. Each event contains:
+    /// - `event_type`: PUT or DELETE
+    /// - `key`: The affected key
+    /// - `value`: New value (empty for DELETE)
+    /// - `offset`: Log offset of the change
+    /// - `timestamp`: Unix timestamp in milliseconds
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use tokio_stream::StreamExt;
+    ///
+    /// let mut stream = client.watch(b"user:").await?;
+    /// while let Some(event) = stream.next().await {
+    ///     match event {
+    ///         Ok(e) => println!("Key {:?} changed", e.key),
+    ///         Err(e) => eprintln!("Error: {}", e),
+    ///     }
+    /// }
+    /// ```
+    pub async fn watch(
+        &self,
+        key_prefix: &[u8],
+    ) -> anyhow::Result<
+        impl tokio_stream::Stream<Item = Result<prkdb_proto::raft::WatchEvent, tonic::Status>>,
+    > {
+        use prkdb_proto::raft::WatchRequest;
+
+        let mut client = self.get_any_client().await?;
+
+        let request = WatchRequest {
+            key_prefix: key_prefix.to_vec(),
+        };
+
+        let response = client.watch(request).await?;
+        let stream = response.into_inner();
+
+        Ok(stream)
+    }
 }
 
 #[cfg(test)]

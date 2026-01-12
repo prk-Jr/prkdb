@@ -4,10 +4,16 @@ use crate::raft::rpc::prk_db_service_server::{
 };
 use crate::raft::rpc::{
     DeleteRequest, DeleteResponse, GetRequest, GetResponse, HealthRequest, HealthResponse,
-    PutRequest, PutResponse,
+    PutRequest, PutResponse, WatchEvent, WatchRequest,
 };
+use std::pin::Pin;
 use std::sync::Arc;
+use tokio::sync::broadcast;
+use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use tonic::{Request, Response, Status};
+
+// Phase 19: Type alias for watch broadcast channel
+pub type WatchBroadcast = broadcast::Sender<WatchEvent>;
 
 /// gRPC service implementation for client data operations
 /// This is the binary protocol equivalent to Kafka's producer/consumer API
@@ -714,6 +720,48 @@ impl PrkDbServiceTrait for PrkDbGrpcService {
                 error: e.to_string(),
             })),
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Phase 19: Watch/Subscribe API
+    // ─────────────────────────────────────────────────────────────────────────
+
+    type WatchStream = Pin<Box<dyn tokio_stream::Stream<Item = Result<WatchEvent, Status>> + Send>>;
+
+    async fn watch(
+        &self,
+        request: Request<WatchRequest>,
+    ) -> Result<Response<Self::WatchStream>, Status> {
+        let req = request.into_inner();
+        let prefix = req.key_prefix;
+
+        tracing::info!("Watch: Client subscribed with prefix len={}", prefix.len());
+
+        // Create a broadcast channel for this subscription
+        // In a real implementation, we'd subscribe to a global event bus
+        let (tx, rx) = broadcast::channel::<WatchEvent>(1024);
+
+        // Store the sender somewhere accessible to put/delete operations
+        // For now, we'll just return an empty stream as a placeholder
+        // TODO: Integrate with actual write path to publish events
+
+        let _ = tx; // Suppress unused warning
+
+        let stream = BroadcastStream::new(rx).filter_map(move |result| {
+            match result {
+                Ok(event) => {
+                    // Filter by prefix
+                    if prefix.is_empty() || event.key.starts_with(&prefix) {
+                        Some(Ok(event))
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => None, // Channel lagged, skip
+            }
+        });
+
+        Ok(Response::new(Box::pin(stream)))
     }
 }
 
