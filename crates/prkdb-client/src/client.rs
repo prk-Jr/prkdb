@@ -541,44 +541,64 @@ impl PrkDbClient {
         anyhow::bail!("Delete failed after {} retries", MAX_RETRIES)
     }
 
-    /// Internal get implementation
+    /// Internal get implementation with health tracking
     async fn get_internal(
         &self,
         key: &[u8],
         consistency: ReadConsistency,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        let metadata = self.metadata.read().await;
-        let partition_id = self.hash_key(key, metadata.num_partitions);
+        let (partition_id, leader_id, client) = {
+            let metadata = self.metadata.read().await;
+            let partition_id = self.hash_key(key, metadata.num_partitions);
 
-        let leader_id = metadata
-            .partition_leaders
-            .get(&partition_id)
-            .ok_or_else(|| anyhow::anyhow!("No leader for partition {}", partition_id))?;
+            let leader_id = *metadata
+                .partition_leaders
+                .get(&partition_id)
+                .ok_or_else(|| anyhow::anyhow!("No leader for partition {}", partition_id))?;
 
-        let mut client = metadata
-            .clients
-            .get(leader_id)
-            .ok_or_else(|| anyhow::anyhow!("No client for node {}", leader_id))?
-            .clone();
+            let client = metadata
+                .clients
+                .get(&leader_id)
+                .ok_or_else(|| anyhow::anyhow!("No client for node {}", leader_id))?
+                .clone();
 
-        drop(metadata);
+            (partition_id, leader_id, client)
+        };
+
+        // Phase 18: Check if leader is healthy before sending
+        if !self.is_node_healthy(leader_id).await {
+            tracing::warn!(
+                "Leader {} for partition {} is unhealthy, attempting anyway",
+                leader_id,
+                partition_id
+            );
+        }
 
         let request = tonic::Request::new(GetRequest {
             key: key.to_vec(),
             read_mode: i32::from(consistency),
         });
 
-        let response = client.get(request).await?;
-        let resp = response.into_inner();
+        // Phase 18: Track health based on response
+        match client.clone().get(request).await {
+            Ok(response) => {
+                self.record_node_success(leader_id).await;
+                let resp = response.into_inner();
 
-        if !resp.success {
-            anyhow::bail!("Get request returned success=false");
-        }
+                if !resp.success {
+                    anyhow::bail!("Get request returned success=false");
+                }
 
-        if resp.found {
-            Ok(Some(resp.value))
-        } else {
-            Ok(None)
+                if resp.found {
+                    Ok(Some(resp.value))
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(e) => {
+                self.record_node_failure(leader_id).await;
+                Err(e.into())
+            }
         }
     }
 
@@ -632,34 +652,51 @@ impl PrkDbClient {
         }
     }
 
-    /// Internal delete implementation
+    /// Internal delete implementation with health tracking
     async fn delete_internal(&self, key: &[u8]) -> anyhow::Result<()> {
-        let metadata = self.metadata.read().await;
-        let num_partitions = metadata.num_partitions;
+        let (partition_id, leader_id, client) = {
+            let metadata = self.metadata.read().await;
+            let partition_id = self.hash_key(key, metadata.num_partitions);
 
-        let partition_id = self.hash_key(key, num_partitions);
-        let leader_id = metadata
-            .partition_leaders
-            .get(&partition_id)
-            .ok_or_else(|| anyhow::anyhow!("No leader for partition {}", partition_id))?;
+            let leader_id = *metadata
+                .partition_leaders
+                .get(&partition_id)
+                .ok_or_else(|| anyhow::anyhow!("No leader for partition {}", partition_id))?;
 
-        let mut client = metadata
-            .clients
-            .get(leader_id)
-            .ok_or_else(|| anyhow::anyhow!("No client for node {}", leader_id))?
-            .clone();
+            let client = metadata
+                .clients
+                .get(&leader_id)
+                .ok_or_else(|| anyhow::anyhow!("No client for node {}", leader_id))?
+                .clone();
 
-        drop(metadata);
+            (partition_id, leader_id, client)
+        };
+
+        // Phase 18: Check if leader is healthy before sending
+        if !self.is_node_healthy(leader_id).await {
+            tracing::warn!(
+                "Leader {} for partition {} is unhealthy, attempting anyway",
+                leader_id,
+                partition_id
+            );
+        }
 
         let request = tonic::Request::new(DeleteRequest { key: key.to_vec() });
 
-        let response = client.delete(request).await?;
-
-        if !response.into_inner().success {
-            anyhow::bail!("Delete failed on server");
+        // Phase 18: Track health based on response
+        match client.clone().delete(request).await {
+            Ok(response) => {
+                self.record_node_success(leader_id).await;
+                if !response.into_inner().success {
+                    anyhow::bail!("Delete failed on server");
+                }
+                Ok(())
+            }
+            Err(e) => {
+                self.record_node_failure(leader_id).await;
+                Err(e.into())
+            }
         }
-
-        Ok(())
     }
 
     /// Hash key to partition (consistent with server-side logic)
