@@ -410,7 +410,7 @@ async fn websocket_connection(mut socket: WebSocket, collection_name: String, st
         });
 
         if socket
-            .send(Message::Text(message.to_string()))
+            .send(Message::Text(message.to_string().into()))
             .await
             .is_err()
         {
@@ -431,7 +431,7 @@ async fn websocket_connection(mut socket: WebSocket, collection_name: String, st
                             "timestamp": chrono::Utc::now().to_rfc3339()
                         });
 
-                        if socket.send(Message::Text(message.to_string())).await.is_err() {
+                        if socket.send(Message::Text(message.to_string().into())).await.is_err() {
                             break;
                         }
                     }

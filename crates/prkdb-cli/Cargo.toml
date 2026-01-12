@@ -18,26 +18,27 @@ prkdb-client = { path = "../prkdb-client" }
 prkdb-storage-sled = { path = "../prkdb-storage-sled" }
 
 # CLI framework
-clap = { version = "4.0", features = ["derive", "color", "env"] }
-tokio = { version = "1.0", features = ["full"] }
+clap = { workspace = true, features = ["derive", "color", "env"] }
+tokio = { workspace = true }
 
 # HTTP server (for serve command)
-axum = { version = "0.7", features = ["ws", "json"] }
+axum = { workspace = true, features = ["ws", "json"] }
 tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["cors", "fs"] }
 futures-util = "0.3"
-tonic = { version = "0.10", features = ["transport"] }
+tonic = { workspace = true, features = ["transport"] }
 
 # Output formatting
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 tabled = "0.15"
 colored = "2.0"
-bincode = "1.3"
+bincode = { workspace = true }
 
 # Utilities
-anyhow = "1.0"
-uuid = { version = "1.0", features = ["v4"] }
+anyhow = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 humantime = "2.1"
-chrono = { version = "0.4", features = ["serde"] }
-tracing-subscriber = "0.3"
+chrono = { workspace = true, features = ["serde"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

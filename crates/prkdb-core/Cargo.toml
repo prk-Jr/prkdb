@@ -8,32 +8,32 @@ edition = "2021"
 prkdb-types = { workspace = true }
 
 anyhow = { workspace = true }
-async-trait = "0.1" # Updated from workspace = true
-serde = { version = "1.0", features = ["derive"] } # Updated from workspace = true
+async-trait = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 dashmap = { workspace = true }
-bincode = "2.0.0-rc.3" # TODO: Remove after rkyv migration complete
-rkyv = { version = "0.7", default-features = false, features = ["size_64", "std", "validation"] } # Phase 5.5: Zero-copy serialization
-chrono = "0.4" # Added
-zerocopy = { version = "0.7", features = ["derive"] } # Zero-copy serialization
+bincode = { workspace = true } # Removed rc.3, usage standard 2.0.1 from workspace
+rkyv = { version = "0.7", default-features = false, features = ["size_64", "std", "validation"] }
+chrono = { workspace = true }
+zerocopy = { version = "0.7", features = ["derive"] }
 
 # Compression libraries for Phase 1
-lz4 = "1.24"              # Fast compression (primary choice)
-snap = "1.1"              # Snappy compression (alternative)
-zstd = "0.13"             # High compression ratio option
-crc32fast = "1.3"         # Fast CRC32 checksums
+lz4 = { workspace = true }
+snap = "1.1"
+zstd = "0.13"
+crc32fast = "1.3"
 
 # Async runtime and networking for Phase 2
-tokio = { version = "1.0", features = ["net", "io-util", "time", "sync", "rt", "macros", "fs"] }
-futures = "0.3"
-tracing = "0.1"
+tokio = { workspace = true, features = ["net", "io-util", "time", "sync", "rt", "macros", "fs"] }
+futures = { workspace = true }
+tracing = { workspace = true }
 memmap2 = "0.9.9"
 
 # Metrics and HTTP server (for examples)
-prometheus = { version = "0.13", optional = true }
-axum = { version = "0.7", optional = true }
-lazy_static = { version = "1.4", optional = true }
+prometheus = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+lazy_static = { workspace = true, optional = true }
 
 [features]
 metrics = ["prometheus", "axum", "lazy_static"]

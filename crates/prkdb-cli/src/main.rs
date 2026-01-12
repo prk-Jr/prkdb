@@ -106,6 +106,12 @@ pub enum Commands {
 
     /// Batch put from file
     BatchPut(data::BatchPutArgs),
+
+    /// Backup database (Offline)
+    Backup(backup::BackupArgs),
+
+    /// Restore database (Offline)
+    Restore(backup::RestoreArgs),
 }
 
 #[derive(clap::ValueEnum, Clone)]
@@ -162,5 +168,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Put(args) => data::handle_put(args.clone()).await,
         Commands::Delete(args) => data::handle_delete(args.clone()).await,
         Commands::BatchPut(args) => data::handle_batch_put(args.clone()).await,
+
+        // Backup/Restore commands (Offline)
+        Commands::Backup(args) => backup::handle_backup(args.clone(), &cli).await,
+        Commands::Restore(args) => backup::handle_restore(args.clone()).await,
     }
 }

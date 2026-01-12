@@ -167,6 +167,17 @@ pub trait StorageAdapter: Send + Sync + 'static {
             "get_changes_since not supported".into(),
         ))
     }
+
+    /// Take a full snapshot of the database
+    async fn take_snapshot(
+        &self,
+        _path: std::path::PathBuf,
+        _compression: crate::snapshot::CompressionType,
+    ) -> Result<u64, StorageError> {
+        Err(StorageError::BackendError(
+            "take_snapshot not supported".into(),
+        ))
+    }
 }
 
 /// Extension trait for transactional storage adapters

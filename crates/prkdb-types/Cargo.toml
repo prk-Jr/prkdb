@@ -7,18 +7,18 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
-bincode = { version = "2.0.1", features = ["serde"] }
+serde = { workspace = true, features = ["derive"] }
+bincode = { workspace = true, features = ["serde", "derive"] }
 
 # Error handling
-thiserror = "1.0"
+thiserror = { workspace = true }
 
 # Async traits (user approved)
-async-trait = "0.1"
+async-trait = { workspace = true }
 
 # Utilities
-dashmap = "5.5"
-chrono = { version = "0.4", features = ["serde"] }
+dashmap = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros"] }

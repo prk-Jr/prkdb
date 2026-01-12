@@ -3,6 +3,8 @@ use super::cache::LruCache;
 use super::checkpoint;
 use super::config::{StorageConfig, SyncMode};
 use super::recovery::RecoveryManager;
+use super::snapshot::SnapshotWriter;
+use prkdb_types::snapshot::{CompressionType, SnapshotHeader};
 
 use papaya::HashMap as LockFreeHashMap; // Phase 5: Lock-free index
 use prkdb_core::batching::adaptive::{AdaptiveBatchAccumulator, AdaptiveBatchConfig};
@@ -13,7 +15,7 @@ use prkdb_core::wal::{LogOperation, LogRecord, WalConfig};
 use prkdb_metrics::storage::StorageMetrics;
 use prkdb_types::error::StorageError;
 use prkdb_types::storage::StorageAdapter;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -784,6 +786,72 @@ impl WalStorageAdapter {
             .map_err(|e| StorageError::Internal(format!("Failed to save checkpoint: {}", e)))?;
         info!("Checkpoint saved with max_offset={}", current_offset);
         Ok(())
+    }
+
+    /// Take a full snapshot of the database
+    ///
+    /// This captures the current state of the database (all key-value pairs)
+    /// and writes it to the specified path.
+    ///
+    /// Returns the max_offset that this snapshot corresponds to.
+    pub async fn take_snapshot(
+        &self,
+        path: &Path,
+        compression: CompressionType,
+    ) -> Result<u64, StorageError> {
+        let max_offset = self.inner.max_offset.load(Ordering::SeqCst);
+        let keys = self.get_all_keys();
+        let count = keys.len() as u64;
+
+        info!(
+            "Starting snapshot: {} keys, max_offset={}",
+            count, max_offset
+        );
+
+        // Producer-Consumer pattern: Use a blocking task for file I/O
+        // to avoid blocking the async runtime.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<(Vec<u8>, Vec<u8>)>(1024);
+        let writer_path = path.to_path_buf();
+
+        let write_task = tokio::task::spawn_blocking(move || -> Result<(), StorageError> {
+            let header = SnapshotHeader::new(max_offset, count, compression);
+            let mut writer = SnapshotWriter::new(&writer_path, header)?;
+
+            while let Some((key, val)) = rx.blocking_recv() {
+                writer.write_entry(&key, &val)?;
+            }
+            writer.finish()?;
+            Ok(())
+        });
+
+        // Iterate keys and send to writer
+        for key in keys {
+            // We use get() which reads from WAL/Cache
+            // Note: This might see updates > max_offset if they happened after we loaded max_offset
+            // This is acceptable as replay will handle them idempotently.
+            if let Some(val) = self.get(&key).await? {
+                if tx.send((key, val)).await.is_err() {
+                    return Err(StorageError::Internal(
+                        "Snapshot writer task failed".to_string(),
+                    ));
+                }
+            }
+        }
+        drop(tx); // Signal completion
+
+        // Wait for writer to finish
+        match write_task.await {
+            Ok(res) => res?,
+            Err(e) => {
+                return Err(StorageError::Internal(format!(
+                    "Snapshot task join error: {}",
+                    e
+                )))
+            }
+        }
+
+        info!("Snapshot completed successfully");
+        Ok(max_offset)
     }
 
     /// Background task to flush accumulator
@@ -1873,6 +1941,13 @@ impl StorageAdapter for WalStorageAdapter {
 
         results.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(results)
+    }
+    async fn take_snapshot(
+        &self,
+        path: PathBuf,
+        compression: CompressionType,
+    ) -> Result<u64, StorageError> {
+        self.take_snapshot(&path, compression).await
     }
 }
 
