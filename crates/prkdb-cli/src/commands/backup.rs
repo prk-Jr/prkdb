@@ -2,7 +2,7 @@ use crate::Cli;
 use clap::Args;
 use prkdb::storage::snapshot::{CompressionType, SnapshotReader};
 use prkdb::PrkDb;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Args, Clone, Debug)]
 pub struct BackupArgs {

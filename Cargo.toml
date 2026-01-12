@@ -30,13 +30,20 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 criterion = { version = "0.5", features = ["async_tokio"] }
 dashmap = "5.5"
-uuid = { version = "*", features = ["v4"] }
+uuid = { version = "1.11", features = ["v4"] }
 prometheus = "0.13"
-axum = "0.7"
-lazy_static = "1.4"
+axum = "0.8.8"
+lazy_static = "1.5"
 crossbeam = "0.8"
-mimalloc = { version = "0.1", default-features = false }  # Fast allocator: 10-15% boost!
-lz4 = "1.24"  # Fast compression: 2-3x for compressible data!
+mimalloc = { version = "0.1", default-features = false }
+lz4 = "1.24"
+tonic = { version = "0.12", features = ["tls", "tls-roots"] }
+prost = "0.13"
+prost-types = "0.13"
+clap = { version = "4.5", features = ["derive", "color", "env"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+flate2 = "1.0"
+tar = "0.4"
 
 prkdb-types = { path = "crates/prkdb-types" }
 prkdb-proto = { path = "crates/prkdb-proto" }

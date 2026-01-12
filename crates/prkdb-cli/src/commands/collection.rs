@@ -882,34 +882,44 @@ pub fn try_bincode_to_json(data: &[u8]) -> Result<serde_json::Value> {
     // Try deserializing as various common types and convert to JSON
 
     // First, try to see if it's a simple string
-    if let Ok(s) = bincode::deserialize::<String>(data) {
+    if let Ok((s, _)) =
+        bincode::serde::decode_from_slice::<String, _>(data, bincode::config::standard())
+    {
         return Ok(serde_json::Value::String(s));
     }
 
     // Try i64
     if data.len() == 8 {
-        if let Ok(n) = bincode::deserialize::<i64>(data) {
+        if let Ok((n, _)) =
+            bincode::serde::decode_from_slice::<i64, _>(data, bincode::config::standard())
+        {
             return Ok(serde_json::json!(n));
         }
     }
 
     // Try f64
     if data.len() == 8 {
-        if let Ok(n) = bincode::deserialize::<f64>(data) {
+        if let Ok((n, _)) =
+            bincode::serde::decode_from_slice::<f64, _>(data, bincode::config::standard())
+        {
             return Ok(serde_json::json!(n));
         }
     }
 
     // Try bool
     if data.len() == 1 {
-        if let Ok(b) = bincode::deserialize::<bool>(data) {
+        if let Ok((b, _)) =
+            bincode::serde::decode_from_slice::<bool, _>(data, bincode::config::standard())
+        {
             return Ok(serde_json::Value::Bool(b));
         }
     }
 
     // If all else fails, try to decode as a generic serde_json::Value
     // This might work if the original data was JSON-compatible
-    if let Ok(value) = bincode::deserialize::<serde_json::Value>(data) {
+    if let Ok((value, _)) =
+        bincode::serde::decode_from_slice::<serde_json::Value, _>(data, bincode::config::standard())
+    {
         return Ok(value);
     }
 

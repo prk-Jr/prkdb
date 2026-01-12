@@ -137,7 +137,11 @@ impl SegmentedLogAdapter {
         let checkpoint_path = dir.join("index.snapshot");
         if checkpoint_path.exists() {
             if let Ok(bytes) = fs::read(&checkpoint_path) {
-                if let Ok(map) = bincode::deserialize::<HashMap<Vec<u8>, Option<Vec<u8>>>>(&bytes) {
+                if let Ok((map, _)) = bincode::serde::decode_from_slice::<
+                    HashMap<Vec<u8>, Option<Vec<u8>>>,
+                    _,
+                >(&bytes, bincode::config::standard())
+                {
                     // determine next_id from segments present
                     let mut max_id = 0usize;
                     for ent in (fs::read_dir(dir)
@@ -372,7 +376,7 @@ impl SegmentedLogAdapter {
 
     fn persist_index(inner: &Inner) -> Result<(), StorageError> {
         let path = inner.dir.join("index.snapshot");
-        let bytes = bincode::serialize(&inner.index)
+        let bytes = bincode::serde::encode_to_vec(&inner.index, bincode::config::standard())
             .map_err(|e| StorageError::BackendError(format!("serialize index: {e}")))?;
         fs::write(&path, bytes)
             .map_err(|e| StorageError::BackendError(format!("write checkpoint: {e}")))?;

@@ -7,9 +7,9 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 # gRPC and protobuf
-tonic = { version = "0.10", features = ["transport", "channel"] }
-prost = "0.12"
-prost-types = "0.12"
+tonic = { workspace = true, features = ["transport", "channel"] }
+prost = { workspace = true }
+prost-types = { workspace = true }
 
 [build-dependencies]
-tonic-build = "0.10"
+tonic-build = "0.12"

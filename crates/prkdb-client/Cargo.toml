@@ -12,7 +12,7 @@ prkdb-proto = { workspace = true }
 # Core dependencies - minimal set for client
 anyhow = { workspace = true }
 tokio = { workspace = true }
-tonic = { version = "0.10", features = ["transport", "channel"] }
+tonic = { workspace = true, features = ["transport", "channel"] }
 tracing = { workspace = true }
 seahash = "4.1.0"
 futures = "0.3"
