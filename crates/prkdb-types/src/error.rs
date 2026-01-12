@@ -1,3 +1,7 @@
+//! Error types for PrkDB.
+//!
+//! This module provides a centralized error hierarchy that is shared across all PrkDB crates.
+
 use thiserror::Error;
 
 /// Centralized error type for PrkDB
@@ -160,5 +164,33 @@ impl From<StorageError> for ConsumerError {
 impl From<StorageError> for ComputeError {
     fn from(e: StorageError) -> Self {
         ComputeError::Storage(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_conversion() {
+        let storage_err = StorageError::NotFound;
+        let err: Error = storage_err.into();
+        assert!(matches!(err, Error::Storage(StorageError::NotFound)));
+    }
+
+    #[test]
+    fn test_storage_error_into_error() {
+        let err = StorageError::Serialization("failed".to_string());
+        let converted = err.into_error();
+        assert!(matches!(converted, Error::Serialization(_)));
+    }
+
+    #[test]
+    fn test_error_display() {
+        let err = StorageError::BackendError("connection failed".to_string());
+        assert_eq!(
+            err.to_string(),
+            "Failed to access underlying store: connection failed"
+        );
     }
 }

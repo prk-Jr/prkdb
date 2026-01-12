@@ -1,7 +1,7 @@
 use crossbeam_channel::{unbounded, Sender};
 use prkdb_core::batch_config::BatchConfig;
-use prkdb_core::collection::Collection;
-use prkdb_core::error::StorageError;
+use prkdb_types::collection::Collection;
+use prkdb_types::error::StorageError;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
@@ -164,7 +164,7 @@ mod tests {
         value: i32,
     }
 
-    impl prkdb_core::collection::Collection for TestItem {
+    impl prkdb_types::collection::Collection for TestItem {
         type Id = String;
         fn id(&self) -> &Self::Id {
             &self.id

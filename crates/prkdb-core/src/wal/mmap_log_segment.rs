@@ -216,7 +216,7 @@ impl MmapLogSegment {
             drop(mmap);
             // Calculate needed size
             let needed = (current_pos + total_size) as u64;
-            let new_size = ((needed + GROWTH_STEP - 1) / GROWTH_STEP) * GROWTH_STEP;
+            let new_size = needed.div_ceil(GROWTH_STEP) * GROWTH_STEP;
             self.resize(new_size).await?;
             mmap = self.mmap.lock().await;
         }
@@ -224,15 +224,12 @@ impl MmapLogSegment {
         // Verify bounds after potential resize to prevent panic
         let mmap_len = mmap.len();
         if current_pos + total_size > mmap_len {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!(
-                    "mmap bounds error: need {}..{} but len={}",
-                    current_pos,
-                    current_pos + total_size,
-                    mmap_len
-                ),
-            ));
+            return Err(std::io::Error::other(format!(
+                "mmap bounds error: need {}..{} but len={}",
+                current_pos,
+                current_pos + total_size,
+                mmap_len
+            )));
         }
 
         // OPTIMIZATION 3: Single memcpy to mmap
@@ -259,7 +256,7 @@ impl MmapLogSegment {
         // Only flush every 10 batches to amortize I/O cost
         // This reduces OS page flushing overhead (identified as 50ms bottleneck)
         let batches = self.batches_since_fsync.fetch_add(1, Ordering::SeqCst);
-        if batches % 10 == 0 {
+        if batches.is_multiple_of(10) {
             mmap.flush_async()?;
         }
 
@@ -357,10 +354,20 @@ impl MmapLogSegment {
 
     /// Scan all records in this segment sequentially
     pub async fn scan(&self) -> Result<Vec<LogRecord>, WalError> {
+        self.scan_from(self.base_offset).await
+    }
+
+    /// Scan records starting from a specific offset
+    pub async fn scan_from(&self, start_offset: u64) -> Result<Vec<LogRecord>, WalError> {
+        let index = self.index.lock().await;
+        // Use lookup to find the file position for the nearest indexed offset <= start_offset
+        let start_pos = index.lookup(start_offset).unwrap_or(0);
+        drop(index);
+
         let mmap = self.mmap.lock().await;
         let max_pos = self.file_position.load(Ordering::SeqCst) as usize;
         let mut records = Vec::new();
-        let mut current_pos = 0;
+        let mut current_pos = start_pos as usize;
 
         // Loop until we can't read a size prefix
         while current_pos + 8 <= max_pos {
@@ -399,18 +406,19 @@ impl MmapLogSegment {
                             break;
                         }
 
-                        records.push(record);
+                        // Only include records >= start_offset
+                        if record.offset >= start_offset {
+                            records.push(record);
+                        }
                         current_pos = data_end;
                     }
                     Err(_) => {
                         // Corruption detected - stop scanning here
-                        // This enables auto-recovery by truncating at corruption point
                         break;
                     }
                 },
                 Err(_) => {
                     // Corruption detected - stop scanning here
-                    // This enables auto-recovery by truncating at corruption point
                     break;
                 }
             }
@@ -642,5 +650,44 @@ mod tests {
 
         let read = segment.read(99).await.unwrap();
         assert_eq!(read.offset, 99);
+    }
+
+    #[tokio::test]
+    async fn test_scan_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let segment = MmapLogSegment::create(dir.path(), 0, 1024 * 1024)
+            .await
+            .unwrap();
+
+        // Append 100 records
+        for i in 0..100 {
+            let record = LogRecord::new(LogOperation::Put {
+                collection: "test".to_string(),
+                id: vec![i as u8],
+                data: vec![i as u8; 10],
+            });
+            segment.append(record).await.unwrap();
+        }
+
+        // 1. Scan from 0 (Full scan)
+        let all = segment.scan_from(0).await.unwrap();
+        assert_eq!(all.len(), 100);
+        assert_eq!(all[0].offset, 0);
+        assert_eq!(all[99].offset, 99);
+
+        // 2. Scan from 50 (Partial scan)
+        let partial = segment.scan_from(50).await.unwrap();
+        assert_eq!(partial.len(), 50);
+        assert_eq!(partial[0].offset, 50);
+        assert_eq!(partial[49].offset, 99);
+
+        // 3. Scan from 99 (Last record)
+        let last = segment.scan_from(99).await.unwrap();
+        assert_eq!(last.len(), 1);
+        assert_eq!(last[0].offset, 99);
+
+        // 4. Scan from 100 (Past end)
+        let none = segment.scan_from(100).await.unwrap();
+        assert_eq!(none.len(), 0);
     }
 }

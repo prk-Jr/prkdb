@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# Foundation types - re-exported for backward compatibility
+prkdb-types = { workspace = true }
+
 anyhow = { workspace = true }
 async-trait = "0.1" # Updated from workspace = true
 serde = { version = "1.0", features = ["derive"] } # Updated from workspace = true
@@ -36,7 +39,7 @@ lazy_static = { version = "1.4", optional = true }
 metrics = ["prometheus", "axum", "lazy_static"]
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = { version = "0.5", features = ["async_tokio"] }
 rand = "0.8"
 tempfile = "3"
 tokio = { version = "1.0", features = ["full"] }
@@ -63,6 +66,10 @@ harness = false
 
 [[bench]]
 name = "mmap_parallel_wal_bench"
+harness = false
+
+[[bench]]
+name = "wal_recovery_bench"
 harness = false
 
 

@@ -36,9 +36,9 @@ impl ParallelWal {
             let mut segment_config = config.clone();
             segment_config.log_dir = config.log_dir.join(format!("segment_{}", i));
 
-            std::fs::create_dir_all(&segment_config.log_dir).map_err(|e| WalError::Io(e))?;
+            std::fs::create_dir_all(&segment_config.log_dir).map_err(WalError::Io)?;
 
-            let wal = WriteAheadLog::create(segment_config).map_err(|e| WalError::Io(e))?;
+            let wal = WriteAheadLog::create(segment_config).map_err(WalError::Io)?;
 
             segments.push(Arc::new(Mutex::new(wal)));
         }
@@ -64,7 +64,7 @@ impl ParallelWal {
             let mut segment_config = config.clone();
             segment_config.log_dir = config.log_dir.join(format!("segment_{}", i));
 
-            let wal = WriteAheadLog::open(segment_config).map_err(|e| WalError::Io(e))?;
+            let wal = WriteAheadLog::open(segment_config).map_err(WalError::Io)?;
 
             segments.push(Arc::new(Mutex::new(wal)));
         }
@@ -81,11 +81,7 @@ impl ParallelWal {
         let segment_id = self.route_record(&record);
         let segment = &self.segments[segment_id];
 
-        let offset = segment
-            .lock()
-            .await
-            .append(record)
-            .map_err(|e| WalError::Io(e))?;
+        let offset = segment.lock().await.append(record).map_err(WalError::Io)?;
 
         Ok((segment_id, offset))
     }
@@ -126,7 +122,7 @@ impl ParallelWal {
                     .lock()
                     .await
                     .append_batch(segment_records)
-                    .map_err(|e| WalError::Io(e))?;
+                    .map_err(WalError::Io)?;
                 Ok::<(usize, u64), WalError>((segment_id, offset))
             };
             futures.push(fut);
@@ -162,7 +158,7 @@ impl ParallelWal {
             .lock()
             .await
             .read(offset)
-            .map_err(|e| WalError::Io(e))
+            .map_err(WalError::Io)
     }
 
     /// Get the number of parallel segments
@@ -262,7 +258,7 @@ mod tests {
         assert_eq!(results.len(), 100);
 
         // Verify records are distributed across segments
-        let mut segment_counts = vec![0; 4];
+        let mut segment_counts = [0; 4];
         for (segment_id, _) in &results {
             segment_counts[*segment_id] += 1;
         }

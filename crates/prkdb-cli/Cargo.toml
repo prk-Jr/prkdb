@@ -7,16 +7,18 @@ authors = ["PrkDB Team"]
 license = "MIT OR Apache-2.0"
 
 [[bin]]
-name = "prkdb"
+name = "prkdb-cli"
 path = "src/main.rs"
 
 [dependencies]
 prkdb = { path = "../prkdb" }
+prkdb-types = { path = "../prkdb-types" }
 prkdb-core = { path = "../prkdb-core" }
+prkdb-client = { path = "../prkdb-client" }
 prkdb-storage-sled = { path = "../prkdb-storage-sled" }
 
 # CLI framework
-clap = { version = "4.0", features = ["derive", "color"] }
+clap = { version = "4.0", features = ["derive", "color", "env"] }
 tokio = { version = "1.0", features = ["full"] }
 
 # HTTP server (for serve command)
@@ -24,6 +26,7 @@ axum = { version = "0.7", features = ["ws", "json"] }
 tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["cors", "fs"] }
 futures-util = "0.3"
+tonic = { version = "0.10", features = ["transport"] }
 
 # Output formatting
 serde = { version = "1.0", features = ["derive"] }

@@ -1,6 +1,6 @@
-use prkdb::storage::wal_adapter::WalStorageAdapter;
-use prkdb_core::storage::StorageAdapter;
+use prkdb::storage::WalStorageAdapter;
 use prkdb_core::wal::WalConfig;
+use prkdb_types::storage::StorageAdapter;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -33,10 +33,12 @@ impl LatencyTracker {
         samples[index.min(samples.len() - 1)]
     }
 
+    #[allow(dead_code)]
     pub async fn count(&self) -> usize {
         self.samples.lock().await.len()
     }
 
+    #[allow(dead_code)]
     pub async fn clear(&self) {
         self.samples.lock().await.clear();
     }

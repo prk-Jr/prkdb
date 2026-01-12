@@ -2,7 +2,7 @@
 
 use futures::Stream;
 use pin_project::pin_project;
-use prkdb_core::{collection::Collection, consumer::ConsumerRecord, error::Error};
+use prkdb_types::{collection::Collection, consumer::ConsumerRecord, error::Error};
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::pin::Pin;

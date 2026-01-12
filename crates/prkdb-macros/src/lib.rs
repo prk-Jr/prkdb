@@ -72,7 +72,7 @@ pub fn collection_derive(input: TokenStream) -> TokenStream {
         .map(|(name, _ty, unique)| {
             let name_str = name.to_string();
             quote! {
-                prkdb_core::index::IndexDef {
+                prkdb_types::index::IndexDef {
                     field: #name_str,
                     unique: #unique,
                 }
@@ -210,7 +210,7 @@ pub fn collection_derive(input: TokenStream) -> TokenStream {
     // Generate the extension trait
     let query_builder_ext = quote! {
         /// Extension trait for type-safe query methods
-        pub trait #query_ext_trait<'a, S: prkdb_core::storage::StorageAdapter + 'static>: Sized {
+        pub trait #query_ext_trait<'a, S: prkdb_types::storage::StorageAdapter + 'static>: Sized {
             #(#query_methods)*
 
             /// Generic filter using a closure
@@ -220,7 +220,7 @@ pub fn collection_derive(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         // Collection trait implementation
-        impl prkdb_core::collection::Collection for #struct_name {
+        impl prkdb_types::collection::Collection for #struct_name {
             type Id = #id_field_type;
             fn id(&self) -> &Self::Id {
                 &self.#id_field_name
@@ -228,9 +228,9 @@ pub fn collection_derive(input: TokenStream) -> TokenStream {
         }
 
         // Indexed trait implementation
-        impl prkdb_core::index::Indexed for #struct_name {
-            fn indexes() -> &'static [prkdb_core::index::IndexDef] {
-                static DEFS: &[prkdb_core::index::IndexDef] = &[
+        impl prkdb_types::index::Indexed for #struct_name {
+            fn indexes() -> &'static [prkdb_types::index::IndexDef] {
+                static DEFS: &[prkdb_types::index::IndexDef] = &[
                     #(#index_defs),*
                 ];
                 DEFS

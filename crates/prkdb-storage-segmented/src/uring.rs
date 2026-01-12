@@ -3,11 +3,12 @@
 
 use crate::SegmentedLogAdapter;
 use async_trait::async_trait;
-use prkdb_core::error::StorageError;
-use prkdb_core::storage::StorageAdapter;
+use prkdb_types::error::StorageError;
+use prkdb_types::storage::StorageAdapter;
 use std::sync::Arc;
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct UringSegmentedAdapter {
     inner: Arc<SegmentedLogAdapter>,
 }

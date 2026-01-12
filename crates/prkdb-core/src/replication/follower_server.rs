@@ -200,11 +200,7 @@ impl FollowerServer {
         follower_id: &str,
     ) -> HealthCheckResponse {
         let follower_offset = wal.next_offset();
-        let lag = if request.leader_offset >= follower_offset {
-            request.leader_offset - follower_offset
-        } else {
-            0
-        };
+        let lag = request.leader_offset.saturating_sub(follower_offset);
 
         HealthCheckResponse {
             follower_id: follower_id.to_string(),

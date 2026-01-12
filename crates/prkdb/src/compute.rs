@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use prkdb_core::collection::Collection;
-use prkdb_core::error::ComputeError;
+use prkdb_types::collection::Collection;
+use prkdb_types::error::ComputeError;
 use serde::{de::DeserializeOwned, Serialize};
 
 pub struct Context<Db> {
@@ -49,9 +49,7 @@ impl<C: Collection, Db: Send + Sync> ComputeHandler<C, Db> for () {
 impl<C: Collection, Db: Send + Sync> StatefulCompute<C, Db> for () {
     type State = ();
 
-    fn init_state(&self) -> Self::State {
-        ()
-    }
+    fn init_state(&self) -> Self::State {}
     fn state_key(&self) -> String {
         "stub".to_string()
     }

@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -49,6 +48,7 @@ impl NetworkSimulator {
     }
 
     /// Clear all rules
+    #[allow(dead_code)]
     pub async fn clear_rules(&self) {
         self.rules.write().await.clear();
         self.persist_rules().await;
@@ -112,6 +112,7 @@ impl NetworkSimulator {
     }
 
     /// Check if packet from src to dst should be dropped
+    #[allow(dead_code)]
     pub async fn should_drop(&self, src: u64, dst: u64) -> bool {
         let rules = self.rules.read().await;
         for rule in rules.iter() {

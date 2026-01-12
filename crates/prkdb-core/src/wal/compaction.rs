@@ -55,11 +55,7 @@ impl Compactor {
         // Calculate safe truncation offset
         // We want to keep some history, so we don't delete everything up to current_offset
         // This is a simplified logic; in a real DB we'd use the checkpoint offset
-        let truncate_offset = if current_offset > 1000 {
-            current_offset - 1000
-        } else {
-            0
-        };
+        let truncate_offset = current_offset.saturating_sub(1000);
 
         if truncate_offset > 0 {
             self.wal.truncate_before(truncate_offset).await?;

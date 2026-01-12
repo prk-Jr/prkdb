@@ -61,7 +61,7 @@ fn bench_replication_save_outbox(c: &mut Criterion) {
                 active: black_box(true),
             };
 
-            let change = prkdb_core::collection::ChangeEvent::Put(item);
+            let change = prkdb_types::collection::ChangeEvent::Put(item);
             let result = manager.replicate_change(&change).await;
             result.unwrap();
         })
@@ -70,8 +70,8 @@ fn bench_replication_save_outbox(c: &mut Criterion) {
     group.bench_function("single_delete_event", |b| {
         b.to_async(&rt).iter(|| async {
             let id = black_box(rand::random::<u64>());
-            let change: prkdb_core::collection::ChangeEvent<BenchmarkItem> =
-                prkdb_core::collection::ChangeEvent::Delete(id);
+            let change: prkdb_types::collection::ChangeEvent<BenchmarkItem> =
+                prkdb_types::collection::ChangeEvent::Delete(id);
             let result = manager.replicate_change(&change).await;
             result.unwrap();
         })
@@ -101,7 +101,7 @@ fn bench_replication_batch_operations(c: &mut Criterion) {
                             active: black_box(i % 2 == 0),
                         };
 
-                        let change = prkdb_core::collection::ChangeEvent::Put(item);
+                        let change = prkdb_types::collection::ChangeEvent::Put(item);
                         let result = manager.replicate_change(&change).await;
                         result.unwrap();
                     }
@@ -126,7 +126,7 @@ fn bench_replication_get_changes_since(c: &mut Criterion) {
                 value: i as i32,
                 active: true,
             };
-            let change = prkdb_core::collection::ChangeEvent::Put(item);
+            let change = prkdb_types::collection::ChangeEvent::Put(item);
             let _ = manager.replicate_change(&change).await;
         }
     });
@@ -166,8 +166,8 @@ fn bench_replication_mixed_workload(c: &mut Criterion) {
                     1 | 2 => {
                         // Delete operations
                         let id = black_box(rand::random::<u64>());
-                        let change: prkdb_core::collection::ChangeEvent<BenchmarkItem> =
-                            prkdb_core::collection::ChangeEvent::Delete(id);
+                        let change: prkdb_types::collection::ChangeEvent<BenchmarkItem> =
+                            prkdb_types::collection::ChangeEvent::Delete(id);
                         let result = manager.replicate_change(&change).await;
                         result.unwrap();
                     }
@@ -179,7 +179,7 @@ fn bench_replication_mixed_workload(c: &mut Criterion) {
                             value: black_box(i),
                             active: black_box(i % 3 == 0),
                         };
-                        let change = prkdb_core::collection::ChangeEvent::Put(item);
+                        let change = prkdb_types::collection::ChangeEvent::Put(item);
                         let result = manager.replicate_change(&change).await;
                         result.unwrap();
                     }
@@ -212,7 +212,7 @@ fn bench_replication_large_items(c: &mut Criterion) {
                         active: black_box(true),
                     };
 
-                    let change = prkdb_core::collection::ChangeEvent::Put(item);
+                    let change = prkdb_types::collection::ChangeEvent::Put(item);
                     let result = manager.replicate_change(&change).await;
                     result.unwrap();
                 })
@@ -245,7 +245,7 @@ fn bench_replication_concurrent_outbox(c: &mut Criterion) {
                             active: black_box(true),
                         };
 
-                        let change = prkdb_core::collection::ChangeEvent::Put(item);
+                        let change = prkdb_types::collection::ChangeEvent::Put(item);
                         let _ = manager_clone.replicate_change(&change).await;
                     }
                 });

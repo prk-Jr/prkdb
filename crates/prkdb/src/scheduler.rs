@@ -1,7 +1,7 @@
 use crate::compute::StatefulCompute;
 use crate::outbox::snapshot_and_compact;
 use crate::PrkDb;
-use prkdb_core::collection::Collection;
+use prkdb_types::collection::Collection;
 use rand::{thread_rng, Rng};
 use std::time::Duration;
 use tokio::task::JoinHandle;

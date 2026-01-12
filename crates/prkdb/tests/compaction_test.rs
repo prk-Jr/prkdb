@@ -2,7 +2,7 @@ use prkdb::raft::config::{ClusterConfig, NodeId};
 use prkdb::raft::node::{RaftNode, RaftState};
 use prkdb::raft::state_machine::{PrkDbStateMachine, StateMachine};
 use prkdb::storage::WalStorageAdapter;
-use prkdb_core::storage::StorageAdapter;
+use prkdb_types::storage::StorageAdapter;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;

@@ -1,9 +1,9 @@
 use super::wal_adapter::WalStorageAdapter;
 use dashmap::DashMap;
-use prkdb_core::error::StorageError;
-use prkdb_core::storage::StorageAdapter;
 use prkdb_core::wal::WalConfig;
 use prkdb_metrics::storage::StorageMetrics;
+use prkdb_types::error::StorageError;
+use prkdb_types::storage::StorageAdapter;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -311,8 +311,8 @@ impl StorageAdapter for CollectionPartitionedAdapter {
             .observe(duration);
 
         // Track cache hit/miss (heuristic: Some = hit, None = miss)
-        if result.is_ok() {
-            if result.as_ref().unwrap().is_some() {
+        if let Ok(entry) = &result {
+            if entry.is_some() {
                 crate::prometheus_metrics::CACHE_HITS_TOTAL
                     .with_label_values(&["local"])
                     .inc();

@@ -2,7 +2,7 @@
 
 use prkdb::prelude::*;
 use prkdb::storage::InMemoryAdapter;
-use prkdb_core::consumer::{AutoOffsetReset, Consumer, ConsumerConfig, Offset};
+use prkdb_types::consumer::{AutoOffsetReset, Consumer, ConsumerConfig, ConsumerRecord, Offset};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -136,7 +136,7 @@ async fn consumer_manual_commit() {
     let result = consumer.commit().await.unwrap();
     assert!(matches!(
         result,
-        prkdb_core::consumer::CommitResult::Success
+        prkdb_types::consumer::CommitResult::Success
     ));
 
     // Close consumer

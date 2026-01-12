@@ -12,13 +12,13 @@ use bincode::{
     serde::{decode_from_slice, encode_to_vec},
 };
 use dashmap::DashMap;
-use prkdb_core::collection::Collection;
-use prkdb_core::consumer::{
+use prkdb_types::collection::Collection;
+use prkdb_types::consumer::{
     AutoOffsetReset, CommitResult, Consumer, ConsumerConfig, ConsumerGroupId, ConsumerRecord,
     Offset, OffsetStore,
 };
-use prkdb_core::error::{Error, StorageError};
-use prkdb_core::storage::StorageAdapter;
+use prkdb_types::error::{Error, StorageError};
+use prkdb_types::storage::StorageAdapter;
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -232,7 +232,7 @@ where
                         AutoOffsetReset::Latest => {
                             Self::get_latest_offset(&self.db, collection_name).await?
                         }
-                        prkdb_core::consumer::AutoOffsetReset::None => Offset::zero(),
+                        prkdb_types::consumer::AutoOffsetReset::None => Offset::zero(),
                     }
                 };
                 self.partition_offsets.insert(*partition, offset);

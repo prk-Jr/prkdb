@@ -2,8 +2,7 @@ use crate::commands::ConsumerCommands;
 use crate::output::{display_single, error, info, success, warning, OutputDisplay};
 use crate::Cli;
 use anyhow::Result;
-use prkdb::prelude::*;
-use prkdb_storage_sled::SledAdapter;
+use prkdb_client::PrkDbClient;
 use serde::Serialize;
 use tabled::Tabled;
 
@@ -52,57 +51,121 @@ struct PartitionAssignment {
 }
 
 pub async fn execute(cmd: ConsumerCommands, cli: &Cli) -> Result<()> {
-    let db = create_db(cli).await?;
+    if cli.local {
+        // Local mode: use embedded database
+        crate::init_database_manager(&cli.database);
+        return execute_local(cmd, cli).await;
+    }
 
+    // Remote mode: use prkdb-client
     match cmd {
-        ConsumerCommands::List => list_consumer_groups(&db, cli).await,
-        ConsumerCommands::Describe { group } => describe_consumer_group(&db, &group, cli).await,
+        ConsumerCommands::List => list_consumer_groups(cli).await,
+        ConsumerCommands::Describe { group } => describe_consumer_group(&group, cli).await,
         ConsumerCommands::Reset {
             group,
             offset,
             earliest,
             latest,
-        } => reset_consumer_offset(&db, &group, offset, earliest, latest, cli).await,
-        ConsumerCommands::Lag { group } => show_consumer_lag(&db, group.as_deref(), cli).await,
+        } => reset_consumer_offset(&group, offset, earliest, latest, cli).await,
+        ConsumerCommands::Lag { group } => show_consumer_lag(group.as_deref(), cli).await,
     }
 }
 
-async fn create_db(cli: &Cli) -> Result<PrkDb> {
-    let storage = SledAdapter::open(&cli.database)?;
-    let db = PrkDb::builder().with_storage(storage).build()?;
-    Ok(db)
+async fn execute_local(cmd: ConsumerCommands, _cli: &Cli) -> Result<()> {
+    use crate::database_manager::with_database_read;
+
+    match cmd {
+        ConsumerCommands::List => {
+            info("Listing consumer groups (local mode)...");
+            let groups = with_database_read(|db| async move {
+                db.list_consumer_groups()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))
+            })
+            .await?;
+            if groups.is_empty() {
+                info("No consumer groups found.");
+            } else {
+                for group_id in groups {
+                    println!("  - {}", group_id);
+                }
+            }
+            Ok(())
+        }
+        ConsumerCommands::Describe { group } => {
+            info(&format!(
+                "Describing consumer group (local mode): {}",
+                group
+            ));
+            let result = with_database_read(|db| {
+                let group_id = group.clone();
+                async move {
+                    let consumers = db.get_active_consumers(&group_id);
+                    let lag = db.get_group_lag_info(&group_id).await.unwrap_or_default();
+                    Ok::<_, anyhow::Error>((consumers, lag))
+                }
+            })
+            .await?;
+            let (consumers, lag) = result;
+            println!("Group: {}", group);
+            println!("Active consumers: {}", consumers.len());
+            for c in consumers {
+                println!("  - {}", c);
+            }
+            println!(
+                "Total lag: {}",
+                lag.iter().map(|(_, _, _, _, l)| l).sum::<u64>()
+            );
+            Ok(())
+        }
+        ConsumerCommands::Reset { group, .. } => {
+            warning(&format!(
+                "Reset not fully implemented in local mode for group: {}",
+                group
+            ));
+            Ok(())
+        }
+        ConsumerCommands::Lag { group } => {
+            info("Showing consumer lag (local mode)...");
+            if let Some(group_id) = group {
+                let lag = with_database_read(|db| {
+                    let g = group_id.to_string();
+                    async move {
+                        db.get_group_lag_info(&g)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))
+                    }
+                })
+                .await?;
+                for (coll, part, current, latest, lag) in lag {
+                    println!(
+                        "  {}:{} - offset: {}/{} lag: {}",
+                        coll, part, current, latest, lag
+                    );
+                }
+            } else {
+                info("Specify --group for lag details in local mode.");
+            }
+            Ok(())
+        }
+    }
 }
 
-async fn list_consumer_groups(db: &PrkDb, cli: &Cli) -> Result<()> {
+async fn create_client(cli: &Cli) -> Result<PrkDbClient> {
+    let client = PrkDbClient::new(vec![cli.server.clone()]).await?;
+    let client = if let Some(token) = &cli.admin_token {
+        client.with_admin_token(token)
+    } else {
+        client
+    };
+    Ok(client)
+}
+
+async fn list_consumer_groups(cli: &Cli) -> Result<()> {
     info("Listing consumer groups...");
 
-    // Get actual consumer groups from the database
-    let group_ids = db.list_consumer_groups().await?;
-
-    let mut groups = Vec::new();
-    for group_id in group_ids {
-        // Get active consumers for this group
-        let active_consumers = db.get_active_consumers(&group_id);
-        let members = active_consumers.len() as u32;
-
-        // Determine state based on whether there are active consumers
-        let state = if members > 0 { "Stable" } else { "Empty" };
-        let assignment = "Range"; // Default assignment strategy
-
-        // Calculate total lag - sum lag across all collections this group consumes
-        let lag = match db.get_group_lag_info(&group_id).await {
-            Ok(lag_infos) => lag_infos.iter().map(|(_, _, _, _, lag)| lag).sum(),
-            Err(_) => 0, // If we can't get lag info, default to 0
-        };
-
-        groups.push(ConsumerGroupInfo {
-            group_id,
-            members,
-            state: state.to_string(),
-            lag,
-            assignment: assignment.to_string(),
-        });
-    }
+    let client = create_client(cli).await?;
+    let groups = client.list_consumer_groups().await?;
 
     if groups.is_empty() {
         info("No consumer groups found. Consumer groups are created when consumers are started.");
@@ -111,65 +174,61 @@ async fn list_consumer_groups(db: &PrkDb, cli: &Cli) -> Result<()> {
         return Ok(());
     }
 
-    groups.display(cli)?;
+    let display_groups: Vec<ConsumerGroupInfo> = groups
+        .into_iter()
+        .map(|g| ConsumerGroupInfo {
+            group_id: g.group_id,
+            members: g.members,
+            state: g.state,
+            lag: g.lag,
+            assignment: g.assignment_strategy,
+        })
+        .collect();
+
+    display_groups.display(cli)?;
     Ok(())
 }
 
-async fn describe_consumer_group(db: &PrkDb, group: &str, cli: &Cli) -> Result<()> {
+async fn describe_consumer_group(group: &str, cli: &Cli) -> Result<()> {
     info(&format!("Describing consumer group: {}", group));
 
-    // Check if the group exists
-    let groups = db.list_consumer_groups().await?;
-    if !groups.contains(&group.to_string()) {
+    let client = create_client(cli).await?;
+    let response = client.describe_consumer_group(group).await?;
+
+    if !response.success {
         error(&format!("Consumer group '{}' not found", group));
         return Ok(());
     }
 
-    // Get real consumer group details
-    let active_consumer_ids = db.get_active_consumers(group);
-    let assignment = db.get_consumer_group_assignment(group);
-
-    let members: Vec<ConsumerMember> = active_consumer_ids
+    let members: Vec<ConsumerMember> = response
+        .members
         .into_iter()
-        .map(|consumer_id| {
-            let partitions = assignment
-                .as_ref()
-                .map(|a| a.get_partitions(&consumer_id))
-                .unwrap_or_default();
+        .map(|m| ConsumerMember {
+            consumer_id: m.consumer_id,
+            host: m.host,
+            partitions: m.partitions,
+        })
+        .collect();
 
-            ConsumerMember {
-                consumer_id,
-                host: "unknown".to_string(), // Would need additional API to get consumer host info
-                partitions,
-            }
+    let partitions: Vec<PartitionAssignment> = response
+        .partitions
+        .into_iter()
+        .map(|p| PartitionAssignment {
+            collection: p.collection,
+            partition: p.partition,
+            current_offset: p.current_offset,
+            latest_offset: p.latest_offset,
+            lag: p.lag,
         })
         .collect();
 
     let is_empty = members.is_empty();
-    let state = if is_empty { "Empty" } else { "Stable" };
-
-    // Get real partition assignments and lag info
-    let lag_infos = db.get_group_lag_info(group).await.unwrap_or_default();
-    let partitions: Vec<PartitionAssignment> = lag_infos
-        .iter()
-        .map(
-            |(collection, partition, current_offset, latest_offset, lag)| PartitionAssignment {
-                collection: collection.clone(),
-                partition: *partition,
-                current_offset: *current_offset,
-                latest_offset: *latest_offset,
-                lag: *lag,
-            },
-        )
-        .collect();
-
-    let total_lag = lag_infos.iter().map(|(_, _, _, _, lag)| lag).sum();
 
     let details = ConsumerGroupDetails {
-        group_id: group.to_string(),
+        group_id: response.group_id,
         members,
-        total_lag,
-        state: state.to_string(),
+        total_lag: response.total_lag,
+        state: response.state,
         partitions,
     };
 
@@ -184,7 +243,6 @@ async fn describe_consumer_group(db: &PrkDb, group: &str, cli: &Cli) -> Result<(
 }
 
 async fn reset_consumer_offset(
-    db: &PrkDb,
     group: &str,
     offset: Option<u64>,
     earliest: bool,
@@ -193,13 +251,7 @@ async fn reset_consumer_offset(
 ) -> Result<()> {
     info(&format!("Resetting offset for consumer group: {}", group));
 
-    // Check if the group exists
-    let groups = db.list_consumer_groups().await?;
-    if !groups.contains(&group.to_string()) {
-        error(&format!("Consumer group '{}' not found", group));
-        return Ok(());
-    }
-
+    // Validate flags
     if [offset.is_some(), earliest, latest]
         .iter()
         .filter(|&&x| x)
@@ -218,42 +270,43 @@ async fn reset_consumer_offset(
         "latest".to_string()
     };
 
+    // TODO: Implement remote reset offset RPC
     warning(&format!(
         "This will reset all partitions for group '{}' to {}",
         group, reset_to
     ));
+    warning("Note: Reset offset is not yet implemented for remote mode.");
 
-    // In a real implementation, we'd reset the offsets in the offset store
     success(&format!("Reset consumer group '{}' to {}", group, reset_to));
 
     Ok(())
 }
 
-async fn show_consumer_lag(db: &PrkDb, group: Option<&str>, cli: &Cli) -> Result<()> {
+async fn show_consumer_lag(group: Option<&str>, cli: &Cli) -> Result<()> {
+    let client = create_client(cli).await?;
+
     match group {
         Some(group) => {
             info(&format!("Showing lag for consumer group: {}", group));
-            // Check if the group exists
-            let groups = db.list_consumer_groups().await?;
-            if !groups.contains(&group.to_string()) {
+
+            let response = client.describe_consumer_group(group).await?;
+
+            if !response.success {
                 error(&format!("Consumer group '{}' not found", group));
                 return Ok(());
             }
 
-            // Get real lag data for this specific group
-            let lag_infos = db.get_group_lag_info(group).await?;
-            let lag_info: Vec<ConsumerLagInfo> = lag_infos
+            let lag_info: Vec<ConsumerLagInfo> = response
+                .partitions
                 .into_iter()
-                .map(
-                    |(collection, partition, current_offset, latest_offset, lag)| ConsumerLagInfo {
-                        group_id: group.to_string(),
-                        collection,
-                        partition,
-                        current_offset,
-                        latest_offset,
-                        lag,
-                    },
-                )
+                .map(|p| ConsumerLagInfo {
+                    group_id: group.to_string(),
+                    collection: p.collection,
+                    partition: p.partition,
+                    current_offset: p.current_offset,
+                    latest_offset: p.latest_offset,
+                    lag: p.lag,
+                })
                 .collect();
 
             if lag_info.is_empty() {
@@ -265,21 +318,24 @@ async fn show_consumer_lag(db: &PrkDb, group: Option<&str>, cli: &Cli) -> Result
         None => {
             info("Showing lag for all consumer groups");
 
-            // Get lag data for all consumer groups
-            let groups = db.list_consumer_groups().await?;
+            let groups = client.list_consumer_groups().await?;
             let mut all_lag_info = Vec::new();
 
-            for group_id in groups {
-                let lag_infos = db.get_group_lag_info(&group_id).await.unwrap_or_default();
-                for (collection, partition, current_offset, latest_offset, lag) in lag_infos {
-                    all_lag_info.push(ConsumerLagInfo {
-                        group_id: group_id.clone(),
-                        collection,
-                        partition,
-                        current_offset,
-                        latest_offset,
-                        lag,
-                    });
+            for group_summary in groups {
+                let response = client
+                    .describe_consumer_group(&group_summary.group_id)
+                    .await?;
+                if response.success {
+                    for p in response.partitions {
+                        all_lag_info.push(ConsumerLagInfo {
+                            group_id: group_summary.group_id.clone(),
+                            collection: p.collection,
+                            partition: p.partition,
+                            current_offset: p.current_offset,
+                            latest_offset: p.latest_offset,
+                            lag: p.lag,
+                        });
+                    }
                 }
             }
 

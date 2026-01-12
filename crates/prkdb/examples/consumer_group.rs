@@ -5,8 +5,7 @@
 //! true horizontal scaling and parallel processing.
 
 use prkdb::prelude::*;
-use prkdb_core::consumer::Consumer;
-use prkdb_core::consumer::{AutoOffsetReset, ConsumerConfig};
+use prkdb_types::consumer::{AutoOffsetReset, Consumer, ConsumerConfig};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;

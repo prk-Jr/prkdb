@@ -4,8 +4,8 @@
 // Run: cargo run --release --example kafka_comparison
 
 use prkdb::storage::WalStorageAdapter;
-use prkdb_core::storage::StorageAdapter;
 use prkdb_core::wal::WalConfig;
+use prkdb_types::storage::StorageAdapter;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

@@ -42,7 +42,7 @@ impl MmapParallelWal {
 
             tokio::fs::create_dir_all(&segment_config.log_dir)
                 .await
-                .map_err(|e| WalError::Io(e))?;
+                .map_err(WalError::Io)?;
 
             // Encode segment ID in high 16 bits of offset
             // Start at 1 to avoid 0 ambiguity
@@ -50,7 +50,7 @@ impl MmapParallelWal {
 
             let wal = MmapLogSegment::create(&segment_config.log_dir, base_offset, 4096)
                 .await
-                .map_err(|e| WalError::Io(e))?;
+                .map_err(WalError::Io)?;
 
             segments.push(Arc::new(Mutex::new(wal)));
         }
@@ -89,7 +89,7 @@ impl MmapParallelWal {
 
             let wal = MmapLogSegment::open(&segment_config.log_dir, base_offset, 4096)
                 .await
-                .map_err(|e| WalError::Io(e))?;
+                .map_err(WalError::Io)?;
 
             segments.push(Arc::new(Mutex::new(wal)));
         }
@@ -119,7 +119,7 @@ impl MmapParallelWal {
             .await
             .append(record)
             .await
-            .map_err(|e| WalError::Io(e))?;
+            .map_err(WalError::Io)?;
 
         self.metrics.record_op(start.elapsed());
         Ok((segment_id, offset))
@@ -161,7 +161,7 @@ impl MmapParallelWal {
                     .await
                     .append_batch(segment_records)
                     .await
-                    .map_err(|e| WalError::Io(e))?;
+                    .map_err(WalError::Io)?;
                 Ok::<(usize, u64), WalError>((segment_id, offset))
             };
             futures.push(fut);
@@ -223,12 +223,27 @@ impl MmapParallelWal {
     /// - **Latency**: ~50-100ms for 100k records
     /// - **Memory**: Zero-copy reading via mmap
     pub async fn scan(&self) -> Result<Vec<(usize, LogRecord)>, WalError> {
+        // Default to scanning from the beginning (offset 0 implies beginning for that segment)
+        let start_offsets = vec![0u64; self.segment_count];
+        self.scan_from(&start_offsets).await
+    }
+
+    /// Scan records starting from specific offsets per segment
+    ///
+    /// `start_offsets`: A slice where index matches segment_id and value is the start offset (inclusive)
+    pub async fn scan_from(
+        &self,
+        start_offsets: &[u64],
+    ) -> Result<Vec<(usize, LogRecord)>, WalError> {
         let mut all_records = Vec::new();
 
         // Enumerate to track segment IDs
         for (segment_id, segment_arc) in self.segments.iter().enumerate() {
+            let start_offset = start_offsets.get(segment_id).copied().unwrap_or(0);
             let segment = segment_arc.lock().await;
-            let segment_records = segment.scan().await?;
+
+            // Use optimized scan_from
+            let segment_records = segment.scan_from(start_offset).await?;
 
             // Tag each record with its segment ID
             for record in segment_records {

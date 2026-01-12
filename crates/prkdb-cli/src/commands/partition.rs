@@ -1,8 +1,8 @@
 use crate::commands::PartitionCommands;
-use crate::database_manager::with_database_read;
 use crate::output::{display_single, info, success, OutputDisplay};
 use crate::Cli;
 use anyhow::Result;
+use prkdb_client::PrkDbClient;
 use serde::Serialize;
 use tabled::Tabled;
 
@@ -49,6 +49,13 @@ struct PartitionMetrics {
 }
 
 pub async fn execute(cmd: PartitionCommands, cli: &Cli) -> Result<()> {
+    if cli.local {
+        // Local mode: use embedded database
+        crate::init_database_manager(&cli.database);
+        return execute_local(cmd, cli).await;
+    }
+
+    // Remote mode: use prkdb-client
     match cmd {
         PartitionCommands::List { collection } => list_partitions(collection.as_deref(), cli).await,
         PartitionCommands::Describe {
@@ -60,6 +67,122 @@ pub async fn execute(cmd: PartitionCommands, cli: &Cli) -> Result<()> {
         }
         PartitionCommands::Rebalance { group } => rebalance_partitions(&group, cli).await,
     }
+}
+
+async fn execute_local(cmd: PartitionCommands, _cli: &Cli) -> Result<()> {
+    use crate::database_manager::with_database_read;
+    use crate::output::info;
+
+    match cmd {
+        PartitionCommands::List { collection } => {
+            info(&format!(
+                "Listing partitions (local mode){}",
+                collection
+                    .as_ref()
+                    .map(|c| format!(" for collection: {}", c))
+                    .unwrap_or_default()
+            ));
+            let partitions = with_database_read(|db| {
+                let coll = collection.clone();
+                async move {
+                    match coll {
+                        Some(name) => db
+                            .get_partitions(&name)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e)),
+                        None => {
+                            let collections = db
+                                .list_collections()
+                                .await
+                                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                            let mut all = Vec::new();
+                            for c in collections {
+                                if let Ok(parts) = db.get_partitions(&c).await {
+                                    for (p, items, size) in parts {
+                                        all.push((c.clone(), p, items, size));
+                                    }
+                                }
+                            }
+                            Ok(all
+                                .into_iter()
+                                .map(|(_, p, items, size)| (p, items, size))
+                                .collect())
+                        }
+                    }
+                }
+            })
+            .await?;
+            for (partition, items, size) in partitions {
+                println!(
+                    "  partition: {}, items: {}, size: {} bytes",
+                    partition, items, size
+                );
+            }
+            Ok(())
+        }
+        PartitionCommands::Describe {
+            collection,
+            partition,
+        } => {
+            info(&format!(
+                "Describing partition {} of {} (local mode)",
+                partition, collection
+            ));
+            let details = with_database_read(|db| {
+                let c = collection.clone();
+                async move {
+                    db.get_partition_details(&c, partition)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{}", e))
+                }
+            })
+            .await?;
+            if let Some((items, size, first, last)) = details {
+                println!("Partition: {}", partition);
+                println!("Items: {}, Size: {} bytes", items, size);
+                println!("Offsets: {} - {}", first, last);
+            } else {
+                info("Partition not found.");
+            }
+            Ok(())
+        }
+        PartitionCommands::Assignment { group } => {
+            info("Showing partition assignments (local mode)...");
+            let assignments = with_database_read(|db| {
+                let g = group.clone();
+                async move {
+                    db.get_partition_assignments(g.as_deref())
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{}", e))
+                }
+            })
+            .await?;
+            for (group_id, consumer, coll, part, offset, lag) in assignments {
+                println!(
+                    "  {}: {} -> {}:{} (offset: {}, lag: {})",
+                    group_id, consumer, coll, part, offset, lag
+                );
+            }
+            Ok(())
+        }
+        PartitionCommands::Rebalance { group } => {
+            info(&format!(
+                "Rebalance not implemented in local mode for group: {}",
+                group
+            ));
+            Ok(())
+        }
+    }
+}
+
+async fn create_client(cli: &Cli) -> Result<PrkDbClient> {
+    let client = PrkDbClient::new(vec![cli.server.clone()]).await?;
+    let client = if let Some(token) = &cli.admin_token {
+        client.with_admin_token(token)
+    } else {
+        client
+    };
+    Ok(client)
 }
 
 async fn list_partitions(collection: Option<&str>, cli: &Cli) -> Result<()> {
@@ -75,70 +198,32 @@ async fn list_partitions(collection: Option<&str>, cli: &Cli) -> Result<()> {
         }
     }
 
-    let partition_result = with_database_read(|db| async move {
+    let client = create_client(cli).await?;
+    let partitions = client.list_partitions(collection).await?;
+
+    if partitions.is_empty() {
         match collection {
-            Some(collection_name) => {
-                // Check if collection exists
-                let collections = db.list_collections().await?;
-                if !collections.contains(&collection_name.to_string()) {
-                    return Ok(Vec::new());
-                }
-
-                // Get real partition information for this collection
-                let partition_data = db.get_partitions(collection_name).await?;
-                let partitions: Vec<PartitionInfo> = partition_data
-                    .into_iter()
-                    .map(|(partition, items, size_bytes)| PartitionInfo {
-                        collection: collection_name.to_string(),
-                        partition,
-                        size_bytes,
-                        items,
-                        assigned_to: "default-consumer".to_string(),
-                        status: "active".to_string(),
-                    })
-                    .collect();
-
-                Ok(partitions)
-            }
-            None => {
-                let collections = db.list_collections().await?;
-                let mut all_partitions = Vec::new();
-
-                for collection_name in collections {
-                    let partition_data = db.get_partitions(&collection_name).await?;
-                    for (partition, items, size_bytes) in partition_data {
-                        all_partitions.push(PartitionInfo {
-                            collection: collection_name.clone(),
-                            partition,
-                            size_bytes,
-                            items,
-                            assigned_to: "default-consumer".to_string(),
-                            status: "active".to_string(),
-                        });
-                    }
-                }
-
-                Ok(all_partitions)
-            }
+            Some(name) => info(&format!(
+                "Collection '{}' not found or has no partitions",
+                name
+            )),
+            None => info(
+                "No partitions found. Partitions are created when data is added to collections.",
+            ),
         }
-    })
-    .await;
-
-    match partition_result {
-        Ok(partitions) => {
-            if partitions.is_empty() {
-                match collection {
-                    Some(name) => info(&format!("Collection '{}' not found or has no partitions", name)),
-                    None => info("No partitions found. Partitions are created when data is added to collections."),
-                }
-            } else {
-                partitions.display(cli)?;
-            }
-        }
-        Err(e) => {
-            info(&format!("Unable to list partitions: {}", e));
-            info("This may happen when the database is busy. Please try again in a moment.");
-        }
+    } else {
+        let display_partitions: Vec<PartitionInfo> = partitions
+            .into_iter()
+            .map(|p| PartitionInfo {
+                collection: p.collection,
+                partition: p.partition,
+                size_bytes: p.size_bytes,
+                items: p.items,
+                assigned_to: p.assigned_to,
+                status: p.status,
+            })
+            .collect();
+        display_partitions.display(cli)?;
     }
 
     Ok(())
@@ -150,62 +235,46 @@ async fn describe_partition(collection: &str, partition: u32, cli: &Cli) -> Resu
         partition, collection
     ));
 
-    let partition_result = with_database_read(|db| async move {
-        // Check if collection exists
-        let collections = db.list_collections().await?;
-        if !collections.contains(&collection.to_string()) {
-            return Ok(None);
-        }
+    let client = create_client(cli).await?;
+    let partitions = client.list_partitions(Some(collection)).await?;
 
-        // Get real partition details
-        match db.get_partition_details(collection, partition).await? {
-            Some((items, size_bytes, first_offset, last_offset)) => {
-                // Get consumers assigned to this partition
-                let assignments = db.get_partition_assignments(None).await?;
-                let assigned_consumers: Vec<String> = assignments
-                    .iter()
-                    .filter(|(_, _, coll, part, _, _)| coll == collection && *part == partition)
-                    .map(|(_, consumer, _, _, _, _)| consumer.clone())
-                    .collect();
+    let target_partition = partitions.into_iter().find(|p| p.partition == partition);
 
-                let details = PartitionDetails {
-                    collection: collection.to_string(),
-                    partition,
-                    size_bytes,
-                    items,
-                    first_offset,
-                    last_offset,
-                    assigned_consumers,
-                    metrics: PartitionMetrics {
-                        events_produced: items,
-                        events_consumed: items,
-                        bytes_produced: size_bytes,
-                        bytes_consumed: size_bytes,
-                        avg_latency_ms: 0.0,
-                        max_latency_ms: 0,
-                    },
-                };
+    match target_partition {
+        Some(p) => {
+            // Get partition assignments for this partition
+            let assignments = client.get_partition_assignments(None).await?;
+            let assigned_consumers: Vec<String> = assignments
+                .iter()
+                .filter(|a| a.collection == collection && a.partition == partition)
+                .map(|a| a.consumer_id.clone())
+                .collect();
 
-                Ok(Some(details))
-            }
-            None => Ok(None),
-        }
-    })
-    .await;
+            let details = PartitionDetails {
+                collection: p.collection,
+                partition: p.partition,
+                size_bytes: p.size_bytes,
+                items: p.items,
+                first_offset: 0,
+                last_offset: p.items,
+                assigned_consumers,
+                metrics: PartitionMetrics {
+                    events_produced: p.items,
+                    events_consumed: p.items,
+                    bytes_produced: p.size_bytes,
+                    bytes_consumed: p.size_bytes,
+                    avg_latency_ms: 0.0,
+                    max_latency_ms: 0,
+                },
+            };
 
-    match partition_result {
-        Ok(Some(details)) => {
             display_single(&details, cli)?;
         }
-        Ok(None) => {
+        None => {
             info(&format!(
                 "Collection '{}' not found or partition {} does not exist",
                 collection, partition
             ));
-        }
-        Err(e) => {
-            info(&format!("Unable to describe partition: {}", e));
-            info("This may happen when the database is busy. Please try again in a moment.");
         }
     }
 
@@ -223,111 +292,73 @@ async fn show_partition_assignment(group: Option<&str>, cli: &Cli) -> Result<()>
         None => info("Showing partition assignments for all groups"),
     }
 
-    let assignment_result = with_database_read(|db| async move {
-        if let Some(group_id) = group {
-            // Check if group exists
-            let groups = db.list_consumer_groups().await?;
-            if !groups.contains(&group_id.to_string()) {
-                return Ok(Vec::new());
-            }
-        }
+    let client = create_client(cli).await?;
+    let assignments = client.get_partition_assignments(group).await?;
 
-        // Get real partition assignments
-        let assignment_data = db.get_partition_assignments(group).await?;
-        let assignments: Vec<PartitionAssignmentInfo> = assignment_data
+    if assignments.is_empty() {
+        match group {
+            Some(name) => info(&format!(
+                "Consumer group '{}' not found or has no assignments",
+                name
+            )),
+            None => info("No partition assignments found. Assignments are created when consumers join groups."),
+        }
+    } else {
+        let display_assignments: Vec<PartitionAssignmentInfo> = assignments
             .into_iter()
-            .map(
-                |(group_id, consumer_id, collection, partition, current_offset, lag)| {
-                    PartitionAssignmentInfo {
-                        group_id,
-                        consumer_id,
-                        collection,
-                        partition,
-                        current_offset,
-                        lag,
-                    }
-                },
-            )
+            .map(|a| PartitionAssignmentInfo {
+                group_id: a.group_id,
+                consumer_id: a.consumer_id,
+                collection: a.collection,
+                partition: a.partition,
+                current_offset: a.current_offset,
+                lag: a.lag,
+            })
             .collect();
-
-        Ok(assignments)
-    })
-    .await;
-
-    match assignment_result {
-        Ok(assignments) => {
-            if assignments.is_empty() {
-                match group {
-                    Some(name) => info(&format!("Consumer group '{}' not found or has no assignments", name)),
-                    None => info("No partition assignments found. Assignments are created when consumers join groups."),
-                }
-            } else {
-                assignments.display(cli)?;
-            }
-        }
-        Err(e) => {
-            info(&format!("Unable to show partition assignments: {}", e));
-            info("This may happen when the database is busy. Please try again in a moment.");
-        }
+        display_assignments.display(cli)?;
     }
 
     Ok(())
 }
 
-async fn rebalance_partitions(group: &str, _cli: &Cli) -> Result<()> {
+async fn rebalance_partitions(group: &str, cli: &Cli) -> Result<()> {
     info(&format!(
         "Triggering rebalance for consumer group: {}",
         group
     ));
 
-    let rebalance_result = with_database_read(|db| async move {
-        // Check if group exists
-        let groups = db.list_consumer_groups().await?;
-        if !groups.contains(&group.to_string()) {
-            return Ok((false, 0, 0)); // (group_exists, active_consumers, assignments)
-        }
+    let client = create_client(cli).await?;
 
-        // In a real implementation, we'd trigger rebalancing via the database API
-        let active_consumers = db.get_active_consumers(group);
-        let assignments = db.get_partition_assignments(Some(group)).await?;
+    // Check if group exists by listing consumer groups
+    let groups = client.list_consumer_groups().await?;
+    let group_exists = groups.iter().any(|g| g.group_id == group);
 
-        Ok((true, active_consumers.len(), assignments.len()))
-    })
-    .await;
-
-    match rebalance_result {
-        Ok((group_exists, active_consumers_count, assignments_count)) => {
-            if !group_exists {
-                info(&format!("Consumer group '{}' not found", group));
-                return Ok(());
-            }
-
-            info(&format!("Current state for group '{}':", group));
-            info(&format!("  Active consumers: {}", active_consumers_count));
-            info(&format!("  Current assignments: {}", assignments_count));
-
-            if active_consumers_count == 0 {
-                info("No active consumers to rebalance partitions among.");
-            } else if assignments_count == 0 {
-                info("No partition assignments to rebalance.");
-            } else {
-                info("Rebalancing would redistribute partitions among active consumers.");
-                info("Note: Automatic rebalancing is not yet implemented.");
-            }
-
-            success(&format!(
-                "Rebalance analysis completed for group: {}",
-                group
-            ));
-        }
-        Err(e) => {
-            info(&format!(
-                "Unable to analyze rebalance for group '{}': {}",
-                group, e
-            ));
-            info("This may happen when the database is busy. Please try again in a moment.");
-        }
+    if !group_exists {
+        info(&format!("Consumer group '{}' not found", group));
+        return Ok(());
     }
+
+    // Get current state
+    let group_info = client.describe_consumer_group(group).await?;
+    let assignments = client.get_partition_assignments(Some(group)).await?;
+
+    info(&format!("Current state for group '{}':", group));
+    info(&format!("  Active consumers: {}", group_info.members.len()));
+    info(&format!("  Current assignments: {}", assignments.len()));
+
+    if group_info.members.is_empty() {
+        info("No active consumers to rebalance partitions among.");
+    } else if assignments.is_empty() {
+        info("No partition assignments to rebalance.");
+    } else {
+        info("Rebalancing would redistribute partitions among active consumers.");
+        info("Note: Automatic rebalancing is not yet implemented via remote RPC.");
+    }
+
+    success(&format!(
+        "Rebalance analysis completed for group: {}",
+        group
+    ));
 
     Ok(())
 }

@@ -26,9 +26,9 @@ impl ComputeHandler<Ev, PrkDb> for FlakyHandler {
         &self,
         _item: &Ev,
         _ctx: &Context<PrkDb>,
-    ) -> Result<(), prkdb_core::error::ComputeError> {
+    ) -> Result<(), prkdb_types::error::ComputeError> {
         if self.fails.fetch_sub(1, Ordering::SeqCst) > 0 {
-            return Err(prkdb_core::error::ComputeError::Handler("fail".into()));
+            return Err(prkdb_types::error::ComputeError::Handler("fail".into()));
         }
         Ok(())
     }
@@ -36,7 +36,7 @@ impl ComputeHandler<Ev, PrkDb> for FlakyHandler {
         &self,
         _id: &u64,
         _ctx: &Context<PrkDb>,
-    ) -> Result<(), prkdb_core::error::ComputeError> {
+    ) -> Result<(), prkdb_types::error::ComputeError> {
         Ok(())
     }
 }

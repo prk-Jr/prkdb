@@ -3,14 +3,17 @@ resolver = "2"
 members = [
     "crates/prkdb",
     "crates/prkdb-cli",
+    "crates/prkdb-client",
     "crates/prkdb-core",
     "crates/prkdb-macros",
     "crates/prkdb-metrics",
     "crates/prkdb-orm", 
     "crates/prkdb-orm-macros",
+    "crates/prkdb-proto",
     "crates/prkdb-storage-sled",
     "crates/prkdb-storage-sql",
     "crates/prkdb-storage-segmented",
+    "crates/prkdb-types",
 ]
 
 [workspace.dependencies]
@@ -35,6 +38,9 @@ crossbeam = "0.8"
 mimalloc = { version = "0.1", default-features = false }  # Fast allocator: 10-15% boost!
 lz4 = "1.24"  # Fast compression: 2-3x for compressible data!
 
+prkdb-types = { path = "crates/prkdb-types" }
+prkdb-proto = { path = "crates/prkdb-proto" }
+prkdb-client = { path = "crates/prkdb-client" }
 prkdb = { path = "crates/prkdb" }
 prkdb-core = { path = "crates/prkdb-core" }
 prkdb-macros = { path = "crates/prkdb-macros" }

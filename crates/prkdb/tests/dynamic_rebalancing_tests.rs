@@ -1,6 +1,6 @@
 use prkdb::partitioning::DefaultPartitioner;
 use prkdb::prelude::*;
-use prkdb_core::consumer::{AutoOffsetReset, Consumer, ConsumerConfig};
+use prkdb_types::consumer::{AutoOffsetReset, Consumer, ConsumerConfig};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;

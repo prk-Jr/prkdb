@@ -8,6 +8,7 @@ use prkdb::prelude::*;
 use prkdb::storage::WalStorageAdapter;
 use prkdb::streaming::{EventStream, StreamConfig};
 use prkdb_core::wal::WalConfig;
+use prkdb_types::consumer::{Consumer, ConsumerConfig};
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -91,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
     // Show different configuration options
     let config_earliest = StreamConfig {
         group_id: "earliest-consumer".to_string(),
-        auto_offset_reset: prkdb_core::consumer::AutoOffsetReset::Earliest,
+        auto_offset_reset: prkdb_types::consumer::AutoOffsetReset::Earliest,
         auto_commit: true,
         buffer_size: 500,
         poll_interval: Duration::from_millis(50),
@@ -99,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
 
     let config_latest = StreamConfig {
         group_id: "latest-consumer".to_string(),
-        auto_offset_reset: prkdb_core::consumer::AutoOffsetReset::Latest,
+        auto_offset_reset: prkdb_types::consumer::AutoOffsetReset::Latest,
         auto_commit: false, // Manual commit for exactly-once
         buffer_size: 1000,
         poll_interval: Duration::from_millis(100),

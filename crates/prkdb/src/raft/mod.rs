@@ -12,9 +12,10 @@ pub mod server;
 pub mod service;
 pub mod state_machine;
 
-// Include generated proto code
+// Re-export proto types from prkdb-proto
+// This maintains backward compatibility for existing code using crate::raft::rpc::*
 pub mod rpc {
-    tonic::include_proto!("raft");
+    pub use prkdb_proto::raft::*;
 }
 
 pub use batch_config::RaftBatchConfig;

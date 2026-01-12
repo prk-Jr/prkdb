@@ -1,9 +1,37 @@
+//! Collection types and traits for PrkDB entities.
+//!
+//! This module defines the core `Collection` trait that all storable entities must implement,
+//! along with various mixins for common patterns like versioning, validation, and soft deletion.
+
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt::Debug;
 use std::hash::Hash;
 
+/// Core trait for storable collections/entities.
+///
+/// Any type that implements this trait can be stored in PrkDB.
+///
+/// # Example
+/// ```ignore
+/// use prkdb_types::Collection;
+/// use serde::{Serialize, Deserialize};
+///
+/// #[derive(Serialize, Deserialize, Clone, Debug)]
+/// struct User {
+///     id: u64,
+///     name: String,
+/// }
+///
+/// impl Collection for User {
+///     type Id = u64;
+///     fn id(&self) -> &Self::Id { &self.id }
+/// }
+/// ```
 pub trait Collection: Serialize + DeserializeOwned + Clone + Send + Debug + Sync + 'static {
+    /// The type of the primary key/identifier
     type Id: Serialize + DeserializeOwned + Send + Sync + Debug + Clone + PartialEq + Eq + Hash;
+
+    /// Get the primary key of this entity
     fn id(&self) -> &Self::Id;
 }
 
@@ -11,14 +39,6 @@ pub trait Collection: Serialize + DeserializeOwned + Clone + Send + Debug + Sync
 ///
 /// # Example
 /// ```ignore
-/// #[derive(Collection)]
-/// struct UserV2 {
-///     #[id] id: u64,
-///     name: String,
-///     #[migrate(default = false)]  // Added in V2
-///     premium: bool,
-/// }
-///
 /// impl Versioned for UserV2 {
 ///     const VERSION: u32 = 2;
 ///     type PreviousVersion = UserV1;
@@ -97,9 +117,6 @@ impl std::error::Error for ValidationError {}
 ///         if self.age > 150 {
 ///             errors.push(ValidationError::new("age", "must be <= 150"));
 ///         }
-///         if !self.email.contains('@') {
-///             errors.push(ValidationError::new("email", "invalid format"));
-///         }
 ///         
 ///         if errors.is_empty() { Ok(()) } else { Err(errors) }
 ///     }
@@ -119,33 +136,6 @@ pub trait Validatable {
 ///
 /// Records can be marked as deleted without actually removing them from storage.
 /// Useful for audit trails, recovery, and compliance requirements.
-///
-/// # Example
-/// ```ignore
-/// #[derive(Collection)]
-/// struct User {
-///     #[id] id: u64,
-///     name: String,
-///     deleted_at: Option<u64>,  // Unix timestamp
-/// }
-///
-/// impl SoftDeletable for User {
-///     fn is_deleted(&self) -> bool {
-///         self.deleted_at.is_some()
-///     }
-///     
-///     fn mark_deleted(&mut self) {
-///         self.deleted_at = Some(std::time::SystemTime::now()
-///             .duration_since(std::time::UNIX_EPOCH)
-///             .unwrap()
-///             .as_secs());
-///     }
-///     
-///     fn restore(&mut self) {
-///         self.deleted_at = None;
-///     }
-/// }
-/// ```
 pub trait SoftDeletable {
     /// Check if record is soft-deleted
     fn is_deleted(&self) -> bool;
@@ -165,16 +155,6 @@ pub trait SoftDeletable {
 /// Trait for timestamped records
 ///
 /// Automatically tracks created_at and updated_at timestamps.
-///
-/// # Example
-/// ```ignore
-/// impl Timestamped for User {
-///     fn created_at(&self) -> u64 { self.created_at }
-///     fn updated_at(&self) -> u64 { self.updated_at }
-///     fn set_created_at(&mut self, ts: u64) { self.created_at = ts; }
-///     fn set_updated_at(&mut self, ts: u64) { self.updated_at = ts; }
-/// }
-/// ```
 pub trait Timestamped {
     /// Get created timestamp (Unix seconds)
     fn created_at(&self) -> u64;
@@ -209,16 +189,6 @@ pub trait Timestamped {
 }
 
 /// Trait for auditable records (tracks who made changes)
-///
-/// # Example
-/// ```ignore
-/// impl Auditable for Document {
-///     fn created_by(&self) -> Option<&str> { self.created_by.as_deref() }
-///     fn updated_by(&self) -> Option<&str> { self.updated_by.as_deref() }
-///     fn set_created_by(&mut self, user: &str) { self.created_by = Some(user.to_string()); }
-///     fn set_updated_by(&mut self, user: &str) { self.updated_by = Some(user.to_string()); }
-/// }
-/// ```
 pub trait Auditable {
     /// Get user who created the record
     fn created_by(&self) -> Option<&str>;
@@ -236,23 +206,6 @@ pub trait Auditable {
 /// Wrapper that adds computed fields to a record
 ///
 /// Computed fields are calculated at runtime and not stored in the database.
-///
-/// # Example
-/// ```ignore
-/// struct UserWithAge {
-///     user: User,
-///     age_in_days: u64,
-/// }
-///
-/// let enriched: Vec<UserWithAge> = db.query::<User>()
-///     .collect().await?
-///     .into_iter()
-///     .map(|user| UserWithAge {
-///         age_in_days: (now - user.birth_date) / 86400,
-///         user,
-///     })
-///     .collect();
-/// ```
 #[derive(Debug, Clone)]
 pub struct WithComputed<T, C> {
     /// The original record
@@ -278,28 +231,6 @@ impl<T, C> WithComputed<T, C> {
 /// Trait for lifecycle hooks on collections
 ///
 /// Implement this trait to add callbacks that run before/after database operations.
-///
-/// # Example
-/// ```ignore
-/// impl Hooks for User {
-///     fn before_insert(&mut self) -> Result<(), String> {
-///         self.name = self.name.trim().to_string();
-///         if self.name.is_empty() {
-///             return Err("Name cannot be empty".to_string());
-///         }
-///         Ok(())
-///     }
-///     
-///     fn after_insert(&self) {
-///         println!("User {} created!", self.id);
-///     }
-///     
-///     fn before_update(&mut self) -> Result<(), String> {
-///         self.updated_count += 1;
-///         Ok(())
-///     }
-/// }
-/// ```
 pub trait Hooks {
     /// Called before inserting a new record. Can modify the record or return error.
     fn before_insert(&mut self) -> Result<(), String> {
@@ -343,5 +274,53 @@ impl<C: Collection> ChangeEvent<C> {
             ChangeEvent::Put(item) => item,
             _ => panic!("Expected ChangeEvent::Put, but got {:?}", self),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Clone, Serialize, serde::Deserialize)]
+    struct TestEntity {
+        id: u64,
+        name: String,
+    }
+
+    impl Collection for TestEntity {
+        type Id = u64;
+        fn id(&self) -> &Self::Id {
+            &self.id
+        }
+    }
+
+    #[test]
+    fn test_collection_trait() {
+        let entity = TestEntity {
+            id: 1,
+            name: "test".to_string(),
+        };
+        assert_eq!(*entity.id(), 1);
+    }
+
+    #[test]
+    fn test_validation_error() {
+        let err = ValidationError::new("email", "invalid format");
+        assert_eq!(err.field, "email");
+        assert_eq!(err.message, "invalid format");
+        assert_eq!(err.to_string(), "email: invalid format");
+    }
+
+    #[test]
+    fn test_with_computed() {
+        let entity = TestEntity {
+            id: 1,
+            name: "test".to_string(),
+        };
+        let with_len = WithComputed::new(entity, 4usize);
+        assert_eq!(with_len.computed, 4);
+
+        let doubled = with_len.map_computed(|len| len * 2);
+        assert_eq!(doubled.computed, 8);
     }
 }

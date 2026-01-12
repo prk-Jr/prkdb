@@ -27,8 +27,8 @@ use axum::{
     routing::get,
     Router,
 };
-use prkdb_core::collection::Collection;
-use prkdb_core::error::StorageError;
+use prkdb_types::collection::Collection;
+use prkdb_types::error::StorageError;
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
 use std::collections::HashMap;
@@ -636,7 +636,7 @@ impl ReplicationManager {
     /// This should only be called on the leader.
     pub async fn replicate_change<C: Collection>(
         &self,
-        change: &prkdb_core::collection::ChangeEvent<C>,
+        change: &prkdb_types::collection::ChangeEvent<C>,
     ) -> Result<(), ReplicationError> {
         if !self.is_leader() {
             return Err(ReplicationError::NotLeader);
@@ -647,11 +647,11 @@ impl ReplicationManager {
 
         // Create an OutboxRecord
         let outbox_record = match change {
-            prkdb_core::collection::ChangeEvent::Put(item) => OutboxRecord::Put(item.clone()),
-            prkdb_core::collection::ChangeEvent::Delete(id) => OutboxRecord::Delete(id.clone()),
+            prkdb_types::collection::ChangeEvent::Put(item) => OutboxRecord::Put(item.clone()),
+            prkdb_types::collection::ChangeEvent::Delete(id) => OutboxRecord::Delete(id.clone()),
             // Batch events decompose into individual records for replication
-            prkdb_core::collection::ChangeEvent::PutBatch(_)
-            | prkdb_core::collection::ChangeEvent::DeleteBatch(_) => {
+            prkdb_types::collection::ChangeEvent::PutBatch(_)
+            | prkdb_types::collection::ChangeEvent::DeleteBatch(_) => {
                 // Batch events are never replicated as-is
                 // They're decomposed at source before replication
                 // If this function is called with a batch event, it means it was not decomposed.

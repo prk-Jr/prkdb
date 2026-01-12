@@ -1,6 +1,9 @@
 use crate::wal::LogRecord;
 use serde::{Deserialize, Serialize};
 
+// Re-export Change from prkdb-types
+pub use prkdb_types::replication::Change;
+
 /// Replication request sent from leader to follower
 #[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub struct ReplicateRequest {
@@ -21,19 +24,6 @@ pub struct ReplicateRequest {
 
     /// Compressed records data (if compression is used)
     pub compressed_data: Option<Vec<u8>>,
-}
-
-/// Represents a single change event for replication
-#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
-pub enum Change {
-    /// Key-value put operation
-    Put {
-        key: Vec<u8>,
-        value: Vec<u8>,
-        version: u64,
-    },
-    /// Key delete operation
-    Delete { key: Vec<u8>, version: u64 },
 }
 
 /// Replication response sent from follower to leader

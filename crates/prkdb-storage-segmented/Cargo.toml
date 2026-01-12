@@ -11,6 +11,7 @@ async-trait = { workspace = true }
 bytes = "1.7"
 tempfile = "3.10.1"
 prkdb-core = { path = "../prkdb-core" }
+prkdb-types = { path = "../prkdb-types" }
 crc32fast = "1.4"
 bincode = "1.3"
 

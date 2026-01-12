@@ -116,8 +116,7 @@ for example_file in "$examples_dir"/*.rs; do
         elif [[ "$example_name" == "raft_cluster" ]]; then
             # Run for 5s then kill. Accept exit code 124 (timeout) or 0 (success).
             # Providing '1' as argument to start node 1.
-            timeout 5s cargo run --example "$example_name" -- 1 >/dev/null 2>&1
-            exit_code=$?
+            timeout 5s cargo run --example "$example_name" -- 1 >/dev/null 2>&1 || exit_code=$?
             if [ $exit_code -eq 124 ] || [ $exit_code -eq 0 ]; then
                 echo -e "${GREEN}✅${NC}"
             else

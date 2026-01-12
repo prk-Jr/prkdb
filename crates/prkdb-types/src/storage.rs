@@ -1,9 +1,42 @@
+//! Storage adapter traits for PrkDB.
+//!
+//! This module defines the core storage abstraction that allows plugging in
+//! different storage backends (SQLite, Postgres, RocksDB, sled, in-memory, etc.).
+
 use crate::error::StorageError;
+use crate::replication::Change;
 use async_trait::async_trait;
 
-/// New async storage adapter port for the hexagonal architecture.
+/// Async storage adapter port for the hexagonal architecture.
 ///
 /// Implement this trait to plug-in any storage backend (SQLite, Postgres, RocksDB, sled, in-memory, ...).
+///
+/// # Example
+/// ```ignore
+/// use prkdb_types::{StorageAdapter, StorageError};
+/// use async_trait::async_trait;
+///
+/// struct InMemoryAdapter {
+///     data: std::collections::HashMap<Vec<u8>, Vec<u8>>,
+/// }
+///
+/// #[async_trait]
+/// impl StorageAdapter for InMemoryAdapter {
+///     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+///         Ok(self.data.get(key).cloned())
+///     }
+///     
+///     async fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+///         // ... implementation
+///         Ok(())
+///     }
+///     
+///     async fn delete(&self, key: &[u8]) -> Result<(), StorageError> {
+///         // ... implementation
+///         Ok(())
+///     }
+/// }
+/// ```
 #[async_trait]
 pub trait StorageAdapter: Send + Sync + 'static {
     /// Retrieve bytes for a key.
@@ -20,15 +53,6 @@ pub trait StorageAdapter: Send + Sync + 'static {
     /// # Performance
     /// - Individual puts: ~375 ops/sec
     /// - Batched puts: ~300K+ ops/sec (800x faster!)
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let entries = vec![
-    ///     (b"key1".to_vec(), b"value1".to_vec()),
-    ///     (b"key2".to_vec(), b"value2".to_vec()),
-    /// ];
-    /// adapter.put_batch(entries).await?;
-    /// ```
     async fn put_batch(&self, entries: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), StorageError> {
         // Default implementation: fall back to individual puts
         for (key, value) in entries {
@@ -138,16 +162,14 @@ pub trait StorageAdapter: Send + Sync + 'static {
 
     /// Optional: get changes since a specific offset/version.
     /// Used for replication.
-    async fn get_changes_since(
-        &self,
-        _offset: u64,
-    ) -> Result<Vec<crate::replication::Change>, StorageError> {
+    async fn get_changes_since(&self, _offset: u64) -> Result<Vec<Change>, StorageError> {
         Err(StorageError::BackendError(
             "get_changes_since not supported".into(),
         ))
     }
 }
 
+/// Extension trait for transactional storage adapters
 #[async_trait]
 pub trait TransactionalStorageAdapter: StorageAdapter {
     /// Optional transactional execution: adapter may implement to run the closure within a DB tx.
@@ -158,11 +180,68 @@ pub trait TransactionalStorageAdapter: StorageAdapter {
         Fut: std::future::Future<Output = Result<(), StorageError>> + Send;
 }
 
-/// Legacy synchronous KVStore kept for compatibility with older adapters.
-/// Prefer `StorageAdapter` for new adapters.
-#[deprecated(note = "Use StorageAdapter for async adapters; KVStore kept for compatibility")]
-pub trait KVStore: Send + Sync + Clone {
-    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError>;
-    fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError>;
-    fn delete(&self, key: &[u8]) -> Result<(), StorageError>;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::RwLock;
+
+    struct MockAdapter {
+        data: RwLock<HashMap<Vec<u8>, Vec<u8>>>,
+    }
+
+    impl MockAdapter {
+        fn new() -> Self {
+            Self {
+                data: RwLock::new(HashMap::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl StorageAdapter for MockAdapter {
+        async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+            Ok(self.data.read().unwrap().get(key).cloned())
+        }
+
+        async fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+            self.data
+                .write()
+                .unwrap()
+                .insert(key.to_vec(), value.to_vec());
+            Ok(())
+        }
+
+        async fn delete(&self, key: &[u8]) -> Result<(), StorageError> {
+            self.data.write().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mock_adapter() {
+        let adapter = MockAdapter::new();
+
+        adapter.put(b"key1", b"value1").await.unwrap();
+        let val = adapter.get(b"key1").await.unwrap();
+        assert_eq!(val, Some(b"value1".to_vec()));
+
+        adapter.delete(b"key1").await.unwrap();
+        let val = adapter.get(b"key1").await.unwrap();
+        assert_eq!(val, None);
+    }
+
+    #[tokio::test]
+    async fn test_put_batch_default() {
+        let adapter = MockAdapter::new();
+
+        let entries = vec![
+            (b"k1".to_vec(), b"v1".to_vec()),
+            (b"k2".to_vec(), b"v2".to_vec()),
+        ];
+        adapter.put_batch(entries).await.unwrap();
+
+        assert_eq!(adapter.get(b"k1").await.unwrap(), Some(b"v1".to_vec()));
+        assert_eq!(adapter.get(b"k2").await.unwrap(), Some(b"v2".to_vec()));
+    }
 }

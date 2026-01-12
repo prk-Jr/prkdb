@@ -33,7 +33,7 @@ impl StatefulCompute<Event, PrkDb> for SumHandler {
         item: &Event,
         state: &mut Self::State,
         _ctx: &Context<PrkDb>,
-    ) -> Result<(), prkdb_core::error::ComputeError> {
+    ) -> Result<(), prkdb_types::error::ComputeError> {
         state.total += item.delta;
         Ok(())
     }
@@ -43,7 +43,7 @@ impl StatefulCompute<Event, PrkDb> for SumHandler {
         _id: &u64,
         _state: &mut Self::State,
         _ctx: &Context<PrkDb>,
-    ) -> Result<(), prkdb_core::error::ComputeError> {
+    ) -> Result<(), prkdb_types::error::ComputeError> {
         Ok(())
     }
 }

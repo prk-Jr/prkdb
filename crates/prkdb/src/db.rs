@@ -9,10 +9,10 @@ use crate::collection_handle::CollectionHandle;
 use crate::consumer::ConsumerGroupCoordinator;
 use crate::partitioning::Partitioner;
 use dashmap::DashMap;
-use prkdb_core::collection::Collection;
-use prkdb_core::consumer::OffsetStore;
-use prkdb_core::error::Error;
-use prkdb_core::storage::StorageAdapter;
+use prkdb_types::collection::Collection;
+use prkdb_types::consumer::OffsetStore;
+use prkdb_types::error::Error;
+use prkdb_types::storage::StorageAdapter;
 use std::any::{Any, TypeId};
 use std::hash::Hash;
 // use std::collections::HashMap;
@@ -80,7 +80,7 @@ impl PrkDb {
                 ))
             },
         )
-        .map_err(|e| Error::Storage(prkdb_core::error::StorageError::Internal(e.to_string())))?;
+        .map_err(|e| Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string())))?;
 
         // We need a base storage for the PrkDb instance itself (for metadata etc)
         // or we can just use the first partition's storage?
@@ -89,7 +89,7 @@ impl PrkDb {
             log_dir: storage_path.join("meta"),
             ..WalConfig::default()
         };
-        let storage = Arc::new(WalStorageAdapter::new(wal_config).map_err(|e| Error::Storage(e))?);
+        let storage = Arc::new(WalStorageAdapter::new(wal_config).map_err(Error::Storage)?);
 
         // Create consumer coordinator
         let offset_store = Arc::new(crate::consumer::StorageOffsetStore::new(storage.clone()));
@@ -122,7 +122,7 @@ impl PrkDb {
     pub async fn wait_for_leaders(&self, timeout: std::time::Duration) -> Result<(), Error> {
         if let Some(pm) = &self.partition_manager {
             pm.wait_for_leaders(timeout).await.map_err(|e| {
-                Error::Storage(prkdb_core::error::StorageError::Internal(e.to_string()))
+                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
             })?;
         }
         Ok(())
@@ -143,11 +143,11 @@ impl PrkDb {
 
             // Propose and wait for commit
             let handle = raft.propose(cmd.serialize()).await.map_err(|e| {
-                Error::Storage(prkdb_core::error::StorageError::Internal(e.to_string()))
+                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
             })?;
 
             handle.wait_commit().await.map_err(|e| {
-                Error::Storage(prkdb_core::error::StorageError::Internal(e.to_string()))
+                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
             })?;
         } else {
             // Local write (legacy/single-node)
@@ -168,11 +168,11 @@ impl PrkDb {
 
             // Propose and wait for commit
             let handle = raft.propose(cmd.serialize()).await.map_err(|e| {
-                Error::Storage(prkdb_core::error::StorageError::Internal(e.to_string()))
+                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
             })?;
 
             handle.wait_commit().await.map_err(|e| {
-                Error::Storage(prkdb_core::error::StorageError::Internal(e.to_string()))
+                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
             })?;
         } else {
             // Local delete
@@ -202,15 +202,18 @@ impl PrkDb {
                     Ok(read_index) => {
                         // Wait for state machine to catch up to read_index
                         if let Err(e) = raft.wait_for_apply(read_index).await {
-                            return Err(Error::Storage(prkdb_core::error::StorageError::Internal(
-                                format!("ReadIndex wait failed: {}", e),
-                            )));
+                            return Err(Error::Storage(
+                                prkdb_types::error::StorageError::Internal(format!(
+                                    "ReadIndex wait failed: {}",
+                                    e
+                                )),
+                            ));
                         }
                     }
                     Err(e) => {
                         // If not leader, we should forward or fail
                         // For now, fail so client can retry with correct leader
-                        return Err(Error::Storage(prkdb_core::error::StorageError::Internal(
+                        return Err(Error::Storage(prkdb_types::error::StorageError::Internal(
                             format!("ReadIndex failed (not leader?): {}", e),
                         )));
                     }
@@ -218,15 +221,15 @@ impl PrkDb {
             }
 
             if let Some(storage) = pm.get_partition_storage(partition_id) {
-                storage.get(key).await.map_err(|e| Error::Storage(e))
+                storage.get(key).await.map_err(Error::Storage)
             } else {
-                Err(Error::Storage(prkdb_core::error::StorageError::Internal(
+                Err(Error::Storage(prkdb_types::error::StorageError::Internal(
                     format!("Partition {} storage not found", partition_id),
                 )))
             }
         } else {
             // Local read
-            self.storage.get(key).await.map_err(|e| Error::Storage(e))
+            self.storage.get(key).await.map_err(Error::Storage)
         }
     }
 
@@ -241,15 +244,15 @@ impl PrkDb {
 
             if let Some(storage) = pm.get_partition_storage(partition_id) {
                 // Direct read without ReadIndex - may be stale
-                storage.get(key).await.map_err(|e| Error::Storage(e))
+                storage.get(key).await.map_err(Error::Storage)
             } else {
-                Err(Error::Storage(prkdb_core::error::StorageError::Internal(
+                Err(Error::Storage(prkdb_types::error::StorageError::Internal(
                     format!("Partition {} storage not found", partition_id),
                 )))
             }
         } else {
             // Local single-node mode - same as regular get
-            self.storage.get(key).await.map_err(|e| Error::Storage(e))
+            self.storage.get(key).await.map_err(Error::Storage)
         }
     }
 
@@ -268,13 +271,16 @@ impl PrkDb {
                     Ok(read_index) => {
                         // Wait for local state machine to catch up
                         if let Err(e) = raft.wait_for_apply(read_index).await {
-                            return Err(Error::Storage(prkdb_core::error::StorageError::Internal(
-                                format!("Follower read wait failed: {}", e),
-                            )));
+                            return Err(Error::Storage(
+                                prkdb_types::error::StorageError::Internal(format!(
+                                    "Follower read wait failed: {}",
+                                    e
+                                )),
+                            ));
                         }
                     }
                     Err(e) => {
-                        return Err(Error::Storage(prkdb_core::error::StorageError::Internal(
+                        return Err(Error::Storage(prkdb_types::error::StorageError::Internal(
                             format!("ReadIndex failed: {}", e),
                         )));
                     }
@@ -282,15 +288,15 @@ impl PrkDb {
             }
 
             if let Some(storage) = pm.get_partition_storage(partition_id) {
-                storage.get(key).await.map_err(|e| Error::Storage(e))
+                storage.get(key).await.map_err(Error::Storage)
             } else {
-                Err(Error::Storage(prkdb_core::error::StorageError::Internal(
+                Err(Error::Storage(prkdb_types::error::StorageError::Internal(
                     format!("Partition {} storage not found", partition_id),
                 )))
             }
         } else {
             // Local single-node mode - same as regular get
-            self.storage.get(key).await.map_err(|e| Error::Storage(e))
+            self.storage.get(key).await.map_err(Error::Storage)
         }
     }
 
@@ -391,16 +397,6 @@ impl PrkDb {
     }
 
     /// Get collection names from registered collections
-    pub async fn list_collections(&self) -> Result<Vec<String>, Error> {
-        // Return all registered collection names
-        let collections: Vec<String> = self
-            .collection_registry
-            .iter()
-            .map(|entry| entry.value().clone())
-            .collect();
-        Ok(collections)
-    }
-
     /// Get collection statistics (count and size)
     pub async fn get_collection_stats(&self, collection_name: &str) -> Result<(u64, u64), Error> {
         // Scan storage for all keys belonging to this collection
@@ -442,7 +438,7 @@ impl PrkDb {
         let current_offset = offset_store
             .get_offset(group_id, collection, partition)
             .await?
-            .unwrap_or(prkdb_core::consumer::Offset(0));
+            .unwrap_or(prkdb_types::consumer::Offset(0));
 
         // Get latest offset by counting items in the collection partition
         let latest_offset = self
@@ -546,7 +542,7 @@ impl PrkDb {
         // Storage-specific backup implementation would go here
         // Indicate that this needs storage-level implementation
         Err(Error::Storage(
-            prkdb_core::error::StorageError::BackendError(
+            prkdb_types::error::StorageError::BackendError(
                 "Backup functionality requires storage-specific implementation".to_string(),
             ),
         ))
@@ -884,7 +880,7 @@ impl PrkDb {
 
                     node_data
                         .entry(node_id.to_string())
-                        .or_insert_with(std::collections::HashMap::new)
+                        .or_default()
                         .insert(field.to_string(), value_str.to_string());
                 }
             }
@@ -937,7 +933,7 @@ impl PrkDb {
 
                     node_lag
                         .entry(node_id.to_string())
-                        .or_insert_with(std::collections::HashMap::new)
+                        .or_default()
                         .insert(field.to_string(), value_str.to_string());
                 }
             }
@@ -990,6 +986,124 @@ impl PrkDb {
             self.storage.put(key.as_bytes(), value.as_bytes()).await?;
         }
 
+        Ok(())
+    }
+
+    /// Create a collection (admin op)
+    /// In a distributed setup, this should propagate via Raft.
+    /// Create a collection (admin op)
+    /// In a distributed setup, this propagates via Raft to Partition 0 (Metadata Partition).
+    pub async fn create_collection(&self, name: &str) -> Result<(), Error> {
+        if let Some(pm) = &self.partition_manager {
+            // Distributed mode: Propose to Partition 0 (Metadata Partition)
+            // Convention: Partition 0 stores cluster metadata including collections
+            use crate::raft::command::Command;
+
+            // Get Raft node for Partition 0
+            let partition_id = 0;
+            let raft = pm.get_partition(partition_id).ok_or_else(|| {
+                Error::Storage(prkdb_types::error::StorageError::Internal(
+                    "Metadata partition (0) not found".to_string(),
+                ))
+            })?;
+
+            let cmd = Command::CreateCollection {
+                name: name.to_string(),
+            };
+
+            // Propose and wait for commit
+            let handle = raft.propose(cmd.serialize()).await.map_err(|e| {
+                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
+            })?;
+
+            handle.wait_commit().await.map_err(|e| {
+                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
+            })?;
+        } else {
+            // Local/Single-node mode: Write directly to storage with metadata key
+            // This ensures behavior is consistent with Raft state machine application
+            let metadata_key = format!("meta:col:{}", name).into_bytes();
+            let metadata_value = b"{}".to_vec();
+            self.storage.put(&metadata_key, &metadata_value).await?;
+        }
+
+        Ok(())
+    }
+
+    /// List all collections
+    pub async fn list_collections(&self) -> Result<Vec<String>, Error> {
+        let mut collections = Vec::new();
+
+        if let Some(pm) = &self.partition_manager {
+            // Distributed mode: Read from Partition 0 (Metadata Partition)
+            let partition_id = 0;
+            if let Some(storage) = pm.get_partition_storage(partition_id) {
+                // Scan keys starting with "meta:col:"
+                let prefix = b"meta:col:";
+                // scan_prefix is async, so await it!
+                let keys = storage.scan_prefix(prefix).await.map_err(Error::Storage)?;
+
+                for (key, _) in keys {
+                    if let Ok(key_str) = String::from_utf8(key) {
+                        if let Some(name) = key_str.strip_prefix("meta:col:") {
+                            collections.push(name.to_string());
+                        }
+                    }
+                }
+            } else {
+                return Err(Error::Storage(prkdb_types::error::StorageError::Internal(
+                    "Metadata partition (0) storage not found".to_string(),
+                )));
+            }
+        } else {
+            // Local mode: Scan local storage
+            let prefix = b"meta:col:";
+            let keys = self
+                .storage
+                .scan_prefix(prefix)
+                .await
+                .map_err(Error::Storage)?;
+            for (key, _) in keys {
+                if let Ok(key_str) = String::from_utf8(key) {
+                    if let Some(name) = key_str.strip_prefix("meta:col:") {
+                        collections.push(name.to_string());
+                    }
+                }
+            }
+        }
+
+        Ok(collections)
+    }
+
+    /// Drop a collection (admin op)
+    pub async fn drop_collection(&self, name: &str) -> Result<(), Error> {
+        if let Some(pm) = &self.partition_manager {
+            // Distributed mode: Propose to Partition 0
+            use crate::raft::command::Command;
+
+            let partition_id = 0;
+            let raft = pm.get_partition(partition_id).ok_or_else(|| {
+                Error::Storage(prkdb_types::error::StorageError::Internal(
+                    "Metadata partition (0) not found".to_string(),
+                ))
+            })?;
+
+            let cmd = Command::DropCollection {
+                name: name.to_string(),
+            };
+
+            let handle = raft.propose(cmd.serialize()).await.map_err(|e| {
+                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
+            })?;
+
+            handle.wait_commit().await.map_err(|e| {
+                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
+            })?;
+        } else {
+            // Local mode
+            let metadata_key = format!("meta:col:{}", name).into_bytes();
+            self.storage.delete(&metadata_key).await?;
+        }
         Ok(())
     }
 }

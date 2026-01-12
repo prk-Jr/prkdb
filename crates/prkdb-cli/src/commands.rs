@@ -2,6 +2,7 @@ use clap::Subcommand;
 
 pub mod collection;
 pub mod consumer;
+pub mod data;
 pub mod database;
 pub mod metrics;
 pub mod partition;
@@ -10,6 +11,10 @@ pub mod serve;
 
 #[derive(Subcommand, Clone)]
 pub enum CollectionCommands {
+    /// Create a new collection
+    Create { name: String },
+    /// Drop a collection
+    Drop { name: String },
     /// List all collections
     List,
     /// Show collection details

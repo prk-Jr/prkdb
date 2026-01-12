@@ -5,14 +5,15 @@ use super::recovery::RecoveryManager;
 
 use papaya::HashMap as LockFreeHashMap; // Phase 5: Lock-free index
 use prkdb_core::batching::adaptive::{AdaptiveBatchAccumulator, AdaptiveBatchConfig};
-use prkdb_core::error::StorageError;
 use prkdb_core::replication::{Change, ReplicationManager};
-use prkdb_core::storage::StorageAdapter;
 use prkdb_core::wal::compaction::{CompactionConfig, Compactor};
 use prkdb_core::wal::mmap_parallel_wal::MmapParallelWal;
 use prkdb_core::wal::{LogOperation, LogRecord, WalConfig};
 use prkdb_metrics::storage::StorageMetrics;
+use prkdb_types::error::StorageError;
+use prkdb_types::storage::StorageAdapter;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::sync::{oneshot, Mutex, Notify};
@@ -114,7 +115,7 @@ fn write_batch(wal: &Arc<MmapParallelWal>, batch: &mut Vec<WriteRequest>) {
     // Write to WAL using Tokio runtime for async WAL API
     // (WAL is async but we're calling from sync thread)
     let result = tokio::runtime::Handle::try_current()
-        .and_then(|handle| Ok(handle.block_on(wal.append_batch(records))))
+        .map(|handle| handle.block_on(wal.append_batch(records)))
         .unwrap_or_else(|_| {
             // No runtime available, create temporary one
             tokio::runtime::Runtime::new()
@@ -203,6 +204,8 @@ struct WalStorageInner {
     metrics: Arc<StorageMetrics>,
     accumulator: Mutex<AdaptiveBatchAccumulator<PendingWrite>>,
     flush_notify: Arc<Notify>,
+    // Phase 8: Track max offset for compaction and change detection
+    max_offset: AtomicU64,
     // Phase 2: Writer thread handle (stored here for Drop)
     _writer_handle: Option<Arc<Mutex<Option<thread::JoinHandle<()>>>>>,
 }
@@ -279,6 +282,7 @@ impl WalStorageAdapter {
             metrics,
             accumulator: Mutex::new(AdaptiveBatchAccumulator::new(config.batching.clone())),
             flush_notify: Arc::new(Notify::new()),
+            max_offset: AtomicU64::new(0),
             _writer_handle: Some(writer_handle),
         });
 
@@ -352,6 +356,7 @@ impl WalStorageAdapter {
                 storage_config.batching.clone(),
             )),
             flush_notify: Arc::new(Notify::new()),
+            max_offset: AtomicU64::new(0),
             _writer_handle: Some(writer_handle),
         });
 
@@ -427,6 +432,7 @@ impl WalStorageAdapter {
                 storage_config.batching.clone(),
             )),
             flush_notify: Arc::new(Notify::new()),
+            max_offset: AtomicU64::new(0),
             _writer_handle: Some(writer_handle),
         });
 
@@ -508,6 +514,7 @@ impl WalStorageAdapter {
                 storage_config.batching.clone(),
             )),
             flush_notify: Arc::new(Notify::new()),
+            max_offset: AtomicU64::new(0),
             _writer_handle: Some(writer_handle),
         });
 
@@ -636,9 +643,11 @@ impl WalStorageAdapter {
     ///
     /// Note: Currently disabled for MmapParallelWal as it doesn't expose offset iteration.
     /// Index will be rebuilt from application put/delete operations after restart.
-    /// TODO: Add scan API to MmapParallelWal for full recovery support
+    /// Index will be rebuilt from application put/delete operations after restart.
     async fn rebuild_index_async(&self) -> Result<(), StorageError> {
         // Use scan API to rebuild index from WAL
+        // TODO: In the future, load last checkpoint offsets and pass them to scan_from
+        // For now, scan everything associated with current log segments
         let records = self
             .inner
             .wal
@@ -769,21 +778,12 @@ impl WalStorageAdapter {
 
                 // Try compaction
                 if let Some(compactor) = &inner.compactor {
-                    // We need a current offset estimate.
-                    // For now, we can pass 0 or track it.
-                    // Ideally, we'd get the max offset from the index or WAL.
-                    // Let's assume the compactor can figure it out or we pass a dummy for now.
-                    // Actually, we need to pass the current max offset to be safe.
-                    // Let's get it from the WAL if possible, or just pass a large number if we trust the compactor's internal logic.
-                    // But wait, run_if_needed takes current_offset.
-                    // Let's use a placeholder for now as we don't easily have the max offset without querying the WAL.
-                    // TODO: Track max offset in WalStorageInner
-                    match compactor.run_if_needed(0).await {
+                    // Use tracked max_offset for compaction decisions
+                    let current_offset = inner.max_offset.load(Ordering::Relaxed);
+                    match compactor.run_if_needed(current_offset).await {
                         Ok(true) => {
                             // Compaction ran, record metrics
                             inner.metrics.record_compaction_cycle();
-                            // Note: We don't have bytes_reclaimed from the current API
-                            // This could be added to the compaction API in the future
                         }
                         Ok(false) => {
                             // No compaction needed
@@ -1034,6 +1034,11 @@ impl StorageAdapter for WalStorageAdapter {
             if let Some(value) = self.inner.cache.get(&key.to_vec()).await {
                 // Record cache hit
                 self.inner.metrics.record_cache_hit();
+                // Record read metrics (app level)
+                self.inner
+                    .metrics
+                    .record_read((key.len() + value.len()) as u64);
+
                 return Ok(Some(value));
             }
             // Record cache miss
@@ -1156,6 +1161,9 @@ impl StorageAdapter for WalStorageAdapter {
         // Get offset from result
         let offset = results.first().map(|(_, off)| *off).unwrap_or(0);
 
+        // Track max offset for compaction
+        self.inner.max_offset.fetch_max(offset, Ordering::Relaxed);
+
         // Update index
         self.inner.index.pin().insert(key.to_vec(), offset);
 
@@ -1220,6 +1228,11 @@ impl StorageAdapter for WalStorageAdapter {
                 offsets.len(),
                 batch_size
             )));
+        }
+
+        // Track max offset from this batch
+        if let Some((_, max_off)) = offsets.last() {
+            self.inner.max_offset.fetch_max(*max_off, Ordering::Relaxed);
         }
 
         // Bulk update: Single cache lock for entire batch!
@@ -1333,7 +1346,7 @@ impl StorageAdapter for WalStorageAdapter {
     /// ```rust
     /// use prkdb::storage::WalStorageAdapter;
     /// use prkdb_core::wal::WalConfig;
-    /// use prkdb_core::storage::StorageAdapter;
+    /// use prkdb::prelude::*;
     /// use std::sync::Arc;
     ///
     /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
@@ -1682,89 +1695,87 @@ impl StorageAdapter for WalStorageAdapter {
     }
 
     async fn get_changes_since(&self, offset: u64) -> Result<Vec<Change>, StorageError> {
-        // Use scan API to get all records
-        // TODO: Optimization - add scan_from(offset) to MmapParallelWal to avoid full scan
+        // Use optimized scan_from to avoid scanning entire WAL
+        // We pass offset+1 to start offsets array since scan_from returns >= start_offset
+        let start_offsets: Vec<u64> = vec![offset + 1; self.inner.wal.segment_count()];
         let records = self
             .inner
             .wal
-            .scan()
+            .scan_from(&start_offsets)
             .await
             .map_err(|e| StorageError::Internal(format!("Scan error: {}", e)))?;
 
         let mut changes = Vec::new();
 
         for (_segment_id, record) in records {
-            // Only include records after the requested offset
-            if record.offset > offset {
-                match record.operation {
-                    LogOperation::Put { id, data, .. } => {
+            // scan_from already filters to records >= offset+1, so all are valid
+            match record.operation {
+                LogOperation::Put { id, data, .. } => {
+                    changes.push(Change::Put {
+                        key: id,
+                        value: data,
+                        version: record.offset,
+                    });
+                }
+                LogOperation::PutBatch { items, .. } => {
+                    // Expand batch into individual changes
+                    // Note: All items in batch share the same record offset/version
+                    // This is acceptable for replication as long as order is preserved
+                    for (id, data) in items {
                         changes.push(Change::Put {
                             key: id,
                             value: data,
                             version: record.offset,
                         });
                     }
-                    LogOperation::PutBatch { items, .. } => {
-                        // Expand batch into individual changes
-                        // Note: All items in batch share the same record offset/version
-                        // This is acceptable for replication as long as order is preserved
-                        for (id, data) in items {
-                            changes.push(Change::Put {
-                                key: id,
-                                value: data,
-                                version: record.offset,
-                            });
-                        }
-                    }
-                    LogOperation::CompressedPutBatch { data, .. } => {
-                        if let Ok(decompressed) =
-                            prkdb_core::wal::compression::decompress(&data, record.compression)
+                }
+                LogOperation::CompressedPutBatch { data, .. } => {
+                    if let Ok(decompressed) =
+                        prkdb_core::wal::compression::decompress(&data, record.compression)
+                    {
+                        let config = bincode::config::standard();
+                        if let Ok((items, _)) = bincode::decode_from_slice::<
+                            Vec<(Vec<u8>, Vec<u8>)>,
+                            _,
+                        >(&decompressed, config)
                         {
-                            let config = bincode::config::standard();
-                            if let Ok((items, _)) =
-                                bincode::decode_from_slice::<Vec<(Vec<u8>, Vec<u8>)>, _>(
-                                    &decompressed,
-                                    config,
-                                )
-                            {
-                                for (id, data) in items {
-                                    changes.push(Change::Put {
-                                        key: id,
-                                        value: data,
-                                        version: record.offset,
-                                    });
-                                }
+                            for (id, data) in items {
+                                changes.push(Change::Put {
+                                    key: id,
+                                    value: data,
+                                    version: record.offset,
+                                });
                             }
                         }
                     }
-                    LogOperation::Delete { id, .. } => {
+                }
+                LogOperation::Delete { id, .. } => {
+                    changes.push(Change::Delete {
+                        key: id,
+                        version: record.offset,
+                    });
+                }
+                LogOperation::DeleteBatch { ids, .. } => {
+                    for id in ids {
                         changes.push(Change::Delete {
                             key: id,
                             version: record.offset,
                         });
                     }
-                    LogOperation::DeleteBatch { ids, .. } => {
-                        for id in ids {
-                            changes.push(Change::Delete {
-                                key: id,
-                                version: record.offset,
-                            });
-                        }
-                    }
-                    LogOperation::CompressedDeleteBatch { data, .. } => {
-                        if let Ok(decompressed) =
-                            prkdb_core::wal::compression::decompress(&data, record.compression)
+                }
+                LogOperation::CompressedDeleteBatch { data, .. } => {
+                    if let Ok(decompressed) =
+                        prkdb_core::wal::compression::decompress(&data, record.compression)
+                    {
+                        let config = bincode::config::standard();
+                        if let Ok((ids, _)) =
+                            bincode::decode_from_slice::<Vec<Vec<u8>>, _>(&decompressed, config)
                         {
-                            let config = bincode::config::standard();
-                            if let Ok((ids, _)) =
-                                bincode::decode_from_slice::<Vec<Vec<u8>>, _>(&decompressed, config)
-                            {
-                                for id in ids {
-                                    changes.push(Change::Delete {
-                                        key: id,
-                                        version: record.offset,
-                                    });
-                                }
+                            for id in ids {
+                                changes.push(Change::Delete {
+                                    key: id,
+                                    version: record.offset,
+                                });
                             }
                         }
                     }
@@ -2057,7 +2068,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore] // TODO: Metrics tracking needs better synchronization in tests - works in production
     async fn test_wal_adapter_metrics() {
         let dir = tempfile::tempdir().unwrap();
         let config = WalConfig {
@@ -2087,17 +2097,31 @@ mod tests {
         );
         assert_eq!(metrics.write_bytes_total, 10); // "key1" (4) + "value1" (6) = 10
 
-        // Test cache miss on first read
+        // Test cache HIT on first read (Write-Through Caching)
+        // Since put() populates the cache, the first get() should be a hit
         let _ = adapter.get(b"key1").await.unwrap();
         let metrics = adapter.metrics();
-        assert_eq!(metrics.cache_misses, 1);
+        println!("DEBUG Metrics: {:?}", metrics);
+        // Writes populate cache, so this should be a HIT, not a MISS
+        assert_eq!(
+            metrics.cache_hits, 1,
+            "Expected cache hit after put. Metrics: {:?}",
+            metrics
+        );
+        assert_eq!(
+            metrics.cache_misses, 0,
+            "Expected no cache misses. Metrics: {:?}",
+            metrics
+        );
         assert_eq!(metrics.reads_total, 1);
 
         // Test cache hit on second read
+        // ...
         let _ = adapter.get(b"key1").await.unwrap();
         let metrics = adapter.metrics();
-        assert_eq!(metrics.cache_hits, 1);
-        assert_eq!(metrics.cache_misses, 1); // Still 1, not incremented
+        assert_eq!(metrics.cache_hits, 2);
+        assert_eq!(metrics.cache_misses, 0);
+        assert_eq!(metrics.reads_total, 2);
 
         // Test batch write metrics
         let items = vec![
@@ -2128,7 +2152,7 @@ mod tests {
         // Test that getting a non-existent key records a cache miss
         let _ = adapter.get(b"nonexistent").await.unwrap();
         let metrics = adapter.metrics();
-        assert_eq!(metrics.cache_misses, 2); // One more miss
+        assert_eq!(metrics.cache_misses, 1); // One miss for non-existent key
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

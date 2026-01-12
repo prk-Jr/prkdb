@@ -9,8 +9,8 @@ use bincode::{
     serde::{decode_from_slice, encode_to_vec},
 };
 use futures::future;
-use prkdb_core::collection::{ChangeEvent, Collection};
-use prkdb_core::error::StorageError;
+use prkdb_types::collection::{ChangeEvent, Collection};
+use prkdb_types::error::StorageError;
 use serde::{de::DeserializeOwned, Serialize};
 use std::any::TypeId;
 use std::marker::PhantomData;
@@ -308,7 +308,7 @@ where
                 }
             };
 
-            let item_bytes = match encode_to_vec(&item, config::standard()) {
+            let item_bytes = match encode_to_vec(item, config::standard()) {
                 Ok(b) => b,
                 Err(e) => {
                     results.push(Err(StorageError::Serialization(e.to_string()).into()));

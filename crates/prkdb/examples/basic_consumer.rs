@@ -12,7 +12,8 @@
 //! ```
 
 use prkdb::prelude::*;
-use prkdb_core::consumer::{AutoOffsetReset, Consumer, ConsumerConfig};
+use prkdb_types::consumer::Consumer;
+use prkdb_types::consumer::{AutoOffsetReset, ConsumerConfig};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::signal;
@@ -138,7 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Manually commit after processing
                 match consumer.commit().await {
                     Ok(result) => {
-                        if matches!(result, prkdb_core::consumer::CommitResult::Success) {
+                        if matches!(result, prkdb_types::consumer::CommitResult::Success) {
                             info!("Manual commit successful");
                         } else {
                             warn!("Manual commit failed");

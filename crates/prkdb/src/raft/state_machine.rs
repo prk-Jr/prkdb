@@ -1,13 +1,13 @@
 use crate::storage::WalStorageAdapter;
 use async_trait::async_trait;
-use prkdb_core::storage::StorageAdapter;
+use prkdb_types::storage::StorageAdapter;
 use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum StateMachineError {
     #[error("Storage error: {0}")]
-    Storage(#[from] prkdb_core::error::StorageError),
+    Storage(#[from] prkdb_types::error::StorageError),
     #[error("Serialization error: {0}")]
     Serialization(String),
 }
@@ -62,6 +62,25 @@ impl StateMachine for PrkDbStateMachine {
                     );
                     self.storage
                         .delete(&key)
+                        .await
+                        .map_err(StateMachineError::Storage)?;
+                }
+                Command::CreateCollection { name } => {
+                    tracing::info!("Applying CreateCollection command: name={}", name);
+                    // Store collection metadata as a special key
+                    let metadata_key = format!("meta:col:{}", name).into_bytes();
+                    // Value could be schema or config in future, for now just placeholder
+                    let metadata_value = b"{}".to_vec();
+                    self.storage
+                        .put(&metadata_key, &metadata_value)
+                        .await
+                        .map_err(StateMachineError::Storage)?;
+                }
+                Command::DropCollection { name } => {
+                    tracing::info!("Applying DropCollection command: name={}", name);
+                    let metadata_key = format!("meta:col:{}", name).into_bytes();
+                    self.storage
+                        .delete(&metadata_key)
                         .await
                         .map_err(StateMachineError::Storage)?;
                 }

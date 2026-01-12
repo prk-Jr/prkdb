@@ -22,6 +22,15 @@
 - **Type-safe collections** - `#[derive(Collection)]` macro
 - **Built-in monitoring** - Prometheus + Grafana dashboards
 
+## 🧱 Modular Architecture
+
+The database is now composed of loosely coupled crates, enabling lightweight clients and flexible deployments:
+
+- **`prkdb-client`**: A stand-alone, smart client that routes requests to the correct partition leader. It depends only on `prkdb-proto` and `tonic`, making it perfect for building microservices that talk to PrkDB.
+- **`prkdb-types`**: Pure data types and traits. Use this if you are building a storage adapter or plugin.
+- **`prkdb-proto`**: The wire protocol definitions.
+
+
 ## Quick Start
 
 ```rust
@@ -720,6 +729,12 @@ prkdb collection list
 prkdb consumer list
 prkdb metrics
 prkdb serve
+
+# Data Operations
+prkdb put user:101 '{"name": "Alice"}'
+prkdb get user:101
+prkdb delete user:101
+prkdb batch-put data.txt --separator=,
 ```
 
 ## Crates
@@ -727,6 +742,9 @@ prkdb serve
 | Crate | Description |
 |-------|-------------|
 | `prkdb` | Main library |
+| `prkdb-client` | **New** Lightweight smart client |
+| `prkdb-types` | **New** Core domain types & traits |
+| `prkdb-proto` | **New** gRPC definitions |
 | `prkdb-core` | WAL, compression, replication |
 | `prkdb-cli` | Command-line interface |
 | `prkdb-macros` | `#[derive(Collection)]` |

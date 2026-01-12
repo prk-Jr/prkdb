@@ -1,4 +1,4 @@
-use prkdb_core::error::{ComputeError, ConsumerError, StorageError};
+use prkdb_types::error::{ComputeError, ConsumerError, StorageError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {

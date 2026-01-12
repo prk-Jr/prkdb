@@ -1,0 +1,407 @@
+syntax = "proto3";
+
+package raft;
+
+service RaftService {
+    // RequestVote RPC: Invoked by candidates to gather votes
+    rpc RequestVote (RequestVoteRequest) returns (RequestVoteResponse);
+
+    // PreVote RPC: Pre-election check to prevent disruption from partitioned nodes (§9.6)
+    rpc PreVote (PreVoteRequest) returns (PreVoteResponse);
+
+    // AppendEntries RPC: Invoked by leader to replicate log entries; also used as heartbeat
+    rpc AppendEntries (AppendEntriesRequest) returns (AppendEntriesResponse);
+
+    // InstallSnapshot RPC: Invoked by leader to send chunks of a snapshot to a follower
+    rpc InstallSnapshot (InstallSnapshotRequest) returns (InstallSnapshotResponse);
+
+    // ReadIndex RPC: Invoked by followers to get the current commit index from leader for linearizable reads
+    rpc ReadIndex (ReadIndexRequest) returns (ReadIndexResponse);
+}
+
+// New service for client data operations (like Kafka's producer/consumer protocol)
+service PrkDbService {
+    // Put key-value pair
+    rpc Put (PutRequest) returns (PutResponse);
+    
+    // Get value by key
+    rpc Get (GetRequest) returns (GetResponse);
+    
+    // Delete key
+    rpc Delete (DeleteRequest) returns (DeleteResponse);
+    
+    // Health check
+    rpc Health (HealthRequest) returns (HealthResponse);
+
+    // Cluster metadata (topology discovery)
+    rpc Metadata (MetadataRequest) returns (MetadataResponse);
+
+    // Batch put for high throughput
+    rpc BatchPut (BatchPutRequest) returns (BatchPutResponse);
+
+    // --- Admin Operations ---
+    
+    // Create a new collection
+    rpc CreateCollection (CreateCollectionRequest) returns (CreateCollectionResponse);
+
+    // List all collections
+    rpc ListCollections (ListCollectionsRequest) returns (ListCollectionsResponse);
+
+    // Drop a collection
+    rpc DropCollection (DropCollectionRequest) returns (DropCollectionResponse);
+
+    // List consumer groups
+    rpc ListConsumerGroups (ListConsumerGroupsRequest) returns (ListConsumerGroupsResponse);
+
+    // Describe a consumer group (members, partition assignments, lag)
+    rpc DescribeConsumerGroup (DescribeConsumerGroupRequest) returns (DescribeConsumerGroupResponse);
+
+    // --- Partition Operations ---
+
+    // List partitions for a collection (or all)
+    rpc ListPartitions (ListPartitionsRequest) returns (ListPartitionsResponse);
+
+    // Get partition assignments for a consumer group
+    rpc GetPartitionAssignments (GetPartitionAssignmentsRequest) returns (GetPartitionAssignmentsResponse);
+
+    // --- Replication Operations ---
+
+    // Get replication status (role, leader, followers)
+    rpc GetReplicationStatus (GetReplicationStatusRequest) returns (GetReplicationStatusResponse);
+
+    // List replication nodes  
+    rpc GetReplicationNodes (GetReplicationNodesRequest) returns (GetReplicationNodesResponse);
+
+    // Get replication lag information
+    rpc GetReplicationLag (GetReplicationLagRequest) returns (GetReplicationLagResponse);
+}
+
+message RequestVoteRequest {
+    uint64 term = 1;          // Candidate's term
+    uint64 candidate_id = 2;  // Candidate requesting vote
+    uint64 last_log_index = 3; // Index of candidate's last log entry
+    uint64 last_log_term = 4;  // Term of candidate's last log entry
+}
+
+message RequestVoteResponse {
+    uint64 term = 1;          // Current term, for candidate to update itself
+    bool vote_granted = 2;    // True means candidate received vote
+}
+
+// Pre-Vote messages (§9.6) - used to check if election would succeed before incrementing term
+message PreVoteRequest {
+    uint64 term = 1;            // Candidate's current term (NOT incremented)
+    uint64 candidate_id = 2;    // Candidate requesting pre-vote
+    uint64 last_log_index = 3;  // Index of candidate's last log entry
+    uint64 last_log_term = 4;   // Term of candidate's last log entry
+}
+
+message PreVoteResponse {
+    uint64 term = 1;            // Current term for candidate to update itself
+    bool vote_granted = 2;      // True if pre-vote granted
+}
+
+message AppendEntriesRequest {
+    uint64 term = 1;          // Leader's term
+    uint64 leader_id = 2;     // So follower can redirect clients
+    uint64 prev_log_index = 3; // Index of log entry immediately preceding new ones
+    uint64 prev_log_term = 4;  // Term of prev_log_index entry
+    uint64 leader_commit = 5;  // Leader's commitIndex
+    repeated LogEntry entries = 6; // Log entries to store (empty for heartbeat)
+}
+
+message AppendEntriesResponse {
+    uint64 term = 1;          // Current term, for leader to update itself
+    bool success = 2;         // True if follower contained entry matching prevLogIndex and prevLogTerm
+}
+
+message InstallSnapshotRequest {
+    uint64 term = 1;              // Leader's term
+    uint64 leader_id = 2;         // So follower can redirect clients
+    uint64 last_included_index = 3; // The snapshot replaces all entries up to and including this index
+    uint64 last_included_term = 4;  // Term of last_included_index
+    uint64 offset = 5;            // Byte offset where chunk is positioned in the snapshot file
+    bytes data = 6;               // Raw bytes of the snapshot chunk, starting at offset
+    bool done = 7;                // True if this is the last chunk
+}
+
+message InstallSnapshotResponse {
+    uint64 term = 1;              // Current term, for leader to update itself
+}
+
+message LogEntry {
+    uint64 index = 1;
+    uint64 term = 2;
+    bytes data = 3;           // The actual command/data
+}
+
+// Client data operation messages
+message PutRequest {
+    bytes key = 1;
+    bytes value = 2;
+}
+
+message PutResponse {
+    bool success = 1;
+    uint64 partition = 2;  // Which partition handled this request
+}
+
+message GetRequest {
+    bytes key = 1;
+    ReadMode read_mode = 2;  // Read consistency level
+}
+
+// Read consistency levels for get operations
+enum ReadMode {
+    READ_MODE_LINEARIZABLE = 0;  // Read from leader (strongest, default)
+    READ_MODE_STALE = 1;          // Direct local read (fastest, may be stale)
+    READ_MODE_FOLLOWER = 2;       // ReadIndex from leader, then local read
+}
+
+message GetResponse {
+    bool success = 1;
+    bytes value = 2;
+    bool found = 3;
+}
+
+message DeleteRequest {
+    bytes key = 1;
+}
+
+message DeleteResponse {
+    bool success = 1;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+    bool healthy = 1;
+    uint32 num_partitions = 2;
+    uint32 leaders_ready = 3;
+}
+
+message MetadataRequest {
+    repeated string topics = 1; 
+}
+
+message MetadataResponse {
+    repeated NodeInfo nodes = 1;
+    repeated PartitionInfo partitions = 2;
+}
+
+message NodeInfo {
+    uint64 node_id = 1;
+    string address = 2;
+}
+
+message PartitionInfo {
+    uint64 partition_id = 1;
+    uint64 leader_id = 2;
+    repeated uint64 replicas = 3;
+}
+
+// Batch operations for performance
+message KVPair {
+    bytes key = 1;
+    bytes value = 2;
+}
+
+message BatchPutRequest {
+    repeated KVPair pairs = 1;
+}
+
+message BatchPutResponse {
+    uint32 successful_count = 1;
+    uint32 failed_count = 2;
+    repeated string errors = 3;  // Optional: error messages
+}
+
+message ReadIndexRequest {
+    uint64 term = 1;          // Follower's term
+    uint64 leader_id = 2;     // ID of the leader
+    string uuid = 3;          // Optional request ID
+}
+
+message ReadIndexResponse {
+    uint64 term = 1;          // Current term
+    bool success = 2;         // True if leader confirmed leadership
+    uint64 read_index = 3;    // The commit index at time of request
+}
+
+// Admin messages
+
+message CreateCollectionRequest {
+    string admin_token = 1;
+    string name = 2;
+}
+
+message CreateCollectionResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+message ListCollectionsRequest {
+    string admin_token = 1;
+}
+
+message ListCollectionsResponse {
+    bool success = 1;
+    repeated string collections = 2;
+    string error = 3;
+}
+
+message DropCollectionRequest {
+    string admin_token = 1;
+    string name = 2;
+}
+
+message DropCollectionResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+message ListConsumerGroupsRequest {
+    string admin_token = 1;
+}
+
+message ConsumerGroupSummary {
+    string group_id = 1;
+    uint32 members = 2;
+    string state = 3;
+    uint64 lag = 4;
+    string assignment_strategy = 5;
+}
+
+message ListConsumerGroupsResponse {
+    bool success = 1;
+    repeated ConsumerGroupSummary groups = 2;
+    string error = 3;
+}
+
+message DescribeConsumerGroupRequest {
+    string admin_token = 1;
+    string group_id = 2;
+}
+
+message ConsumerMemberInfo {
+    string consumer_id = 1;
+    string host = 2;
+    repeated uint32 partitions = 3;
+}
+
+message PartitionLagInfo {
+    string collection = 1;
+    uint32 partition = 2;
+    uint64 current_offset = 3;
+    uint64 latest_offset = 4;
+    uint64 lag = 5;
+}
+
+message DescribeConsumerGroupResponse {
+    bool success = 1;
+    string group_id = 2;
+    string state = 3;
+    repeated ConsumerMemberInfo members = 4;
+    repeated PartitionLagInfo partitions = 5;
+    uint64 total_lag = 6;
+    string error = 7;
+}
+
+// --- Partition Messages ---
+
+message ListPartitionsRequest {
+    string admin_token = 1;
+    string collection = 2;  // Optional: filter by collection
+}
+
+message PartitionSummary {
+    string collection = 1;
+    uint32 partition = 2;
+    uint64 size_bytes = 3;
+    uint64 items = 4;
+    string assigned_to = 5;
+    string status = 6;
+}
+
+message ListPartitionsResponse {
+    bool success = 1;
+    repeated PartitionSummary partitions = 2;
+    string error = 3;
+}
+
+message GetPartitionAssignmentsRequest {
+    string admin_token = 1;
+    string group_id = 2;  // Optional: filter by group
+}
+
+message PartitionAssignmentSummary {
+    string group_id = 1;
+    string consumer_id = 2;
+    string collection = 3;
+    uint32 partition = 4;
+    uint64 current_offset = 5;
+    uint64 lag = 6;
+}
+
+message GetPartitionAssignmentsResponse {
+    bool success = 1;
+    repeated PartitionAssignmentSummary assignments = 2;
+    string error = 3;
+}
+
+// --- Replication Messages ---
+
+message GetReplicationStatusRequest {
+    string admin_token = 1;
+}
+
+message GetReplicationStatusResponse {
+    bool success = 1;
+    string node_id = 2;
+    string role = 3;
+    string leader_address = 4;
+    repeated string followers = 5;
+    string state = 6;
+    string last_sync = 7;
+    uint64 total_changes = 8;
+    uint64 changes_applied = 9;
+    string error = 10;
+}
+
+message GetReplicationNodesRequest {
+    string admin_token = 1;
+}
+
+message ReplicationNodeInfo {
+    string node_id = 1;
+    string address = 2;
+    string role = 3;
+    string status = 4;
+    uint64 lag_ms = 5;
+    string last_seen = 6;
+}
+
+message GetReplicationNodesResponse {
+    bool success = 1;
+    repeated ReplicationNodeInfo nodes = 2;
+    string error = 3;
+}
+
+message GetReplicationLagRequest {
+    string admin_token = 1;
+}
+
+message ReplicationLagInfo {
+    string follower_node = 1;
+    uint64 leader_offset = 2;
+    uint64 follower_offset = 3;
+    uint64 lag_records = 4;
+    uint64 lag_ms = 5;
+    string status = 6;
+}
+
+message GetReplicationLagResponse {
+    bool success = 1;
+    repeated ReplicationLagInfo lags = 2;
+    string error = 3;
+}

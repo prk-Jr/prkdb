@@ -62,12 +62,13 @@ impl RpcClientPool {
                                 }
                             }
                             ChaosRule::Drop { src, dst, rate } => {
-                                if self.local_node_id == src && target_node == dst {
-                                    if rand::random::<f64>() < rate {
-                                        return Err(RpcError::Rpc(tonic::Status::unavailable(
-                                            "Chaos drop",
-                                        )));
-                                    }
+                                if self.local_node_id == src
+                                    && target_node == dst
+                                    && rand::random::<f64>() < rate
+                                {
+                                    return Err(RpcError::Rpc(tonic::Status::unavailable(
+                                        "Chaos drop",
+                                    )));
                                 }
                             }
                         }

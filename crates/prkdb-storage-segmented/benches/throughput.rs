@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use prkdb_core::storage::StorageAdapter;
 use prkdb_storage_segmented::SegmentedLogAdapter;
+use prkdb_types::storage::StorageAdapter;
 use tempfile::tempdir;
 
 fn bench_puts(c: &mut Criterion) {

@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity)]
 //! # IndexedStorage - High-Performance Storage with Secondary Indexes
 //!
 //! This module provides a generic storage adapter with secondary index support,
@@ -73,10 +74,10 @@
 
 use crate::storage::WalStorageAdapter;
 use dashmap::DashMap;
-use prkdb_core::collection::Collection;
-use prkdb_core::error::StorageError;
-use prkdb_core::index::Indexed;
-use prkdb_core::storage::StorageAdapter;
+use prkdb_types::collection::Collection;
+use prkdb_types::error::StorageError;
+use prkdb_types::index::Indexed;
+use prkdb_types::storage::StorageAdapter;
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -152,9 +153,9 @@ impl MemoryIndex {
     fn add(&mut self, field: &str, value: Vec<u8>, primary_key: Vec<u8>) {
         self.indexes
             .entry(field.to_string())
-            .or_insert_with(BTreeMap::new)
+            .or_default()
             .entry(value)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(primary_key);
     }
 
@@ -219,9 +220,9 @@ impl MemoryIndex {
     fn add_compound(&mut self, index_name: &str, composite_value: Vec<u8>, primary_key: Vec<u8>) {
         self.compound_indexes
             .entry(index_name.to_string())
-            .or_insert_with(BTreeMap::new)
+            .or_default()
             .entry(composite_value)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(primary_key);
     }
 
@@ -252,9 +253,9 @@ impl MemoryIndex {
         let mut total_entries = 0;
         let mut total_keys = 0;
 
-        for (_, index) in &self.indexes {
+        for index in self.indexes.values() {
             total_keys += index.len();
-            for (_, pks) in index {
+            for pks in index.values() {
                 total_entries += pks.len();
             }
         }
@@ -303,6 +304,7 @@ impl MemoryIndex {
     }
 
     /// Search full-text index, returns primary keys ranked by match count
+    #[allow(dead_code)]
     fn search_text(&self, field: &str, query: &str) -> Vec<(Vec<u8>, usize)> {
         let tokens = Self::tokenize(query);
         let mut scores: std::collections::HashMap<Vec<u8>, usize> =
@@ -414,8 +416,8 @@ pub struct QueryBuilder<'a, S: StorageAdapter, T> {
 
 impl<'a, S: StorageAdapter + 'static, T> QueryBuilder<'a, S, T>
 where
-    T: prkdb_core::index::Indexed
-        + prkdb_core::collection::Collection
+    T: prkdb_types::index::Indexed
+        + prkdb_types::collection::Collection
         + serde::de::DeserializeOwned
         + Clone,
 {
@@ -655,7 +657,7 @@ where
     pub async fn with_computed<C, F>(
         self,
         compute_fn: F,
-    ) -> Result<Vec<prkdb_core::WithComputed<T, C>>, StorageError>
+    ) -> Result<Vec<prkdb_types::collection::WithComputed<T, C>>, StorageError>
     where
         F: Fn(&T) -> C,
     {
@@ -664,7 +666,7 @@ where
             .into_iter()
             .map(|record| {
                 let computed = compute_fn(&record);
-                prkdb_core::WithComputed::new(record, computed)
+                prkdb_types::collection::WithComputed::new(record, computed)
             })
             .collect())
     }
@@ -682,7 +684,7 @@ where
         F: Fn(&T) -> V,
     {
         let records = self.collect().await?;
-        Ok(records.iter().map(|r| field_fn(r)).collect())
+        Ok(records.iter().map(field_fn).collect())
     }
 
     /// Partition records by a predicate
@@ -1211,8 +1213,8 @@ pub struct MappedQueryBuilder<'a, S: StorageAdapter, T, U, F: Fn(T) -> U> {
 
 impl<'a, S: StorageAdapter + 'static, T, U, F> MappedQueryBuilder<'a, S, T, U, F>
 where
-    T: prkdb_core::index::Indexed
-        + prkdb_core::collection::Collection
+    T: prkdb_types::index::Indexed
+        + prkdb_types::collection::Collection
         + serde::de::DeserializeOwned
         + Clone,
     F: Fn(T) -> U,
@@ -1398,14 +1400,11 @@ impl<'a, S: StorageAdapter + 'static> Transaction<'a, S> {
                         .storage
                         .lock_free_indexes
                         .entry(collection.clone())
-                        .or_insert_with(DashMap::new);
+                        .or_default();
 
                     for (field, value) in index_values {
-                        let field_idx = col_idx.entry(field).or_insert_with(DashMap::new);
-                        field_idx
-                            .entry(value)
-                            .or_insert_with(Vec::new)
-                            .push(key.clone());
+                        let field_idx = col_idx.entry(field).or_default();
+                        field_idx.entry(value).or_default().push(key.clone());
                     }
                 }
                 TxOperation::Delete {
@@ -1758,13 +1757,10 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
 
         for (col_name, mem_index) in &persisted.collections {
             // Restore field values indexes
-            let col_idx = self
-                .lock_free_indexes
-                .entry(col_name.clone())
-                .or_insert_with(DashMap::new);
+            let col_idx = self.lock_free_indexes.entry(col_name.clone()).or_default();
 
             for (field, values) in &mem_index.indexes {
-                let field_idx = col_idx.entry(field.clone()).or_insert_with(DashMap::new);
+                let field_idx = col_idx.entry(field.clone()).or_default();
                 for (val, keys) in values {
                     field_idx.insert(val.clone(), keys.clone());
                 }
@@ -1774,12 +1770,10 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
             let text_col_idx = self
                 .lock_free_text_indexes
                 .entry(col_name.clone())
-                .or_insert_with(DashMap::new);
+                .or_default();
 
             for (field, tokens) in &mem_index.text_indexes {
-                let field_idx = text_col_idx
-                    .entry(field.clone())
-                    .or_insert_with(DashMap::new);
+                let field_idx = text_col_idx.entry(field.clone()).or_default();
                 for (token, keys) in tokens {
                     field_idx.insert(token.clone(), keys.clone());
                 }
@@ -1924,15 +1918,13 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         let collection_idx = self
             .lock_free_indexes
             .entry(collection_name.clone())
-            .or_insert_with(DashMap::new);
+            .or_default();
 
         for (field, value) in record.index_values() {
-            let field_idx = collection_idx
-                .entry(field.to_string())
-                .or_insert_with(DashMap::new);
+            let field_idx = collection_idx.entry(field.to_string()).or_default();
             field_idx
                 .entry(value)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(primary_key.clone());
         }
 
@@ -1966,12 +1958,10 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// ```
     pub async fn insert_with_hooks<T>(&self, record: &mut T) -> Result<(), StorageError>
     where
-        T: Indexed + Collection + prkdb_core::Hooks,
+        T: Indexed + Collection + prkdb_types::Hooks,
     {
         // Call before_insert hook
-        record
-            .before_insert()
-            .map_err(|e| StorageError::Validation(e))?;
+        record.before_insert().map_err(StorageError::Validation)?;
 
         // Insert the record
         self.insert(record).await?;
@@ -1985,12 +1975,10 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Delete a record with lifecycle hooks
     pub async fn delete_with_hooks<T>(&self, record: &T) -> Result<(), StorageError>
     where
-        T: Indexed + Collection + prkdb_core::Hooks,
+        T: Indexed + Collection + prkdb_types::Hooks,
     {
         // Call before_delete hook
-        record
-            .before_delete()
-            .map_err(|e| StorageError::Validation(e))?;
+        record.before_delete().map_err(StorageError::Validation)?;
 
         // Delete the record
         self.delete(record).await?;
@@ -2020,7 +2008,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// ```
     pub async fn insert_validated<T>(&self, record: &T) -> Result<(), StorageError>
     where
-        T: Indexed + Collection + prkdb_core::Validatable,
+        T: Indexed + Collection + prkdb_types::Validatable,
     {
         // Run validation first
         if let Err(errors) = record.validate() {
@@ -2044,7 +2032,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// ```
     pub async fn insert_timestamped<T>(&self, record: &mut T) -> Result<(), StorageError>
     where
-        T: Indexed + Collection + prkdb_core::Timestamped,
+        T: Indexed + Collection + prkdb_types::Timestamped,
     {
         record.init_timestamps();
         self.insert(record).await
@@ -2055,7 +2043,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Sets updated_at to current time, sets created_at only if new record.
     pub async fn upsert_timestamped<T>(&self, record: &mut T) -> Result<bool, StorageError>
     where
-        T: Indexed + Collection + prkdb_core::Timestamped,
+        T: Indexed + Collection + prkdb_types::Timestamped,
     {
         let primary_key = serde_json::to_vec(record.id())
             .map_err(|e| StorageError::Serialization(format!("Failed to serialize id: {}", e)))?;
@@ -2160,7 +2148,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// ```
     pub async fn soft_delete<T>(&self, id: &T::Id) -> Result<bool, StorageError>
     where
-        T: Indexed + Collection + DeserializeOwned + prkdb_core::SoftDeletable,
+        T: Indexed + Collection + DeserializeOwned + prkdb_types::SoftDeletable,
     {
         if let Some(mut record) = self.get::<T>(id).await? {
             record.mark_deleted();
@@ -2180,7 +2168,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// ```
     pub async fn restore<T>(&self, id: &T::Id) -> Result<bool, StorageError>
     where
-        T: Indexed + Collection + DeserializeOwned + prkdb_core::SoftDeletable,
+        T: Indexed + Collection + DeserializeOwned + prkdb_types::SoftDeletable,
     {
         if let Some(mut record) = self.get::<T>(id).await? {
             record.restore();
@@ -2199,7 +2187,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// ```
     pub async fn query_active<T>(&self) -> Result<Vec<T>, StorageError>
     where
-        T: Indexed + Collection + DeserializeOwned + prkdb_core::SoftDeletable,
+        T: Indexed + Collection + DeserializeOwned + prkdb_types::SoftDeletable,
     {
         let all: Vec<T> = self.all().await?;
         Ok(all.into_iter().filter(|r| r.is_active()).collect())
@@ -2648,19 +2636,14 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         self.storage.put_batch(wal_entries).await?;
 
         // Step 3: Lock-free index updates using DashMap
-        let collection_idx = self
-            .lock_free_indexes
-            .entry(collection_name)
-            .or_insert_with(DashMap::new);
+        let collection_idx = self.lock_free_indexes.entry(collection_name).or_default();
 
         for (primary_key, _data, index_values) in &serialized {
             for (field, value) in index_values {
-                let field_idx = collection_idx
-                    .entry(field.clone())
-                    .or_insert_with(DashMap::new);
+                let field_idx = collection_idx.entry(field.clone()).or_default();
                 field_idx
                     .entry(value.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(primary_key.clone());
             }
         }
