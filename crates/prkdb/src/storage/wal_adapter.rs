@@ -1,5 +1,6 @@
 #[allow(unused_imports)]
 use super::cache::LruCache;
+use super::checkpoint;
 use super::config::{StorageConfig, SyncMode};
 use super::recovery::RecoveryManager;
 
@@ -206,6 +207,8 @@ struct WalStorageInner {
     flush_notify: Arc<Notify>,
     // Phase 8: Track max offset for compaction and change detection
     max_offset: AtomicU64,
+    // Phase 9: Checkpoint path for fast recovery
+    checkpoint_path: PathBuf,
     // Phase 2: Writer thread handle (stored here for Drop)
     _writer_handle: Option<Arc<Mutex<Option<thread::JoinHandle<()>>>>>,
 }
@@ -283,6 +286,7 @@ impl WalStorageAdapter {
             accumulator: Mutex::new(AdaptiveBatchAccumulator::new(config.batching.clone())),
             flush_notify: Arc::new(Notify::new()),
             max_offset: AtomicU64::new(0),
+            checkpoint_path: config.wal.log_dir.join("checkpoint.json"),
             _writer_handle: Some(writer_handle),
         });
 
@@ -357,6 +361,7 @@ impl WalStorageAdapter {
             )),
             flush_notify: Arc::new(Notify::new()),
             max_offset: AtomicU64::new(0),
+            checkpoint_path: storage_config.wal.log_dir.join("checkpoint.json"),
             _writer_handle: Some(writer_handle),
         });
 
@@ -433,6 +438,7 @@ impl WalStorageAdapter {
             )),
             flush_notify: Arc::new(Notify::new()),
             max_offset: AtomicU64::new(0),
+            checkpoint_path: storage_config.wal.log_dir.join("checkpoint.json"),
             _writer_handle: Some(writer_handle),
         });
 
@@ -515,6 +521,7 @@ impl WalStorageAdapter {
             )),
             flush_notify: Arc::new(Notify::new()),
             max_offset: AtomicU64::new(0),
+            checkpoint_path: storage_config.wal.log_dir.join("checkpoint.json"),
             _writer_handle: Some(writer_handle),
         });
 
@@ -645,15 +652,45 @@ impl WalStorageAdapter {
     /// Index will be rebuilt from application put/delete operations after restart.
     /// Index will be rebuilt from application put/delete operations after restart.
     async fn rebuild_index_async(&self) -> Result<(), StorageError> {
-        // Use scan API to rebuild index from WAL
-        // TODO: In the future, load last checkpoint offsets and pass them to scan_from
-        // For now, scan everything associated with current log segments
-        let records = self
-            .inner
-            .wal
-            .scan()
-            .await
-            .map_err(|e| StorageError::Internal(format!("Scan error: {}", e)))?;
+        // Phase 9: Load checkpoint for incremental recovery
+        let checkpoint = match checkpoint::load_checkpoint(&self.inner.checkpoint_path) {
+            Ok(Some(cp)) => {
+                info!(
+                    "Loaded checkpoint: {} segments, max_offset={}, using scan_from for incremental recovery",
+                    cp.segment_offsets.len(),
+                    cp.max_offset
+                );
+                Some(cp)
+            }
+            Ok(None) => {
+                info!("No checkpoint found, performing full WAL scan");
+                None
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to load checkpoint ({}), falling back to full scan",
+                    e
+                );
+                None
+            }
+        };
+
+        // Use scan_from if checkpoint exists, otherwise full scan
+        let records = if let Some(ref cp) = checkpoint {
+            let segment_count = self.inner.wal.segment_count();
+            let start_offsets = cp.to_start_offsets(segment_count);
+            self.inner
+                .wal
+                .scan_from(&start_offsets)
+                .await
+                .map_err(|e| StorageError::Internal(format!("scan_from error: {}", e)))?
+        } else {
+            self.inner
+                .wal
+                .scan()
+                .await
+                .map_err(|e| StorageError::Internal(format!("Scan error: {}", e)))?
+        };
 
         let pinned = self.inner.index.pin();
 
@@ -735,6 +772,20 @@ impl WalStorageAdapter {
         self.inner._config.wal.log_dir.clone()
     }
 
+    /// Save checkpoint for faster recovery on next startup
+    ///
+    /// Call this before graceful shutdown to ensure the next startup
+    /// can use incremental recovery via `scan_from`.
+    pub fn save_checkpoint(&self) -> Result<(), StorageError> {
+        let current_offset = self.inner.max_offset.load(Ordering::Relaxed);
+        let segment_count = self.inner.wal.segment_count();
+        let cp = checkpoint::Checkpoint::from_segment_count(segment_count, current_offset);
+        checkpoint::save_checkpoint(&self.inner.checkpoint_path, &cp)
+            .map_err(|e| StorageError::Internal(format!("Failed to save checkpoint: {}", e)))?;
+        info!("Checkpoint saved with max_offset={}", current_offset);
+        Ok(())
+    }
+
     /// Background task to flush accumulator
     async fn run_flush_loop(weak_inner: Weak<WalStorageInner>) {
         // We need the notify to wait on. We can get it from the inner if it's alive.
@@ -773,8 +824,8 @@ impl WalStorageAdapter {
                 Self::flush_accumulator_inner(&inner).await;
 
                 // Update cache size metrics periodically
-                // TODO: Implement estimate_size_bytes for ShardedLruCache
-                // For now, skip this metric update
+                let cache_size = inner.cache.estimate_size_bytes().await;
+                inner.metrics.set_cache_size_bytes(cache_size);
 
                 // Try compaction
                 if let Some(compactor) = &inner.compactor {
@@ -784,6 +835,22 @@ impl WalStorageAdapter {
                         Ok(true) => {
                             // Compaction ran, record metrics
                             inner.metrics.record_compaction_cycle();
+
+                            // Phase 9: Save checkpoint after successful compaction
+                            let segment_count = inner.wal.segment_count();
+                            let cp = checkpoint::Checkpoint::from_segment_count(
+                                segment_count,
+                                current_offset,
+                            );
+                            if let Err(e) = checkpoint::save_checkpoint(&inner.checkpoint_path, &cp)
+                            {
+                                warn!("Failed to save checkpoint: {}", e);
+                            } else {
+                                tracing::debug!(
+                                    "Checkpoint saved with max_offset={}",
+                                    current_offset
+                                );
+                            }
                         }
                         Ok(false) => {
                             // No compaction needed

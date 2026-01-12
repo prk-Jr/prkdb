@@ -120,10 +120,21 @@ where
             async move {
                 // Get collection handle and call put_batch
                 let handle = db_clone.collection::<C>();
-                let _results = handle.put_batch(items).await;
+                let results = handle
+                    .put_batch(items)
+                    .await
+                    .map_err(|e| StorageError::Internal(e.to_string()))?;
 
-                // For now, assume success
-                // TODO: Properly handle individual result errors
+                // Count failures and report if any occurred
+                let failed_count = results.iter().filter(|r| r.is_err()).count();
+                if failed_count > 0 {
+                    tracing::warn!(
+                        "Batch operation had {} failed items out of {}",
+                        failed_count,
+                        results.len()
+                    );
+                }
+
                 Ok(())
             }
         };

@@ -181,6 +181,21 @@ impl<K: Eq + Hash + Clone, V: Clone> ShardedLruCache<K, V> {
 
         futures::future::join_all(futures).await;
     }
+
+    /// Estimate cache size in bytes across all shards
+    /// For Vec<u8> keys and values, this is reasonably accurate
+    pub async fn estimate_size_bytes(&self) -> u64
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        let mut total = 0u64;
+        for shard in &self.shards {
+            let guard = shard.read().await;
+            total += guard.estimate_size_bytes();
+        }
+        total
+    }
 }
 
 /// Simple LRU cache with configurable capacity and optional metrics tracking

@@ -48,6 +48,7 @@ tokio-stream = { version = "0.1", features = ["time", "sync", "net"] }
 tracing-subscriber = { workspace = true }
 sysinfo = "0.30"
 seahash = "4.1.0"
+crc32fast = "1.4"  # Fast CRC32 checksums for checkpoint integrity
 prometheus = { workspace = true }
 lazy_static = { workspace = true }
 clap = { version = "4.4", features = ["derive"] }

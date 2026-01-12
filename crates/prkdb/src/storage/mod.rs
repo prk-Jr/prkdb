@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod checkpoint; // Phase 9: Checkpoint persistence for fast recovery
 pub mod collection_partitioned_adapter; // Kafka-style collection partitioning for 4-7x performance!
 pub mod config;
 pub mod recovery;
