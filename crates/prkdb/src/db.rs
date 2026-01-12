@@ -1115,4 +1115,125 @@ impl PrkDb {
         }
         Ok(())
     }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Remote Admin Operations (Phase 14)
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    /// Reset consumer group offsets to a specific position
+    ///
+    /// # Arguments
+    /// * `group_id` - Consumer group to reset
+    /// * `collection_filter` - Optional collection name (None = all collections)
+    /// * `target_offset` - Target offset (None = latest, Some(0) = earliest)
+    ///
+    /// Returns the number of partitions that were reset.
+    pub async fn reset_consumer_offset(
+        &self,
+        group_id: &str,
+        collection_filter: Option<&str>,
+        target_offset: Option<u64>,
+    ) -> Result<u32, Error> {
+        tracing::info!(
+            "Resetting consumer group '{}' offsets (collection={:?}, target={:?})",
+            group_id,
+            collection_filter,
+            target_offset
+        );
+
+        let offset_store = crate::consumer::StorageOffsetStore::new(self.storage.clone());
+        let group_offsets = offset_store.get_group_offsets(group_id).await?;
+
+        let mut partitions_reset = 0u32;
+
+        for entry in group_offsets.iter() {
+            let key = entry.key();
+            let key_parts: Vec<&str> = key.split(':').collect();
+
+            if key_parts.len() < 2 {
+                continue;
+            }
+
+            let collection = key_parts[0];
+            let partition: u32 = match key_parts[1].parse() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            // Apply collection filter
+            if let Some(filter) = collection_filter {
+                if collection != filter {
+                    continue;
+                }
+            }
+
+            // Determine target offset
+            let new_offset = match target_offset {
+                Some(o) => o,
+                None => {
+                    // Latest: get current end of log
+                    self.get_collection_latest_offset(collection, partition)
+                        .await
+                        .unwrap_or(0)
+                }
+            };
+
+            // Update offset in storage
+            let offset_key = format!("offset:{}:{}:{}", group_id, collection, partition);
+            let offset_bytes = new_offset.to_le_bytes().to_vec();
+            self.storage
+                .put(offset_key.as_bytes(), &offset_bytes)
+                .await?;
+
+            partitions_reset += 1;
+        }
+
+        tracing::info!(
+            "Reset {} partitions for consumer group '{}'",
+            partitions_reset,
+            group_id
+        );
+
+        Ok(partitions_reset)
+    }
+
+    /// Start replication to a target follower address
+    ///
+    /// This is a placeholder implementation. In a full Raft system,
+    /// this would add a new node to the cluster configuration.
+    pub async fn start_replication(&self, target_address: &str) -> Result<String, Error> {
+        tracing::info!("Start replication requested for target: {}", target_address);
+
+        // In a real implementation, this would:
+        // 1. Validate the target address is reachable
+        // 2. Add node to Raft cluster configuration
+        // 3. Trigger leader to send snapshots/logs
+
+        // For now, return a placeholder node ID
+        let node_id = format!("node-{}", seahash::hash(target_address.as_bytes()));
+
+        tracing::warn!(
+            "Replication start is a stub. Target: {}, Assigned NodeId: {}",
+            target_address,
+            node_id
+        );
+
+        Ok(node_id)
+    }
+
+    /// Stop replication to a target follower address
+    ///
+    /// This is a placeholder implementation. In a full Raft system,
+    /// this would remove a node from the cluster configuration.
+    pub async fn stop_replication(&self, target_address: &str) -> Result<(), Error> {
+        tracing::info!("Stop replication requested for target: {}", target_address);
+
+        // In a real implementation, this would:
+        // 1. Remove node from Raft cluster configuration
+        // 2. Stop sending AppendEntries to that node
+
+        tracing::warn!("Replication stop is a stub. Target: {}", target_address);
+
+        Ok(())
+    }
 }

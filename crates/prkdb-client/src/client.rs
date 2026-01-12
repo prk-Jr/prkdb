@@ -701,6 +701,98 @@ impl PrkDbClient {
             anyhow::bail!("GetReplicationLag failed: {}", response.error)
         }
     }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Phase 14: Remote Admin Operations
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    /// Reset consumer group offset
+    ///
+    /// # Arguments
+    /// * `group_id` - Consumer group to reset
+    /// * `collection` - Optional collection name (None = all)
+    /// * `target` - "earliest", "latest", or a specific offset number
+    pub async fn reset_consumer_offset(
+        &self,
+        group_id: &str,
+        collection: Option<&str>,
+        target: &str,
+    ) -> anyhow::Result<u32> {
+        use prkdb_proto::raft::reset_consumer_offset_request::Target;
+        use prkdb_proto::raft::ResetConsumerOffsetRequest;
+
+        let mut client = self.get_any_client().await?;
+
+        // Parse target
+        let target_field = match target {
+            "earliest" => Some(Target::Earliest(true)),
+            "latest" => Some(Target::Latest(true)),
+            s => {
+                if let Ok(offset) = s.parse::<u64>() {
+                    Some(Target::Offset(offset))
+                } else {
+                    anyhow::bail!(
+                        "Invalid target: must be 'earliest', 'latest', or an offset number"
+                    )
+                }
+            }
+        };
+
+        let request = ResetConsumerOffsetRequest {
+            admin_token: self.admin_token.clone().unwrap_or_default(),
+            group_id: group_id.to_string(),
+            collection: collection.unwrap_or_default().to_string(),
+            target: target_field,
+        };
+
+        let response = client.reset_consumer_offset(request).await?.into_inner();
+
+        if response.success {
+            Ok(response.partitions_reset)
+        } else {
+            anyhow::bail!("ResetConsumerOffset failed: {}", response.error)
+        }
+    }
+
+    /// Start replication to a target address
+    pub async fn start_replication(&self, target_address: &str) -> anyhow::Result<String> {
+        use prkdb_proto::raft::StartReplicationRequest;
+
+        let mut client = self.get_any_client().await?;
+
+        let request = StartReplicationRequest {
+            admin_token: self.admin_token.clone().unwrap_or_default(),
+            target_address: target_address.to_string(),
+        };
+
+        let response = client.start_replication(request).await?.into_inner();
+
+        if response.success {
+            Ok(response.node_id)
+        } else {
+            anyhow::bail!("StartReplication failed: {}", response.error)
+        }
+    }
+
+    /// Stop replication to a target address
+    pub async fn stop_replication(&self, target_address: &str) -> anyhow::Result<()> {
+        use prkdb_proto::raft::StopReplicationRequest;
+
+        let mut client = self.get_any_client().await?;
+
+        let request = StopReplicationRequest {
+            admin_token: self.admin_token.clone().unwrap_or_default(),
+            target_address: target_address.to_string(),
+        };
+
+        let response = client.stop_replication(request).await?.into_inner();
+
+        if response.success {
+            Ok(())
+        } else {
+            anyhow::bail!("StopReplication failed: {}", response.error)
+        }
+    }
 }
 
 #[cfg(test)]

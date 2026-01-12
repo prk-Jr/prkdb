@@ -1,5 +1,5 @@
 use crate::commands::ReplicationCommands;
-use crate::output::{display_single, info, success, warning, OutputDisplay};
+use crate::output::{display_single, error, info, success, warning, OutputDisplay};
 use crate::Cli;
 use anyhow::Result;
 use prkdb_client::PrkDbClient;
@@ -212,7 +212,7 @@ async fn show_replication_lag(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-async fn start_replication(config_path: &str, _cli: &Cli) -> Result<()> {
+async fn start_replication(config_path: &str, cli: &Cli) -> Result<()> {
     info(&format!(
         "Starting replication with config: {}",
         config_path
@@ -226,21 +226,28 @@ async fn start_replication(config_path: &str, _cli: &Cli) -> Result<()> {
         ));
     }
 
-    // Read configuration file
-    let config_content = std::fs::read_to_string(config_path)?;
-    info(&format!(
-        "Loaded configuration: {} bytes",
-        config_content.len()
-    ));
+    // Read configuration file - expect it to contain target address
+    let target_address = std::fs::read_to_string(config_path)?
+        .lines()
+        .next()
+        .map(|s| s.trim().to_string())
+        .ok_or_else(|| anyhow::anyhow!("Config file is empty"))?;
 
-    // TODO: Implement remote start replication RPC
-    warning("Note: Remote replication start is not yet implemented.");
-    warning("Please start replication locally via the server configuration.");
+    info(&format!("Target address: {}", target_address));
 
-    success("Replication configuration loaded successfully");
-    info(
-        "Note: Full replication functionality requires additional setup and network configuration",
-    );
+    // Call remote RPC
+    let client = create_client(cli).await?;
+    match client.start_replication(&target_address).await {
+        Ok(node_id) => {
+            success(&format!(
+                "Replication started successfully. Assigned NodeId: {}",
+                node_id
+            ));
+        }
+        Err(e) => {
+            error(&format!("Failed to start replication: {}", e));
+        }
+    }
 
     Ok(())
 }

@@ -247,7 +247,7 @@ async fn reset_consumer_offset(
     offset: Option<u64>,
     earliest: bool,
     latest: bool,
-    _cli: &Cli,
+    cli: &Cli,
 ) -> Result<()> {
     info(&format!("Resetting offset for consumer group: {}", group));
 
@@ -262,22 +262,27 @@ async fn reset_consumer_offset(
         return Ok(());
     }
 
-    let reset_to = if let Some(offset) = offset {
-        format!("offset {}", offset)
+    let target = if let Some(offset) = offset {
+        offset.to_string()
     } else if earliest {
         "earliest".to_string()
     } else {
         "latest".to_string()
     };
 
-    // TODO: Implement remote reset offset RPC
-    warning(&format!(
-        "This will reset all partitions for group '{}' to {}",
-        group, reset_to
-    ));
-    warning("Note: Reset offset is not yet implemented for remote mode.");
-
-    success(&format!("Reset consumer group '{}' to {}", group, reset_to));
+    // Call remote RPC
+    let client = create_client(cli).await?;
+    match client.reset_consumer_offset(group, None, &target).await {
+        Ok(partitions_reset) => {
+            success(&format!(
+                "Reset consumer group '{}' to {} ({} partitions affected)",
+                group, target, partitions_reset
+            ));
+        }
+        Err(e) => {
+            error(&format!("Failed to reset consumer offset: {}", e));
+        }
+    }
 
     Ok(())
 }

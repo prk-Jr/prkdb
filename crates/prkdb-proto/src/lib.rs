@@ -60,4 +60,11 @@ pub use raft::{
     // Raft messages
     RequestVoteRequest,
     RequestVoteResponse,
+    // Admin messages for consumer/replication
+    ResetConsumerOffsetRequest,
+    ResetConsumerOffsetResponse,
+    StartReplicationRequest,
+    StartReplicationResponse,
+    StopReplicationRequest,
+    StopReplicationResponse,
 };

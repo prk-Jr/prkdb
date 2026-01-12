@@ -74,6 +74,19 @@ service PrkDbService {
 
     // Get replication lag information
     rpc GetReplicationLag (GetReplicationLagRequest) returns (GetReplicationLagResponse);
+
+    // --- Consumer Admin Operations ---
+
+    // Reset consumer group offset to a specific position
+    rpc ResetConsumerOffset (ResetConsumerOffsetRequest) returns (ResetConsumerOffsetResponse);
+
+    // --- Replication Admin Operations ---
+
+    // Start replication to a target follower
+    rpc StartReplication (StartReplicationRequest) returns (StartReplicationResponse);
+
+    // Stop replication to a target follower
+    rpc StopReplication (StopReplicationRequest) returns (StopReplicationResponse);
 }
 
 message RequestVoteRequest {
@@ -404,4 +417,47 @@ message GetReplicationLagResponse {
     bool success = 1;
     repeated ReplicationLagInfo lags = 2;
     string error = 3;
+}
+
+// --- Consumer Admin Messages ---
+
+message ResetConsumerOffsetRequest {
+    string admin_token = 1;
+    string group_id = 2;
+    string collection = 3;  // Optional: specific collection, empty = all
+    // Target offset position
+    oneof target {
+        uint64 offset = 4;      // Specific offset
+        bool earliest = 5;      // Reset to earliest available
+        bool latest = 6;        // Reset to latest (end of log)
+    }
+}
+
+message ResetConsumerOffsetResponse {
+    bool success = 1;
+    uint32 partitions_reset = 2;
+    string error = 3;
+}
+
+// --- Replication Admin Messages ---
+
+message StartReplicationRequest {
+    string admin_token = 1;
+    string target_address = 2;  // Address of follower to add (e.g., "127.0.0.1:9001")
+}
+
+message StartReplicationResponse {
+    bool success = 1;
+    string node_id = 2;  // Assigned node ID for the new follower
+    string error = 3;
+}
+
+message StopReplicationRequest {
+    string admin_token = 1;
+    string target_address = 2;  // Address of follower to remove
+}
+
+message StopReplicationResponse {
+    bool success = 1;
+    string error = 2;
 }

@@ -616,6 +616,105 @@ impl PrkDbServiceTrait for PrkDbGrpcService {
             error: "".to_string(),
         }))
     }
+
+    async fn reset_consumer_offset(
+        &self,
+        request: Request<crate::raft::rpc::ResetConsumerOffsetRequest>,
+    ) -> Result<Response<crate::raft::rpc::ResetConsumerOffsetResponse>, Status> {
+        let req = request.into_inner();
+        self.validate_admin_token(&req.admin_token)?;
+
+        tracing::info!(
+            "Admin: ResetConsumerOffset group='{}' collection='{}'",
+            req.group_id,
+            req.collection
+        );
+
+        // Determine target offset
+        let target_offset = match req.target {
+            Some(crate::raft::rpc::reset_consumer_offset_request::Target::Offset(o)) => Some(o),
+            Some(crate::raft::rpc::reset_consumer_offset_request::Target::Earliest(true)) => {
+                // Get earliest offset (0 for simplicity, or query storage)
+                Some(0)
+            }
+            Some(crate::raft::rpc::reset_consumer_offset_request::Target::Latest(true)) => {
+                // Get latest offset from storage
+                None // Will be resolved by PrkDb
+            }
+            _ => None,
+        };
+
+        let collection_filter = if req.collection.is_empty() {
+            None
+        } else {
+            Some(req.collection.as_str())
+        };
+
+        match self
+            .db
+            .reset_consumer_offset(&req.group_id, collection_filter, target_offset)
+            .await
+        {
+            Ok(partitions_reset) => Ok(Response::new(
+                crate::raft::rpc::ResetConsumerOffsetResponse {
+                    success: true,
+                    partitions_reset,
+                    error: "".to_string(),
+                },
+            )),
+            Err(e) => Ok(Response::new(
+                crate::raft::rpc::ResetConsumerOffsetResponse {
+                    success: false,
+                    partitions_reset: 0,
+                    error: e.to_string(),
+                },
+            )),
+        }
+    }
+
+    async fn start_replication(
+        &self,
+        request: Request<crate::raft::rpc::StartReplicationRequest>,
+    ) -> Result<Response<crate::raft::rpc::StartReplicationResponse>, Status> {
+        let req = request.into_inner();
+        self.validate_admin_token(&req.admin_token)?;
+
+        tracing::info!("Admin: StartReplication target='{}'", req.target_address);
+
+        match self.db.start_replication(&req.target_address).await {
+            Ok(node_id) => Ok(Response::new(crate::raft::rpc::StartReplicationResponse {
+                success: true,
+                node_id,
+                error: "".to_string(),
+            })),
+            Err(e) => Ok(Response::new(crate::raft::rpc::StartReplicationResponse {
+                success: false,
+                node_id: "".to_string(),
+                error: e.to_string(),
+            })),
+        }
+    }
+
+    async fn stop_replication(
+        &self,
+        request: Request<crate::raft::rpc::StopReplicationRequest>,
+    ) -> Result<Response<crate::raft::rpc::StopReplicationResponse>, Status> {
+        let req = request.into_inner();
+        self.validate_admin_token(&req.admin_token)?;
+
+        tracing::info!("Admin: StopReplication target='{}'", req.target_address);
+
+        match self.db.stop_replication(&req.target_address).await {
+            Ok(_) => Ok(Response::new(crate::raft::rpc::StopReplicationResponse {
+                success: true,
+                error: "".to_string(),
+            })),
+            Err(e) => Ok(Response::new(crate::raft::rpc::StopReplicationResponse {
+                success: false,
+                error: e.to_string(),
+            })),
+        }
+    }
 }
 
 impl PrkDbGrpcService {
