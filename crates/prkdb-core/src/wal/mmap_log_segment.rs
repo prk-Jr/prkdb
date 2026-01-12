@@ -444,6 +444,13 @@ impl MmapLogSegment {
         mmap.flush()
     }
 
+    /// Get the current file size (bytes written)
+    ///
+    /// This returns the actual data size, not the allocated capacity.
+    pub fn file_size(&self) -> u64 {
+        self.file_position.load(Ordering::SeqCst)
+    }
+
     /// Verify segment integrity
     pub async fn verify_segment(&self) -> Result<(), WalError> {
         let mmap = self.mmap.lock().await;

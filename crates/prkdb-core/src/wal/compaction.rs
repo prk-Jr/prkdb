@@ -49,8 +49,21 @@ impl Compactor {
             return Ok(false);
         }
 
-        // TODO: Check total WAL size
-        // For now, we'll just use the offset-based truncation strategy
+        // Phase 16: Check total WAL size before triggering compaction
+        let total_wal_size = self.wal.total_size().await;
+        if total_wal_size < self.config.min_wal_size_bytes {
+            tracing::debug!(
+                "WAL size {}MB is below threshold {}MB, skipping compaction",
+                total_wal_size / (1024 * 1024),
+                self.config.min_wal_size_bytes / (1024 * 1024)
+            );
+            return Ok(false);
+        }
+
+        tracing::info!(
+            "WAL size {}MB exceeds threshold, triggering compaction",
+            total_wal_size / (1024 * 1024)
+        );
 
         // Calculate safe truncation offset
         // We want to keep some history, so we don't delete everything up to current_offset

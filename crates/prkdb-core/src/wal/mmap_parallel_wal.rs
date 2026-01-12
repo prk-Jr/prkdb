@@ -290,6 +290,18 @@ impl MmapParallelWal {
         self.metrics.clone()
     }
 
+    /// Get total size of all WAL segments (bytes written)
+    ///
+    /// This is used by the compactor to determine if compaction is needed.
+    pub async fn total_size(&self) -> u64 {
+        let mut total = 0u64;
+        for segment in &self.segments {
+            let seg = segment.lock().await;
+            total += seg.file_size();
+        }
+        total
+    }
+
     /// Set workload profile (Runtime Tuning)
     pub async fn set_profile(&self, profile: WorkloadProfile) {
         let mut config = self.config.lock().await;
