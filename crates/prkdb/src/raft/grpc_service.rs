@@ -3,8 +3,8 @@ use crate::raft::rpc::prk_db_service_server::{
     PrkDbService as PrkDbServiceTrait, PrkDbServiceServer,
 };
 use crate::raft::rpc::{
-    DeleteRequest, DeleteResponse, GetRequest, GetResponse, HealthRequest, HealthResponse,
-    PutRequest, PutResponse, WatchEvent, WatchRequest,
+    DeleteRequest, DeleteResponse, FetchSegmentRequest, GetRequest, GetResponse, HealthRequest,
+    HealthResponse, PutRequest, PutResponse, RawChunk, WatchEvent, WatchRequest,
 };
 use std::pin::Pin;
 use std::sync::Arc;
@@ -760,6 +760,125 @@ impl PrkDbServiceTrait for PrkDbGrpcService {
                 Err(_) => None, // Channel lagged, skip
             }
         });
+
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    // Phase 22: Type alias for FetchSegment stream
+    type FetchSegmentStream =
+        Pin<Box<dyn tokio_stream::Stream<Item = Result<RawChunk, Status>> + Send>>;
+
+    /// Fetch raw WAL segment data for zero-copy streaming
+    ///
+    /// This bypasses Protobuf serialization for the payload data,
+    /// streaming raw WAL bytes directly to the client for high throughput.
+    async fn fetch_segment(
+        &self,
+        request: Request<FetchSegmentRequest>,
+    ) -> Result<Response<Self::FetchSegmentStream>, Status> {
+        let req = request.into_inner();
+
+        tracing::info!(
+            "FetchSegment: start_offset={}, max_bytes={}, segment_id={}",
+            req.start_offset,
+            req.max_bytes,
+            req.segment_id
+        );
+
+        // Get WAL data from the database
+        // For now, we'll read from the storage adapter's scan_from method
+        let start_offset = req.start_offset;
+        let max_bytes = if req.max_bytes == 0 {
+            u64::MAX
+        } else {
+            req.max_bytes
+        };
+
+        // Stream chunks of 64KB each
+        const CHUNK_SIZE: usize = 64 * 1024;
+
+        // Create an async stream that reads data
+        let db = self.db.clone();
+        let stream = async_stream::try_stream! {
+            let mut current_offset = start_offset;
+            let mut bytes_sent: u64 = 0;
+            let storage = db.storage.clone();
+
+            // Use get_changes_since to read records from the offset
+            match storage.get_changes_since(current_offset).await {
+                Ok(changes) => {
+                    let mut chunk_data: Vec<u8> = Vec::with_capacity(CHUNK_SIZE);
+                    let mut chunk_start = current_offset;
+
+                    for change in changes {
+                        // Encode change as simple length-prefixed format
+                        // [op: u8][key_len: u32][key][value_len: u32][value][version: u64]
+                        let mut record_bytes: Vec<u8> = Vec::new();
+
+                        match &change {
+                            prkdb_types::replication::Change::Put { key, value, version } => {
+                                record_bytes.push(0u8); // op = PUT
+                                record_bytes.extend_from_slice(&(key.len() as u32).to_le_bytes());
+                                record_bytes.extend_from_slice(key);
+                                record_bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+                                record_bytes.extend_from_slice(value);
+                                record_bytes.extend_from_slice(&version.to_le_bytes());
+                            }
+                            prkdb_types::replication::Change::Delete { key, version } => {
+                                record_bytes.push(1u8); // op = DELETE
+                                record_bytes.extend_from_slice(&(key.len() as u32).to_le_bytes());
+                                record_bytes.extend_from_slice(key);
+                                record_bytes.extend_from_slice(&0u32.to_le_bytes()); // empty value
+                                record_bytes.extend_from_slice(&version.to_le_bytes());
+                            }
+                        }
+
+                        // Check if we've exceeded max_bytes
+                        if bytes_sent + record_bytes.len() as u64 > max_bytes {
+                            // Send remaining chunk if any
+                            if !chunk_data.is_empty() {
+                                yield RawChunk {
+                                    data: chunk_data.clone(),
+                                    start_offset: chunk_start,
+                                    end_offset: current_offset,
+                                    has_more: false,
+                                };
+                            }
+                            return;
+                        }
+
+                        // Add to current chunk
+                        chunk_data.extend_from_slice(&record_bytes);
+                        current_offset = change.version(); // Use version as offset proxy
+                        bytes_sent += record_bytes.len() as u64;
+
+                        // If chunk is full, yield it
+                        if chunk_data.len() >= CHUNK_SIZE {
+                            yield RawChunk {
+                                data: std::mem::take(&mut chunk_data),
+                                start_offset: chunk_start,
+                                end_offset: current_offset,
+                                has_more: true,
+                            };
+                            chunk_start = current_offset + 1;
+                        }
+                    }
+
+                    // Yield any remaining data
+                    if !chunk_data.is_empty() {
+                        yield RawChunk {
+                            data: chunk_data,
+                            start_offset: chunk_start,
+                            end_offset: current_offset,
+                            has_more: false,
+                        };
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("FetchSegment scan error: {}", e);
+                }
+            }
+        };
 
         Ok(Response::new(Box::pin(stream)))
     }

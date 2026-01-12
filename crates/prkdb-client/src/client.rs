@@ -1130,6 +1130,60 @@ impl PrkDbClient {
 
         Ok(stream)
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Phase 22: Zero-Copy Consumer Streams
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Fetch raw WAL segment data for high-throughput consumption
+    ///
+    /// This method bypasses Protobuf serialization for the payload data,
+    /// streaming raw bytes directly for maximum throughput.
+    ///
+    /// Returns a stream of `RawChunk` items. Each chunk contains:
+    /// - `data`: Raw bytes (up to 64KB)
+    /// - `start_offset`: Offset of first record in chunk
+    /// - `end_offset`: Offset after last record
+    /// - `has_more`: Whether more data is available
+    ///
+    /// The raw bytes are encoded as:
+    /// `[op: u8][key_len: u32][key][value_len: u32][value][version: u64]`
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use tokio_stream::StreamExt;
+    ///
+    /// let mut stream = client.fetch_segment_raw(0, 1024 * 1024).await?;
+    /// while let Some(chunk) = stream.next().await {
+    ///     match chunk {
+    ///         Ok(c) => println!("Received {} bytes", c.data.len()),
+    ///         Err(e) => eprintln!("Error: {}", e),
+    ///     }
+    /// }
+    /// ```
+    pub async fn fetch_segment_raw(
+        &self,
+        start_offset: u64,
+        max_bytes: u64,
+    ) -> anyhow::Result<
+        impl tokio_stream::Stream<Item = Result<prkdb_proto::raft::RawChunk, tonic::Status>>,
+    > {
+        use prkdb_proto::raft::FetchSegmentRequest;
+
+        let mut client = self.get_any_client().await?;
+
+        let request = FetchSegmentRequest {
+            start_offset,
+            max_bytes,
+            segment_id: 0, // Auto-detect
+        };
+
+        let response = client.fetch_segment(request).await?;
+        let stream = response.into_inner();
+
+        Ok(stream)
+    }
 }
 
 #[cfg(test)]

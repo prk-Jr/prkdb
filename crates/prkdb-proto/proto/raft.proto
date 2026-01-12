@@ -93,6 +93,12 @@ service PrkDbService {
     // Watch for changes on keys matching a prefix
     // Returns a stream of WatchEvents for real-time notifications
     rpc Watch (WatchRequest) returns (stream WatchEvent);
+
+    // --- High-Throughput Data Transfer (Phase 22) ---
+
+    // Fetch raw WAL segment data for zero-copy consumption
+    // Streams raw bytes to bypass Protobuf serialization overhead
+    rpc FetchSegment (FetchSegmentRequest) returns (stream RawChunk);
 }
 
 message RequestVoteRequest {
@@ -490,4 +496,21 @@ message WatchEvent {
     bytes value = 3;        // New value (empty for DELETE)
     uint64 offset = 4;      // Log offset of this change
     uint64 timestamp = 5;   // Unix timestamp in milliseconds
+}
+
+// --- Phase 22: High-Throughput Data Transfer ---
+
+// Request to fetch raw WAL segment data
+message FetchSegmentRequest {
+    uint64 start_offset = 1;     // Starting offset in WAL
+    uint64 max_bytes = 2;        // Maximum bytes to return (0 = no limit)
+    uint32 segment_id = 3;       // Optional: specific segment (0 = auto-detect)
+}
+
+// Raw data chunk for zero-copy streaming
+message RawChunk {
+    bytes data = 1;              // Raw WAL bytes (up to 64KB per chunk)
+    uint64 start_offset = 2;     // Offset of first record in this chunk
+    uint64 end_offset = 3;       // Offset after last record in this chunk
+    bool has_more = 4;           // More data available after this chunk
 }

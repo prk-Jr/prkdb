@@ -46,6 +46,7 @@ tonic = { workspace = true, features = ["tls", "tls-roots"] }
 prost = { workspace = true }
 prost-types = { workspace = true }
 tokio-stream = { version = "0.1", features = ["time", "sync", "net"] }
+async-stream = "0.3"  # Phase 22: Zero-copy streaming
 tracing-subscriber = { workspace = true }
 sysinfo = "0.30"
 seahash = "4.1.0"
