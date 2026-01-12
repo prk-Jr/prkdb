@@ -88,6 +88,33 @@ impl Default for NodeHealth {
     }
 }
 
+impl NodeHealth {
+    /// Record a successful request
+    fn record_success(&mut self) {
+        self.last_success = std::time::Instant::now();
+        self.consecutive_failures = 0;
+    }
+
+    /// Record a failed request
+    fn record_failure(&mut self) {
+        self.consecutive_failures += 1;
+    }
+
+    /// Check if node is considered healthy
+    ///
+    /// A node is unhealthy if it has exceeded the failure threshold.
+    /// After a cooldown period, it becomes probe-able again.
+    fn is_healthy(&self, threshold: u32, cooldown_secs: u64) -> bool {
+        if self.consecutive_failures < threshold {
+            return true;
+        }
+
+        // Allow retry after cooldown
+        let since_success = self.last_success.elapsed().as_secs();
+        since_success >= cooldown_secs
+    }
+}
+
 /// Smart Client for PrkDB with automatic routing and failover
 ///
 /// This client maintains a cache of cluster metadata and routes requests
@@ -188,6 +215,40 @@ impl PrkDbClient {
     pub fn with_admin_token(mut self, token: impl Into<String>) -> Self {
         self.admin_token = Some(token.into());
         self
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Phase 18: Health-Based Routing helpers
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Record a successful request to a node
+    async fn record_node_success(&self, node_id: u64) {
+        let mut metadata = self.metadata.write().await;
+        metadata
+            .node_health
+            .entry(node_id)
+            .or_default()
+            .record_success();
+    }
+
+    /// Record a failed request to a node
+    async fn record_node_failure(&self, node_id: u64) {
+        let mut metadata = self.metadata.write().await;
+        metadata
+            .node_health
+            .entry(node_id)
+            .or_default()
+            .record_failure();
+    }
+
+    /// Check if a node is considered healthy
+    async fn is_node_healthy(&self, node_id: u64) -> bool {
+        let metadata = self.metadata.read().await;
+        if let Some(health) = metadata.node_health.get(&node_id) {
+            health.is_healthy(self.config.unhealthy_threshold, 30) // 30 sec cooldown
+        } else {
+            true // Unknown nodes are assumed healthy
+        }
     }
 
     /// Refresh cluster metadata from any available node
@@ -521,36 +582,54 @@ impl PrkDbClient {
         }
     }
 
-    /// Internal put implementation
+    /// Internal put implementation with health tracking
     async fn put_internal(&self, key: &[u8], value: &[u8]) -> anyhow::Result<()> {
-        let metadata = self.metadata.read().await;
-        let partition_id = self.hash_key(key, metadata.num_partitions);
+        let (partition_id, leader_id, client) = {
+            let metadata = self.metadata.read().await;
+            let partition_id = self.hash_key(key, metadata.num_partitions);
 
-        let leader_id = metadata
-            .partition_leaders
-            .get(&partition_id)
-            .ok_or_else(|| anyhow::anyhow!("No leader for partition {}", partition_id))?;
+            let leader_id = *metadata
+                .partition_leaders
+                .get(&partition_id)
+                .ok_or_else(|| anyhow::anyhow!("No leader for partition {}", partition_id))?;
 
-        let mut client = metadata
-            .clients
-            .get(leader_id)
-            .ok_or_else(|| anyhow::anyhow!("No client for node {}", leader_id))?
-            .clone();
+            let client = metadata
+                .clients
+                .get(&leader_id)
+                .ok_or_else(|| anyhow::anyhow!("No client for node {}", leader_id))?
+                .clone();
 
-        drop(metadata);
+            (partition_id, leader_id, client)
+        };
+
+        // Phase 18: Check if leader is healthy before sending
+        if !self.is_node_healthy(leader_id).await {
+            tracing::warn!(
+                "Leader {} for partition {} is unhealthy, attempting anyway",
+                leader_id,
+                partition_id
+            );
+        }
 
         let request = tonic::Request::new(PutRequest {
             key: key.to_vec(),
             value: value.to_vec(),
         });
 
-        let response = client.put(request).await?;
-
-        if !response.into_inner().success {
-            anyhow::bail!("Put request returned success=false");
+        // Phase 18: Track health based on response
+        match client.clone().put(request).await {
+            Ok(response) => {
+                self.record_node_success(leader_id).await;
+                if !response.into_inner().success {
+                    anyhow::bail!("Put request returned success=false");
+                }
+                Ok(())
+            }
+            Err(e) => {
+                self.record_node_failure(leader_id).await;
+                Err(e.into())
+            }
         }
-
-        Ok(())
     }
 
     /// Internal delete implementation

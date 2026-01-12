@@ -323,6 +323,7 @@ impl Builder {
             partitioning_registry: Arc::new(DashMap::new()),
             collection_registry: Arc::new(collection_registry),
             partition_manager: None,
+            replication_targets: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         })
     }
 
