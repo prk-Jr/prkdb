@@ -3,7 +3,6 @@
 //
 // Run: cargo run --release --example streaming_example
 
-use futures::StreamExt;
 use prkdb::prelude::*;
 use prkdb::storage::WalStorageAdapter;
 use prkdb::streaming::StreamConfig;

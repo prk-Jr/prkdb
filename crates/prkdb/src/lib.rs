@@ -10,6 +10,7 @@ pub mod compute; // Stub module
 pub mod consumer;
 pub mod dashboard;
 pub mod db;
+pub mod dlq; // Dead Letter Queue support
 mod error;
 pub mod indexed_storage; // Secondary index support
 pub mod joins;
@@ -46,9 +47,12 @@ pub mod prelude {
         TransactionStatus,
     };
     pub use crate::ttl::TtlStorage;
+    // Dead Letter Queue support
+    pub use crate::dlq::{MessageHandler, ProcessingStats};
     // Use prkdb-types directly for domain types
     pub use prkdb_macros::Collection;
     pub use prkdb_types::collection::Collection;
+    pub use prkdb_types::consumer::{DlqRecord, ProcessResult};
     pub use prkdb_types::index::{IndexDef, Indexed};
     pub use prkdb_types::storage::StorageAdapter;
 }
