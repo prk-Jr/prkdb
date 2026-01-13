@@ -188,7 +188,7 @@ async fn bench_consumer(storage: &Arc<WalStorageAdapter>) -> anyhow::Result<f64>
 async fn bench_mixed(
     storage: &Arc<WalStorageAdapter>,
     read_pct: u32,
-    write_pct: u32,
+    _write_pct: u32,
 ) -> anyhow::Result<f64> {
     let start = Instant::now();
     let deadline = start + Duration::from_secs(TEST_DURATION_SECS);

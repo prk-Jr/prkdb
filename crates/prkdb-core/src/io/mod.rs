@@ -93,6 +93,7 @@ fn is_iouring_available() -> bool {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 fn is_iouring_available() -> bool {
     false
 }

@@ -157,7 +157,6 @@ impl TestCluster {
                         .join("prkdb-server");
                     if path.exists() {
                         binary_path = path;
-                        found = true;
                         break;
                     }
                 }

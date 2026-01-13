@@ -155,7 +155,7 @@ impl PartitionedStreamingAdapter {
             .await?;
 
         // Update total count
-        let global_offset = self
+        let _global_offset = self
             .inner
             .total_records
             .fetch_add(record_count, Ordering::SeqCst);

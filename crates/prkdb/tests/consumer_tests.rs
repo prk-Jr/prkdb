@@ -2,7 +2,7 @@
 
 use prkdb::prelude::*;
 use prkdb::storage::InMemoryAdapter;
-use prkdb_types::consumer::{AutoOffsetReset, Consumer, ConsumerConfig, ConsumerRecord, Offset};
+use prkdb_types::consumer::{AutoOffsetReset, Consumer, ConsumerConfig, Offset};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 

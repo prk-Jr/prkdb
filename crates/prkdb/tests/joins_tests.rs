@@ -3,7 +3,7 @@
 use futures::{stream, StreamExt};
 use prkdb::joins::{JoinConfig, JoinExt, JoinType};
 use prkdb_types::collection::{ChangeEvent, Collection};
-use prkdb_types::consumer::{Consumer, ConsumerRecord};
+use prkdb_types::consumer::ConsumerRecord;
 use prkdb_types::error::Error;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
