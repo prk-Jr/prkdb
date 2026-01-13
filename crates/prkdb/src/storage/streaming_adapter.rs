@@ -314,51 +314,67 @@ impl StreamingStorageAdapter {
         Ok(())
     }
 
-    /// Read records starting from offset
+    /// Read records starting from offset (Phase 24: Zero-copy streaming read)
     pub async fn read_from(
         &self,
         offset: u64,
         max_records: usize,
     ) -> Result<Vec<StreamingRecord>, StorageError> {
-        // For now, use WAL scan. Future: direct mmap access
-        // scan_from expects &[u64] with one offset per segment
-        let segment_count = self.inner.wal.segment_count();
-        let start_offsets: Vec<u64> = vec![offset; segment_count];
-        let batches = self
-            .inner
-            .wal
-            .scan_from(&start_offsets)
-            .await
-            .map_err(|e| StorageError::Internal(format!("WAL scan failed: {}", e)))?;
-
+        let mut current_offset = offset;
         let mut records = Vec::with_capacity(max_records);
 
-        for (_segment_id, log_record) in batches {
-            if records.len() >= max_records {
-                break;
+        while records.len() < max_records {
+            // 1. Read BatchHeader
+            let header_bytes = self
+                .inner
+                .wal
+                .read_raw(current_offset, BatchHeader::SIZE)
+                .await
+                .map_err(|e| StorageError::Internal(format!("Failed to read header: {}", e)))?;
+
+            if header_bytes.len() < BatchHeader::SIZE {
+                break; // End of log
             }
 
-            // Extract key/value from LogRecord
-            match &log_record.operation {
-                prkdb_core::wal::LogOperation::Put { id, data, .. } => {
-                    records.push(StreamingRecord {
-                        key: id.clone(),
-                        value: data.clone(),
-                    });
-                }
-                prkdb_core::wal::LogOperation::PutBatch { items, .. } => {
-                    for (key, value) in items {
-                        if records.len() >= max_records {
-                            break;
-                        }
-                        records.push(StreamingRecord {
-                            key: key.clone(),
-                            value: value.clone(),
-                        });
-                    }
-                }
-                _ => {}
+            let header_arr: &[u8; BatchHeader::SIZE] = header_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| StorageError::Internal("Invalid header size".into()))?;
+            let header = BatchHeader::from_bytes(header_arr);
+
+            // Validate magic
+            if header.magic() != BatchHeader::MAGIC {
+                return Err(StorageError::Internal(format!(
+                    "Invalid batch magic at offset {}: {:x}",
+                    current_offset,
+                    header.magic()
+                )));
             }
+
+            // 2. Read Batch Data
+            let data_size = header.data_size() as usize;
+            let data_offset = current_offset + BatchHeader::SIZE as u64;
+            let data = self
+                .inner
+                .wal
+                .read_raw(data_offset, data_size)
+                .await
+                .map_err(|e| StorageError::Internal(format!("Failed to read batch data: {}", e)))?;
+
+            if data.len() < data_size {
+                return Err(StorageError::Internal("Incomplete batch data".into()));
+            }
+
+            // 3. Decode Records from Batch
+            let mut batch_pos = 0;
+            while batch_pos < data_size && records.len() < max_records {
+                let (record, consumed) = StreamingRecord::decode(&data[batch_pos..])?;
+                records.push(record);
+                batch_pos += consumed;
+            }
+
+            // Move to next batch
+            current_offset += BatchHeader::SIZE as u64 + data_size as u64;
         }
 
         Ok(records)

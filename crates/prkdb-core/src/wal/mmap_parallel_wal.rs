@@ -293,6 +293,15 @@ impl MmapParallelWal {
         Ok(offset)
     }
 
+    /// Read raw bytes directly from WAL (Phase 24: Streaming mode)
+    ///
+    /// Reads raw data from segment 0 (streaming mode assumes single segment usage).
+    /// Used by StreamingStorageAdapter for consumer reads.
+    pub async fn read_raw(&self, offset: u64, len: usize) -> Result<Vec<u8>, WalError> {
+        let segment = self.segments[0].lock().await;
+        segment.read_raw(offset, len).await.map_err(WalError::Io)
+    }
+
     /// Flush all segments to disk
     pub async fn flush(&self) -> Result<(), WalError> {
         self.sync().await

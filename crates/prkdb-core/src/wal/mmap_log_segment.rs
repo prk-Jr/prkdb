@@ -320,6 +320,42 @@ impl MmapLogSegment {
         Ok(start_pos)
     }
 
+    /// Read raw bytes from the segment (Phase 24: Streaming mode)
+    ///
+    /// Returns the raw bytes from file_offset to file_offset + len.
+    /// Used by StreamingStorageAdapter for consumer reads.
+    pub async fn read_raw(&self, file_offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
+        let mmap = self.mmap.lock().await;
+        let start = file_offset as usize;
+        let end = start + len;
+        let max_pos = self.file_position.load(Ordering::SeqCst) as usize;
+
+        if start >= max_pos || end > max_pos {
+            // Return what we can
+            let available_len = max_pos.saturating_sub(start);
+            if available_len == 0 {
+                return Ok(Vec::new());
+            }
+            return Ok(mmap[start..start + available_len].to_vec());
+        }
+
+        Ok(mmap[start..end].to_vec())
+    }
+
+    /// Get the current file position (bytes written)
+    pub fn file_position(&self) -> u64 {
+        self.file_position.load(Ordering::SeqCst)
+    }
+
+    /// Read all raw data from offset 0 to current position
+    pub async fn read_all_raw(&self) -> std::io::Result<Vec<u8>> {
+        let current_pos = self.file_position.load(Ordering::SeqCst);
+        if current_pos == 0 {
+            return Ok(Vec::new());
+        }
+        self.read_raw(0, current_pos as usize).await
+    }
+
     /// Read record (Phase 5.5: Using rkyv deserialization)
     pub async fn read(&self, offset: u64) -> Result<LogRecord, WalError> {
         let index = self.index.lock().await;
