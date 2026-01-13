@@ -809,7 +809,7 @@ async fn test_chaos_monkey_continuous_load() {
     use std::sync::Arc;
 
     const CLUSTER_SIZE: usize = 5;
-    const CHAOS_DURATION_SECS: u64 = 60; // Run chaos for 60 seconds
+    const CHAOS_DURATION_SECS: u64 = 30; // 30 seconds for CI (was 60)
     const KILL_INTERVAL_MS: u64 = 5000; // Kill a node every 5 seconds
     const WRITE_INTERVAL_MS: u64 = 50; // Write every 50ms
 

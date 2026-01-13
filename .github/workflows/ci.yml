@@ -72,7 +72,7 @@ jobs:
   chaos-test:
     name: "🐵 Chaos Engineering"
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15  # Allow time for compilation + 30s test
     
     steps:
       - name: Free disk space
