@@ -253,6 +253,39 @@ jobs:
           echo "prkdb_latency_p95_us=$LATENCY_P95" >> $GITHUB_OUTPUT
           echo "prkdb_latency_p99_us=$LATENCY_P99" >> $GITHUB_OUTPUT
           
+      # ═══════════════════════════════════════════════════════════════════════
+      # SUSTAINED LOAD TEST (10M Records, ~1GB)
+      # ═══════════════════════════════════════════════════════════════════════
+      - name: "🔵 Kafka Sustained Load (10M records)"
+        id: kafka_sustained
+        run: |
+          echo "Running Kafka sustained load test (10M records)..."
+          KAFKA_CONTAINER=$(docker ps -q -f ancestor=confluentinc/cp-kafka:7.5.0)
+          
+          RESULT=$(docker exec $KAFKA_CONTAINER \
+            kafka-producer-perf-test \
+            --topic benchmark-test \
+            --num-records 10000000 \
+            --record-size 100 \
+            --throughput -1 \
+            --producer-props bootstrap.servers=localhost:9092 batch.size=10000 linger.ms=50 \
+            2>&1 | tail -1)
+          echo "$RESULT"
+          
+          MBPS=$(echo "$RESULT" | grep -oE '[0-9]+\.[0-9]+ MB/sec' | grep -oE '[0-9]+\.[0-9]+' || echo "0")
+          echo "kafka_sustained_mbps=$MBPS" >> $GITHUB_OUTPUT
+
+      - name: "🟢 PrkDB Sustained Load (10M records)"
+        id: prkdb_sustained
+        run: |
+          echo "Running PrkDB sustained load test (10M records)..."
+          # Run with 10M records argument
+          OUTPUT=$(cargo run --release --example comprehensive_bench -- 10000000 2>&1)
+          echo "$OUTPUT"
+          
+          MBPS=$(echo "$OUTPUT" | grep "producer_avg_mbps=" | cut -d= -f2)
+          echo "prkdb_sustained_mbps=$MBPS" >> $GITHUB_OUTPUT
+
       - name: "🟢 PrkDB Partitioned Benchmark"
         id: prkdb_partitioned
         run: |
@@ -283,9 +316,13 @@ jobs:
           PRKDB_P99="${{ steps.prkdb_comprehensive.outputs.prkdb_latency_p99_us }}"
           PRKDB_PEAK="${{ steps.prkdb_partitioned.outputs.prkdb_peak_mbps }}"
           
+          KAFKA_SUST="${{ steps.kafka_sustained.outputs.kafka_sustained_mbps }}"
+          PRKDB_SUST="${{ steps.prkdb_sustained.outputs.prkdb_sustained_mbps }}"
+          
           # Calculate ratios
           PROD_RATIO=$(echo "scale=1; $PRKDB_PROD / $KAFKA_PROD" | bc 2>/dev/null || echo "N/A")
           CONS_RATIO=$(echo "scale=1; $PRKDB_CONS / $KAFKA_CONS" | bc 2>/dev/null || echo "N/A")
+          SUST_RATIO=$(echo "scale=1; $PRKDB_SUST / $KAFKA_SUST" | bc 2>/dev/null || echo "N/A")
           
           # Convert Kafka latency to microseconds for comparison
           KAFKA_LAT_US=$(echo "scale=0; $KAFKA_LAT * 1000" | bc 2>/dev/null || echo "N/A")
@@ -300,12 +337,14 @@ jobs:
             "kafka": {
               "producer_mbps": $KAFKA_PROD,
               "consumer_mbps": ${KAFKA_CONS:-0},
+              "sustained_mbps": ${KAFKA_SUST:-0},
               "latency_avg_ms": $KAFKA_LAT,
               "latency_p99_ms": $KAFKA_P99
             },
             "prkdb": {
               "producer_mbps": $PRKDB_PROD,
               "consumer_mbps": $PRKDB_CONS,
+              "sustained_mbps": ${PRKDB_SUST:-0},
               "latency_avg_us": $PRKDB_LAT,
               "latency_p50_us": $PRKDB_P50,
               "latency_p95_us": $PRKDB_P95,
@@ -314,7 +353,8 @@ jobs:
             },
             "ratios": {
               "producer": "$PROD_RATIO",
-              "consumer": "$CONS_RATIO"
+              "consumer": "$CONS_RATIO",
+              "sustained": "$SUST_RATIO"
             }
           }
           EOF
@@ -324,7 +364,7 @@ jobs:
           # 🔬 PrkDB vs Kafka Benchmark Results
           
           **Test Configuration:**
-          - Records: 1,000,000
+          - Records: 1,000,000 (Standard) / 10,000,000 (Sustained)
           - Record Size: 100 bytes
           - Batch Size: 10,000
           - Runs: 3 (averaged)
@@ -335,7 +375,8 @@ jobs:
           |--------|-------|-------|-----------------|
           EOF
           
-          echo "| **Producer** | ${KAFKA_PROD} MB/s | ${PRKDB_PROD} MB/s | **${PROD_RATIO}x faster** |" >> benchmark_results/BENCHMARK_RESULTS.md
+          echo "| **Producer (1M)** | ${KAFKA_PROD} MB/s | ${PRKDB_PROD} MB/s | **${PROD_RATIO}x faster** |" >> benchmark_results/BENCHMARK_RESULTS.md
+          echo "| **Sustained (10M)** | ${KAFKA_SUST:-N/A} MB/s | ${PRKDB_SUST:-N/A} MB/s | **${SUST_RATIO:-N/A}x faster** |" >> benchmark_results/BENCHMARK_RESULTS.md
           echo "| **Consumer** | ${KAFKA_CONS:-N/A} MB/s | ${PRKDB_CONS} MB/s | **${CONS_RATIO:-N/A}x faster** |" >> benchmark_results/BENCHMARK_RESULTS.md
           echo "| **Partitioned Peak** | - | ${PRKDB_PEAK:-N/A} MB/s | - |" >> benchmark_results/BENCHMARK_RESULTS.md
           

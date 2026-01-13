@@ -5,32 +5,42 @@
 // 2. Consumer throughput (read from offset)
 // 3. End-to-end latency (p50, p95, p99)
 // 4. Multiple runs for statistical accuracy
+// 5. Sustained load option (10x data)
 //
-// Run: cargo run --release --example comprehensive_bench
+// Run: cargo run --release --example comprehensive_bench -- [records]
 
 use prkdb::storage::{StreamingConfig, StreamingRecord, StreamingStorageAdapter};
+use std::env;
 use std::time::{Duration, Instant};
 
-const NUM_RECORDS: usize = 1_000_000;
+const DEFAULT_RECORDS: usize = 1_000_000;
 const RECORD_SIZE: usize = 100;
 const BATCH_SIZE: usize = 10_000;
 const NUM_RUNS: usize = 3;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Parse command line arguments for record count
+    let args: Vec<String> = env::args().collect();
+    let num_records = if args.len() > 1 {
+        args[1].parse().unwrap_or(DEFAULT_RECORDS)
+    } else {
+        DEFAULT_RECORDS
+    };
+
     println!();
     println!("╔════════════════════════════════════════════════════════════════╗");
     println!("║    🔬 COMPREHENSIVE STREAMING BENCHMARK 🔬                     ║");
     println!("╚════════════════════════════════════════════════════════════════╝");
     println!();
     println!("  Configuration:");
-    println!("    Records: {:>12}", NUM_RECORDS);
+    println!("    Records: {:>12}", num_records);
     println!("    Record Size: {:>8} bytes", RECORD_SIZE);
     println!("    Batch Size: {:>9}", BATCH_SIZE);
     println!("    Runs: {:>14}", NUM_RUNS);
     println!(
         "    Total Data: {:>9} MB",
-        NUM_RECORDS * RECORD_SIZE / 1024 / 1024
+        num_records * RECORD_SIZE / 1024 / 1024
     );
     println!();
 
@@ -65,8 +75,8 @@ async fn main() -> anyhow::Result<()> {
         let mut total_records = 0usize;
         let mut batch_num = 0u64;
 
-        while total_records < NUM_RECORDS {
-            let batch_count = std::cmp::min(BATCH_SIZE, NUM_RECORDS - total_records);
+        while total_records < num_records {
+            let batch_count = std::cmp::min(BATCH_SIZE, num_records - total_records);
 
             let records: Vec<StreamingRecord> = (0..batch_count)
                 .map(|i| StreamingRecord {
@@ -85,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
 
         let producer_duration = producer_start.elapsed();
         let producer_mbps =
-            (NUM_RECORDS * RECORD_SIZE) as f64 / producer_duration.as_secs_f64() / 1024.0 / 1024.0;
+            (num_records * RECORD_SIZE) as f64 / producer_duration.as_secs_f64() / 1024.0 / 1024.0;
         producer_results.push(producer_mbps);
 
         // Calculate latency percentiles
@@ -107,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
         println!("  📥 Consumer benchmark...");
 
         let consumer_start = Instant::now();
-        let read_records = adapter.read_from(0, NUM_RECORDS).await?;
+        let read_records = adapter.read_from(0, num_records).await?;
         let consumer_duration = consumer_start.elapsed();
 
         let records_read = read_records.len();
