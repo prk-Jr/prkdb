@@ -34,14 +34,20 @@ struct WriterConfig {
     max_batch_entries: usize,
     _max_batch_bytes: usize,
     linger_ms: u64,
+    /// How often to fsync (0 = never, 1 = every batch, N = every N batches)
+    sync_interval: usize,
 }
 
 impl Default for WriterConfig {
     fn default() -> Self {
         Self {
-            max_batch_entries: 1000,       // Match production default
-            _max_batch_bytes: 1024 * 1024, // 1MB
-            linger_ms: 10,                 // Match production default
+            // Phase 23: Increased from 1000 to 10000 to match Kafka batching
+            max_batch_entries: 10_000,
+            _max_batch_bytes: 4 * 1024 * 1024, // 4MB (increased from 1MB)
+            // Phase 23: Increased from 10ms to 50ms for better batching
+            linger_ms: 50,
+            // Phase 23: Sync every 10 batches (not every batch) for throughput
+            sync_interval: 10,
         }
     }
 }
@@ -65,6 +71,8 @@ fn spawn_dedicated_writer(
 /// Main writer loop - runs on dedicated OS thread
 fn run_writer_loop(rx: Receiver<WriteRequest>, wal: Arc<MmapParallelWal>, config: WriterConfig) {
     let mut batch = Vec::with_capacity(config.max_batch_entries);
+    // Phase 23: Track batch count for deferred sync
+    let mut batch_count: usize = 0;
 
     loop {
         // Block until first request
@@ -72,6 +80,10 @@ fn run_writer_loop(rx: Receiver<WriteRequest>, wal: Arc<MmapParallelWal>, config
             Ok(req) => req,
             Err(_) => {
                 info!("Writer thread shutting down (channel closed)");
+                // Final sync before shutdown
+                if config.sync_interval > 0 {
+                    let _ = tokio::runtime::Handle::try_current().map(|h| h.block_on(wal.sync()));
+                }
                 break;
             }
         };
@@ -103,6 +115,12 @@ fn run_writer_loop(rx: Receiver<WriteRequest>, wal: Arc<MmapParallelWal>, config
 
         // Write batch to WAL (blocking I/O - no Tokio overhead!)
         write_batch(&wal, &mut batch);
+
+        // Phase 23: Deferred sync - only sync every N batches
+        batch_count += 1;
+        if config.sync_interval > 0 && batch_count % config.sync_interval == 0 {
+            let _ = tokio::runtime::Handle::try_current().map(|h| h.block_on(wal.sync()));
+        }
     }
 }
 

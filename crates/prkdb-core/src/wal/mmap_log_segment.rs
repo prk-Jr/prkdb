@@ -269,6 +269,93 @@ impl MmapLogSegment {
         mmap.flush()
     }
 
+    /// Append raw bytes directly (Phase 24: Streaming mode)
+    ///
+    /// This bypasses LogRecord serialization for maximum throughput.
+    /// Used by StreamingStorageAdapter for append-only workloads.
+    pub async fn append_raw(&self, data: &[u8]) -> std::io::Result<u64> {
+        let total_size = data.len();
+        if total_size == 0 {
+            return Ok(self.file_position.load(Ordering::SeqCst));
+        }
+
+        let mut mmap = self.mmap.lock().await;
+        let current_pos = self.file_position.load(Ordering::SeqCst) as usize;
+        let capacity = self.capacity.load(Ordering::SeqCst) as usize;
+
+        // Resize if needed
+        if current_pos + total_size > capacity {
+            drop(mmap);
+            let needed = (current_pos + total_size) as u64;
+            let new_size = needed.div_ceil(GROWTH_STEP) * GROWTH_STEP;
+            self.resize(new_size).await?;
+            mmap = self.mmap.lock().await;
+        }
+
+        // Verify bounds
+        let mmap_len = mmap.len();
+        if current_pos + total_size > mmap_len {
+            return Err(std::io::Error::other(format!(
+                "mmap bounds error: need {}..{} but len={}",
+                current_pos,
+                current_pos + total_size,
+                mmap_len
+            )));
+        }
+
+        // Single memcpy to mmap
+        mmap[current_pos..current_pos + total_size].copy_from_slice(data);
+
+        // Update position
+        let start_pos = current_pos as u64;
+        self.file_position
+            .fetch_add(total_size as u64, Ordering::SeqCst);
+
+        // Async flush every 10 writes
+        let batches = self.batches_since_fsync.fetch_add(1, Ordering::SeqCst);
+        if batches.is_multiple_of(10) {
+            mmap.flush_async()?;
+        }
+
+        Ok(start_pos)
+    }
+
+    /// Read raw bytes from the segment (Phase 24: Streaming mode)
+    ///
+    /// Returns the raw bytes from file_offset to file_offset + len.
+    /// Used by StreamingStorageAdapter for consumer reads.
+    pub async fn read_raw(&self, file_offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
+        let mmap = self.mmap.lock().await;
+        let start = file_offset as usize;
+        let end = start + len;
+        let max_pos = self.file_position.load(Ordering::SeqCst) as usize;
+
+        if start >= max_pos || end > max_pos {
+            // Return what we can
+            let available_len = max_pos.saturating_sub(start);
+            if available_len == 0 {
+                return Ok(Vec::new());
+            }
+            return Ok(mmap[start..start + available_len].to_vec());
+        }
+
+        Ok(mmap[start..end].to_vec())
+    }
+
+    /// Get the current file position (bytes written)
+    pub fn file_position(&self) -> u64 {
+        self.file_position.load(Ordering::SeqCst)
+    }
+
+    /// Read all raw data from offset 0 to current position
+    pub async fn read_all_raw(&self) -> std::io::Result<Vec<u8>> {
+        let current_pos = self.file_position.load(Ordering::SeqCst);
+        if current_pos == 0 {
+            return Ok(Vec::new());
+        }
+        self.read_raw(0, current_pos as usize).await
+    }
+
     /// Read record (Phase 5.5: Using rkyv deserialization)
     pub async fn read(&self, offset: u64) -> Result<LogRecord, WalError> {
         let index = self.index.lock().await;
