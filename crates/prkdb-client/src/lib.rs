@@ -47,7 +47,7 @@
 mod client;
 pub mod ws;
 
-pub use client::{PrkDbClient, ReadConsistency};
+pub use client::{ClientConfig, PrkDbClient, ReadConsistency};
 pub use ws::{WsConfig, WsConsumer, WsEvent};
 
 // Re-export commonly used types from prkdb-proto for convenience

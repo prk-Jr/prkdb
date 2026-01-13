@@ -163,8 +163,16 @@ impl StorageAdapter for SledAdapter {
         self.kv
             .insert(key, value)
             .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        // Double-write to outbox to support streaming/subscription
+        self.outbox
+            .insert(key, value)
+            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+
         if self.kv_ops_since_flush.fetch_add(1, Ordering::Relaxed) + 1 >= self.flush_every {
             self.kv
+                .flush()
+                .map_err(|e| StorageError::BackendError(e.to_string()))?;
+            self.outbox
                 .flush()
                 .map_err(|e| StorageError::BackendError(e.to_string()))?;
             self.db

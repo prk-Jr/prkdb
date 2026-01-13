@@ -140,20 +140,20 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         .route("/", get(root_handler))
         .route("/health", get(health_handler))
         .route("/collections", get(list_collections_handler))
-        .route("/collections/:name", get(get_collection_handler))
-        .route("/collections/:name/data", get(get_collection_data_handler))
+        .route("/collections/{name}", get(get_collection_handler))
+        .route("/collections/{name}/data", get(get_collection_data_handler))
         .route(
-            "/collections/:name/count",
+            "/collections/{name}/count",
             get(get_collection_count_handler),
         )
         .route(
-            "/collections/:name/schema",
+            "/collections/{name}/schema",
             get(get_collection_schema_handler),
         );
 
     // Add WebSocket route if enabled
     if args.websockets {
-        app = app.route("/ws/collections/:name", get(websocket_handler));
+        app = app.route("/ws/collections/{name}", get(websocket_handler));
     }
 
     // Add metrics route if enabled
@@ -214,7 +214,8 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
 
             use std::env;
             let admin_token = env::var("PRKDB_ADMIN_TOKEN").unwrap_or_default();
-            let service = PrkDbGrpcService::new(Arc::new(db), admin_token);
+            let service = PrkDbGrpcService::new(Arc::new(db), admin_token)
+                .with_public_address(format!("http://{}", grpc_addr));
 
             if let Err(e) = Server::builder()
                 .add_service(PrkDbServiceServer::new(service))
@@ -494,10 +495,13 @@ async fn websocket_connection(
 
                              if seq > last_sequence {
                                  // Try to decode payload
-                                 // HACK: OutboxRecord<T> enum (u32 variant + T).
-                                 // Put=0, PutBatch=2. We assume Put for now or try to skip 4 bytes
-
-                                 if bytes.len() > 4 {
+                                 // 1. Try raw JSON (SledAdapter default)
+                                 if let Ok(json_val) = serde_json::from_slice::<Value>(&bytes) {
+                                     updates.push((seq, json_val));
+                                     new_sequence = new_sequence.max(seq);
+                                 }
+                                 // 2. Try skipping 4-byte header (Raft/Legacy)
+                                 else if bytes.len() > 4 {
                                      // Skip 4 bytes (variant index)
                                      let payload = &bytes[4..];
                                      // Try to convert to JSON
