@@ -30,6 +30,10 @@ futures = { workspace = true }
 tracing = { workspace = true }
 memmap2 = "0.9.9"
 
+# Platform-specific I/O (Phase 24B)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Metrics and HTTP server (for examples)
 prometheus = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }

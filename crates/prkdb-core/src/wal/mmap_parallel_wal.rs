@@ -276,6 +276,23 @@ impl MmapParallelWal {
         Ok(())
     }
 
+    /// Write raw bytes directly to WAL (Phase 24: Streaming mode)
+    ///
+    /// This bypasses LogRecord serialization for maximum throughput.
+    /// Used by StreamingStorageAdapter for append-only workloads.
+    pub async fn write_raw(&self, data: &[u8]) -> Result<u64, WalError> {
+        // Use segment 0 for raw writes (streaming mode is single-partition)
+        let segment = self.segments[0].lock().await;
+
+        // Get current position
+        let offset = segment.file_size();
+
+        // Write directly to mmap
+        segment.append_raw(data).await.map_err(WalError::Io)?;
+
+        Ok(offset)
+    }
+
     /// Flush all segments to disk
     pub async fn flush(&self) -> Result<(), WalError> {
         self.sync().await
