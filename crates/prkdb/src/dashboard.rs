@@ -444,10 +444,10 @@ fn snapshot(state: &DashboardState) -> MetricsSnapshot {
     // Collect system metrics
     let mut sys_metrics = SystemMetrics::default();
     if let Ok(mut sys) = state.sys.try_lock() {
-        sys.refresh_cpu();
+        sys.refresh_cpu_all();
         sys.refresh_memory();
 
-        sys_metrics.cpu_usage_percent = sys.global_cpu_info().cpu_usage();
+        sys_metrics.cpu_usage_percent = sys.global_cpu_usage();
         sys_metrics.memory_used_mb = sys.used_memory() / 1024 / 1024;
         sys_metrics.memory_total_mb = sys.total_memory() / 1024 / 1024;
 
@@ -456,7 +456,7 @@ fn snapshot(state: &DashboardState) -> MetricsSnapshot {
     }
 
     if let Ok(mut nets) = state.networks.try_lock() {
-        nets.refresh();
+        nets.refresh(true);
         for (_interface_name, data) in nets.iter() {
             sys_metrics.network_rx_bytes += data.received();
             sys_metrics.network_tx_bytes += data.transmitted();

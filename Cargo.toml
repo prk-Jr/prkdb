@@ -22,7 +22,7 @@ async-trait = "0.1.88"
 bincode = { version ="2.0.1", features = ["serde"]}
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0"}
-thiserror = "1.0"
+thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 chrono = { version = "0.4", features = ["serde", "alloc"] }
