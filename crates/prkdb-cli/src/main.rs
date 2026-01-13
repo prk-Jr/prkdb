@@ -107,6 +107,9 @@ pub enum Commands {
     /// Batch put from file
     BatchPut(data::BatchPutArgs),
 
+    /// Subscribe to real-time updates
+    Subscribe(subscribe::SubscribeArgs),
+
     /// Backup database (Offline)
     Backup(backup::BackupArgs),
 
@@ -168,6 +171,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Put(args) => data::handle_put(args.clone()).await,
         Commands::Delete(args) => data::handle_delete(args.clone()).await,
         Commands::BatchPut(args) => data::handle_batch_put(args.clone()).await,
+        Commands::Subscribe(args) => subscribe::handle_subscribe(args.clone()).await,
 
         // Backup/Restore commands (Offline)
         Commands::Backup(args) => backup::handle_backup(args.clone(), &cli).await,

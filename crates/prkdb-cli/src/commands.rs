@@ -9,6 +9,7 @@ pub mod metrics;
 pub mod partition;
 pub mod replication;
 pub mod serve;
+pub mod subscribe;
 
 #[derive(Subcommand, Clone)]
 pub enum CollectionCommands {

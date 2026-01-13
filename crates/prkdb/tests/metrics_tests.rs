@@ -237,6 +237,9 @@ async fn test_partition_metrics_with_consumer() {
         auto_commit_interval: Duration::from_millis(1000),
         max_poll_records: 100,
         auto_offset_reset: AutoOffsetReset::Earliest,
+        dead_letter_topic: None,
+        max_retries: 3,
+        retry_backoff: Duration::from_millis(100),
     };
     let mut consumer = db.consumer::<MRec>(config).await.unwrap();
 
@@ -287,6 +290,9 @@ async fn test_partition_metrics_latency_tracking() {
         auto_commit_interval: Duration::from_millis(1000),
         max_poll_records: 100,
         auto_offset_reset: AutoOffsetReset::Earliest,
+        dead_letter_topic: None,
+        max_retries: 3,
+        retry_backoff: Duration::from_millis(100),
     };
     let mut consumer = db.consumer::<MRec>(config).await.unwrap();
 
