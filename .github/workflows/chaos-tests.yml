@@ -95,10 +95,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Run Jepsen Consistency Tests
-        run: cargo test --test jepsen_consistency_tests --nocapture
+        run: cargo test --test jepsen_consistency_tests -- --nocapture
 
       - name: Run Extended Chaos Tests
-        run: cargo test --test extended_chaos_tests --nocapture
+        run: cargo test --test extended_chaos_tests -- --nocapture
 
       - name: Cleanup
         if: always()
