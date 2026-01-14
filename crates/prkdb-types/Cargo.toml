@@ -1,6 +1,6 @@
 [package]
 name = "prkdb-types"
-version = "0.1.0"
+version = "0.6.0"
 edition = "2021"
 description = "Core domain types and traits for PrkDB - the foundation crate with minimal dependencies"
 license = "MIT OR Apache-2.0"

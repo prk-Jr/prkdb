@@ -53,6 +53,7 @@ struct AppState {
     _database_path: std::path::PathBuf,
     websocket_enabled: bool,
     prometheus_enabled: bool,
+    #[allow(dead_code)] // Used for future broadcast features
     broadcast_tx: broadcast::Sender<String>,
 }
 
@@ -75,6 +76,7 @@ struct ApiResponse<T> {
 #[derive(Deserialize)]
 struct WsParams {
     from_offset: Option<u64>,
+    #[allow(dead_code)] // Reserved for future authentication
     token: Option<String>,
 }
 

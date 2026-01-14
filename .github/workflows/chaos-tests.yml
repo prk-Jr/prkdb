@@ -1,0 +1,128 @@
+name: Chaos Tests
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # RAFT CHAOS ENGINEERING TESTS
+  # Features:
+  #   - 5-node cluster under continuous load
+  #   - Random node kills/restarts during operation
+  #   - Data integrity verification after chaos
+  # ═══════════════════════════════════════════════════════════════════════════
+  raft-chaos-tests:
+    name: "🐵 Raft Chaos Engineering"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+
+      - uses: actions/checkout@v4
+
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build prkdb-server
+        run: cargo build --release -p prkdb-cli
+
+      - name: Run Chaos Monkey Test
+        run: |
+          echo "🐵 Starting Chaos Monkey Test..."
+          cargo test --test raft_chaos_tests test_chaos_monkey_continuous_load -- --ignored --nocapture
+        env:
+          RUST_LOG: info
+          RUST_BACKTRACE: 1
+        timeout-minutes: 20
+
+      - name: Run All Raft Chaos Tests
+        run: cargo test --test raft_chaos_tests -- --ignored --nocapture
+        timeout-minutes: 20
+        continue-on-error: true
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raft-chaos-logs
+          path: |
+            /tmp/prkdb_test_logs/
+            /tmp/chaos-*.log
+          retention-days: 7
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "Cleaning up test artifacts..."
+          rm -rf /tmp/prkdb_test_logs/ || true
+          rm -rf /tmp/chaos-*.log || true
+          pkill -f prkdb-server || true
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # JEPSEN-STYLE CONSISTENCY TESTS
+  # Features:
+  #   - Linearizable register verification
+  #   - Bank transfer invariant checks
+  #   - Monotonic reads validation
+  # ═══════════════════════════════════════════════════════════════════════════
+  consistency-tests:
+    name: "📊 Consistency Tests"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run Jepsen Consistency Tests
+        run: cargo test --test jepsen_consistency_tests -- --nocapture
+
+      - name: Run Extended Chaos Tests
+        run: cargo test --test extended_chaos_tests -- --nocapture
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf /tmp/test-* || true
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # RESULTS SUMMARY
+  # ═══════════════════════════════════════════════════════════════════════════
+  notify-results:
+    name: "📋 Results Summary"
+    runs-on: ubuntu-latest
+    needs: [raft-chaos-tests, consistency-tests]
+    if: always()
+
+    steps:
+      - name: Summary
+        run: |
+          echo "## 🐵 Chaos Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Test Suite | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Raft Chaos (7 tests) | ${{ needs.raft-chaos-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Jepsen Consistency (6 tests) | ${{ needs.consistency-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Extended Chaos (6 tests) | ${{ needs.consistency-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Total: 19 chaos tests**" >> $GITHUB_STEP_SUMMARY

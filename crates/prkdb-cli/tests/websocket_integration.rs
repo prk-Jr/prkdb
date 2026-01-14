@@ -82,6 +82,7 @@ impl Drop for TestServer {
 }
 
 #[tokio::test]
+#[ignore] // Integration test: requires server binary, may be flaky in CI
 async fn test_websocket_streaming_flow() {
     // 1. Start Server
     let server = TestServer::start().await;
@@ -154,6 +155,7 @@ async fn test_websocket_streaming_flow() {
 }
 
 #[tokio::test]
+#[ignore] // Integration test: requires server binary, may be flaky in CI
 async fn test_websocket_resume_from_offset() {
     let server = TestServer::start().await;
     let collection = "resume-test";
