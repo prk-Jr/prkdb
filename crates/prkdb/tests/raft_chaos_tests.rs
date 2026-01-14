@@ -253,6 +253,7 @@ async fn test_leader_crash_during_write() {
 /// 5. Restart follower
 /// 6. Verify follower catches up (via AppendEntries or InstallSnapshot)
 #[tokio::test]
+#[ignore] // Requires server binary
 async fn test_follower_crash_and_recovery() {
     let mut cluster = TestCluster::new(3).await.unwrap();
     cluster.start_all().await.unwrap();
