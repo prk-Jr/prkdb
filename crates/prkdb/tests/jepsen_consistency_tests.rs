@@ -46,8 +46,23 @@ async fn test_linearizable_register() {
     let num_readers = 4;
     let ops_per_client = 50;
 
-    // Initialize key
-    storage.put(&key, &0u64.to_le_bytes()).await.unwrap();
+    // Initialize key and record in history
+    let initial_value = 0u64.to_le_bytes().to_vec();
+    let init_start = Instant::now();
+    storage.put(&key, &initial_value).await.unwrap();
+    let init_end = Instant::now();
+
+    // Record initial write so reads of 0 are valid
+    history.record(Operation {
+        kind: OpKind::Write,
+        key: key.clone(),
+        write_value: Some(initial_value),
+        read_value: None,
+        start_time: init_start,
+        end_time: init_end,
+        result: OpResult::Ok(None),
+        client_id: u64::MAX, // Special client for init
+    });
 
     let mut handles = vec![];
 
