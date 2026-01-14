@@ -22,6 +22,14 @@ pub enum NetworkRule {
     Delay { src: u64, dst: u64, ms: u64 },
     /// Drop packets from src to dst with given probability (0.0-1.0)
     Drop { src: u64, dst: u64, rate: f64 },
+    /// Block traffic in one direction only (from -> to blocked, reverse allowed)
+    AsymmetricBlock { from: u64, to: u64 },
+    /// Message reordering with random delay variance
+    Reorder {
+        src: u64,
+        dst: u64,
+        variance_ms: u64,
+    },
 }
 
 impl NetworkSimulator {
@@ -69,10 +77,46 @@ impl NetworkSimulator {
         self.persist_rules().await;
     }
 
+    /// Create an asymmetric partition (from can't reach to, but to can reach from)
+    #[allow(dead_code)]
+    pub async fn asymmetric_partition(&self, from: u64, to: u64) {
+        self.add_rule(NetworkRule::AsymmetricBlock { from, to })
+            .await;
+    }
+
+    /// Add delay to a specific link with reordering
+    #[allow(dead_code)]
+    pub async fn add_reordering(&self, src: u64, dst: u64, variance_ms: u64) {
+        self.add_rule(NetworkRule::Reorder {
+            src,
+            dst,
+            variance_ms,
+        })
+        .await;
+    }
+
+    /// Add progressive delay to a node (for slow follower simulation)
+    #[allow(dead_code)]
+    pub async fn set_delay(&self, src: u64, dst: u64, ms: u64) {
+        // Remove existing delay rules for this pair
+        {
+            let mut rules = self.rules.write().await;
+            rules.retain(|r| {
+                !matches!(r, NetworkRule::Delay { src: s, dst: d, .. } if *s == src && *d == dst)
+            });
+        }
+        self.add_rule(NetworkRule::Delay { src, dst, ms }).await;
+    }
+
     /// Heal all partitions
     pub async fn heal_partitions(&self) {
         let mut rules = self.rules.write().await;
-        rules.retain(|rule| !matches!(rule, NetworkRule::Partition { .. }));
+        rules.retain(|rule| {
+            !matches!(
+                rule,
+                NetworkRule::Partition { .. } | NetworkRule::AsymmetricBlock { .. }
+            )
+        });
         drop(rules);
         self.persist_rules().await;
     }
@@ -87,28 +131,48 @@ impl NetworkSimulator {
                         return true;
                     }
                 }
+                NetworkRule::AsymmetricBlock { from, to } => {
+                    if src == *from && dst == *to {
+                        return true;
+                    }
+                }
                 _ => {}
             }
         }
         false
     }
 
-    /// Get delay for traffic from src to dst
+    /// Get delay for traffic from src to dst (including reordering variance)
     pub async fn get_delay(&self, src: u64, dst: u64) -> Option<u64> {
         let rules = self.rules.read().await;
+        let mut delay = None;
+
         for rule in rules.iter() {
-            if let NetworkRule::Delay {
-                src: rule_src,
-                dst: rule_dst,
-                ms,
-            } = rule
-            {
-                if src == *rule_src && dst == *rule_dst {
-                    return Some(*ms);
+            match rule {
+                NetworkRule::Delay {
+                    src: rule_src,
+                    dst: rule_dst,
+                    ms,
+                } => {
+                    if src == *rule_src && dst == *rule_dst {
+                        delay = Some(*ms);
+                    }
                 }
+                NetworkRule::Reorder {
+                    src: rule_src,
+                    dst: rule_dst,
+                    variance_ms,
+                } => {
+                    if src == *rule_src && dst == *rule_dst {
+                        // Add random delay for reordering effect
+                        let random_delay = (rand::random::<u64>() % (variance_ms + 1)) as u64;
+                        delay = Some(delay.unwrap_or(0) + random_delay);
+                    }
+                }
+                _ => {}
             }
         }
-        None
+        delay
     }
 
     /// Check if packet from src to dst should be dropped

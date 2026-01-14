@@ -4,7 +4,7 @@
 
 [![Performance](https://img.shields.io/badge/Producer-21.8x%20faster%20than%20Kafka-brightgreen)]()
 [![Consumer](https://img.shields.io/badge/Consumer-24.5x%20faster-brightgreen)]()
-[![Chaos Tests](https://img.shields.io/badge/Chaos%20Tests-14%20passing-blue)]()
+[![Chaos Tests](https://img.shields.io/badge/Chaos%20Tests-19%20passing-blue)]()
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange)]()
 
 ## 🚀 Features
@@ -840,14 +840,18 @@ PrkDB includes comprehensive chaos testing to ensure production reliability:
 | Test Category | Tests | Coverage |
 |---------------|-------|----------|
 | **Distributed Raft** | 7 | Split-brain, leader crash, cascading failures |
+| **Jepsen Consistency** | 6 | Linearizable register, bank transfers, monotonic reads |
+| **Extended Chaos** | 6 | Asymmetric partition, rolling restart, message reorder |
 | **Local Storage** | 4 | Delays, concurrent ops, memory pressure |
 | **Disk Corruption** | 3 | Byte flip, truncation, header corruption |
-| **Chaos Monkey** | 1 | 5-node continuous load with random kills |
 
 ```bash
-# Run chaos monkey test (requires prkdb-server)
-cargo build --release --bin prkdb-server
-cargo test --test raft_chaos_tests test_chaos_monkey_continuous_load -- --ignored --nocapture
+# Run all consistency tests (runs in CI)
+cargo test --test jepsen_consistency_tests
+cargo test --test extended_chaos_tests
+
+# Run Raft chaos tests (nightly CI)
+cargo test --test raft_chaos_tests -- --ignored --nocapture
 
 # Run corruption tests
 cargo test --test corruption_tests -- --ignored --nocapture
@@ -863,7 +867,7 @@ cargo test --test corruption_tests -- --ignored --nocapture
 | Category | Status |
 |----------|--------|
 | Kafka Benchmark | ✅ 21.8x faster producer, 24.5x faster consumer |
-| Chaos Engineering | ✅ 14 tests (Raft + Local + Corruption) |
+| Chaos Engineering | ✅ 19 tests (Raft + Jepsen + Extended + Corruption) |
 | Raft Cluster | ✅ 5-node chaos monkey with 99.4% success |
 | Storage Backends | ✅ 8 tests |
 | ORM Layer | ✅ 15 tests |

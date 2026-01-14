@@ -34,6 +34,7 @@ pub fn dlq_topic_name<C: Collection>() -> String {
 
 /// Internal state for tracking retries per record
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Reserved for per-record retry tracking
 pub(crate) struct RetryState {
     pub retry_count: u8,
     pub last_error: Option<String>,
