@@ -1,5 +1,4 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use prkdb::prelude::*;
 use prkdb::raft::{ClusterConfig, PrkDbStateMachine, RaftNode, RpcClientPool};
 use prkdb::storage::WalStorageAdapter;
 use prkdb_types::storage::StorageAdapter;
@@ -157,7 +156,7 @@ async fn create_node(id: u64, port: u16, peers: Vec<u64>) -> (Arc<RaftNode>, Tem
 
     // RaftNode::new is synchronous and returns Self
     let node = Arc::new(RaftNode::new(config, storage, state_machine));
-    let client_pool = Arc::new(RpcClientPool::new(id));
+    let _client_pool = Arc::new(RpcClientPool::new(id));
 
     (node, dir)
 }

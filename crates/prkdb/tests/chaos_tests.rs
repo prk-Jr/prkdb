@@ -1,6 +1,5 @@
 use prkdb::storage::WalStorageAdapter;
 use prkdb_core::wal::WalConfig;
-use prkdb_types::error::StorageError;
 use prkdb_types::storage::StorageAdapter;
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
@@ -92,7 +91,7 @@ async fn chaos_test_concurrent_mixed_operations() {
     }
 
     // Readers
-    for i in 0..10 {
+    for _i in 0..10 {
         let adapter = adapter.clone();
         let handle = tokio::spawn(async move {
             for j in 0..50 {

@@ -18,5 +18,13 @@ seahash = "4.1.0"
 futures = "0.3"
 tokio-stream = "0.1"
 
+# WebSocket support
+tokio-tungstenite = "0.24"
+url = "2.5"
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-stream = "0.3"
+chrono = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

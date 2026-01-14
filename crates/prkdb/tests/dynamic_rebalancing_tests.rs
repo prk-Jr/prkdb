@@ -47,6 +47,9 @@ async fn test_consumer_join_triggers_rebalancing() {
         auto_commit_interval: Duration::from_millis(100),
         max_poll_records: 100,
         auto_offset_reset: AutoOffsetReset::Earliest,
+        dead_letter_topic: None,
+        max_retries: 3,
+        retry_backoff: Duration::from_millis(100),
     };
 
     let mut consumer1 = db.consumer::<TestEvent>(config1).await.unwrap();
@@ -71,6 +74,9 @@ async fn test_consumer_join_triggers_rebalancing() {
         auto_commit_interval: Duration::from_millis(100),
         max_poll_records: 100,
         auto_offset_reset: AutoOffsetReset::Earliest,
+        dead_letter_topic: None,
+        max_retries: 3,
+        retry_backoff: Duration::from_millis(100),
     };
 
     let mut consumer2 = db.consumer::<TestEvent>(config2).await.unwrap();
@@ -128,6 +134,9 @@ async fn test_consumer_leave_triggers_rebalancing() {
         auto_commit_interval: Duration::from_millis(100),
         max_poll_records: 100,
         auto_offset_reset: AutoOffsetReset::Earliest,
+        dead_letter_topic: None,
+        max_retries: 3,
+        retry_backoff: Duration::from_millis(100),
     };
 
     let config2 = ConsumerConfig {
@@ -137,6 +146,9 @@ async fn test_consumer_leave_triggers_rebalancing() {
         auto_commit_interval: Duration::from_millis(100),
         max_poll_records: 100,
         auto_offset_reset: AutoOffsetReset::Earliest,
+        dead_letter_topic: None,
+        max_retries: 3,
+        retry_backoff: Duration::from_millis(100),
     };
 
     let mut consumer1 = db.consumer::<TestEvent>(config1).await.unwrap();
@@ -203,6 +215,9 @@ async fn test_generation_based_coordination() {
         auto_commit_interval: Duration::from_millis(100),
         max_poll_records: 100,
         auto_offset_reset: AutoOffsetReset::Earliest,
+        dead_letter_topic: None,
+        max_retries: 3,
+        retry_backoff: Duration::from_millis(100),
     };
 
     // Generation 0: Single consumer
@@ -218,6 +233,9 @@ async fn test_generation_based_coordination() {
         auto_commit_interval: Duration::from_millis(100),
         max_poll_records: 100,
         auto_offset_reset: AutoOffsetReset::Earliest,
+        dead_letter_topic: None,
+        max_retries: 3,
+        retry_backoff: Duration::from_millis(100),
     };
 
     let mut consumer2 = db.consumer::<TestEvent>(config2).await.unwrap();
@@ -232,6 +250,9 @@ async fn test_generation_based_coordination() {
         auto_commit_interval: Duration::from_millis(100),
         max_poll_records: 100,
         auto_offset_reset: AutoOffsetReset::Earliest,
+        dead_letter_topic: None,
+        max_retries: 3,
+        retry_backoff: Duration::from_millis(100),
     };
 
     let mut consumer3 = db.consumer::<TestEvent>(config3).await.unwrap();
@@ -289,6 +310,9 @@ async fn test_rebalancing_preserves_consumption() {
         auto_commit_interval: Duration::from_millis(100),
         max_poll_records: 100,
         auto_offset_reset: AutoOffsetReset::Earliest,
+        dead_letter_topic: None,
+        max_retries: 3,
+        retry_backoff: Duration::from_millis(100),
     };
 
     let mut consumer1 = db.consumer::<TestEvent>(config1).await.unwrap();
@@ -310,6 +334,9 @@ async fn test_rebalancing_preserves_consumption() {
         auto_commit_interval: Duration::from_millis(100),
         max_poll_records: 100,
         auto_offset_reset: AutoOffsetReset::Earliest,
+        dead_letter_topic: None,
+        max_retries: 3,
+        retry_backoff: Duration::from_millis(100),
     };
 
     let mut consumer2 = db.consumer::<TestEvent>(config2).await.unwrap();
@@ -358,6 +385,9 @@ async fn test_multiple_consumer_groups_independent_rebalancing() {
         auto_commit_interval: Duration::from_millis(100),
         max_poll_records: 100,
         auto_offset_reset: AutoOffsetReset::Earliest,
+        dead_letter_topic: None,
+        max_retries: 3,
+        retry_backoff: Duration::from_millis(100),
     };
 
     let config_a2 = ConsumerConfig {
@@ -367,6 +397,9 @@ async fn test_multiple_consumer_groups_independent_rebalancing() {
         auto_commit_interval: Duration::from_millis(100),
         max_poll_records: 100,
         auto_offset_reset: AutoOffsetReset::Earliest,
+        dead_letter_topic: None,
+        max_retries: 3,
+        retry_backoff: Duration::from_millis(100),
     };
 
     // Create consumers in group B
@@ -377,6 +410,9 @@ async fn test_multiple_consumer_groups_independent_rebalancing() {
         auto_commit_interval: Duration::from_millis(100),
         max_poll_records: 100,
         auto_offset_reset: AutoOffsetReset::Earliest,
+        dead_letter_topic: None,
+        max_retries: 3,
+        retry_backoff: Duration::from_millis(100),
     };
 
     let mut consumer_a1 = db.consumer::<TestEvent>(config_a1).await.unwrap();

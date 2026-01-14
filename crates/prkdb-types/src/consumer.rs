@@ -130,6 +130,12 @@ pub struct ConsumerConfig {
     pub auto_commit_interval: Duration,
     /// Maximum records to return in a single poll
     pub max_poll_records: usize,
+    /// Dead letter queue topic name (None = disabled)
+    pub dead_letter_topic: Option<String>,
+    /// Max retries before sending to DLQ (default: 3)
+    pub max_retries: u8,
+    /// Backoff between retries
+    pub retry_backoff: Duration,
 }
 
 impl Default for ConsumerConfig {
@@ -141,6 +147,9 @@ impl Default for ConsumerConfig {
             auto_commit: true,
             auto_commit_interval: Duration::from_secs(5),
             max_poll_records: 100,
+            dead_letter_topic: None,
+            max_retries: 3,
+            retry_backoff: Duration::from_millis(100),
         }
     }
 }
@@ -172,6 +181,21 @@ impl ConsumerConfig {
         self.max_poll_records = max;
         self
     }
+
+    pub fn with_dead_letter_topic(mut self, topic: impl Into<String>) -> Self {
+        self.dead_letter_topic = Some(topic.into());
+        self
+    }
+
+    pub fn with_max_retries(mut self, max: u8) -> Self {
+        self.max_retries = max;
+        self
+    }
+
+    pub fn with_retry_backoff(mut self, backoff: Duration) -> Self {
+        self.retry_backoff = backoff;
+        self
+    }
 }
 
 /// Result of a commit operation
@@ -193,6 +217,32 @@ impl CommitResult {
     pub fn is_success(&self) -> bool {
         matches!(self, Self::Success)
     }
+}
+
+/// Result of processing a message
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcessResult {
+    /// Message processed successfully
+    Ok,
+    /// Retry processing later (will respect retry_backoff)
+    RetryLater,
+    /// Send to DLQ with error message
+    SendToDlq(String),
+}
+
+/// A record that was sent to the Dead Letter Queue
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DlqRecord<C> {
+    /// The original record that failed processing
+    pub original_record: ConsumerRecord<C>,
+    /// Error message describing the failure
+    pub error_message: String,
+    /// Number of retry attempts before DLQ
+    pub retry_count: u8,
+    /// Timestamp when sent to DLQ (millis since epoch)
+    pub dlq_timestamp: i64,
+    /// Original topic/collection
+    pub source_topic: String,
 }
 
 /// Consumer trait for streaming data from collections

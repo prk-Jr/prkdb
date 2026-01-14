@@ -20,11 +20,21 @@ pub type WatchBroadcast = broadcast::Sender<WatchEvent>;
 pub struct PrkDbGrpcService {
     db: Arc<PrkDb>,
     admin_token: String,
+    public_address: Option<String>,
 }
 
 impl PrkDbGrpcService {
     pub fn new(db: Arc<PrkDb>, admin_token: String) -> Self {
-        Self { db, admin_token }
+        Self {
+            db,
+            admin_token,
+            public_address: None,
+        }
+    }
+
+    pub fn with_public_address(mut self, address: String) -> Self {
+        self.public_address = Some(address);
+        self
     }
 
     pub fn into_server(self) -> PrkDbServiceServer<Self> {
@@ -171,9 +181,14 @@ impl PrkDbServiceTrait for PrkDbGrpcService {
         } else {
             // Single node mode / No partition manager
             // Return a default node so clients can connect
+            let address = self
+                .public_address
+                .clone()
+                .unwrap_or_else(|| "http://127.0.0.1:50051".to_string());
+
             nodes.push(NodeInfo {
                 node_id: 1,
-                address: "http://127.0.0.1:50051".to_string(), // Default gRPC port
+                address,
             });
             // We can also return a default partition 0 that this node leads
             partitions.push(PartitionInfo {

@@ -1,5 +1,4 @@
 // Test for State Machine delete handling
-use prkdb::prelude::*;
 use prkdb::raft::command::Command;
 use prkdb::raft::state_machine::{PrkDbStateMachine, StateMachine};
 use prkdb::storage::WalStorageAdapter;

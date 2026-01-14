@@ -6,6 +6,7 @@
 //! - Automatically discovers cluster topology
 //! - Routes requests to the correct partition leader
 //! - Handles retries and failover transparently
+//! - **NEW**: WebSocket consumer for real-time streaming
 //!
 //! ## Example
 //!
@@ -40,11 +41,14 @@
 //! - **Automatic Routing**: Keys are hashed to partitions, requests go to the right leader
 //! - **Metadata Caching**: Cluster topology is cached and refreshed on failure
 //! - **Retry Logic**: Failed requests are retried with exponential backoff
+//! - **WebSocket Streaming**: Real-time event consumption via WebSocket
 //! - **Lightweight**: Only depends on `prkdb-proto` + minimal runtime dependencies
 
 mod client;
+pub mod ws;
 
-pub use client::{PrkDbClient, ReadConsistency};
+pub use client::{ClientConfig, PrkDbClient, ReadConsistency};
+pub use ws::{WsConfig, WsConsumer, WsEvent};
 
 // Re-export commonly used types from prkdb-proto for convenience
 pub use prkdb_proto::{

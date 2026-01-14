@@ -133,7 +133,7 @@ impl TestCluster {
         let profiles = ["debug", "release"];
         let locations = ["target", "../target", "../../target"];
 
-        let mut found = false;
+        let found = false;
         'outer: for profile in profiles {
             for loc in locations {
                 if let Ok(cwd) = std::env::current_dir() {
@@ -157,7 +157,6 @@ impl TestCluster {
                         .join("prkdb-server");
                     if path.exists() {
                         binary_path = path;
-                        found = true;
                         break;
                     }
                 }

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use prkdb_macros::Collection;
-use prkdb_types::error::{Error, StorageError};
+use prkdb_types::error::StorageError;
 use prkdb_types::storage::StorageAdapter;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;

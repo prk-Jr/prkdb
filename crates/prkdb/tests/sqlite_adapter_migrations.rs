@@ -93,6 +93,9 @@ async fn sqlite_consumer_sees_put_events() {
         auto_commit_interval: Duration::from_millis(100),
         max_poll_records: 10,
         auto_offset_reset: AutoOffsetReset::Earliest,
+        dead_letter_topic: None,
+        max_retries: 3,
+        retry_backoff: Duration::from_millis(100),
     };
     let mut consumer = db.consumer::<Item>(config).await.unwrap();
 

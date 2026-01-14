@@ -75,6 +75,11 @@ impl PrkDb {
         crate::builder::Builder::new()
     }
 
+    /// Access the underlying storage adapter (Read-Only access recommended)
+    pub fn storage(&self) -> &Arc<dyn StorageAdapter> {
+        &self.storage
+    }
+
     /// Create a new PrkDb instance with Multi-Raft partitioning
     pub fn new_multi_raft(
         num_partitions: usize,

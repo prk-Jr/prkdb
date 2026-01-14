@@ -3,14 +3,11 @@
 //
 // Run: cargo run --release --example streaming_example
 
-use futures::StreamExt;
 use prkdb::prelude::*;
 use prkdb::storage::WalStorageAdapter;
-use prkdb::streaming::{EventStream, StreamConfig};
+use prkdb::streaming::StreamConfig;
 use prkdb_core::wal::WalConfig;
-use prkdb_types::consumer::{Consumer, ConsumerConfig};
 use std::time::Duration;
-use tokio::time::timeout;
 
 // Define a message collection
 #[derive(Collection, serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -98,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
         poll_interval: Duration::from_millis(50),
     };
 
-    let config_latest = StreamConfig {
+    let _config_latest = StreamConfig {
         group_id: "latest-consumer".to_string(),
         auto_offset_reset: prkdb_types::consumer::AutoOffsetReset::Latest,
         auto_commit: false, // Manual commit for exactly-once

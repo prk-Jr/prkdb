@@ -1,5 +1,5 @@
-use prkdb::raft::config::{ClusterConfig, NodeId};
-use prkdb::raft::node::{RaftNode, RaftState};
+use prkdb::raft::config::ClusterConfig;
+use prkdb::raft::node::RaftNode;
 use prkdb::raft::state_machine::{PrkDbStateMachine, StateMachine};
 use prkdb::storage::WalStorageAdapter;
 use prkdb_types::storage::StorageAdapter;
@@ -35,7 +35,7 @@ async fn test_log_compaction() {
     };
 
     // Create Raft node
-    let node = Arc::new(RaftNode::new(
+    let _node = Arc::new(RaftNode::new(
         config,
         storage.clone(),
         state_machine.clone(),

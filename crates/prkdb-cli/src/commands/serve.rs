@@ -72,6 +72,12 @@ struct ApiResponse<T> {
     total: Option<usize>,
 }
 
+#[derive(Deserialize)]
+struct WsParams {
+    from_offset: Option<u64>,
+    token: Option<String>,
+}
+
 impl<T> ApiResponse<T> {
     fn success(data: T) -> Self {
         Self {
@@ -134,20 +140,20 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         .route("/", get(root_handler))
         .route("/health", get(health_handler))
         .route("/collections", get(list_collections_handler))
-        .route("/collections/:name", get(get_collection_handler))
-        .route("/collections/:name/data", get(get_collection_data_handler))
+        .route("/collections/{name}", get(get_collection_handler))
+        .route("/collections/{name}/data", get(get_collection_data_handler))
         .route(
-            "/collections/:name/count",
+            "/collections/{name}/count",
             get(get_collection_count_handler),
         )
         .route(
-            "/collections/:name/schema",
+            "/collections/{name}/schema",
             get(get_collection_schema_handler),
         );
 
     // Add WebSocket route if enabled
     if args.websockets {
-        app = app.route("/ws/collections/:name", get(websocket_handler));
+        app = app.route("/ws/collections/{name}", get(websocket_handler));
     }
 
     // Add metrics route if enabled
@@ -208,7 +214,8 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
 
             use std::env;
             let admin_token = env::var("PRKDB_ADMIN_TOKEN").unwrap_or_default();
-            let service = PrkDbGrpcService::new(Arc::new(db), admin_token);
+            let service = PrkDbGrpcService::new(Arc::new(db), admin_token)
+                .with_public_address(format!("http://{}", grpc_addr));
 
             if let Err(e) = Server::builder()
                 .add_service(PrkDbServiceServer::new(service))
@@ -385,63 +392,169 @@ async fn get_collection_schema_handler(Path(name): Path<String>) -> impl IntoRes
 async fn websocket_handler(
     ws: WebSocketUpgrade,
     Path(collection_name): Path<String>,
+    Query(params): Query<WsParams>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| websocket_connection(socket, collection_name, state))
+    ws.on_upgrade(move |socket| websocket_connection(socket, collection_name, params, state))
 }
 
-async fn websocket_connection(mut socket: WebSocket, collection_name: String, state: AppState) {
+async fn websocket_connection(
+    mut socket: WebSocket,
+    collection_name: String,
+    params: WsParams,
+    _state: AppState,
+) {
     println!("🔌 WebSocket connected for collection: {}", collection_name);
 
-    let mut rx = state.broadcast_tx.subscribe();
-
-    // Send initial data
-    if let Ok(output) = execute_collection_command(CollectionCommands::Sample {
-        name: collection_name.clone(),
-        limit: 10,
-    })
-    .await
-    {
-        let message = json!({
-            "type": "initial_data",
-            "collection": collection_name,
-            "data": output,
-            "timestamp": chrono::Utc::now().to_rfc3339()
-        });
-
-        if socket
-            .send(Message::Text(message.to_string().into()))
-            .await
-            .is_err()
-        {
+    // Get database instance
+    let db = match crate::database_manager::get_db_instance().await {
+        Ok(db) => std::sync::Arc::new(db),
+        Err(e) => {
+            let _ = socket
+                .send(Message::Text(
+                    json!({
+                        "type": "error",
+                        "message": format!("Failed to get database instance: {}", e)
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await;
             return;
+        }
+    };
+
+    let mut last_sequence = 0u64;
+
+    // Determine start offset
+    if let Some(offset) = params.from_offset {
+        last_sequence = offset;
+    } else {
+        // Default behavior: start from latest
+        // Attempt to find current max sequence for this collection
+        {
+            // Simple scan to find max sequence (expensive for large history, but okay for MVP/small collections)
+            let prefix = format!("{}:", collection_name);
+            // Use storage() getter which we added to PrkDb
+            match db.storage().outbox_list().await {
+                Ok(entries) => {
+                    for (id, _) in entries {
+                        if id.starts_with(&prefix) {
+                            // Find max sequence
+                            if let Some(seq_str) = id.rsplit(':').next() {
+                                if let Ok(seq) = seq_str.parse::<u64>() {
+                                    last_sequence = last_sequence.max(seq);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
         }
     }
 
-    // Listen for updates
+    // Send initial connection success
+    if socket
+        .send(Message::Text(
+            json!({
+                "type": "connected",
+                "collection": collection_name,
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "start_offset": last_sequence
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    // Poll loop
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+    let prefix = format!("{}:", collection_name);
+
     loop {
         tokio::select! {
-            msg = rx.recv() => {
-                match msg {
-                    Ok(update) => {
-                        let message = json!({
-                            "type": "update",
-                            "collection": collection_name,
-                            "data": update,
-                            "timestamp": chrono::Utc::now().to_rfc3339()
-                        });
+            _ = interval.tick() => {
+                match db.storage().outbox_list().await {
+                    Ok(entries) => {
+                        let mut new_sequence = last_sequence;
+                        let mut updates = Vec::new();
 
-                        if socket.send(Message::Text(message.to_string().into())).await.is_err() {
-                            break;
+                        // Filter and sort entries strictly > last_sequence
+                        for (id, bytes) in entries {
+                             if !id.starts_with(&prefix) { continue; }
+
+                             // Parse sequence
+                             let seq = if let Some(seq_str) = id.rsplit(':').next() {
+                                if let Ok(s) = seq_str.parse::<u64>() { s } else { continue; }
+                             } else { continue; };
+
+                             if seq > last_sequence {
+                                 // Try to decode payload
+                                 // 1. Try raw JSON (SledAdapter default)
+                                 if let Ok(json_val) = serde_json::from_slice::<Value>(&bytes) {
+                                     updates.push((seq, json_val));
+                                     new_sequence = new_sequence.max(seq);
+                                 }
+                                 // 2. Try skipping 4-byte header (Raft/Legacy)
+                                 else if bytes.len() > 4 {
+                                     // Skip 4 bytes (variant index)
+                                     let payload = &bytes[4..];
+                                     // Try to convert to JSON
+                                     if let Ok(json_val) = crate::commands::collection::try_bincode_to_json(payload) {
+                                         updates.push((seq, json_val));
+                                         new_sequence = new_sequence.max(seq);
+                                     }
+                                 }
+                             }
                         }
+
+                        // Sort by sequence to ensure order
+                        updates.sort_by_key(|(seq, _)| *seq);
+
+                        for (seq, data) in updates {
+                            let message = json!({
+                                "type": "update",
+                                "collection": collection_name,
+                                "data": data,
+                                "offset": seq,
+                                "timestamp": chrono::Utc::now().to_rfc3339()
+                            });
+
+                            if socket.send(Message::Text(message.to_string().into())).await.is_err() {
+                                return;
+                            }
+                        }
+
+                        last_sequence = new_sequence;
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        let _ = socket
+                            .send(Message::Text(
+                                json!({
+                                    "type": "error",
+                                    "message": e.to_string()
+                                })
+                                .to_string()
+                                .into(),
+                            ))
+                            .await;
+                        break;
+                    }
                 }
             }
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Close(_))) => break,
                     Some(Err(_)) => break,
+                    Some(Ok(Message::Text(text))) => {
+                         // Optional: Handle client commands like "seek" or "pause"
+                         println!("Received WS message from client: {}", text);
+                    }
                     _ => {}
                 }
             }
@@ -449,7 +562,7 @@ async fn websocket_connection(mut socket: WebSocket, collection_name: String, st
     }
 
     println!(
-        "� WebSocket disconnected for collection: {}",
+        "🔌 WebSocket disconnected for collection: {}",
         collection_name
     );
 }
