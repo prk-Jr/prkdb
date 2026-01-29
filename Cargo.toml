@@ -7,7 +7,7 @@ members = [
     "crates/prkdb-core",
     "crates/prkdb-macros",
     "crates/prkdb-metrics",
-    "crates/prkdb-orm", 
+    "crates/prkdb-orm",
     "crates/prkdb-orm-macros",
     "crates/prkdb-proto",
     "crates/prkdb-storage-sled",
@@ -16,12 +16,19 @@ members = [
     "crates/prkdb-types",
 ]
 
+[workspace.package]
+version = "0.6.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/prk-Jr/prkdb"
+authors = ["prk-Jr"]
+
 [workspace.dependencies]
 anyhow = "1.0"
 async-trait = "0.1.88"
-bincode = { version ="2.0.1", features = ["serde"]}
+bincode = { version = "2.0.1", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = { version = "1.0"}
+serde_json = { version = "1.0" }
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
@@ -41,7 +48,10 @@ tonic = { version = "0.12", features = ["tls", "tls-roots"] }
 prost = "0.13"
 prost-types = "0.13"
 clap = { version = "4.5", features = ["derive", "color", "env"] }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite",
+] }
 flate2 = "1.0"
 tar = "0.4"
 

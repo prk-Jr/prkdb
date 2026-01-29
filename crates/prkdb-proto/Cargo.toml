@@ -3,7 +3,7 @@ name = "prkdb-proto"
 version = "0.6.0"
 edition = "2021"
 description = "Protocol buffer definitions for PrkDB - shared between client and server"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 
 [dependencies]
 # gRPC and protobuf

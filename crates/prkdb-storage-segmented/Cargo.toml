@@ -3,7 +3,7 @@ name = "prkdb-storage-segmented"
 version = "0.6.0"
 edition = "2021"
 description = "Segmented log storage adapter for prkdb with simple indexing and rotation."
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 
 [dependencies]
 tokio = { workspace = true }

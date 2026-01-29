@@ -4,7 +4,7 @@ version = "0.6.0"
 edition = "2021"
 description = "Command-line interface for PrkDB management and monitoring"
 authors = ["PrkDB Team"]
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 
 [[bin]]
 name = "prkdb-cli"

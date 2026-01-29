@@ -3,7 +3,7 @@ name = "prkdb-client"
 version = "0.6.0"
 edition = "2021"
 description = "Lightweight client library for PrkDB - smart client with automatic routing and failover"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 
 [dependencies]
 # Use prkdb-proto for gRPC definitions
