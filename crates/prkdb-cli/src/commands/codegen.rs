@@ -277,13 +277,17 @@ async fn generate_python(out_dir: &PathBuf, collection: &str, schema: &[u8]) -> 
     let messages = parse_schema_messages(schema);
 
     let mut code = format!(
-        r#""""
+        r#"""
 Generated PrkDB client model for {}
 """
 from dataclasses import dataclass
 from typing import Optional, List, Any
 import json
-from .prkdb_client import PrkDbClient, QueryBuilder
+
+try:
+    from .prkdb_client import PrkDbClient, QueryBuilder
+except ImportError:
+    from prkdb_client import PrkDbClient, QueryBuilder
 
 "#,
         collection
@@ -457,17 +461,115 @@ export interface {} {{
         code.push_str(&format!(
             r#"}}
 
-export function serialize{}(obj: {}): Uint8Array {{
-  return new TextEncoder().encode(JSON.stringify(obj));
-}}
+export const {}Meta = {{
+  fromDict: (data: any): {} => {{
+    return {{
+      ...data,
+      // Handle nested types if needed
+    }};
+  }},
+  select: (client: PrkDbClient): {}QueryBuilder => {{
+    return new {}QueryBuilder(client);
+  }},
+}};
 
-export function deserialize{}(data: Uint8Array): {} {{
-  return JSON.parse(new TextDecoder().decode(data));
-}}
+export class {}QueryBuilder {{
+    private client: PrkDbClient;
+    private filters: string[] = [];
+    private sortField: string | null = null;
+    private _limit: number = 100;
+    private _offset: number = 0;
+
+    constructor(client: PrkDbClient) {{
+        this.client = client;
+    }}
+
+    filter(field: string, op: string, value: any): this {{
+        this.filters.push(`${{field}}${{op}}${{value}}`);
+        return this;
+    }}
+
+    sort(field: string, desc: boolean = false): this {{
+        this.sortField = `${{field}}:${{desc ? 'desc' : 'asc'}}`;
+        return this;
+    }}
+
+    limit(limit: number): this {{
+        this._limit = limit;
+        return this;
+    }}
+
+    offset(offset: number): this {{
+        this._offset = offset;
+        return this;
+    }}
+
+    async execute(): Promise<{}[]> {{
+        return this.client.list("{}", {{
+            limit: this._limit,
+            offset: this._offset,
+            filter: this.filters.join(','),
+            sort: this.sortField || undefined,
+        }});
+    }}
 "#,
-            class_name, class_name, class_name, class_name
+            class_name, class_name, class_name, class_name, class_name, class_name, collection
         ));
+
+        // Generate fluent methods
+        for field in &msg.fields {
+            code.push_str(&format!(
+                r#"
+    where{}Eq(value: {}): this {{
+        return this.filter("{}", "=", value);
+    }}
+"#,
+                to_pascal_case(&field.name),
+                field.typescript_type(),
+                field.name
+            ));
+        }
+
+        code.push_str("}\n"); // Close QueryBuilder
     }
+
+    // Add PrkDbClient class
+    code.push_str(&format!(
+        r#"
+export class PrkDbClient {{
+    private host: string;
+
+    constructor(host: string = "http://127.0.0.1:8080") {{
+        this.host = host.replace(/\/$/, "");
+    }}
+
+    async list<T>(collection: string, options: {{ limit?: number, offset?: number, filter?: string, sort?: string }} = {{}}): Promise<T[]> {{
+        const params = new URLSearchParams();
+        if (options.limit) params.set("limit", options.limit.toString());
+        if (options.offset) params.set("offset", options.offset.toString());
+        if (options.filter) params.set("filter", options.filter);
+        if (options.sort) params.set("sort", options.sort);
+
+        const response = await fetch(`${{this.host}}/collections/${{collection}}/data?${{params}}`);
+        if (!response.ok) {{
+            throw new Error(`Failed to list collection: ${{response.status}}`);
+        }}
+
+        const data = await response.json();
+        
+        const result = data.data || {{}};
+        if (result && result.data && Array.isArray(result.data)) {{
+            return result.data;
+        }}
+        return Array.isArray(result) ? result : [];
+    }}
+
+    user(): UserQueryBuilder {{
+        return new UserQueryBuilder(this);
+    }}
+}}
+"#
+    ));
 
     let filename = format!("{}.ts", collection.to_lowercase());
     fs::write(out_dir.join(&filename), code).await?;

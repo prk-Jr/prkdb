@@ -93,6 +93,22 @@ jobs:
       - name: Run Client Features Test
         run: ./scripts/test_client_features.sh
 
+  client-features-integration-ts:
+    name: Client Features Integration (TypeScript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Run Client Features Test (TS)
+        run: ./scripts/test_client_features_ts.sh
+
   # ═══════════════════════════════════════════════════════════════════════════
   # CHAOS ENGINEERING TESTS (reusable workflow)
   # ═══════════════════════════════════════════════════════════════════════════
