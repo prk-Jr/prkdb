@@ -1,6 +1,7 @@
 use clap::Subcommand;
 
 pub mod backup;
+pub mod codegen;
 pub mod collection;
 pub mod consumer;
 pub mod data;
@@ -8,6 +9,7 @@ pub mod database;
 pub mod metrics;
 pub mod partition;
 pub mod replication;
+pub mod schema;
 pub mod serve;
 pub mod subscribe;
 
@@ -41,6 +43,12 @@ pub enum CollectionCommands {
         filter: Option<String>,
         #[arg(long)]
         sort: Option<String>,
+    },
+    /// Insert data into collection
+    Put {
+        name: String,
+        /// JSON data to insert
+        data: String,
     },
 }
 

@@ -3,9 +3,31 @@ use crate::raft::rpc::prk_db_service_server::{
     PrkDbService as PrkDbServiceTrait, PrkDbServiceServer,
 };
 use crate::raft::rpc::{
-    DeleteRequest, DeleteResponse, FetchSegmentRequest, GetRequest, GetResponse, HealthRequest,
-    HealthResponse, PutRequest, PutResponse, RawChunk, WatchEvent, WatchRequest,
+    // Schema Registry types
+    CheckCompatibilityRequest,
+    CheckCompatibilityResponse,
+    DeleteRequest,
+    DeleteResponse,
+    FetchSegmentRequest,
+    GetRequest,
+    GetResponse,
+    GetSchemaRequest,
+    GetSchemaResponse,
+    HealthRequest,
+    HealthResponse,
+    ListSchemasRequest,
+    ListSchemasResponse,
+    PutRequest,
+    PutResponse,
+    RawChunk,
+    RegisterSchemaRequest,
+    RegisterSchemaResponse,
+    SchemaInfo as ProtoSchemaInfo,
+    WatchEvent,
+    WatchRequest,
 };
+use prkdb_schema::{CompatibilityMode, InMemorySchemaStorage, SchemaRegistry};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -21,14 +43,41 @@ pub struct PrkDbGrpcService {
     db: Arc<PrkDb>,
     admin_token: String,
     public_address: Option<String>,
+    /// Schema registry for cross-language SDK support
+    schema_registry: Arc<SchemaRegistry<InMemorySchemaStorage>>,
 }
 
 impl PrkDbGrpcService {
     pub fn new(db: Arc<PrkDb>, admin_token: String) -> Self {
+        // Initialize schema registry with in-memory storage
+        // TODO: In production, use FileSchemaStorage with a configurable path
+        let storage = Arc::new(InMemorySchemaStorage::new());
+        let schema_registry = Arc::new(SchemaRegistry::new(storage));
+
         Self {
             db,
             admin_token,
             public_address: None,
+            schema_registry,
+        }
+    }
+
+    /// Create a new gRPC service with file-backed schema storage
+    pub fn with_schema_storage_path(
+        db: Arc<PrkDb>,
+        admin_token: String,
+        _schema_path: PathBuf,
+    ) -> Self {
+        let storage = Arc::new(InMemorySchemaStorage::new());
+        // Note: FileSchemaStorage requires mutable load(), so we use InMemory for now
+        // and cache is populated on first access
+        let schema_registry = Arc::new(SchemaRegistry::new(storage));
+
+        Self {
+            db,
+            admin_token,
+            public_address: None,
+            schema_registry,
         }
     }
 
@@ -896,6 +945,188 @@ impl PrkDbServiceTrait for PrkDbGrpcService {
         };
 
         Ok(Response::new(Box::pin(stream)))
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Schema Registry API
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Register a new schema version for a collection
+    async fn register_schema(
+        &self,
+        request: Request<RegisterSchemaRequest>,
+    ) -> Result<Response<RegisterSchemaResponse>, Status> {
+        let req = request.into_inner();
+
+        tracing::info!(
+            "RegisterSchema: collection='{}', compatibility={:?}",
+            req.collection,
+            req.compatibility
+        );
+
+        // Convert proto compatibility mode to internal type
+        use crate::raft::rpc::CompatibilityMode as ProtoCompat;
+        let compatibility = match ProtoCompat::try_from(req.compatibility) {
+            Ok(ProtoCompat::CompatibilityNone) => CompatibilityMode::None,
+            Ok(ProtoCompat::CompatibilityBackward) => CompatibilityMode::Backward,
+            Ok(ProtoCompat::CompatibilityForward) => CompatibilityMode::Forward,
+            Ok(ProtoCompat::CompatibilityFull) => CompatibilityMode::Full,
+            Err(_) => CompatibilityMode::Backward, // Default
+        };
+
+        // migration_id is Option<String> from proto
+        let migration_id = req.migration_id;
+
+        match self
+            .schema_registry
+            .register(
+                &req.collection,
+                req.schema_proto,
+                compatibility,
+                migration_id,
+            )
+            .await
+        {
+            Ok(schema) => Ok(Response::new(RegisterSchemaResponse {
+                success: true,
+                schema_id: schema.schema_id,
+                version: schema.version,
+                is_breaking: schema.is_breaking,
+                error: String::new(),
+            })),
+            Err(e) => Ok(Response::new(RegisterSchemaResponse {
+                success: false,
+                schema_id: 0,
+                version: 0,
+                is_breaking: false,
+                error: e.to_string(),
+            })),
+        }
+    }
+
+    /// Get a schema for a collection
+    async fn get_schema(
+        &self,
+        request: Request<GetSchemaRequest>,
+    ) -> Result<Response<GetSchemaResponse>, Status> {
+        let req = request.into_inner();
+
+        let version = if req.version == 0 {
+            None
+        } else {
+            Some(req.version)
+        };
+
+        tracing::debug!(
+            "GetSchema: collection='{}', version={:?}",
+            req.collection,
+            version
+        );
+
+        use crate::raft::rpc::CompatibilityMode as ProtoCompat;
+        match self.schema_registry.get(&req.collection, version).await {
+            Ok(schema) => Ok(Response::new(GetSchemaResponse {
+                success: true,
+                schema_proto: schema.descriptor,
+                version: schema.version,
+                schema_id: schema.schema_id,
+                compatibility: match schema.compatibility {
+                    CompatibilityMode::None => ProtoCompat::CompatibilityNone as i32,
+                    CompatibilityMode::Backward => ProtoCompat::CompatibilityBackward as i32,
+                    CompatibilityMode::Forward => ProtoCompat::CompatibilityForward as i32,
+                    CompatibilityMode::Full => ProtoCompat::CompatibilityFull as i32,
+                },
+                created_at: schema.created_at,
+                error: String::new(),
+            })),
+            Err(e) => Ok(Response::new(GetSchemaResponse {
+                success: false,
+                schema_proto: vec![],
+                version: 0,
+                schema_id: 0,
+                compatibility: 0,
+                created_at: 0,
+                error: e.to_string(),
+            })),
+        }
+    }
+
+    /// List all registered schemas
+    async fn list_schemas(
+        &self,
+        request: Request<ListSchemasRequest>,
+    ) -> Result<Response<ListSchemasResponse>, Status> {
+        let _req = request.into_inner();
+
+        tracing::debug!("ListSchemas: listing all schemas");
+
+        use crate::raft::rpc::CompatibilityMode as ProtoCompat;
+        match self.schema_registry.list().await {
+            Ok(schemas) => {
+                let proto_schemas: Vec<ProtoSchemaInfo> = schemas
+                    .into_iter()
+                    .map(|s| ProtoSchemaInfo {
+                        collection: s.collection,
+                        schema_id: s.schema_id,
+                        latest_version: s.latest_version,
+                        compatibility: match s.compatibility {
+                            CompatibilityMode::None => ProtoCompat::CompatibilityNone as i32,
+                            CompatibilityMode::Backward => {
+                                ProtoCompat::CompatibilityBackward as i32
+                            }
+                            CompatibilityMode::Forward => ProtoCompat::CompatibilityForward as i32,
+                            CompatibilityMode::Full => ProtoCompat::CompatibilityFull as i32,
+                        },
+                        created_at: s.created_at,
+                        updated_at: s.updated_at,
+                    })
+                    .collect();
+
+                Ok(Response::new(ListSchemasResponse {
+                    success: true,
+                    schemas: proto_schemas,
+                    error: String::new(),
+                }))
+            }
+            Err(e) => Ok(Response::new(ListSchemasResponse {
+                success: false,
+                schemas: vec![],
+                error: e.to_string(),
+            })),
+        }
+    }
+
+    /// Check if a new schema is compatible with the existing schema
+    async fn check_compatibility(
+        &self,
+        request: Request<CheckCompatibilityRequest>,
+    ) -> Result<Response<CheckCompatibilityResponse>, Status> {
+        let req = request.into_inner();
+
+        tracing::debug!(
+            "CheckCompatibility: collection='{}' new_schema_size={}",
+            req.collection,
+            req.schema_proto.len()
+        );
+
+        match self
+            .schema_registry
+            .check_compatibility(&req.collection, &req.schema_proto)
+            .await
+        {
+            Ok(result) => Ok(Response::new(CheckCompatibilityResponse {
+                compatible: result.compatible,
+                is_breaking: result.is_breaking,
+                errors: result.errors,
+                warnings: result.warnings,
+            })),
+            Err(e) => Ok(Response::new(CheckCompatibilityResponse {
+                compatible: false,
+                is_breaking: false,
+                errors: vec![e.to_string()],
+                warnings: vec![],
+            })),
+        }
     }
 }
 

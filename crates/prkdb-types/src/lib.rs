@@ -8,6 +8,7 @@
 //! - Error types
 //! - Index abstractions
 //! - Consumer/replication protocol types
+//! - Schema types for cross-language SDK support
 //!
 //! ## Design Philosophy
 //!
@@ -21,6 +22,7 @@ pub mod consumer;
 pub mod error;
 pub mod index;
 pub mod replication;
+pub mod schema;
 pub mod snapshot;
 pub mod storage;
 
@@ -36,4 +38,5 @@ pub use consumer::{
 pub use error::{ComputeError, ConsumerError, Error, StorageError};
 pub use index::{IndexDef, Indexed, IndexedStorage};
 pub use replication::{AckLevel, Change, ReplicationConfig};
+pub use schema::{FieldDef, ProtoSchema, ProtoType};
 pub use storage::{StorageAdapter, TransactionalStorageAdapter};

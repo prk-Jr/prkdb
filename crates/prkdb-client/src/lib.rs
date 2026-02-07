@@ -47,10 +47,11 @@
 mod client;
 pub mod ws;
 
-pub use client::{ClientConfig, PrkDbClient, ReadConsistency};
+pub use client::{ClientConfig, PrkDbClient, ReadConsistency, SchemaInfo};
 pub use ws::{WsConfig, WsConsumer, WsEvent};
 
 // Re-export commonly used types from prkdb-proto for convenience
+pub use prkdb_proto::raft::CompatibilityMode;
 pub use prkdb_proto::{
     DeleteRequest, DeleteResponse, GetRequest, GetResponse, MetadataRequest, MetadataResponse,
     NodeInfo, PartitionInfo, PutRequest, PutResponse, ReadMode,

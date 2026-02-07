@@ -142,20 +142,20 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         .route("/", get(root_handler))
         .route("/health", get(health_handler))
         .route("/collections", get(list_collections_handler))
-        .route("/collections/{name}", get(get_collection_handler))
-        .route("/collections/{name}/data", get(get_collection_data_handler))
+        .route("/collections/:name", get(get_collection_handler))
+        .route("/collections/:name/data", get(get_collection_data_handler))
         .route(
-            "/collections/{name}/count",
+            "/collections/:name/count",
             get(get_collection_count_handler),
         )
         .route(
-            "/collections/{name}/schema",
+            "/collections/:name/schema",
             get(get_collection_schema_handler),
         );
 
     // Add WebSocket route if enabled
     if args.websockets {
-        app = app.route("/ws/collections/{name}", get(websocket_handler));
+        app = app.route("/ws/collections/:name", get(websocket_handler));
     }
 
     // Add metrics route if enabled
@@ -335,6 +335,15 @@ async fn get_collection_data_handler(
     Path(name): Path<String>,
     Query(params): Query<DataQuery>,
 ) -> impl IntoResponse {
+    println!(
+        "DEBUG: get_collection_data_handler called for collection: '{}'",
+        name
+    );
+    println!(
+        "DEBUG: params: limit={:?}, offset={:?}, filter={:?}, sort={:?}",
+        params.limit, params.offset, params.filter, params.sort
+    );
+
     let limit = params.limit.unwrap_or(20);
     let offset = params.offset.unwrap_or(0);
 
@@ -617,9 +626,12 @@ async fn execute_collection_command(cmd: CollectionCommands) -> Result<Value> {
             name,
             limit,
             offset,
-            ..
-        } => get_collection_data(&name, limit, offset).await,
-        CollectionCommands::Sample { name, limit } => get_collection_data(&name, limit, 0).await,
+            filter,
+            sort,
+        } => get_collection_data(&name, limit, offset, filter, sort).await,
+        CollectionCommands::Sample { name, limit } => {
+            get_collection_data(&name, limit, 0, None, None).await
+        }
         _ => Ok(serde_json::json!({
             "error": "This command is not supported via the HTTP API"
         })),
@@ -731,16 +743,20 @@ async fn get_collection_count(name: &str) -> Result<Value> {
     }))
 }
 
-async fn get_collection_data(name: &str, limit: usize, offset: usize) -> Result<Value> {
+async fn get_collection_data(
+    name: &str,
+    limit: usize,
+    offset: usize,
+    filter: Option<String>,
+    sort: Option<String>,
+) -> Result<Value> {
     let data = database_manager::get_database_manager()
         .scan_storage()
         .await?;
-    let mut items = Vec::new();
-    let mut total = 0;
-    let mut skipped = 0;
+    let mut collection_entries = Vec::new();
 
-    for (key, value) in data {
-        let key_str = String::from_utf8_lossy(&key);
+    for (key, value) in &data {
+        let key_str = String::from_utf8_lossy(key);
 
         // Handle both formats: "collection:id" and "collection::Type:id"
         let matches_collection = if key_str.contains("::") {
@@ -752,21 +768,78 @@ async fn get_collection_data(name: &str, limit: usize, offset: usize) -> Result<
         };
 
         if matches_collection {
-            total += 1;
+            // Try multiple deserialization approaches
+            let mut entry = None;
 
-            if skipped < offset {
-                skipped += 1;
-                continue;
+            // 1. Try JSON first (for backward compatibility)
+            if let Ok(json_value) = serde_json::from_slice::<serde_json::Value>(value) {
+                entry = Some(json_value);
+            }
+            // 2. Try bincode deserialization
+            else if let Ok(json_value) = crate::commands::collection::try_bincode_to_json(value) {
+                entry = Some(json_value);
             }
 
-            if items.len() >= limit {
-                break;
-            }
+            if let Some(mut json_entry) = entry {
+                let key_part = if key_str.contains("::") {
+                    // Extract ID from "collection::Type:id" format
+                    key_str.split(':').next_back().unwrap_or("unknown")
+                } else {
+                    // Extract ID from "collection:id" format
+                    key_str.split(':').nth(1).unwrap_or("unknown")
+                };
 
-            if let Ok(parsed) = collection::try_bincode_to_json(&value) {
-                items.push(parsed);
+                if let Some(obj) = json_entry.as_object_mut() {
+                    obj.insert(
+                        "_key".to_string(),
+                        serde_json::Value::String(key_part.to_string()),
+                    );
+                    obj.insert(
+                        "_full_key".to_string(),
+                        serde_json::Value::String(key_str.to_string()),
+                    );
+                }
+                collection_entries.push((key_str.to_string(), json_entry));
             }
         }
+    }
+
+    if collection_entries.is_empty() {
+        return Ok(json!({
+            "collection": name,
+            "data": [],
+            "total": 0,
+            "limit": limit,
+            "offset": offset,
+            "returned": 0
+        }));
+    }
+
+    // Apply filter if specified
+    if let Some(filter_expr) = &filter {
+        collection_entries = apply_simple_filter(collection_entries, filter_expr)?;
+    }
+
+    // Apply sort if specified
+    if let Some(sort_field) = &sort {
+        collection_entries = apply_simple_sort(collection_entries, sort_field)?;
+    }
+
+    let total = collection_entries.len();
+    let mut items = Vec::new();
+    let mut skipped = 0;
+
+    for (_, item) in collection_entries {
+        if skipped < offset {
+            skipped += 1;
+            continue;
+        }
+
+        if items.len() >= limit {
+            break;
+        }
+
+        items.push(item);
     }
 
     Ok(json!({
@@ -777,6 +850,107 @@ async fn get_collection_data(name: &str, limit: usize, offset: usize) -> Result<
         "offset": offset,
         "returned": items.len()
     }))
+}
+
+/// Apply simple filter to collection entries
+fn apply_simple_filter(
+    entries: Vec<(String, serde_json::Value)>,
+    filter_expr: &str,
+) -> Result<Vec<(String, serde_json::Value)>> {
+    // Simple filter format: "field=value" or "field!=value" or "field~value" (contains)
+    let filtered = if let Some(eq_pos) = filter_expr.find("!=") {
+        let (field, value) = filter_expr.split_at(eq_pos);
+        let value = &value[2..]; // Skip "!="
+        entries
+            .into_iter()
+            .filter(|(_, entry)| {
+                entry
+                    .get(field)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s != value)
+                    .unwrap_or(true)
+            })
+            .collect()
+    } else if let Some(eq_pos) = filter_expr.find('=') {
+        let (field, value) = filter_expr.split_at(eq_pos);
+        let value = &value[1..]; // Skip "="
+        entries
+            .into_iter()
+            .filter(|(_, entry)| {
+                entry
+                    .get(field)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s == value)
+                    .unwrap_or(false)
+            })
+            .collect()
+    } else if let Some(tilde_pos) = filter_expr.find('~') {
+        let (field, value) = filter_expr.split_at(tilde_pos);
+        let value = &value[1..]; // Skip "~"
+        entries
+            .into_iter()
+            .filter(|(_, entry)| {
+                entry
+                    .get(field)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.contains(value))
+                    .unwrap_or(false)
+            })
+            .collect()
+    } else {
+        entries // No valid filter format, return all
+    };
+
+    Ok(filtered)
+}
+
+/// Apply simple sort to collection entries
+fn apply_simple_sort(
+    mut entries: Vec<(String, serde_json::Value)>,
+    sort_field: &str,
+) -> Result<Vec<(String, serde_json::Value)>> {
+    let (field, descending) = if let Some(field) = sort_field.strip_suffix(":desc") {
+        (field, true)
+    } else if let Some(field) = sort_field.strip_suffix(":asc") {
+        (field, false)
+    } else {
+        (sort_field, false) // Default to ascending
+    };
+
+    entries.sort_by(|(_, a), (_, b)| {
+        let a_val = a.get(field);
+        let b_val = b.get(field);
+
+        let cmp = match (a_val, b_val) {
+            (Some(a), Some(b)) => {
+                // Try string comparison first
+                if let (Some(a_str), Some(b_str)) = (a.as_str(), b.as_str()) {
+                    a_str.cmp(b_str)
+                }
+                // Try number comparison
+                else if let (Some(a_num), Some(b_num)) = (a.as_f64(), b.as_f64()) {
+                    a_num
+                        .partial_cmp(&b_num)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }
+                // Fallback to string representation
+                else {
+                    a.to_string().cmp(&b.to_string())
+                }
+            }
+            (Some(_), None) => std::cmp::Ordering::Less, // Non-null values come first
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        };
+
+        if descending {
+            cmp.reverse()
+        } else {
+            cmp
+        }
+    });
+
+    Ok(entries)
 }
 
 fn analyze_schema(items: &[Value]) -> Value {

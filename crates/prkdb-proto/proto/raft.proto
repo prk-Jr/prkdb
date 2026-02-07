@@ -99,6 +99,22 @@ service PrkDbService {
     // Fetch raw WAL segment data for zero-copy consumption
     // Streams raw bytes to bypass Protobuf serialization overhead
     rpc FetchSegment (FetchSegmentRequest) returns (stream RawChunk);
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Schema Registry (Cross-Language SDK Support)
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    // Register a schema for a collection (creates or updates version)
+    rpc RegisterSchema (RegisterSchemaRequest) returns (RegisterSchemaResponse);
+
+    // Get schema for a collection (specific version or latest)
+    rpc GetSchema (GetSchemaRequest) returns (GetSchemaResponse);
+
+    // List all registered schemas
+    rpc ListSchemas (ListSchemasRequest) returns (ListSchemasResponse);
+
+    // Check if a new schema is compatible with existing versions
+    rpc CheckCompatibility (CheckCompatibilityRequest) returns (CheckCompatibilityResponse);
 }
 
 message RequestVoteRequest {
@@ -513,4 +529,82 @@ message RawChunk {
     uint64 start_offset = 2;     // Offset of first record in this chunk
     uint64 end_offset = 3;       // Offset after last record in this chunk
     bool has_more = 4;           // More data available after this chunk
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Schema Registry Messages (Cross-Language SDK Support)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Compatibility modes for schema evolution
+enum CompatibilityMode {
+    COMPATIBILITY_NONE = 0;       // No compatibility checking
+    COMPATIBILITY_BACKWARD = 1;   // New schema can read old data (default)
+    COMPATIBILITY_FORWARD = 2;    // Old schema can read new data
+    COMPATIBILITY_FULL = 3;       // Both backward and forward compatible
+}
+
+// Request to register a new schema version for a collection
+message RegisterSchemaRequest {
+    string admin_token = 1;
+    string collection = 2;                // Collection name (e.g., "users")
+    bytes schema_proto = 3;               // FileDescriptorProto bytes
+    CompatibilityMode compatibility = 4;  // Compatibility mode to enforce
+    optional string migration_id = 5;     // Required if change is breaking
+}
+
+message RegisterSchemaResponse {
+    bool success = 1;
+    uint32 schema_id = 2;         // Unique schema ID
+    uint32 version = 3;           // Auto-incremented version number
+    bool is_breaking = 4;         // True if breaking change detected
+    string error = 5;
+}
+
+// Request to get schema for a collection
+message GetSchemaRequest {
+    string collection = 1;
+    uint32 version = 2;           // 0 = latest version
+}
+
+message GetSchemaResponse {
+    bool success = 1;
+    bytes schema_proto = 2;       // FileDescriptorProto bytes
+    uint32 version = 3;
+    uint32 schema_id = 4;
+    CompatibilityMode compatibility = 5;
+    uint64 created_at = 6;        // Unix timestamp ms
+    string error = 7;
+}
+
+// Request to list all registered schemas
+message ListSchemasRequest {
+    string admin_token = 1;
+}
+
+message SchemaInfo {
+    string collection = 1;
+    uint32 latest_version = 2;
+    uint32 schema_id = 3;
+    CompatibilityMode compatibility = 4;
+    uint64 created_at = 5;
+    uint64 updated_at = 6;
+}
+
+message ListSchemasResponse {
+    bool success = 1;
+    repeated SchemaInfo schemas = 2;
+    string error = 3;
+}
+
+// Request to check compatibility before registering
+message CheckCompatibilityRequest {
+    string collection = 1;
+    bytes schema_proto = 2;       // New schema to check
+}
+
+message CheckCompatibilityResponse {
+    bool compatible = 1;
+    bool is_breaking = 2;         // True if breaking change detected
+    repeated string errors = 3;   // Compatibility errors if any
+    repeated string warnings = 4; // Non-blocking warnings
 }

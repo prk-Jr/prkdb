@@ -91,6 +91,56 @@ pub fn collection_derive(input: TokenStream) -> TokenStream {
         })
         .collect();
 
+    // Generate ProtoSchema field definitions
+    let field_defs: Vec<_> = all_fields
+        .iter()
+        .enumerate()
+        .map(|(idx, (name, ty))| {
+            let name_str = name.to_string();
+            let field_number = (idx + 1) as i32;
+            let type_str = quote!(#ty).to_string();
+
+            // Determine if type is Option<_> or Vec<_>
+            let is_optional = type_str.starts_with("Option <") || type_str.starts_with("Option<");
+            let is_repeated = (type_str.starts_with("Vec <") || type_str.starts_with("Vec<"))
+                && !type_str.contains("u8"); // Vec<u8> is bytes, not repeated
+
+            // Map Rust type to ProtoType
+            let proto_type = if type_str.contains("String") || type_str.contains("str") {
+                quote! { prkdb_types::schema::ProtoType::String }
+            } else if type_str.contains("Vec < u8") || type_str.contains("Vec<u8") {
+                quote! { prkdb_types::schema::ProtoType::Bytes }
+            } else if type_str.contains("i32") {
+                quote! { prkdb_types::schema::ProtoType::Int32 }
+            } else if type_str.contains("i64") {
+                quote! { prkdb_types::schema::ProtoType::Int64 }
+            } else if type_str.contains("u32") {
+                quote! { prkdb_types::schema::ProtoType::Uint32 }
+            } else if type_str.contains("u64") {
+                quote! { prkdb_types::schema::ProtoType::Uint64 }
+            } else if type_str.contains("f32") {
+                quote! { prkdb_types::schema::ProtoType::Float }
+            } else if type_str.contains("f64") {
+                quote! { prkdb_types::schema::ProtoType::Double }
+            } else if type_str.contains("bool") {
+                quote! { prkdb_types::schema::ProtoType::Bool }
+            } else {
+                // Default: treat as bytes (serialized)
+                quote! { prkdb_types::schema::ProtoType::Bytes }
+            };
+
+            quote! {
+                prkdb_types::schema::FieldDef {
+                    name: #name_str,
+                    field_number: #field_number,
+                    proto_type: #proto_type,
+                    is_optional: #is_optional,
+                    is_repeated: #is_repeated,
+                }
+            }
+        })
+        .collect();
+
     // Generate QueryBuilder extension methods for indexed fields
     let query_methods: Vec<_> = all_fields
         .iter()
@@ -111,8 +161,10 @@ pub fn collection_derive(input: TokenStream) -> TokenStream {
                         self.filter(move |r| r.#name == value)
                     }
                 }
-            } else if type_str.contains("String") || type_str.contains("str") {
-                // String type: eq, contains, starts_with
+            } else if (type_str.contains("String") || type_str.contains("str"))
+                && !type_str.starts_with("Option")
+            {
+                // String type (not Optional): eq, contains, starts_with
                 let where_contains = format_ident!("where_{}_contains", name);
                 let where_starts_with = format_ident!("where_{}_starts_with", name);
                 quote! {
@@ -240,6 +292,51 @@ pub fn collection_derive(input: TokenStream) -> TokenStream {
                 vec![
                     #(#index_extractions),*
                 ]
+            }
+        }
+
+        // ProtoSchema trait implementation for cross-language SDK support
+        impl prkdb_types::schema::ProtoSchema for #struct_name {
+            fn collection_name() -> &'static str {
+                // Use struct name in snake_case as collection name
+                stringify!(#struct_name)
+            }
+
+            fn field_definitions() -> &'static [prkdb_types::schema::FieldDef] {
+                static FIELDS: &[prkdb_types::schema::FieldDef] = &[
+                    #(#field_defs),*
+                ];
+                FIELDS
+            }
+
+            fn schema_proto() -> Vec<u8> {
+                // Build a minimal FileDescriptorProto representation
+                // Format: simple binary format that can be parsed by prkdb-schema
+                // [name_len:u32][name:utf8][field_count:u32][fields...]
+                // Each field: [name_len:u32][name:utf8][number:i32][type:i32][optional:u8][repeated:u8]
+                let mut bytes = Vec::with_capacity(256);
+                let name = stringify!(#struct_name);
+                let name_bytes = name.as_bytes();
+
+                // Write message name
+                bytes.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+                bytes.extend_from_slice(name_bytes);
+
+                // Write field count and field definitions
+                let fields = Self::field_definitions();
+                bytes.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+
+                for field in fields {
+                    let field_name = field.name.as_bytes();
+                    bytes.extend_from_slice(&(field_name.len() as u32).to_le_bytes());
+                    bytes.extend_from_slice(field_name);
+                    bytes.extend_from_slice(&field.field_number.to_le_bytes());
+                    bytes.extend_from_slice(&field.proto_type.as_i32().to_le_bytes());
+                    bytes.push(if field.is_optional { 1 } else { 0 });
+                    bytes.push(if field.is_repeated { 1 } else { 0 });
+                }
+
+                bytes
             }
         }
 

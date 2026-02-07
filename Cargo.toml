@@ -10,6 +10,7 @@ members = [
     "crates/prkdb-orm",
     "crates/prkdb-orm-macros",
     "crates/prkdb-proto",
+    "crates/prkdb-schema",
     "crates/prkdb-storage-sled",
     "crates/prkdb-storage-sql",
     "crates/prkdb-storage-segmented",
@@ -39,7 +40,7 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 dashmap = "5.5"
 uuid = { version = "1.11", features = ["v4"] }
 prometheus = "0.13"
-axum = "0.8.8"
+axum = "0.7.9"
 lazy_static = "1.5"
 crossbeam = "0.8"
 mimalloc = { version = "0.1", default-features = false }
@@ -67,6 +68,7 @@ prkdb-orm = { path = "crates/prkdb-orm" }
 prkdb-storage-sled = { path = "crates/prkdb-storage-sled" }
 prkdb-storage-sql = { path = "crates/prkdb-storage-sql" }
 prkdb-storage-segmented = { path = "crates/prkdb-storage-segmented" }
+prkdb-schema = { path = "crates/prkdb-schema" }
 
 # Optimize for CI to avoid Linker OOM (Bus Error signal 7)
 # Reduces debug info for dependencies in dev/test builds

@@ -1,0 +1,38 @@
+[package]
+name = "prkdb-schema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Schema Registry for PrkDB - stores and validates collection schemas for cross-language SDK support"
+
+[dependencies]
+# Core dependencies
+prkdb-proto = { workspace = true }
+prkdb-types = { workspace = true }
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+
+# Protobuf handling
+prost = { workspace = true }
+prost-types = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Utilities
+tracing = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+tempfile = "3.24"

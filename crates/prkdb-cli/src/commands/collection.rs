@@ -75,6 +75,7 @@ pub async fn execute(cmd: CollectionCommands, cli: &Cli) -> Result<()> {
             crate::init_database_manager(&cli.database);
             browse_collection_data(&name, limit, offset, filter, sort, cli).await
         }
+        CollectionCommands::Put { name, data } => put_collection_data(&name, &data, cli).await,
     }
 }
 
@@ -88,6 +89,47 @@ async fn create_collection(name: &str, cli: &Cli) -> Result<()> {
 
     client.create_collection(name).await?;
     success(&format!("Collection '{}' created successfully", name));
+    Ok(())
+}
+
+async fn put_collection_data(name: &str, data: &str, cli: &Cli) -> Result<()> {
+    // Parse JSON
+    let json: serde_json::Value =
+        serde_json::from_str(data).map_err(|e| anyhow::anyhow!("Invalid JSON data: {}", e))?;
+
+    // Extract ID
+    let id = json
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Data must have an 'id' field (string)"))?;
+
+    // Construct Key: "collection:id"
+    // Note: If using Type, it would be "collection::Type:id".
+    // For now, assume simple collection.
+    // Ideally we should check schema to key format?
+    // But standardized key format is "collection:id".
+    let key = format!("{}:{}", name, id);
+
+    // Connect client
+    let client = PrkDbClient::new(vec![cli.server.clone()]).await?;
+    let client = if let Some(token) = &cli.admin_token {
+        client.with_admin_token(token)
+    } else {
+        client
+    };
+
+    // Serialize value (JSON bytes)
+    // We store JSON bytes directly for now (or bincode wrapped?)
+    // `serve.rs` tries `serde_json::from_slice` first.
+    let value_bytes = serde_json::to_vec(&json)?;
+
+    // Put
+    client.put(key.as_bytes(), &value_bytes).await?;
+
+    success(&format!(
+        "Inserted document '{}' into collection '{}'",
+        id, name
+    ));
     Ok(())
 }
 

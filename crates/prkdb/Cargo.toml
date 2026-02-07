@@ -14,8 +14,8 @@ path = "tests/load_tests.rs"
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 bincode = { workspace = true }
-bytes = "1.5"  # Zero-copy data handling for performance
-crossbeam-channel = "0.5"  # Lock-free channels for Phase 2 batching optimization
+bytes = "1.5"                                                          # Zero-copy data handling for performance
+crossbeam-channel = "0.5"                                              # Lock-free channels for Phase 2 batching optimization
 futures = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
@@ -25,8 +25,8 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 rand = "0.8"
 ahash = "0.8"
-dashmap = { workspace = true}
-papaya = "0.1"  # Lock-free HashMap for Phase 5 optimization (better than flurry)
+dashmap = { workspace = true }
+papaya = "0.1"                                                         # Lock-free HashMap for Phase 5 optimization (better than flurry)
 prkdb-core = { workspace = true }
 prkdb-types = { workspace = true }
 prkdb-metrics = { workspace = true }
@@ -34,10 +34,11 @@ prkdb-orm = { workspace = true }
 prkdb-macros = { workspace = true }
 prkdb-orm-macros = { workspace = true }
 prkdb-proto = { workspace = true }
+prkdb-schema = { workspace = true }
 prkdb-client = { workspace = true }
-uuid = { workspace = true}
-mimalloc = { workspace = true }  # Fast allocator
-lz4 = { workspace = true }  # Compression
+uuid = { workspace = true }
+mimalloc = { workspace = true }                                        # Fast allocator
+lz4 = { workspace = true }                                             # Compression
 axum = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
 pin-project = "1.1"
@@ -46,13 +47,13 @@ tonic = { workspace = true, features = ["tls", "tls-roots"] }
 prost = { workspace = true }
 prost-types = { workspace = true }
 tokio-stream = { version = "0.1", features = ["time", "sync", "net"] }
-async-stream = "0.3"  # Phase 22: Zero-copy streaming
+async-stream = "0.3"                                                   # Phase 22: Zero-copy streaming
 tracing-subscriber = { workspace = true }
 sysinfo = "0.37"
 seahash = "4.1.0"
-crc32fast = "1.4"  # Fast CRC32 checksums for checkpoint integrity
-flate2 = { workspace = true }  # Compression for snapshots
-tar = { workspace = true }     # Archiving for snapshots
+crc32fast = "1.4"                                                      # Fast CRC32 checksums for checkpoint integrity
+flate2 = { workspace = true }                                          # Compression for snapshots
+tar = { workspace = true }                                             # Archiving for snapshots
 prometheus = { workspace = true }
 lazy_static = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
@@ -70,7 +71,10 @@ prkdb-metrics = { workspace = true }
 
 
 tempfile = "3"
-sqlx = { version = "0.8.2", default-features = false, features = ["runtime-tokio", "sqlite"] }
+sqlx = { version = "0.8.2", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite",
+] }
 criterion = { workspace = true }
 proptest = "1.4"
 
@@ -117,4 +121,3 @@ harness = false
 [[bench]]
 name = "query_bench"
 harness = false
-

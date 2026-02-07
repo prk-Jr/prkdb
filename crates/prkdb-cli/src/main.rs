@@ -115,6 +115,12 @@ pub enum Commands {
 
     /// Restore database (Offline)
     Restore(backup::RestoreArgs),
+
+    /// Generate cross-language SDK clients from schemas
+    Codegen(codegen::CodegenArgs),
+
+    /// Schema registry management
+    Schema(schema::SchemaArgs),
 }
 
 #[derive(clap::ValueEnum, Clone)]
@@ -176,5 +182,11 @@ async fn main() -> anyhow::Result<()> {
         // Backup/Restore commands (Offline)
         Commands::Backup(args) => backup::handle_backup(args.clone(), &cli).await,
         Commands::Restore(args) => backup::handle_restore(args.clone()).await,
+
+        // Codegen command (pure remote)
+        Commands::Codegen(args) => codegen::handle_codegen(args.clone()).await,
+
+        // Schema command (pure remote)
+        Commands::Schema(args) => schema::handle_schema(args.clone()).await,
     }
 }
