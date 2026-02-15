@@ -68,11 +68,11 @@ cat > "$WORK_DIR/app_v1.py" <<EOF
 import sys
 import os
 sys.path.append("$WORK_DIR/client_v1")
-# Generated file is 'users.py' (from collection name 'users') which contains class 'Users'
-from users import Users
+# Generated file is 'users.py' (from collection name 'users') which contains class 'User'
+from users import User
 
 print("✅ App V1: Creating user...")
-u = Users(id="u1", name="Alice", email="alice@example.com")
+u = User(id="u1", name="Alice", email="alice@example.com")
 print(f"User created: {u}")
 EOF
 
@@ -137,10 +137,10 @@ import sys
 import os
 sys.path.append("$WORK_DIR/client_v2")
 # Generated file is 'users.py' (from collection name)
-from users import Users
+from users import User
 
 print("✅ App V2: Creating user with int ID...")
-u = Users(id=123, name="Bob")
+u = User(id=123, name="Bob")
 print(f"User created: {u}")
 EOF
 

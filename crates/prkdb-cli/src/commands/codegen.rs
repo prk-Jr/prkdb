@@ -277,7 +277,7 @@ async fn generate_python(out_dir: &PathBuf, collection: &str, schema: &[u8]) -> 
     let messages = parse_schema_messages(schema);
 
     let mut code = format!(
-        r#"""
+        r#""""
 Generated PrkDB client model for {}
 """
 from dataclasses import dataclass

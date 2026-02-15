@@ -5,28 +5,15 @@ set -e
 SERVER_PORT=50056
 GRPC_PORT=50053
 WORK_DIR="/tmp/prkdb_client_features_ts"
-PRKDB_BIN="./target/debug/prkdb"
-if [ ! -f "$PRKDB_BIN" ]; then
-    if [ -f "./target/debug/prkdb-cli" ]; then
-        PRKDB_BIN="./target/debug/prkdb-cli"
-    elif [ -f "./target/debug/prkdb-server" ]; then
-        PRKDB_BIN="./target/debug/prkdb-server" # server can also run cli commands usually? No, prkdb-cli is for CLI.
-        # Check if prkdb-cli exists
-    fi
-fi
-
-if [ ! -f "$PRKDB_BIN" ]; then
-    echo "❌ Could not find prkdb binary in target/debug"
-    echo "Files:"
-    ls -l target/debug/prkdb*
-    exit 1
-fi
-
+PRKDB_CMD="cargo run --quiet -p prkdb-cli --bin prkdb-cli --"
 
 # Cleanup function
 cleanup() {
     echo "🧹 Cleaning up..."
     if [ -f "$WORK_DIR/server.pid" ]; then
+        # If we used cargo run, the PID might be the cargo process.
+        # Killing it usually kills the child if it's the main process.
+        # But we spawn server with &
         kill $(cat "$WORK_DIR/server.pid") 2>/dev/null || true
     fi
     rm -rf "$WORK_DIR"
@@ -55,7 +42,7 @@ cargo build -p prkdb-cli
 
 # Start server
 echo "🚀 Starting server on port $SERVER_PORT..."
-$PRKDB_BIN --verbose serve --port $SERVER_PORT --grpc-port $GRPC_PORT > "$WORK_DIR/server.log" 2>&1 &
+$PRKDB_CMD --verbose serve --port $SERVER_PORT --grpc-port $GRPC_PORT > "$WORK_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 echo $SERVER_PID > "$WORK_DIR/server.pid"
 echo "Server PID: $SERVER_PID"
@@ -94,18 +81,18 @@ protoc --include_imports --descriptor_set_out="$WORK_DIR/user.desc" --proto_path
 
 # Register Schema
 echo "🚀 Registering Schema..."
-$PRKDB_BIN schema --server "http://127.0.0.1:$GRPC_PORT" register --collection users --proto "$WORK_DIR/user.desc"
+$PRKDB_CMD schema --server "http://127.0.0.1:$GRPC_PORT" register --collection users --proto "$WORK_DIR/user.desc"
 
 # Insert Data via CLI (since HTTP API is read-only)
 echo "💾 Inserting Test Data..."
-$PRKDB_BIN --server "http://127.0.0.1:$GRPC_PORT" collection put users '{"id": "u1", "name": "Alice", "age": 30}'
-$PRKDB_BIN --server "http://127.0.0.1:$GRPC_PORT" collection put users '{"id": "u2", "name": "Bob", "age": 25}'
-$PRKDB_BIN --server "http://127.0.0.1:$GRPC_PORT" collection put users '{"id": "u3", "name": "Alice", "age": 35}'
+$PRKDB_CMD --server "http://127.0.0.1:$GRPC_PORT" collection put users '{"id": "u1", "name": "Alice", "age": 30}'
+$PRKDB_CMD --server "http://127.0.0.1:$GRPC_PORT" collection put users '{"id": "u2", "name": "Bob", "age": 25}'
+$PRKDB_CMD --server "http://127.0.0.1:$GRPC_PORT" collection put users '{"id": "u3", "name": "Alice", "age": 35}'
 
 
 # Generate TypeScript Client
 echo "⚙️  Generating TypeScript Client..."
-$PRKDB_BIN codegen \
+$PRKDB_CMD codegen \
     --server "http://127.0.0.1:$GRPC_PORT" \
     --collection "users" \
     --lang typescript \
