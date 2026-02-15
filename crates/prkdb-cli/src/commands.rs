@@ -16,7 +16,13 @@ pub mod subscribe;
 #[derive(Subcommand, Clone)]
 pub enum CollectionCommands {
     /// Create a new collection
-    Create { name: String },
+    Create {
+        name: String,
+        #[arg(short, long, default_value = "1")]
+        partitions: u32,
+        #[arg(short, long, default_value = "1")]
+        replication_factor: u32,
+    },
     /// Drop a collection
     Drop { name: String },
     /// List all collections

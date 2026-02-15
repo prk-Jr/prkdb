@@ -165,7 +165,11 @@ impl PartitionManager {
     }
 
     /// Start all Raft partitions
-    pub fn start_all(&self, rpc_pool: Arc<super::rpc_client::RpcClientPool>) {
+    pub fn start_all(
+        &self,
+        rpc_pool: Arc<super::rpc_client::RpcClientPool>,
+        skip_server_partitions: &[u64],
+    ) {
         tracing::info!("Starting all {} partitions", self.num_partitions);
 
         for (partition_id, raft_node) in &self.raft_groups {
@@ -178,6 +182,16 @@ impl PartitionManager {
             tokio::spawn(async move {
                 raft_node_clone.start(rpc_pool_clone);
             });
+
+            // Check if we should skip starting the server for this partition
+            // (e.g. if it's being served by the main PrkDB server)
+            if skip_server_partitions.contains(partition_id) {
+                tracing::info!(
+                    "Skipping dedicated Raft server for partition {} (handled externally)",
+                    partition_id
+                );
+                continue;
+            }
 
             // Start Raft gRPC server to handle incoming RPCs
             // Config already has correct listen_addr from adjust_config_for_partition

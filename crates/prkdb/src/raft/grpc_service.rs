@@ -220,7 +220,7 @@ impl PrkDbServiceTrait for PrkDbGrpcService {
                         // For this prototype, we'll construct it based on convention
                         // Node 1 -> 127.0.0.1:8081, Node 2 -> 127.0.0.1:8082, etc.
                         // This is a hack for the demo, but sufficient for the benchmark
-                        let port = 8080 + node_id as u32;
+                        let port = 50050 + node_id as u32;
                         let address = format!("http://127.0.0.1:{}", port);
 
                         nodes.push(NodeInfo { node_id, address });
@@ -295,7 +295,10 @@ impl PrkDbServiceTrait for PrkDbGrpcService {
         // Delegate to PrkDb, which handles distributed proposal (via Raft to Partition 0)
         // or local execution depending on configuration.
 
-        let result = self.db.create_collection(&req.name).await;
+        let result = self
+            .db
+            .create_collection(&req.name, req.num_partitions, req.replication_factor)
+            .await;
 
         match result {
             Ok(_) => Ok(Response::new(crate::raft::rpc::CreateCollectionResponse {

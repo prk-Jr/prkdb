@@ -32,9 +32,9 @@ impl Default for ClusterConfig {
             local_node_id: 1,
             listen_addr: "127.0.0.1:50051".parse().unwrap(),
             nodes: vec![(1, "127.0.0.1:50051".parse().unwrap())],
-            election_timeout_min_ms: 150,
-            election_timeout_max_ms: 300,
-            heartbeat_interval_ms: 50,
+            election_timeout_min_ms: 500,
+            election_timeout_max_ms: 1000,
+            heartbeat_interval_ms: 100,
         }
     }
 }

@@ -76,6 +76,9 @@ impl TestClient {
             .create_collection(tonic::Request::new(CreateCollectionRequest {
                 admin_token: self.admin_token.clone(),
                 name: name.to_string(),
+                num_partitions: 1,
+                replication_factor: 1,
+                ..Default::default()
             }))
             .await
             .map_err(|e| e.to_string())?;

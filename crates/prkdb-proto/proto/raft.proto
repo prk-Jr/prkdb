@@ -274,6 +274,8 @@ message ReadIndexResponse {
 message CreateCollectionRequest {
     string admin_token = 1;
     string name = 2;
+    uint32 num_partitions = 3;
+    uint32 replication_factor = 4;
 }
 
 message CreateCollectionResponse {

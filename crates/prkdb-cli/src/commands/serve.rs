@@ -6,7 +6,7 @@ use axum::{
     },
     http::StatusCode,
     response::IntoResponse,
-    routing::get,
+    routing::{delete, get},
     Json, Router,
 };
 use clap::Args;
@@ -46,6 +46,10 @@ pub struct ServeArgs {
     /// Enable WebSocket support for real-time data
     #[arg(long)]
     pub websockets: bool,
+
+    /// Node ID for Raft cluster
+    #[arg(long, default_value = "1")]
+    pub id: u64,
 }
 
 #[derive(Clone)]
@@ -143,7 +147,14 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         .route("/health", get(health_handler))
         .route("/collections", get(list_collections_handler))
         .route("/collections/:name", get(get_collection_handler))
-        .route("/collections/:name/data", get(get_collection_data_handler))
+        .route(
+            "/collections/:name/data",
+            get(get_collection_data_handler).put(put_collection_data_handler),
+        )
+        .route(
+            "/collections/:name/data/:id",
+            delete(delete_collection_data_handler),
+        )
         .route(
             "/collections/:name/count",
             get(get_collection_count_handler),
@@ -208,22 +219,40 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     if let Ok(db) = crate::database_manager::get_db_instance().await {
         println!("🚀 Starting PrkDB gRPC server on {}", grpc_addr);
 
+        // Start Multi-Raft partitions (background tasks)
+        // Skip serving Partition 0's Raft server here, as we'll multiplex it on the main gRPC server below
+        // This avoids port collision on 50051
+        let rpc_pool = std::sync::Arc::new(prkdb::raft::RpcClientPool::new(args.id));
+        db.start_multi_raft(rpc_pool, &[0]);
+
         tokio::spawn(async move {
             use prkdb::raft::grpc_service::PrkDbGrpcService;
             use prkdb::raft::rpc::prk_db_service_server::PrkDbServiceServer;
+            use prkdb::raft::rpc::raft_service_server::RaftServiceServer;
+            use prkdb::raft::service::RaftServiceImpl;
             use std::sync::Arc;
             use tonic::transport::Server;
 
             use std::env;
             let admin_token = env::var("PRKDB_ADMIN_TOKEN").unwrap_or_default();
-            let service = PrkDbGrpcService::new(Arc::new(db), admin_token)
+            let service = PrkDbGrpcService::new(Arc::new(db.clone()), admin_token)
                 .with_public_address(format!("http://{}", grpc_addr));
 
-            if let Err(e) = Server::builder()
-                .add_service(PrkDbServiceServer::new(service))
-                .serve(grpc_addr)
-                .await
-            {
+            let mut builder = Server::builder();
+
+            // Register client service
+            let mut router = builder.add_service(PrkDbServiceServer::new(service));
+
+            // Register Raft service for Partition 0 (multiplexed on same port)
+            if let Some(pm) = &db.partition_manager {
+                if let Some(raft_node) = pm.get_partition(0) {
+                    println!("✨ Multiplexing Raft Service for Partition 0 on main port");
+                    let raft_service = RaftServiceImpl::new(raft_node);
+                    router = router.add_service(RaftServiceServer::new(raft_service));
+                }
+            }
+
+            if let Err(e) = router.serve(grpc_addr).await {
                 eprintln!("❌ gRPC server error: {}", e);
             }
         });
@@ -360,6 +389,81 @@ async fn get_collection_data_handler(
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiResponse::<Value>::error(e.to_string())),
+        )
+            .into_response(),
+    }
+}
+
+async fn put_collection_data_handler(
+    Path(name): Path<String>,
+    Json(data): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let db = match crate::database_manager::get_db_instance().await {
+        Ok(db) => db,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+
+    // Extract ID
+    let id = match data.get("id").and_then(|v| v.as_str()) {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "Data must have 'id' field"})),
+            )
+                .into_response()
+        }
+    };
+
+    let key = format!("{}:{}", name, id);
+    let value = match serde_json::to_vec(&data) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+
+    match db.put(key.as_bytes(), &value).await {
+        Ok(_) => Json(json!({"success": true, "id": id})).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn delete_collection_data_handler(
+    Path((name, id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let db = match crate::database_manager::get_db_instance().await {
+        Ok(db) => db,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+
+    let key = format!("{}:{}", name, id);
+
+    match db.delete(key.as_bytes()).await {
+        Ok(_) => Json(json!({"success": true, "id": id})).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
         )
             .into_response(),
     }

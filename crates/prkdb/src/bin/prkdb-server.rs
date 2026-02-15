@@ -74,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Start Multi-Raft
     let rpc_pool = Arc::new(RpcClientPool::new(node_id));
-    db.start_multi_raft(rpc_pool);
+    db.start_multi_raft(rpc_pool, &[]);
 
     // Wait for leaders
     info!("Waiting for leader election...");

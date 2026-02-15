@@ -65,12 +65,28 @@ impl StateMachine for PrkDbStateMachine {
                         .await
                         .map_err(StateMachineError::Storage)?;
                 }
-                Command::CreateCollection { name } => {
-                    tracing::info!("Applying CreateCollection command: name={}", name);
+                Command::CreateCollection {
+                    name,
+                    num_partitions,
+                    replication_factor,
+                } => {
+                    tracing::info!(
+                        "Applying CreateCollection command: name={}, partitions={}, replication={}",
+                        name,
+                        num_partitions,
+                        replication_factor
+                    );
                     // Store collection metadata as a special key
                     let metadata_key = format!("meta:col:{}", name).into_bytes();
-                    // Value could be schema or config in future, for now just placeholder
-                    let metadata_value = b"{}".to_vec();
+
+                    // Store configuration as JSON
+                    let metadata = serde_json::json!({
+                        "num_partitions": num_partitions,
+                        "replication_factor": replication_factor,
+                        "created_at": chrono::Utc::now().to_rfc3339()
+                    });
+
+                    let metadata_value = metadata.to_string().into_bytes();
                     self.storage
                         .put(&metadata_key, &metadata_value)
                         .await

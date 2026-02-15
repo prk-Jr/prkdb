@@ -2,10 +2,21 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Command {
-    Put { key: Vec<u8>, value: Vec<u8> },
-    Delete { key: Vec<u8> },
-    CreateCollection { name: String },
-    DropCollection { name: String },
+    Put {
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    Delete {
+        key: Vec<u8>,
+    },
+    CreateCollection {
+        name: String,
+        num_partitions: u32,
+        replication_factor: u32,
+    },
+    DropCollection {
+        name: String,
+    },
 }
 
 impl Command {

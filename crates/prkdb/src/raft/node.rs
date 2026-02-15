@@ -37,13 +37,15 @@ pub struct ProposeHandle {
 }
 
 impl ProposeHandle {
-    /// Wait for the proposal to be committed
+    /// Wait for the proposal to be committed (with timeout)
     pub async fn wait_commit(self) -> Result<u64, RaftError> {
-        self.commit_rx.await.map_err(|_| {
-            RaftError::Storage(prkdb_types::error::StorageError::Internal(
-                "Commit notification dropped".into(),
-            ))
-        })?
+        match tokio::time::timeout(std::time::Duration::from_secs(10), self.commit_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(RaftError::Storage(
+                prkdb_types::error::StorageError::Internal("Commit notification dropped".into()),
+            )),
+            Err(_) => Err(RaftError::Timeout),
+        }
     }
 
     /// Get the log index (available immediately)
@@ -275,7 +277,7 @@ impl RaftNode {
             snapshot_term: Arc::new(RwLock::new(snapshot_term_val)),
             snapshot_data: Arc::new(RwLock::new(snapshot_data_val)),
             last_heartbeat_time: Arc::new(RwLock::new(Instant::now())),
-            election_timeout_min: std::time::Duration::from_millis(150),
+            election_timeout_min: std::time::Duration::from_millis(config.election_timeout_min_ms),
         }
     }
 
@@ -1132,6 +1134,7 @@ impl RaftNode {
     }
 
     /// Start the Raft node (election timer + heartbeat loop + apply loop)
+    #[tracing::instrument(skip(self, rpc_pool), fields(node_id = %self.config.local_node_id, addr = %self.config.listen_addr))]
     pub fn start(self: Arc<Self>, rpc_pool: Arc<super::rpc_client::RpcClientPool>) {
         // Spawn election timer
         let election_node = self.clone();

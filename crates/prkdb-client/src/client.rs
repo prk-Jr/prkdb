@@ -782,13 +782,20 @@ impl PrkDbClient {
     // --- Admin Operations ---
 
     /// Create a new collection
-    pub async fn create_collection(&self, name: &str) -> anyhow::Result<()> {
+    pub async fn create_collection(
+        &self,
+        name: &str,
+        num_partitions: u32,
+        replication_factor: u32,
+    ) -> anyhow::Result<()> {
         let mut client = self.get_any_client().await?;
         let token = self.admin_token.clone().unwrap_or_default();
 
         let request = tonic::Request::new(CreateCollectionRequest {
             admin_token: token,
             name: name.to_string(),
+            num_partitions,
+            replication_factor,
         });
 
         let response: Response<CreateCollectionResponse> =
