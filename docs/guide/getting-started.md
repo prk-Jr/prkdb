@@ -103,9 +103,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Next Steps
 
-- [Deployment Guide](DEPLOYMENT.md) - Deploying to production
-- [Replication Guide](REPLICATION.md) - Understanding Multi-Raft
-- [Metrics Reference](METRICS.md) - Monitoring your cluster
+- [Deployment Guide](./deployment.md) - Deploying to production
+- [Replication Guide](./replication.md) - Understanding Multi-Raft
+- [Metrics Reference](./metrics.md) - Monitoring your cluster
 
 ## Features (v2.0)
 
