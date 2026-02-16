@@ -15,9 +15,8 @@ cleanup() {
 trap cleanup EXIT
 
 echo -e "${GREEN}Building PrkDB (Release)...${NC}"
-cargo build --release -p prkdb-cli --bin prkdb-server --bin prkdb-cli
+cargo build --release -p prkdb-cli --bin prkdb-cli
 
-PRKDB_SERVER=./target/release/prkdb-server
 PRKDB_CLI=./target/release/prkdb-cli
 
 # Set admin token for security
@@ -31,7 +30,7 @@ mkdir -p /tmp/prkdb_cluster_3
 echo -e "${GREEN}Starting 3-node cluster...${NC}"
 
 # Node 1 (Bootstrap leader)
-RUST_LOG=debug,raft=debug,prkdb=debug,openraft=debug $PRKDB_SERVER --verbose serve \
+RUST_LOG=debug,raft=debug,prkdb=debug,openraft=debug $PRKDB_CLI --verbose serve \
     --id 1 \
     --port 8081 \
     --grpc-port 50051 \
@@ -43,7 +42,7 @@ PID1=$!
 sleep 2
 
 # Node 2
-RUST_LOG=debug,raft=debug,prkdb=debug,openraft=debug $PRKDB_SERVER --verbose serve \
+RUST_LOG=debug,raft=debug,prkdb=debug,openraft=debug $PRKDB_CLI --verbose serve \
     --id 2 \
     --port 8082 \
     --grpc-port 50052 \
@@ -52,7 +51,7 @@ RUST_LOG=debug,raft=debug,prkdb=debug,openraft=debug $PRKDB_SERVER --verbose ser
 PID2=$!
 
 # Node 3
-RUST_LOG=debug,raft=debug,prkdb=debug,openraft=debug $PRKDB_SERVER --verbose serve \
+RUST_LOG=debug,raft=debug,prkdb=debug,openraft=debug $PRKDB_CLI --verbose serve \
     --id 3 \
     --port 8083 \
     --grpc-port 50053 \

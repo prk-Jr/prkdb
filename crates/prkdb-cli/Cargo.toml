@@ -10,9 +10,6 @@ license = "Apache-2.0"
 name = "prkdb-cli"
 path = "src/main.rs"
 
-[[bin]]
-name = "prkdb-server"
-path = "src/main.rs"
 
 [dependencies]
 prkdb = { path = "../prkdb" }

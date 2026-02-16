@@ -554,7 +554,7 @@ jobs:
           # Fix import path in generated file if necessary? 
           # The benchmark script imports from ./client_ts/benchmark.ts
           
-          ts-node benches/bench_ts.ts
+          ts-node --esm benches/bench_ts.ts
         env:
           PRKDB_SERVER: http://127.0.0.1:50051
           NUM_RECORDS: 10000

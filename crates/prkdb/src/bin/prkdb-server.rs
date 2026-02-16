@@ -127,14 +127,32 @@ async fn main() -> anyhow::Result<()> {
     let admin_token = env::var("PRKDB_ADMIN_TOKEN").unwrap_or_default();
     let grpc_service = PrkDbGrpcService::new(db_arc.clone(), admin_token).into_server();
 
+    // Create Raft service for multiplexed Raft traffic
+    // We must register this service on the SAME server/port as the client API
+    // because we are using port multiplexing (one port for everything)
+    let raft_service_opt = if let Some(pm) = &db_arc.partition_manager {
+        use prkdb::raft::rpc::raft_service_server::RaftServiceServer;
+        use prkdb::raft::service::RaftServiceImpl;
+
+        info!("Registering multiplexed Raft service");
+        Some(RaftServiceServer::new(RaftServiceImpl::new(pm.clone())))
+    } else {
+        None
+    };
+
     // Start gRPC data service on port 8080 (like Kafka's binary protocol)
     let grpc_port = env::var("GRPC_PORT").unwrap_or_else(|_| "8080".to_string());
     let data_addr: SocketAddr = format!("0.0.0.0:{}", grpc_port).parse()?;
     info!("Starting gRPC data service on {}", data_addr);
 
     //  Run gRPC server until shutdown
-    Server::builder()
-        .add_service(grpc_service)
+    let mut router = Server::builder().add_service(grpc_service);
+
+    if let Some(raft_service) = raft_service_opt {
+        router = router.add_service(raft_service);
+    }
+
+    router
         .serve_with_shutdown(data_addr, async {
             signal::ctrl_c().await.ok();
             info!("Shutting down...");
