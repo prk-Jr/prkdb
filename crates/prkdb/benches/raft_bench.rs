@@ -145,6 +145,7 @@ async fn create_node(id: u64, port: u16, peers: Vec<u64>) -> (Arc<RaftNode>, Tem
         election_timeout_min_ms: 150,
         election_timeout_max_ms: 300,
         heartbeat_interval_ms: 25,
+        partition_id: 0,
     };
 
     let mut wal_config = WalConfig::test_config();

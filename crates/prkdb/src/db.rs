@@ -143,9 +143,13 @@ impl PrkDb {
     }
 
     /// Start Multi-Raft partitions
-    pub fn start_multi_raft(&self, rpc_pool: std::sync::Arc<crate::raft::RpcClientPool>) {
+    pub fn start_multi_raft(
+        &self,
+        rpc_pool: std::sync::Arc<crate::raft::RpcClientPool>,
+        skip_server_partitions: &[u64],
+    ) {
         if let Some(pm) = &self.partition_manager {
-            pm.start_all(rpc_pool);
+            pm.start_all(rpc_pool, skip_server_partitions);
         }
     }
 
@@ -1033,7 +1037,12 @@ impl PrkDb {
     /// In a distributed setup, this should propagate via Raft.
     /// Create a collection (admin op)
     /// In a distributed setup, this propagates via Raft to Partition 0 (Metadata Partition).
-    pub async fn create_collection(&self, name: &str) -> Result<(), Error> {
+    pub async fn create_collection(
+        &self,
+        name: &str,
+        num_partitions: u32,
+        replication_factor: u32,
+    ) -> Result<(), Error> {
         if let Some(pm) = &self.partition_manager {
             // Distributed mode: Propose to Partition 0 (Metadata Partition)
             // Convention: Partition 0 stores cluster metadata including collections
@@ -1049,6 +1058,8 @@ impl PrkDb {
 
             let cmd = Command::CreateCollection {
                 name: name.to_string(),
+                num_partitions,
+                replication_factor,
             };
 
             // Propose and wait for commit
@@ -1063,7 +1074,15 @@ impl PrkDb {
             // Local/Single-node mode: Write directly to storage with metadata key
             // This ensures behavior is consistent with Raft state machine application
             let metadata_key = format!("meta:col:{}", name).into_bytes();
-            let metadata_value = b"{}".to_vec();
+
+            // Store configuration as JSON
+            let metadata = serde_json::json!({
+                "num_partitions": num_partitions,
+                "replication_factor": replication_factor,
+                "created_at": chrono::Utc::now().to_rfc3339()
+            });
+
+            let metadata_value = metadata.to_string().into_bytes();
             self.storage.put(&metadata_key, &metadata_value).await?;
         }
 

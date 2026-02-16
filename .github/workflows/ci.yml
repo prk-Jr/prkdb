@@ -61,6 +61,58 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --no-fail-fast
 
+  schema-integration:
+    name: Schema E2E Integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install Python dependencies
+        run: pip install httpx
+      - name: Run Schema E2E Test
+        run: ./scripts/test_schema_app_e2e.sh
+
+  client-features-integration:
+    name: Client Features Integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install Python dependencies
+        run: pip install httpx
+      - name: Run Client Features Test
+        run: ./scripts/test_client_features.sh
+
+  client-features-integration-ts:
+    name: Client Features Integration (TypeScript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Run Client Features Test (TS)
+        run: ./scripts/test_client_features_ts.sh
+
   # ═══════════════════════════════════════════════════════════════════════════
   # CHAOS ENGINEERING TESTS (reusable workflow)
   # ═══════════════════════════════════════════════════════════════════════════
@@ -430,3 +482,79 @@ jobs:
       - name: "📝 Post to Step Summary"
         run: |
           cat benchmark_results/BENCHMARK_RESULTS.md >> $GITHUB_STEP_SUMMARY
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # CROSS-LANGUAGE BENCHMARKS
+  # ═══════════════════════════════════════════════════════════════════════════
+  cross-lang-benchmark:
+    name: "🌍 Cross-Language Benchmarks"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          
+      - name: Build PrkDB CLI
+        run: cargo build --release -p prkdb-cli
+        
+      - name: Install Python dependencies
+        run: pip install httpx
+
+      - name: Start PrkDB Server
+        run: |
+          ./target/release/prkdb-cli serve --port 8080 --grpc-port 50051 &
+          echo "Waiting for server..."
+          sleep 5
+          
+      - name: Define Benchmark Schema
+        run: |
+          # Create a simple schema for benchmarking
+          cat > bench.proto <<EOF
+          syntax = "proto3";
+          package models;
+          message Benchmark {
+            string id = 1;
+            string payload = 2;
+            int64 timestamp = 3;
+          }
+          EOF
+          protoc --descriptor_set_out=bench.desc --include_imports bench.proto
+          
+          # Register it
+          ./target/release/prkdb-cli schema --server http://127.0.0.1:50051 register --collection benchmark --proto bench.desc
+          
+      - name: Generate Clients
+        run: |
+          # Python
+          ./target/release/prkdb-cli codegen --server http://127.0.0.1:50051 --lang python --out benches/client_py --collection benchmark
+          # TypeScript
+          ./target/release/prkdb-cli codegen --server http://127.0.0.1:50051 --lang typescript --out benches/client_ts --collection benchmark
+          
+      - name: "🐍 Run Python Benchmark"
+        run: |
+          python3 benches/bench_python.py --server http://127.0.0.1:8080 --records 10000
+          
+      - name: "📘 Run TypeScript Benchmark"
+        run: |
+          # Compile TS if needed or run with tsx (simpler ESM support)
+          npm install -g tsx typescript
+          # Fix import path in generated file if necessary? 
+          # The benchmark script imports from ./client_ts/benchmark.ts
+          
+          tsx benches/bench_ts.ts
+        env:
+          PRKDB_SERVER: http://127.0.0.1:50051
+          NUM_RECORDS: 10000

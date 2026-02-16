@@ -92,6 +92,15 @@ pub enum Commands {
         /// Port to serve gRPC on (for Admin & Raft)
         #[arg(long, default_value = "50051")]
         grpc_port: u16,
+        /// Node ID for Raft cluster
+        #[arg(long, default_value = "1")]
+        id: u64,
+        /// Peers in the cluster (format: "id=host:port,id=host:port")
+        #[arg(long)]
+        peers: Option<String>,
+        /// Number of partitions for default collection creation
+        #[arg(long, default_value = "16")]
+        num_partitions: usize,
     },
 
     // --- Data Commands (via prkdb-client) ---
@@ -115,6 +124,12 @@ pub enum Commands {
 
     /// Restore database (Offline)
     Restore(backup::RestoreArgs),
+
+    /// Generate cross-language SDK clients from schemas
+    Codegen(codegen::CodegenArgs),
+
+    /// Schema registry management
+    Schema(schema::SchemaArgs),
 }
 
 #[derive(clap::ValueEnum, Clone)]
@@ -129,7 +144,11 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Initialize logging based on verbosity
-    if cli.verbose {
+    // Initialize logging based on verbosity or RUST_LOG env var
+    if cli.verbose || std::env::var("RUST_LOG").is_ok() {
+        tracing_subscriber::fmt::init();
+    } else if cli.verbose {
+        // Fallback if RUST_LOG not set but verbose is on (though fmt::init handles defaults)
         tracing_subscriber::fmt::init();
     }
 
@@ -140,11 +159,11 @@ async fn main() -> anyhow::Result<()> {
         Commands::Partition(cmd) => partition::execute(cmd.clone(), &cli).await,
         Commands::Replication(cmd) => replication::execute(cmd.clone(), &cli).await,
         Commands::Metrics(cmd) => {
-            init_database_manager(&cli.database);
+            init_database_manager(&cli.database, None);
             metrics::execute(cmd.clone(), &cli).await
         }
         Commands::Database(cmd) => {
-            init_database_manager(&cli.database);
+            init_database_manager(&cli.database, None);
             database::execute(cmd.clone(), &cli).await
         }
         Commands::Serve {
@@ -154,8 +173,41 @@ async fn main() -> anyhow::Result<()> {
             prometheus,
             cors,
             websockets,
+            id,
+            peers,
+            num_partitions,
         } => {
-            init_database_manager(&cli.database);
+            let raft_options = if let Some(peers_str) = peers {
+                let peers_vec: Vec<(u64, std::net::SocketAddr)> = peers_str
+                    .split(',')
+                    .filter_map(|s| {
+                        let parts: Vec<&str> = s.split('=').collect();
+                        if parts.len() == 2 {
+                            let id = parts[0].parse().ok()?;
+                            let addr = parts[1].parse().ok()?;
+                            Some((id, addr))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                Some(database_manager::RaftOptions {
+                    node_id: *id,
+                    listen_addr: format!("{}:{}", host, grpc_port).parse().unwrap(),
+                    peers: peers_vec,
+                    num_partitions: *num_partitions,
+                })
+            } else {
+                None
+            };
+
+            let peers_for_serve = raft_options
+                .as_ref()
+                .map(|r| r.peers.clone())
+                .unwrap_or_default();
+
+            init_database_manager(&cli.database, raft_options);
             let args = commands::serve::ServeArgs {
                 port: *port,
                 grpc_port: *grpc_port,
@@ -163,6 +215,8 @@ async fn main() -> anyhow::Result<()> {
                 prometheus: *prometheus,
                 cors: *cors,
                 websockets: *websockets,
+                id: *id,
+                peers: peers_for_serve,
             };
             commands::serve::handle_serve(args).await
         }
@@ -176,5 +230,11 @@ async fn main() -> anyhow::Result<()> {
         // Backup/Restore commands (Offline)
         Commands::Backup(args) => backup::handle_backup(args.clone(), &cli).await,
         Commands::Restore(args) => backup::handle_restore(args.clone()).await,
+
+        // Codegen command (pure remote)
+        Commands::Codegen(args) => codegen::handle_codegen(args.clone()).await,
+
+        // Schema command (pure remote)
+        Commands::Schema(args) => schema::handle_schema(args.clone()).await,
     }
 }

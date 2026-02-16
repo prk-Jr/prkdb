@@ -28,6 +28,7 @@ fn create_test_node() -> (Arc<RaftNode>, TempDir) {
         election_timeout_min_ms: 1000,
         election_timeout_max_ms: 2000,
         heartbeat_interval_ms: 200,
+        partition_id: 0,
     };
 
     // Create Raft node

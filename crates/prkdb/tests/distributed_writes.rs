@@ -1,11 +1,11 @@
-use prkdb::raft::{ClusterConfig, PrkDbStateMachine, RaftNode, RpcClientPool};
+use prkdb::raft::{ClusterConfig, PartitionManager, PrkDbStateMachine, RaftNode, RpcClientPool};
 use prkdb::storage::WalStorageAdapter;
 use prkdb_core::wal::WalConfig;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-/// Helper to create a Raft node
+/// Helper to create a Raft node (wrapped in PartitionManager)
 async fn create_raft_node(
     id: u64,
     port: u16,
@@ -13,10 +13,6 @@ async fn create_raft_node(
 ) -> (Arc<RaftNode>, TempDir) {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().to_path_buf();
-
-    let mut wal_config = WalConfig::test_config();
-    wal_config.log_dir = db_path.clone();
-    let storage = Arc::new(WalStorageAdapter::new(wal_config).unwrap());
 
     let listen_addr = format!("127.0.0.1:{}", port).parse().unwrap();
     let config = ClusterConfig {
@@ -26,19 +22,29 @@ async fn create_raft_node(
         election_timeout_min_ms: 200,
         election_timeout_max_ms: 400,
         heartbeat_interval_ms: 50,
+        partition_id: 0, // Default partition
     };
 
-    let state_machine = Arc::new(PrkDbStateMachine::new(storage.clone()));
-    let raft_node = Arc::new(RaftNode::new(config, storage.clone(), state_machine));
+    let pm = Arc::new(
+        PartitionManager::new(1, config, db_path, |_part_id, storage| {
+            Arc::new(PrkDbStateMachine::new(storage))
+        })
+        .unwrap(),
+    );
+
     let rpc_pool = Arc::new(RpcClientPool::new(id));
 
+    // Start background tasks
+    pm.start_all(rpc_pool, &[]);
+
     // Start server
-    let server_node = raft_node.clone();
+    let pm_clone = pm.clone();
     tokio::spawn(async move {
-        let _ = prkdb::raft::server::start_raft_server(server_node, listen_addr).await;
+        let _ = prkdb::raft::server::start_raft_server(pm_clone, listen_addr).await;
     });
 
-    raft_node.clone().start(rpc_pool);
+    // Return partition 0 node for testing
+    let raft_node = pm.get_partition(0).unwrap();
 
     (raft_node, temp_dir)
 }

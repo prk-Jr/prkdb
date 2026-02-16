@@ -3,6 +3,7 @@
 PrkDB’s persistence port is `prkdb_core::storage::StorageAdapter`. Implement it for any backend (RocksDB, Redis, HTTP service, etc.) and pass it into `PrkDb::builder().with_storage(...)`. The trait is async-first and has optional hooks for migrations and CDC outbox.
 
 ## Minimal in-memory adapter (async + outbox)
+
 ```rust
 use async_trait::async_trait;
 use prkdb_core::error::StorageError;
@@ -68,6 +69,7 @@ impl StorageAdapter for MemoryAdapter {
 ```
 
 ## Wiring it up
+
 ```rust
 use prkdb::prelude::*;
 use prkdb_macros::Collection;
@@ -101,6 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 ## Notes
+
 - Implement `scan_prefix`/`scan_range` if your backend supports range queries (used by scans and some admin commands).
 - Implement `migrate_table` if your adapter can run schema DDL (SQL backends should do this to support `register_table_collection`).
 - `tests/adapter_matrix.rs` shows how multiple adapters are exercised; `tests/custom_adapter.rs` demonstrates plugging a bespoke one.

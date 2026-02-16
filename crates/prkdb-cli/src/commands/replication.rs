@@ -41,7 +41,7 @@ struct ReplicationLag {
 pub async fn execute(cmd: ReplicationCommands, cli: &Cli) -> Result<()> {
     if cli.local {
         // Local mode: use embedded database
-        crate::init_database_manager(&cli.database);
+        crate::init_database_manager(&cli.database, None);
         return execute_local(cmd, cli).await;
     }
 

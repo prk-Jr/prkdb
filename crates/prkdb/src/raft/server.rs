@@ -1,4 +1,4 @@
-use crate::raft::node::RaftNode;
+use crate::raft::partition_manager::PartitionManager;
 use crate::raft::rpc::raft_service_server::RaftServiceServer;
 use crate::raft::service::RaftServiceImpl;
 use std::net::SocketAddr;
@@ -19,10 +19,10 @@ pub struct TlsConfig {
 
 /// Start the Raft gRPC server (plain)
 pub async fn start_raft_server(
-    node: Arc<RaftNode>,
+    partition_manager: Arc<PartitionManager>,
     listen_addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let service = RaftServiceImpl::new(node);
+    let service = RaftServiceImpl::new(partition_manager);
 
     tracing::info!("Starting Raft gRPC server on {}", listen_addr);
 
@@ -36,11 +36,11 @@ pub async fn start_raft_server(
 
 /// Start the Raft gRPC server with TLS
 pub async fn start_raft_server_tls(
-    node: Arc<RaftNode>,
+    partition_manager: Arc<PartitionManager>,
     listen_addr: SocketAddr,
     tls_config: TlsConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let service = RaftServiceImpl::new(node);
+    let service = RaftServiceImpl::new(partition_manager);
 
     // Read certificate and key
     let cert = tokio::fs::read(&tls_config.cert_path).await?;

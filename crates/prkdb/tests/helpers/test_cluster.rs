@@ -50,7 +50,8 @@ impl TestCluster {
         for i in 0..num_nodes {
             let node_id = (i + 1) as u64;
             let data_port = base_data_port + i as u16;
-            let raft_port = base_raft_port + i as u16;
+            // With multiplexing, Raft traffic uses the same port as data traffic
+            let raft_port = data_port;
             let data_dir = base_dir.path().join(format!("node{}", node_id));
             let log_file = base_dir.path().join(format!("node{}.log", node_id));
 

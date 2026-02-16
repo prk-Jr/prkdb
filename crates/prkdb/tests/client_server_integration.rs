@@ -76,6 +76,9 @@ impl TestClient {
             .create_collection(tonic::Request::new(CreateCollectionRequest {
                 admin_token: self.admin_token.clone(),
                 name: name.to_string(),
+                num_partitions: 1,
+                replication_factor: 1,
+                ..Default::default()
             }))
             .await
             .map_err(|e| e.to_string())?;
@@ -208,6 +211,85 @@ impl TestClient {
             .await
             .map_err(|e| e.to_string())?;
         Ok(response.into_inner())
+    }
+
+    // --- Schema Registry Helpers ---
+
+    async fn register_schema(
+        &mut self,
+        collection: &str,
+        schema_proto: Vec<u8>,
+    ) -> Result<u32, String> {
+        let response = self
+            .client
+            .register_schema(tonic::Request::new(RegisterSchemaRequest {
+                admin_token: self.admin_token.clone(),
+                collection: collection.to_string(),
+                schema_proto,
+                compatibility: CompatibilityMode::CompatibilityBackward as i32,
+                migration_id: None,
+            }))
+            .await
+            .map_err(|e| e.to_string())?;
+        let resp = response.into_inner();
+        if resp.success {
+            Ok(resp.version)
+        } else {
+            Err(resp.error)
+        }
+    }
+
+    async fn get_schema(
+        &mut self,
+        collection: &str,
+        version: Option<u32>,
+    ) -> Result<Vec<u8>, String> {
+        let response = self
+            .client
+            .get_schema(tonic::Request::new(GetSchemaRequest {
+                collection: collection.to_string(),
+                version: version.unwrap_or(0),
+            }))
+            .await
+            .map_err(|e| e.to_string())?;
+        let resp = response.into_inner();
+        if resp.success {
+            Ok(resp.schema_proto)
+        } else {
+            Err(resp.error)
+        }
+    }
+
+    async fn list_schemas(&mut self) -> Result<Vec<SchemaInfo>, String> {
+        let response = self
+            .client
+            .list_schemas(tonic::Request::new(ListSchemasRequest {
+                admin_token: self.admin_token.clone(),
+            }))
+            .await
+            .map_err(|e| e.to_string())?;
+        let resp = response.into_inner();
+        if resp.success {
+            Ok(resp.schemas)
+        } else {
+            Err("ListSchemas failed".to_string())
+        }
+    }
+
+    async fn check_compatibility(
+        &mut self,
+        collection: &str,
+        schema_proto: Vec<u8>,
+    ) -> Result<bool, String> {
+        let response = self
+            .client
+            .check_compatibility(tonic::Request::new(CheckCompatibilityRequest {
+                collection: collection.to_string(),
+                schema_proto,
+            }))
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(response.into_inner().compatible)
     }
 }
 
@@ -574,6 +656,94 @@ async fn test_data_consistency_integration() {
     );
 
     println!("✅ Data consistency verified across put/get/delete/recreate cycle");
+
+    shutdown.send(()).ok();
+}
+
+// =============================================================================
+// Integration Test: Schema Registry Flow
+// =============================================================================
+
+#[tokio::test]
+async fn test_schema_rpc_integration() {
+    let (server_url, shutdown) = start_server().await;
+    let mut client = TestClient::connect(&server_url, ADMIN_TOKEN).await;
+
+    println!("\n📋 Schema Registry Integration Test");
+
+    // 1. Create a dummy descriptor (simulating a .proto file)
+    // In a real scenario this comes from protoc, but here we just use bytes
+    // Minimal valid FileDescriptorProto bytes for a message named "User"
+    // Name = field 1, string
+    let user_v1_proto = vec![
+        10, 4, 85, 115, 101, 114, // name="User"
+    ];
+
+    // 2. Register Schema
+    println!("   Registering User schema v1...");
+    let version = client
+        .register_schema("users", user_v1_proto.clone())
+        .await
+        .expect("RegisterSchema failed");
+    assert_eq!(version, 1, "Should be version 1");
+    println!("✅ Registered v1");
+
+    // 3. List Schemas
+    println!("   Listing schemas...");
+    let schemas = client.list_schemas().await.expect("ListSchemas failed");
+    assert_eq!(schemas.len(), 1);
+    assert_eq!(schemas[0].collection, "users");
+    assert_eq!(schemas[0].latest_version, 1);
+    println!("✅ ListSchemas verified");
+
+    // 4. Get Schema
+    println!("   Getting schema v1...");
+    let fetched_proto = client
+        .get_schema("users", Some(1))
+        .await
+        .expect("GetSchema failed");
+    assert_eq!(fetched_proto, user_v1_proto, "Schema bytes mismatch");
+    println!("✅ GetSchema v1 verified");
+
+    // 5. Register v2 (Non-breaking change)
+    // Just a slightly different name to make bytes different
+    let user_v2_proto = vec![
+        10, 4, 85, 115, 101, 114, // name="User"
+        18, 0, // file_list (empty) - just adding some dummy field
+    ];
+
+    println!("   Registering User schema v2...");
+    let version_2 = client
+        .register_schema("users", user_v2_proto.clone())
+        .await
+        .expect("RegisterSchema v2 failed");
+    assert_eq!(version_2, 2, "Should be version 2");
+    println!("✅ Registered v2");
+
+    // 6. Verify Latest Version
+    let latest = client
+        .get_schema("users", None)
+        .await
+        .expect("GetSchema latest failed");
+    assert_eq!(latest, user_v2_proto, "Should return v2");
+    println!("✅ GetSchema (latest) verified");
+
+    // 7. Verify Isolation (v1 still exists)
+    let v1 = client
+        .get_schema("users", Some(1))
+        .await
+        .expect("GetSchema v1 failed separate check");
+    assert_eq!(v1, user_v1_proto, "v1 should be preserved");
+    println!("✅ Version isolation verified");
+
+    // 8. Check Compatibility
+    println!("   Checking compatibility...");
+    let compatible = client
+        .check_compatibility("users", user_v2_proto.clone())
+        .await
+        .expect("CheckCompatibility failed");
+    assert!(compatible, "v2 should be compatible with v1");
+    println!("✅ Compatibility check verified");
 
     shutdown.send(()).ok();
 }

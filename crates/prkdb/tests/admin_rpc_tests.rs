@@ -85,6 +85,7 @@ async fn test_collection_create_list_drop() {
         .create_collection(tonic::Request::new(CreateCollectionRequest {
             admin_token: TEST_ADMIN_TOKEN.to_string(),
             name: "test_users".to_string(),
+            ..Default::default()
         }))
         .await
         .unwrap()
@@ -114,6 +115,7 @@ async fn test_collection_create_list_drop() {
         .create_collection(tonic::Request::new(CreateCollectionRequest {
             admin_token: TEST_ADMIN_TOKEN.to_string(),
             name: "test_orders".to_string(),
+            ..Default::default()
         }))
         .await
         .unwrap()
@@ -238,6 +240,7 @@ async fn test_full_collection_workflow() {
             .create_collection(tonic::Request::new(CreateCollectionRequest {
                 admin_token: TEST_ADMIN_TOKEN.to_string(),
                 name: name.to_string(),
+                ..Default::default()
             }))
             .await
             .unwrap()

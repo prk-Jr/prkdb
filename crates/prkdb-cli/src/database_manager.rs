@@ -6,17 +6,30 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// Configuration options for Raft cluster
+#[derive(Clone, Debug)]
+pub struct RaftOptions {
+    pub node_id: u64,
+    pub listen_addr: std::net::SocketAddr,
+    pub peers: Vec<(u64, std::net::SocketAddr)>,
+    pub num_partitions: usize,
+}
+
 /// Database connection manager that handles Sled's exclusive locking properly
 pub struct DatabaseManager {
     connection: Arc<Mutex<Option<PrkDb>>>,
+    adapter: Arc<Mutex<Option<SledAdapter>>>,
     database_path: String,
+    raft_options: Option<RaftOptions>,
 }
 
 impl DatabaseManager {
-    pub fn new(database_path: impl AsRef<Path>) -> Self {
+    pub fn new(database_path: impl AsRef<Path>, raft_options: Option<RaftOptions>) -> Self {
         Self {
             connection: Arc::new(Mutex::new(None)),
+            adapter: Arc::new(Mutex::new(None)),
             database_path: database_path.as_ref().to_string_lossy().to_string(),
+            raft_options,
         }
     }
 
@@ -53,15 +66,41 @@ impl DatabaseManager {
         let mut conn_guard = self.connection.lock().unwrap();
 
         if conn_guard.is_none() {
-            let storage = SledAdapter::open(&self.database_path)
-                .with_context(|| format!("Failed to open database at: {}", self.database_path))?;
+            // Check if Raft is enabled
+            if let Some(raft_opts) = &self.raft_options {
+                println!(
+                    "🚀 Initializing PrkDB with Multi-Raft (Node ID: {})",
+                    raft_opts.node_id
+                );
 
-            let db = PrkDb::builder()
-                .with_storage(storage)
-                .build()
-                .context("Failed to build PrkDb instance")?;
+                let config = prkdb::raft::ClusterConfig {
+                    local_node_id: raft_opts.node_id,
+                    listen_addr: raft_opts.listen_addr,
+                    nodes: raft_opts.peers.clone(),
+                    ..Default::default()
+                };
 
-            *conn_guard = Some(db);
+                let db = PrkDb::new_multi_raft(
+                    raft_opts.num_partitions,
+                    config,
+                    std::path::PathBuf::from(&self.database_path),
+                )?;
+
+                *conn_guard = Some(db);
+            } else {
+                let storage = SledAdapter::open(&self.database_path).with_context(|| {
+                    format!("Failed to open database at: {}", self.database_path)
+                })?;
+
+                *self.adapter.lock().unwrap() = Some(storage.clone());
+
+                let db = PrkDb::builder()
+                    .with_storage(storage)
+                    .build()
+                    .context("Failed to build PrkDb instance")?;
+
+                *conn_guard = Some(db);
+            }
         }
 
         Ok(conn_guard.as_ref().unwrap().clone())
@@ -93,38 +132,19 @@ impl DatabaseManager {
 
     /// Get storage adapter directly for simple scan operations
     pub async fn scan_storage(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        const MAX_RETRIES: usize = 3;
-        const RETRY_DELAY: Duration = Duration::from_millis(50);
+        // Ensure initialized
+        let _ = self.try_get_connection()?;
 
-        for attempt in 0..MAX_RETRIES {
-            match SledAdapter::open(&self.database_path) {
-                Ok(storage) => match storage.scan_prefix(b"").await {
-                    Ok(result) => return Ok(result),
-                    Err(e)
-                        if attempt < MAX_RETRIES - 1
-                            && e.to_string().contains("could not acquire lock") =>
-                    {
-                        tokio::time::sleep(RETRY_DELAY * (attempt as u32 + 1)).await;
-                        continue;
-                    }
-                    Err(e) => return Err(e.into()),
-                },
-                Err(e)
-                    if attempt < MAX_RETRIES - 1
-                        && e.to_string().contains("could not acquire lock") =>
-                {
-                    tokio::time::sleep(RETRY_DELAY * (attempt as u32 + 1)).await;
-                    continue;
-                }
-                Err(e) => return Err(e.into()),
-            }
+        let adapter = {
+            let adapter_guard = self.adapter.lock().unwrap();
+            adapter_guard.clone()
+        };
+
+        if let Some(adapter) = adapter {
+            return adapter.scan_prefix(b"").await.map_err(|e| e.into());
         }
 
-        Err(anyhow::anyhow!(
-            "Database is currently busy and cannot be accessed. \
-            This may happen when another process is writing to the database. \
-            Please try again in a moment."
-        ))
+        Err(anyhow::anyhow!("Database adapter not available"))
     }
 }
 
@@ -133,9 +153,9 @@ static mut DB_MANAGER: Option<DatabaseManager> = None;
 static INIT: std::sync::Once = std::sync::Once::new();
 
 /// Initialize the global database manager
-pub fn init_database_manager(database_path: impl AsRef<Path>) {
+pub fn init_database_manager(database_path: impl AsRef<Path>, raft_options: Option<RaftOptions>) {
     INIT.call_once(|| unsafe {
-        DB_MANAGER = Some(DatabaseManager::new(database_path));
+        DB_MANAGER = Some(DatabaseManager::new(database_path, raft_options));
     });
 }
 

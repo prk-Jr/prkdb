@@ -121,9 +121,16 @@ impl RpcClientPool {
         node_id: NodeId,
         addr: &str,
         request: RequestVoteRequest,
+        partition_id: u64,
     ) -> Result<RequestVoteResponse, RpcError> {
         let mut client = self.get_client(node_id, addr).await?;
-        match client.request_vote(request).await {
+        let mut req = tonic::Request::new(request);
+        req.metadata_mut().insert(
+            "x-prkdb-partition-id",
+            partition_id.to_string().parse().unwrap(),
+        );
+
+        match client.request_vote(req).await {
             Ok(response) => Ok(response.into_inner()),
             Err(e) => {
                 // Remove client from cache on failure to force reconnection
@@ -139,9 +146,16 @@ impl RpcClientPool {
         node_id: NodeId,
         addr: &str,
         request: PreVoteRequest,
+        partition_id: u64,
     ) -> Result<PreVoteResponse, RpcError> {
         let mut client = self.get_client(node_id, addr).await?;
-        match client.pre_vote(request).await {
+        let mut req = tonic::Request::new(request);
+        req.metadata_mut().insert(
+            "x-prkdb-partition-id",
+            partition_id.to_string().parse().unwrap(),
+        );
+
+        match client.pre_vote(req).await {
             Ok(response) => Ok(response.into_inner()),
             Err(e) => {
                 // Remove client from cache on failure to force reconnection
@@ -157,9 +171,16 @@ impl RpcClientPool {
         node_id: NodeId,
         addr: &str,
         request: AppendEntriesRequest,
+        partition_id: u64,
     ) -> Result<AppendEntriesResponse, RpcError> {
         let mut client = self.get_client(node_id, addr).await?;
-        match client.append_entries(request).await {
+        let mut req = tonic::Request::new(request);
+        req.metadata_mut().insert(
+            "x-prkdb-partition-id",
+            partition_id.to_string().parse().unwrap(),
+        );
+
+        match client.append_entries(req).await {
             Ok(response) => Ok(response.into_inner()),
             Err(e) => {
                 // Remove client from cache on failure to force reconnection
@@ -175,9 +196,16 @@ impl RpcClientPool {
         node_id: NodeId,
         addr: &str,
         request: InstallSnapshotRequest,
+        partition_id: u64,
     ) -> Result<InstallSnapshotResponse, RpcError> {
         let mut client = self.get_client(node_id, addr).await?;
-        match client.install_snapshot(request).await {
+        let mut req = tonic::Request::new(request);
+        req.metadata_mut().insert(
+            "x-prkdb-partition-id",
+            partition_id.to_string().parse().unwrap(),
+        );
+
+        match client.install_snapshot(req).await {
             Ok(response) => Ok(response.into_inner()),
             Err(e) => {
                 // Remove client from cache on failure to force reconnection

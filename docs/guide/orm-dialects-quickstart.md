@@ -3,6 +3,7 @@
 PrkDB ORM ships fluent builders that are dialect-aware. Enable dialect features via `prkdb-orm` features (default: `sqlite`, optional: `postgres`, `mysql`).
 
 ## SQLite (default)
+
 ```rust
 use prkdb_orm::dialect::SqlDialect;
 use prkdb_orm::executor::SqlxSqliteExecutor;
@@ -41,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
 ```
 
 ## Postgres (feature = `postgres`)
+
 ```rust
 use prkdb_orm::dialect::SqlDialect;
 use prkdb_orm::executor::SqlxPostgresExecutor;
@@ -106,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
 ```
 
 ## Tips
+
 - Field helpers are generated per struct: `Table::insert()` exposes `.insert_<field>()` for non-`#[auto_increment]` columns, while `.update_*`/`.where_*` exist for all fields.
 - JSON/nested fields use `#[column(json)]` and remain dialect-aware.
 - Use `Sqlx*Executor` helpers for drivers, or implement your own executor to reuse the builder/SQL generation with another driver.

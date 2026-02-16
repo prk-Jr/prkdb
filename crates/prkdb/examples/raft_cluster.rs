@@ -40,31 +40,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         election_timeout_min_ms: 150,
         election_timeout_max_ms: 300,
         heartbeat_interval_ms: 50,
+        partition_id: 0,
     };
 
-    // Create WAL storage
+    // Create WAL storage path
     let db_path = std::path::PathBuf::from(format!("tmp/raft_node_{}", node_id));
     if db_path.exists() {
         std::fs::remove_dir_all(&db_path)?;
     }
     std::fs::create_dir_all(&db_path)?;
 
-    let mut wal_config = WalConfig::test_config();
-    wal_config.log_dir = db_path;
-    let storage = Arc::new(WalStorageAdapter::new(wal_config)?);
+    // Create PartitionManager
+    let pm = Arc::new(
+        prkdb::raft::PartitionManager::new(1, config.clone(), db_path, |_part_id, storage| {
+            Arc::new(prkdb::raft::PrkDbStateMachine::new(storage))
+        })
+        .unwrap(),
+    );
 
-    // Create Raft node
-    let state_machine = Arc::new(prkdb::raft::PrkDbStateMachine::new(storage.clone()));
-    let node = Arc::new(RaftNode::new(config.clone(), storage, state_machine));
+    // Create RPC pool
     let rpc_pool = Arc::new(RpcClientPool::new(node_id));
 
+    // Start background tasks
+    pm.start_all(rpc_pool.clone(), &[]);
+
     // Start gRPC server
-    let server_node = node.clone();
+    let pm_server = pm.clone();
     tokio::spawn(async move {
-        if let Err(e) = prkdb::raft::server::start_raft_server(server_node, listen_addr).await {
+        if let Err(e) = prkdb::raft::server::start_raft_server(pm_server, listen_addr).await {
             eprintln!("Server error: {}", e);
         }
     });
+
+    // Get the node for local operations
+    let node = pm.get_partition(0).unwrap();
 
     // Wait a bit for server to start
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;

@@ -6,12 +6,13 @@ use axum::{
     },
     http::StatusCode,
     response::IntoResponse,
-    routing::get,
+    routing::{delete, get},
     Json, Router,
 };
 use clap::Args;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
@@ -46,6 +47,14 @@ pub struct ServeArgs {
     /// Enable WebSocket support for real-time data
     #[arg(long)]
     pub websockets: bool,
+
+    /// Node ID for Raft cluster
+    #[arg(long, default_value = "1")]
+    pub id: u64,
+
+    /// Peer node addresses (node_id -> gRPC SocketAddr), set programmatically
+    #[arg(skip)]
+    pub peers: Vec<(u64, SocketAddr)>,
 }
 
 #[derive(Clone)]
@@ -55,6 +64,8 @@ struct AppState {
     prometheus_enabled: bool,
     #[allow(dead_code)] // Used for future broadcast features
     broadcast_tx: broadcast::Sender<String>,
+    /// Maps node_id -> HTTP base URL (e.g., 2 -> "http://127.0.0.1:8082")
+    peer_http_addrs: HashMap<u64, String>,
 }
 
 #[derive(Deserialize)]
@@ -129,12 +140,24 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     // Create broadcast channel for WebSocket updates
     let (broadcast_tx, _) = broadcast::channel::<String>(100);
 
+    // Build peer HTTP address map
+    // Derive each peer's HTTP port using the offset: http_port = grpc_port - (my_grpc_port - my_http_port)
+    let port_offset = args.grpc_port as i32 - args.port as i32;
+    let mut peer_http_addrs = HashMap::new();
+    for (node_id, grpc_addr) in &args.peers {
+        let peer_http_port = (grpc_addr.port() as i32 - port_offset) as u16;
+        let peer_http_url = format!("http://{}:{}", grpc_addr.ip(), peer_http_port);
+        peer_http_addrs.insert(*node_id, peer_http_url);
+    }
+    tracing::info!("Peer HTTP addresses: {:?}", peer_http_addrs);
+
     // Create app state
     let state = AppState {
         _database_path: std::path::PathBuf::from("./prkdb.db"), // Default path
         websocket_enabled: args.websockets,
         prometheus_enabled: args.prometheus,
         broadcast_tx: broadcast_tx.clone(),
+        peer_http_addrs,
     };
 
     // Build our application with routes
@@ -142,20 +165,27 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         .route("/", get(root_handler))
         .route("/health", get(health_handler))
         .route("/collections", get(list_collections_handler))
-        .route("/collections/{name}", get(get_collection_handler))
-        .route("/collections/{name}/data", get(get_collection_data_handler))
+        .route("/collections/:name", get(get_collection_handler))
         .route(
-            "/collections/{name}/count",
+            "/collections/:name/data",
+            get(get_collection_data_handler).put(put_collection_data_handler),
+        )
+        .route(
+            "/collections/:name/data/:id",
+            delete(delete_collection_data_handler),
+        )
+        .route(
+            "/collections/:name/count",
             get(get_collection_count_handler),
         )
         .route(
-            "/collections/{name}/schema",
+            "/collections/:name/schema",
             get(get_collection_schema_handler),
         );
 
     // Add WebSocket route if enabled
     if args.websockets {
-        app = app.route("/ws/collections/{name}", get(websocket_handler));
+        app = app.route("/ws/collections/:name", get(websocket_handler));
     }
 
     // Add metrics route if enabled
@@ -208,22 +238,38 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     if let Ok(db) = crate::database_manager::get_db_instance().await {
         println!("🚀 Starting PrkDB gRPC server on {}", grpc_addr);
 
+        // Start Multi-Raft partitions (background tasks)
+        // Skip serving Partition 0's Raft server here, as we'll multiplex it on the main gRPC server below
+        // This avoids port collision on 50051
+        let rpc_pool = std::sync::Arc::new(prkdb::raft::RpcClientPool::new(args.id));
+        db.start_multi_raft(rpc_pool, &[0]);
+
         tokio::spawn(async move {
             use prkdb::raft::grpc_service::PrkDbGrpcService;
             use prkdb::raft::rpc::prk_db_service_server::PrkDbServiceServer;
+            use prkdb::raft::rpc::raft_service_server::RaftServiceServer;
+            use prkdb::raft::service::RaftServiceImpl;
             use std::sync::Arc;
             use tonic::transport::Server;
 
             use std::env;
             let admin_token = env::var("PRKDB_ADMIN_TOKEN").unwrap_or_default();
-            let service = PrkDbGrpcService::new(Arc::new(db), admin_token)
+            let service = PrkDbGrpcService::new(Arc::new(db.clone()), admin_token)
                 .with_public_address(format!("http://{}", grpc_addr));
 
-            if let Err(e) = Server::builder()
-                .add_service(PrkDbServiceServer::new(service))
-                .serve(grpc_addr)
-                .await
-            {
+            let mut builder = Server::builder();
+
+            // Register client service
+            let mut router = builder.add_service(PrkDbServiceServer::new(service));
+
+            // Register Raft service for all partitions (multiplexed on same port)
+            if let Some(pm) = &db.partition_manager {
+                println!("✨ Multiplexing Raft Service (All Partitions) on main port");
+                let raft_service = RaftServiceImpl::new(pm.clone());
+                router = router.add_service(RaftServiceServer::new(raft_service));
+            }
+
+            if let Err(e) = router.serve(grpc_addr).await {
                 eprintln!("❌ gRPC server error: {}", e);
             }
         });
@@ -335,6 +381,15 @@ async fn get_collection_data_handler(
     Path(name): Path<String>,
     Query(params): Query<DataQuery>,
 ) -> impl IntoResponse {
+    println!(
+        "DEBUG: get_collection_data_handler called for collection: '{}'",
+        name
+    );
+    println!(
+        "DEBUG: params: limit={:?}, offset={:?}, filter={:?}, sort={:?}",
+        params.limit, params.offset, params.filter, params.sort
+    );
+
     let limit = params.limit.unwrap_or(20);
     let offset = params.offset.unwrap_or(0);
 
@@ -354,6 +409,174 @@ async fn get_collection_data_handler(
         )
             .into_response(),
     }
+}
+
+async fn put_collection_data_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(data): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let db = match crate::database_manager::get_db_instance().await {
+        Ok(db) => db,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+
+    // Extract ID
+    let id = match data.get("id").and_then(|v| v.as_str()) {
+        Some(id) => id.to_string(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "Data must have 'id' field"})),
+            )
+                .into_response()
+        }
+    };
+
+    let key = format!("{}:{}", name, id);
+    let value = match serde_json::to_vec(&data) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+
+    match db.put(key.as_bytes(), &value).await {
+        Ok(_) => Json(json!({"success": true, "id": id})).into_response(),
+        Err(e) => {
+            let err_str = e.to_string();
+            // Check for NotLeader error and forward to leader
+            if let Some(leader_id) = parse_leader_id(&err_str) {
+                if let Some(leader_url) = state.peer_http_addrs.get(&leader_id) {
+                    // Forward the PUT to the leader's HTTP endpoint
+                    let forward_url = format!("{}/collections/{}/data", leader_url, name);
+                    match reqwest::Client::new()
+                        .put(&forward_url)
+                        .json(&data)
+                        .send()
+                        .await
+                    {
+                        Ok(resp) if resp.status().is_success() => {
+                            Json::<Value>(json!({"success": true, "id": id, "forwarded_to": leader_id}))
+                                .into_response()
+                        }
+                        Ok(resp) => {
+                            let status = resp.status().as_u16();
+                            let body = resp.text().await.unwrap_or_default();
+                            (
+                                StatusCode::from_u16(status)
+                                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                                Json::<Value>(json!({"error": body, "forwarded_to": leader_id})),
+                            )
+                                .into_response()
+                        }
+                        Err(fwd_err) => (
+                            StatusCode::BAD_GATEWAY,
+                            Json::<Value>(json!({"error": format!("Forward failed: {}", fwd_err), "leader_id": leader_id})),
+                        )
+                            .into_response(),
+                    }
+                } else {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({"error": err_str, "leader_id": leader_id})),
+                    )
+                        .into_response()
+                }
+            } else {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": err_str})),
+                )
+                    .into_response()
+            }
+        }
+    }
+}
+
+async fn delete_collection_data_handler(
+    State(state): State<AppState>,
+    Path((name, id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let db = match crate::database_manager::get_db_instance().await {
+        Ok(db) => db,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+
+    let key = format!("{}:{}", name, id);
+
+    match db.delete(key.as_bytes()).await {
+        Ok(_) => Json(json!({"success": true, "id": id})).into_response(),
+        Err(e) => {
+            let err_str = e.to_string();
+            if let Some(leader_id) = parse_leader_id(&err_str) {
+                if let Some(leader_url) = state.peer_http_addrs.get(&leader_id) {
+                    let forward_url = format!("{}/collections/{}/data/{}", leader_url, name, id);
+                    match reqwest::Client::new().delete(&forward_url).send().await {
+                        Ok(resp) if resp.status().is_success() => {
+                            Json::<Value>(json!({"success": true, "id": id, "forwarded_to": leader_id}))
+                                .into_response()
+                        }
+                        Ok(resp) => {
+                            let status = resp.status().as_u16();
+                            let body = resp.text().await.unwrap_or_default();
+                            (
+                                StatusCode::from_u16(status)
+                                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                                Json::<Value>(json!({"error": body, "forwarded_to": leader_id})),
+                            )
+                                .into_response()
+                        }
+                        Err(fwd_err) => (
+                            StatusCode::BAD_GATEWAY,
+                            Json::<Value>(json!({"error": format!("Forward failed: {}", fwd_err), "leader_id": leader_id})),
+                        )
+                            .into_response(),
+                    }
+                } else {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({"error": err_str, "leader_id": leader_id})),
+                    )
+                        .into_response()
+                }
+            } else {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": err_str})),
+                )
+                    .into_response()
+            }
+        }
+    }
+}
+
+/// Parse leader node ID from a "Not leader. Leader is Some(N)" error string
+fn parse_leader_id(err: &str) -> Option<u64> {
+    // Match pattern: "Not leader. Leader is Some(N)"
+    if let Some(pos) = err.find("Leader is Some(") {
+        let start = pos + "Leader is Some(".len();
+        if let Some(end) = err[start..].find(')') {
+            return err[start..start + end].parse::<u64>().ok();
+        }
+    }
+    None
 }
 
 async fn get_collection_count_handler(Path(name): Path<String>) -> impl IntoResponse {
@@ -617,9 +840,12 @@ async fn execute_collection_command(cmd: CollectionCommands) -> Result<Value> {
             name,
             limit,
             offset,
-            ..
-        } => get_collection_data(&name, limit, offset).await,
-        CollectionCommands::Sample { name, limit } => get_collection_data(&name, limit, 0).await,
+            filter,
+            sort,
+        } => get_collection_data(&name, limit, offset, filter, sort).await,
+        CollectionCommands::Sample { name, limit } => {
+            get_collection_data(&name, limit, 0, None, None).await
+        }
         _ => Ok(serde_json::json!({
             "error": "This command is not supported via the HTTP API"
         })),
@@ -731,16 +957,20 @@ async fn get_collection_count(name: &str) -> Result<Value> {
     }))
 }
 
-async fn get_collection_data(name: &str, limit: usize, offset: usize) -> Result<Value> {
+async fn get_collection_data(
+    name: &str,
+    limit: usize,
+    offset: usize,
+    filter: Option<String>,
+    sort: Option<String>,
+) -> Result<Value> {
     let data = database_manager::get_database_manager()
         .scan_storage()
         .await?;
-    let mut items = Vec::new();
-    let mut total = 0;
-    let mut skipped = 0;
+    let mut collection_entries = Vec::new();
 
-    for (key, value) in data {
-        let key_str = String::from_utf8_lossy(&key);
+    for (key, value) in &data {
+        let key_str = String::from_utf8_lossy(key);
 
         // Handle both formats: "collection:id" and "collection::Type:id"
         let matches_collection = if key_str.contains("::") {
@@ -752,21 +982,78 @@ async fn get_collection_data(name: &str, limit: usize, offset: usize) -> Result<
         };
 
         if matches_collection {
-            total += 1;
+            // Try multiple deserialization approaches
+            let mut entry = None;
 
-            if skipped < offset {
-                skipped += 1;
-                continue;
+            // 1. Try JSON first (for backward compatibility)
+            if let Ok(json_value) = serde_json::from_slice::<serde_json::Value>(value) {
+                entry = Some(json_value);
+            }
+            // 2. Try bincode deserialization
+            else if let Ok(json_value) = crate::commands::collection::try_bincode_to_json(value) {
+                entry = Some(json_value);
             }
 
-            if items.len() >= limit {
-                break;
-            }
+            if let Some(mut json_entry) = entry {
+                let key_part = if key_str.contains("::") {
+                    // Extract ID from "collection::Type:id" format
+                    key_str.split(':').next_back().unwrap_or("unknown")
+                } else {
+                    // Extract ID from "collection:id" format
+                    key_str.split(':').nth(1).unwrap_or("unknown")
+                };
 
-            if let Ok(parsed) = collection::try_bincode_to_json(&value) {
-                items.push(parsed);
+                if let Some(obj) = json_entry.as_object_mut() {
+                    obj.insert(
+                        "_key".to_string(),
+                        serde_json::Value::String(key_part.to_string()),
+                    );
+                    obj.insert(
+                        "_full_key".to_string(),
+                        serde_json::Value::String(key_str.to_string()),
+                    );
+                }
+                collection_entries.push((key_str.to_string(), json_entry));
             }
         }
+    }
+
+    if collection_entries.is_empty() {
+        return Ok(json!({
+            "collection": name,
+            "data": [],
+            "total": 0,
+            "limit": limit,
+            "offset": offset,
+            "returned": 0
+        }));
+    }
+
+    // Apply filter if specified
+    if let Some(filter_expr) = &filter {
+        collection_entries = apply_simple_filter(collection_entries, filter_expr)?;
+    }
+
+    // Apply sort if specified
+    if let Some(sort_field) = &sort {
+        collection_entries = apply_simple_sort(collection_entries, sort_field)?;
+    }
+
+    let total = collection_entries.len();
+    let mut items = Vec::new();
+    let mut skipped = 0;
+
+    for (_, item) in collection_entries {
+        if skipped < offset {
+            skipped += 1;
+            continue;
+        }
+
+        if items.len() >= limit {
+            break;
+        }
+
+        items.push(item);
     }
 
     Ok(json!({
@@ -777,6 +1064,107 @@ async fn get_collection_data(name: &str, limit: usize, offset: usize) -> Result<
         "offset": offset,
         "returned": items.len()
     }))
+}
+
+/// Apply simple filter to collection entries
+fn apply_simple_filter(
+    entries: Vec<(String, serde_json::Value)>,
+    filter_expr: &str,
+) -> Result<Vec<(String, serde_json::Value)>> {
+    // Simple filter format: "field=value" or "field!=value" or "field~value" (contains)
+    let filtered = if let Some(eq_pos) = filter_expr.find("!=") {
+        let (field, value) = filter_expr.split_at(eq_pos);
+        let value = &value[2..]; // Skip "!="
+        entries
+            .into_iter()
+            .filter(|(_, entry)| {
+                entry
+                    .get(field)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s != value)
+                    .unwrap_or(true)
+            })
+            .collect()
+    } else if let Some(eq_pos) = filter_expr.find('=') {
+        let (field, value) = filter_expr.split_at(eq_pos);
+        let value = &value[1..]; // Skip "="
+        entries
+            .into_iter()
+            .filter(|(_, entry)| {
+                entry
+                    .get(field)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s == value)
+                    .unwrap_or(false)
+            })
+            .collect()
+    } else if let Some(tilde_pos) = filter_expr.find('~') {
+        let (field, value) = filter_expr.split_at(tilde_pos);
+        let value = &value[1..]; // Skip "~"
+        entries
+            .into_iter()
+            .filter(|(_, entry)| {
+                entry
+                    .get(field)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.contains(value))
+                    .unwrap_or(false)
+            })
+            .collect()
+    } else {
+        entries // No valid filter format, return all
+    };
+
+    Ok(filtered)
+}
+
+/// Apply simple sort to collection entries
+fn apply_simple_sort(
+    mut entries: Vec<(String, serde_json::Value)>,
+    sort_field: &str,
+) -> Result<Vec<(String, serde_json::Value)>> {
+    let (field, descending) = if let Some(field) = sort_field.strip_suffix(":desc") {
+        (field, true)
+    } else if let Some(field) = sort_field.strip_suffix(":asc") {
+        (field, false)
+    } else {
+        (sort_field, false) // Default to ascending
+    };
+
+    entries.sort_by(|(_, a), (_, b)| {
+        let a_val = a.get(field);
+        let b_val = b.get(field);
+
+        let cmp = match (a_val, b_val) {
+            (Some(a), Some(b)) => {
+                // Try string comparison first
+                if let (Some(a_str), Some(b_str)) = (a.as_str(), b.as_str()) {
+                    a_str.cmp(b_str)
+                }
+                // Try number comparison
+                else if let (Some(a_num), Some(b_num)) = (a.as_f64(), b.as_f64()) {
+                    a_num
+                        .partial_cmp(&b_num)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }
+                // Fallback to string representation
+                else {
+                    a.to_string().cmp(&b.to_string())
+                }
+            }
+            (Some(_), None) => std::cmp::Ordering::Less, // Non-null values come first
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        };
+
+        if descending {
+            cmp.reverse()
+        } else {
+            cmp
+        }
+    });
+
+    Ok(entries)
 }
 
 fn analyze_schema(items: &[Value]) -> Value {

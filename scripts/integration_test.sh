@@ -65,6 +65,47 @@ run_test_suite "retention_tests"
 run_test_suite "integration_tests"
 run_test_suite "outbox_cdc_tests"
 run_test_suite "stateful_compute_tests"
+run_test_suite "schema_tests"
+run_test_suite "client_server_integration"
+
+# Run schema CLI tests
+echo -e "${YELLOW}Running schema CLI tests...${NC}"
+if ./scripts/test_schema_cli.sh; then
+    echo -e "${GREEN}✓ Schema CLI tests PASSED${NC}"
+    ((PASSED_TESTS++))
+else
+    echo -e "${RED}✗ Schema CLI tests FAILED${NC}"
+    ((FAILED_TESTS++))
+fi
+((TOTAL_TESTS++))
+
+
+# Run client features tests (Python)
+echo -e "${YELLOW}Running client features tests (Python)...${NC}"
+if ./scripts/test_client_features.sh; then
+    echo -e "${GREEN}✓ Client features tests (Python) PASSED${NC}"
+    ((PASSED_TESTS++))
+else
+    echo -e "${RED}✗ Client features tests (Python) FAILED${NC}"
+    ((FAILED_TESTS++))
+fi
+((TOTAL_TESTS++))
+
+# Run client features tests (TypeScript)
+if command -v node &> /dev/null && command -v npm &> /dev/null; then
+    echo -e "${YELLOW}Running client features tests (TypeScript)...${NC}"
+    if ./scripts/test_client_features_ts.sh; then
+        echo -e "${GREEN}✓ Client features tests (TypeScript) PASSED${NC}"
+        ((PASSED_TESTS++))
+    else
+        echo -e "${RED}✗ Client features tests (TypeScript) FAILED${NC}"
+        ((FAILED_TESTS++))
+    fi
+    ((TOTAL_TESTS++))
+else
+    echo -e "${YELLOW}Skipping TypeScript tests (Node.js/npm not found)${NC}"
+fi
+echo ""
 
 # Run doc tests
 echo -e "${YELLOW}Running doc tests...${NC}"

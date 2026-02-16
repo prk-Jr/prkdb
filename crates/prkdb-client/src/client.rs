@@ -1,12 +1,13 @@
 use prkdb_proto::raft::prk_db_service_client::PrkDbServiceClient;
 use prkdb_proto::raft::{
-    CreateCollectionRequest, CreateCollectionResponse, DescribeConsumerGroupRequest,
-    DescribeConsumerGroupResponse, DropCollectionRequest, DropCollectionResponse,
-    GetPartitionAssignmentsRequest, GetPartitionAssignmentsResponse, GetReplicationLagRequest,
-    GetReplicationLagResponse, GetReplicationNodesRequest, GetReplicationNodesResponse,
-    GetReplicationStatusRequest, GetReplicationStatusResponse, ListCollectionsRequest,
+    CheckCompatibilityRequest, CompatibilityMode, CreateCollectionRequest,
+    CreateCollectionResponse, DescribeConsumerGroupRequest, DescribeConsumerGroupResponse,
+    DropCollectionRequest, DropCollectionResponse, GetPartitionAssignmentsRequest,
+    GetPartitionAssignmentsResponse, GetReplicationLagRequest, GetReplicationLagResponse,
+    GetReplicationNodesRequest, GetReplicationNodesResponse, GetReplicationStatusRequest,
+    GetReplicationStatusResponse, GetSchemaRequest, ListCollectionsRequest,
     ListCollectionsResponse, ListConsumerGroupsRequest, ListConsumerGroupsResponse,
-    ListPartitionsRequest, ListPartitionsResponse,
+    ListPartitionsRequest, ListPartitionsResponse, ListSchemasRequest, RegisterSchemaRequest,
 };
 use prkdb_proto::{
     BatchPutRequest, DeleteRequest, GetRequest, KvPair, MetadataRequest, PutRequest, ReadMode,
@@ -781,13 +782,20 @@ impl PrkDbClient {
     // --- Admin Operations ---
 
     /// Create a new collection
-    pub async fn create_collection(&self, name: &str) -> anyhow::Result<()> {
+    pub async fn create_collection(
+        &self,
+        name: &str,
+        num_partitions: u32,
+        replication_factor: u32,
+    ) -> anyhow::Result<()> {
         let mut client = self.get_any_client().await?;
         let token = self.admin_token.clone().unwrap_or_default();
 
         let request = tonic::Request::new(CreateCollectionRequest {
             admin_token: token,
             name: name.to_string(),
+            num_partitions,
+            replication_factor,
         });
 
         let response: Response<CreateCollectionResponse> =
@@ -1184,6 +1192,111 @@ impl PrkDbClient {
 
         Ok(stream)
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Schema Registry Operations (for codegen CLI)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Register a new schema for a collection
+    pub async fn register_schema(
+        &self,
+        collection: &str,
+        schema_proto: Vec<u8>,
+        compatibility: CompatibilityMode,
+        migration_id: Option<String>,
+    ) -> anyhow::Result<u32> {
+        let mut client = self.get_any_client().await?;
+        let token = self.admin_token.clone().unwrap_or_default();
+
+        let request = tonic::Request::new(RegisterSchemaRequest {
+            admin_token: token,
+            collection: collection.to_string(),
+            schema_proto,
+            compatibility: compatibility as i32,
+            migration_id,
+        });
+
+        let response = client.register_schema(request).await?.into_inner();
+
+        if response.success {
+            Ok(response.version)
+        } else {
+            anyhow::bail!("RegisterSchema failed: {}", response.error)
+        }
+    }
+
+    /// Check compatibility of a schema
+    pub async fn check_compatibility(
+        &self,
+        collection: &str,
+        schema_proto: Vec<u8>,
+    ) -> anyhow::Result<bool> {
+        let mut client = self.get_any_client().await?;
+
+        let request = tonic::Request::new(CheckCompatibilityRequest {
+            collection: collection.to_string(),
+            schema_proto,
+        });
+
+        let response = client.check_compatibility(request).await?.into_inner();
+        Ok(response.compatible)
+    }
+
+    /// Get schema for a collection
+    ///
+    /// # Arguments
+    /// * `collection` - Collection name
+    /// * `version` - Optional version (None = latest)
+    pub async fn get_schema(
+        &self,
+        collection: &str,
+        version: Option<u32>,
+    ) -> anyhow::Result<Vec<u8>> {
+        let mut client = self.get_any_client().await?;
+
+        let request = tonic::Request::new(GetSchemaRequest {
+            collection: collection.to_string(),
+            version: version.unwrap_or(0),
+        });
+
+        let response = client.get_schema(request).await?.into_inner();
+
+        if response.success {
+            Ok(response.schema_proto)
+        } else {
+            anyhow::bail!("GetSchema failed: {}", response.error)
+        }
+    }
+
+    /// List all registered schemas
+    pub async fn list_schemas(&self) -> anyhow::Result<Vec<SchemaInfo>> {
+        let mut client = self.get_any_client().await?;
+        let token = self.admin_token.clone().unwrap_or_default();
+
+        let request = tonic::Request::new(ListSchemasRequest { admin_token: token });
+
+        let response = client.list_schemas(request).await?.into_inner();
+
+        if response.success {
+            Ok(response
+                .schemas
+                .into_iter()
+                .map(|s| SchemaInfo {
+                    collection: s.collection,
+                    latest_version: s.latest_version,
+                })
+                .collect())
+        } else {
+            anyhow::bail!("ListSchemas failed")
+        }
+    }
+}
+
+/// Schema information returned by list_schemas
+#[derive(Debug, Clone)]
+pub struct SchemaInfo {
+    pub collection: String,
+    pub latest_version: u32,
 }
 
 #[cfg(test)]

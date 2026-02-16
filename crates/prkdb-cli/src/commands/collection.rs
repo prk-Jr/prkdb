@@ -48,21 +48,25 @@ use prkdb_client::PrkDbClient;
 
 pub async fn execute(cmd: CollectionCommands, cli: &Cli) -> Result<()> {
     match cmd {
-        CollectionCommands::Create { name } => create_collection(&name, cli).await,
+        CollectionCommands::Create {
+            name,
+            partitions,
+            replication_factor,
+        } => create_collection(&name, partitions, replication_factor, cli).await,
         CollectionCommands::Drop { name } => drop_collection(&name, cli).await,
         CollectionCommands::List => list_collections(cli).await,
 
         // Legacy commands requiring local DB access
         CollectionCommands::Describe { name } => {
-            crate::init_database_manager(&cli.database);
+            crate::init_database_manager(&cli.database, None);
             describe_collection(&name, cli).await
         }
         CollectionCommands::Count { name } => {
-            crate::init_database_manager(&cli.database);
+            crate::init_database_manager(&cli.database, None);
             count_collection(&name, cli).await
         }
         CollectionCommands::Sample { name, limit } => {
-            crate::init_database_manager(&cli.database);
+            crate::init_database_manager(&cli.database, None);
             sample_collection(&name, limit, cli).await
         }
         CollectionCommands::Data {
@@ -72,13 +76,19 @@ pub async fn execute(cmd: CollectionCommands, cli: &Cli) -> Result<()> {
             filter,
             sort,
         } => {
-            crate::init_database_manager(&cli.database);
+            crate::init_database_manager(&cli.database, None);
             browse_collection_data(&name, limit, offset, filter, sort, cli).await
         }
+        CollectionCommands::Put { name, data } => put_collection_data(&name, &data, cli).await,
     }
 }
 
-async fn create_collection(name: &str, cli: &Cli) -> Result<()> {
+async fn create_collection(
+    name: &str,
+    num_partitions: u32,
+    replication_factor: u32,
+    cli: &Cli,
+) -> Result<()> {
     let client = PrkDbClient::new(vec![cli.server.clone()]).await?;
     let client = if let Some(token) = &cli.admin_token {
         client.with_admin_token(token)
@@ -86,8 +96,51 @@ async fn create_collection(name: &str, cli: &Cli) -> Result<()> {
         client
     };
 
-    client.create_collection(name).await?;
+    client
+        .create_collection(name, num_partitions, replication_factor)
+        .await?;
     success(&format!("Collection '{}' created successfully", name));
+    Ok(())
+}
+
+async fn put_collection_data(name: &str, data: &str, cli: &Cli) -> Result<()> {
+    // Parse JSON
+    let json: serde_json::Value =
+        serde_json::from_str(data).map_err(|e| anyhow::anyhow!("Invalid JSON data: {}", e))?;
+
+    // Extract ID
+    let id = json
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("Data must have an 'id' field (string)"))?;
+
+    // Construct Key: "collection:id"
+    // Note: If using Type, it would be "collection::Type:id".
+    // For now, assume simple collection.
+    // Ideally we should check schema to key format?
+    // But standardized key format is "collection:id".
+    let key = format!("{}:{}", name, id);
+
+    // Connect client
+    let client = PrkDbClient::new(vec![cli.server.clone()]).await?;
+    let client = if let Some(token) = &cli.admin_token {
+        client.with_admin_token(token)
+    } else {
+        client
+    };
+
+    // Serialize value (JSON bytes)
+    // We store JSON bytes directly for now (or bincode wrapped?)
+    // `serve.rs` tries `serde_json::from_slice` first.
+    let value_bytes = serde_json::to_vec(&json)?;
+
+    // Put
+    client.put(key.as_bytes(), &value_bytes).await?;
+
+    success(&format!(
+        "Inserted document '{}' into collection '{}'",
+        id, name
+    ));
     Ok(())
 }
 
