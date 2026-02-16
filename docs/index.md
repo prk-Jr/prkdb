@@ -3,8 +3,8 @@ layout: home
 
 hero:
   name: 'PrkDB'
-  text: 'Distributed KV Store'
-  tagline: 'Production-ready toolkit for portable edge HTTP workloads'
+  text: 'Event Streaming Database'
+  tagline: 'High-performance Rust-native database with ACID transactions and distributed consensus'
   actions:
     - theme: brand
       text: Get Started
