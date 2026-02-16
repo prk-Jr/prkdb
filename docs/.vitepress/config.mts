@@ -4,6 +4,7 @@ export default defineConfig({
   title: 'PrkDB',
   description:
     'A persistent, distributed key-value store with advanced features',
+  base: '/prkdb/',
   ignoreDeadLinks: true,
   themeConfig: {
     nav: [
