@@ -103,21 +103,6 @@ async fn main() -> anyhow::Result<()> {
     // Create data directory
     std::fs::create_dir_all(&args.data_dir)?;
 
-    // Create storage
-    println!("⏳ Initializing storage...");
-    let storage = tokio::task::spawn_blocking({
-        let path = args.data_dir.clone();
-        move || {
-            WalStorageAdapter::new(WalConfig {
-                log_dir: path,
-                ..WalConfig::test_config()
-            })
-        }
-    })
-    .await??;
-    let storage = Arc::new(storage);
-    println!("✅ Storage ready");
-
     // Create cluster config
     let config = ClusterConfig {
         local_node_id: args.node_id,
@@ -126,16 +111,22 @@ async fn main() -> anyhow::Result<()> {
         election_timeout_min_ms: 150,
         election_timeout_max_ms: 300,
         heartbeat_interval_ms: 50,
+        partition_id: 0,
     };
 
-    // Create state machine
-    let state_machine = Arc::new(PrkDbStateMachine::new(storage.clone()));
+    // Create PartitionManager
+    println!("⏳ Creating PartitionManager...");
+    let pm = Arc::new(
+        prkdb::raft::PartitionManager::new(1, config, args.data_dir, |_part_id, storage| {
+            Arc::new(PrkDbStateMachine::new(storage))
+        })
+        .unwrap(),
+    );
+    println!("✅ PartitionManager created");
 
-    // Create Raft node
-    println!("⏳ Creating Raft node...");
-    let raft_node = Arc::new(RaftNode::new(config, storage, state_machine));
-    println!("✅ Raft node created");
-    println!();
+    // Start background tasks
+    let rpc_pool = Arc::new(prkdb::raft::RpcClientPool::new(args.node_id));
+    pm.start_all(rpc_pool, &[]);
 
     // Start gRPC server (with or without TLS)
     if tls_enabled {
@@ -150,7 +141,7 @@ async fn main() -> anyhow::Result<()> {
         println!("   Press Ctrl+C to stop.");
         println!();
 
-        prkdb::raft::server::start_raft_server_tls(raft_node, args.listen, tls_config)
+        prkdb::raft::server::start_raft_server_tls(pm, args.listen, tls_config)
             .await
             .map_err(|e| anyhow::anyhow!("Raft server error: {}", e))?;
     } else {
@@ -160,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
         println!("   Press Ctrl+C to stop.");
         println!();
 
-        prkdb::raft::server::start_raft_server(raft_node, args.listen)
+        prkdb::raft::server::start_raft_server(pm, args.listen)
             .await
             .map_err(|e| anyhow::anyhow!("Raft server error: {}", e))?;
     }
