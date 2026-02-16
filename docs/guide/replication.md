@@ -71,7 +71,7 @@ Key metrics to watch:
 - `prkdb_raft_commit_index`: Should closely track `last_log_index`.
 - `prkdb_raft_voted_for`: Who this node voted for.
 
-See [Metrics Guide](METRICS.md) for a full list.
+See [Metrics Guide](./metrics.md) for a full list.
 
 ## Roadmap Status
 
