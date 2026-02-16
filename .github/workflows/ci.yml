@@ -549,12 +549,12 @@ jobs:
           
       - name: "📘 Run TypeScript Benchmark"
         run: |
-          # Compile TS if needed or run with ts-node
-          npm install -g ts-node typescript
+          # Compile TS if needed or run with tsx (simpler ESM support)
+          npm install -g tsx typescript
           # Fix import path in generated file if necessary? 
           # The benchmark script imports from ./client_ts/benchmark.ts
           
-          ts-node --esm benches/bench_ts.ts
+          tsx benches/bench_ts.ts
         env:
           PRKDB_SERVER: http://127.0.0.1:50051
           NUM_RECORDS: 10000
