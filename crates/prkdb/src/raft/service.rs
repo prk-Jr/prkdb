@@ -1,16 +1,35 @@
 use crate::raft::node::RaftNode;
+use crate::raft::partition_manager::PartitionManager;
 use crate::raft::rpc::*;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 /// gRPC service implementation for Raft
 pub struct RaftServiceImpl {
-    node: Arc<RaftNode>,
+    partition_manager: Arc<PartitionManager>,
 }
 
 impl RaftServiceImpl {
-    pub fn new(node: Arc<RaftNode>) -> Self {
-        Self { node }
+    pub fn new(partition_manager: Arc<PartitionManager>) -> Self {
+        Self { partition_manager }
+    }
+
+    /// Helper to get the correct Raft node based on partition ID header
+    fn get_node<T>(&self, request: &Request<T>) -> Result<Arc<RaftNode>, Status> {
+        // Extract partition ID from metadata
+        let partition_id = if let Some(val) = request.metadata().get("x-prkdb-partition-id") {
+            val.to_str()
+                .map_err(|_| Status::invalid_argument("Invalid partition ID header"))?
+                .parse::<u64>()
+                .map_err(|_| Status::invalid_argument("Invalid partition ID format"))?
+        } else {
+            // Default to partition 0 for backward compatibility
+            0
+        };
+
+        self.partition_manager
+            .get_partition(partition_id)
+            .ok_or_else(|| Status::not_found(format!("Raft partition {} not found", partition_id)))
     }
 }
 
@@ -20,16 +39,17 @@ impl raft_service_server::RaftService for RaftServiceImpl {
         &self,
         request: Request<RequestVoteRequest>,
     ) -> Result<Response<RequestVoteResponse>, Status> {
+        let node = self.get_node(&request)?;
         let req = request.into_inner();
 
         tracing::debug!(
-            "Received RequestVote from candidate {} for term {}",
+            "Received RequestVote from candidate {} for term {} (partition {})",
             req.candidate_id,
-            req.term
+            req.term,
+            node.get_config().await.partition_id
         );
 
-        let (term, vote_granted) = self
-            .node
+        let (term, vote_granted) = node
             .handle_request_vote(
                 req.term,
                 req.candidate_id,
@@ -51,16 +71,17 @@ impl raft_service_server::RaftService for RaftServiceImpl {
         &self,
         request: Request<PreVoteRequest>,
     ) -> Result<Response<PreVoteResponse>, Status> {
+        let node = self.get_node(&request)?;
         let req = request.into_inner();
 
         tracing::debug!(
-            "Received PreVote from candidate {} for term {}",
+            "Received PreVote from candidate {} for term {} (partition {})",
             req.candidate_id,
-            req.term
+            req.term,
+            node.get_config().await.partition_id
         );
 
-        let (term, vote_granted) = self
-            .node
+        let (term, vote_granted) = node
             .handle_pre_vote(
                 req.term,
                 req.candidate_id,
@@ -82,17 +103,18 @@ impl raft_service_server::RaftService for RaftServiceImpl {
         &self,
         request: Request<AppendEntriesRequest>,
     ) -> Result<Response<AppendEntriesResponse>, Status> {
+        let node = self.get_node(&request)?;
         let req = request.into_inner();
 
         tracing::trace!(
-            "Received AppendEntries from leader {} for term {} ({} entries)",
+            "Received AppendEntries from leader {} for term {} ({} entries) (partition {})",
             req.leader_id,
             req.term,
-            req.entries.len()
+            req.entries.len(),
+            node.get_config().await.partition_id
         );
 
-        let (term, success) = self
-            .node
+        let (term, success) = node
             .handle_append_entries(
                 req.term,
                 req.leader_id,
@@ -110,15 +132,17 @@ impl raft_service_server::RaftService for RaftServiceImpl {
         &self,
         request: Request<ReadIndexRequest>,
     ) -> Result<Response<ReadIndexResponse>, Status> {
+        let node = self.get_node(&request)?;
         let req = request.into_inner();
 
         tracing::debug!(
-            "Received ReadIndex from term {} for leader {}",
+            "Received ReadIndex from term {} for leader {} (partition {})",
             req.term,
-            req.leader_id
+            req.leader_id,
+            node.get_config().await.partition_id
         );
 
-        match self.node.handle_read_index(req.term).await {
+        match node.handle_read_index(req.term).await {
             Ok((term, read_index)) => {
                 tracing::debug!(
                     "ReadIndex response: term={}, read_index={}",
@@ -147,10 +171,10 @@ impl raft_service_server::RaftService for RaftServiceImpl {
         &self,
         request: Request<InstallSnapshotRequest>,
     ) -> Result<Response<InstallSnapshotResponse>, Status> {
+        let node = self.get_node(&request)?;
         let req = request.into_inner();
 
-        let (term, _success) = self
-            .node
+        let (term, _success) = node
             .handle_install_snapshot(
                 req.term,
                 req.leader_id,

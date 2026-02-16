@@ -24,6 +24,10 @@ pub struct ClusterConfig {
 
     /// Heartbeat interval in milliseconds
     pub heartbeat_interval_ms: u64,
+
+    /// Partition ID this node belongs to
+    #[serde(default)]
+    pub partition_id: u64,
 }
 
 impl Default for ClusterConfig {
@@ -35,6 +39,7 @@ impl Default for ClusterConfig {
             election_timeout_min_ms: 500,
             election_timeout_max_ms: 1000,
             heartbeat_interval_ms: 100,
+            partition_id: 0,
         }
     }
 }

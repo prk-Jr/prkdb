@@ -1287,6 +1287,7 @@ impl RaftNode {
 
         // Request pre-votes from all peers concurrently
         let mut vote_tasks = Vec::new();
+        let partition_id = self.config.partition_id;
 
         for (node_id, addr) in &self.config.nodes {
             if *node_id == self.config.local_node_id {
@@ -1304,8 +1305,10 @@ impl RaftNode {
                 last_log_term,
             };
 
-            let task =
-                tokio::spawn(async move { pool.send_pre_vote(node_id, &addr, request).await });
+            let task = tokio::spawn(async move {
+                pool.send_pre_vote(node_id, &addr, request, partition_id)
+                    .await
+            });
             vote_tasks.push(task);
         }
 
@@ -1372,6 +1375,7 @@ impl RaftNode {
 
         // Request votes from all peers concurrently
         let mut vote_tasks = Vec::new();
+        let partition_id = self.config.partition_id;
 
         for (node_id, addr) in &self.config.nodes {
             if *node_id == self.config.local_node_id {
@@ -1388,8 +1392,10 @@ impl RaftNode {
                 last_log_term,
             };
 
-            let task =
-                tokio::spawn(async move { pool.send_request_vote(node_id, &addr, request).await });
+            let task = tokio::spawn(async move {
+                pool.send_request_vote(node_id, &addr, request, partition_id)
+                    .await
+            });
             vote_tasks.push(task);
         }
 
@@ -1677,7 +1683,12 @@ impl RaftNode {
                             };
 
                             match pool
-                                .send_install_snapshot(follower_id, &addr, request)
+                                .send_install_snapshot(
+                                    follower_id,
+                                    &addr,
+                                    request,
+                                    self_clone.config.partition_id,
+                                )
                                 .await
                             {
                                 Ok(response) => {
@@ -1768,7 +1779,15 @@ impl RaftNode {
                         follower_id,
                         entries_count
                     );
-                    match pool.send_append_entries(follower_id, &addr, request).await {
+                    match pool
+                        .send_append_entries(
+                            follower_id,
+                            &addr,
+                            request,
+                            self_clone.config.partition_id,
+                        )
+                        .await
+                    {
                         Ok(response) => {
                             // Update Prometheus metrics - heartbeat sent successfully
                             crate::prometheus_metrics::RAFT_HEARTBEATS_SENT_TOTAL

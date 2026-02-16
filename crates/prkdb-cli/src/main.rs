@@ -202,6 +202,11 @@ async fn main() -> anyhow::Result<()> {
                 None
             };
 
+            let peers_for_serve = raft_options
+                .as_ref()
+                .map(|r| r.peers.clone())
+                .unwrap_or_default();
+
             init_database_manager(&cli.database, raft_options);
             let args = commands::serve::ServeArgs {
                 port: *port,
@@ -211,6 +216,7 @@ async fn main() -> anyhow::Result<()> {
                 cors: *cors,
                 websockets: *websockets,
                 id: *id,
+                peers: peers_for_serve,
             };
             commands::serve::handle_serve(args).await
         }

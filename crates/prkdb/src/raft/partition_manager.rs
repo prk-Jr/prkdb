@@ -131,35 +131,17 @@ impl PartitionManager {
     ) -> ClusterConfig {
         let mut config = base_config.clone();
 
-        // Adjust listen address for THIS partition's server
+        // In Multiplexed mode, we DO NOT adjust ports.
+        // All partitions share the same main gRPC port and use x-prkdb-partition-id header.
+
         let base_listen_port = config.listen_addr.port();
-        let partition_listen_port = base_listen_port + (partition_id as u16 * 100);
-        config.listen_addr = SocketAddr::new(config.listen_addr.ip(), partition_listen_port);
+        config.partition_id = partition_id as u64;
 
         tracing::info!(
-            "[PARTITION-CONFIG] Partition {}: ADJUSTED listen_addr from {} to {}",
+            "[PARTITION-CONFIG] Partition {}: Using main port {} (Multiplexed)",
             partition_id,
-            base_listen_port,
-            partition_listen_port
+            base_listen_port
         );
-
-        // Adjust ports for all peer nodes in this partition's cluster
-        for (node_id, addr) in &mut config.nodes {
-            // addr is SocketAddr, so we can use it directly
-            let base_port = addr.port();
-
-            // Each partition gets its own port range: partition_0: base, partition_1: base+100, etc.
-            let new_port = base_port + (partition_id as u16 * 100);
-            *addr = SocketAddr::new(addr.ip(), new_port);
-
-            tracing::debug!(
-                "Partition {} node {}: peer address adjusted port {} -> {}",
-                partition_id,
-                node_id,
-                base_port,
-                new_port
-            );
-        }
 
         config
     }
@@ -183,37 +165,12 @@ impl PartitionManager {
                 raft_node_clone.start(rpc_pool_clone);
             });
 
-            // Check if we should skip starting the server for this partition
-            // (e.g. if it's being served by the main PrkDB server)
-            if skip_server_partitions.contains(partition_id) {
-                tracing::info!(
-                    "Skipping dedicated Raft server for partition {} (handled externally)",
-                    partition_id
-                );
-                continue;
-            }
-
-            // Start Raft gRPC server to handle incoming RPCs
-            // Config already has correct listen_addr from adjust_config_for_partition
-            let raft_node_for_server = raft_node.clone();
-            let partition_id_copy = *partition_id;
-            tokio::spawn(async move {
-                let listen_addr = raft_node_for_server.get_config().await.listen_addr;
-                tracing::info!(
-                    "Starting Raft gRPC server for partition {} on {}",
-                    partition_id_copy,
-                    listen_addr
-                );
-                if let Err(e) =
-                    super::server::start_raft_server(raft_node_for_server, listen_addr).await
-                {
-                    tracing::error!(
-                        "Raft gRPC server for partition {} failed: {}",
-                        partition_id_copy,
-                        e
-                    );
-                }
-            });
+            // In Multiplexed mode, we DO NOT start separate servers for partitions.
+            // The main server handles all traffic via RaftServiceImpl routing.
+            tracing::info!(
+                "Partition {} initialized (Multiplexed on main server)",
+                partition_id
+            );
         }
     }
 

@@ -72,7 +72,7 @@ for round in 1 2 3 4 5; do
     echo "--- Attempt round $round ---"
     for port in 50051 50052 50053; do
         echo "  Trying port $port..."
-        if $PRKDB_CLI --server http://127.0.0.1:$port collection create benchmark --partitions 3 --replication-factor 3; then
+        if timeout 15 $PRKDB_CLI --server http://127.0.0.1:$port collection create benchmark --partitions 3 --replication-factor 3; then
             echo -e "${GREEN}✓ Collection created successfully on port $port${NC}"
             success=true
             break 2

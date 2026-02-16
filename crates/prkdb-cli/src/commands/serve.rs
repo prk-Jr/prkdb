@@ -12,6 +12,7 @@ use axum::{
 use clap::Args;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
@@ -50,6 +51,10 @@ pub struct ServeArgs {
     /// Node ID for Raft cluster
     #[arg(long, default_value = "1")]
     pub id: u64,
+
+    /// Peer node addresses (node_id -> gRPC SocketAddr), set programmatically
+    #[arg(skip)]
+    pub peers: Vec<(u64, SocketAddr)>,
 }
 
 #[derive(Clone)]
@@ -59,6 +64,8 @@ struct AppState {
     prometheus_enabled: bool,
     #[allow(dead_code)] // Used for future broadcast features
     broadcast_tx: broadcast::Sender<String>,
+    /// Maps node_id -> HTTP base URL (e.g., 2 -> "http://127.0.0.1:8082")
+    peer_http_addrs: HashMap<u64, String>,
 }
 
 #[derive(Deserialize)]
@@ -133,12 +140,24 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     // Create broadcast channel for WebSocket updates
     let (broadcast_tx, _) = broadcast::channel::<String>(100);
 
+    // Build peer HTTP address map
+    // Derive each peer's HTTP port using the offset: http_port = grpc_port - (my_grpc_port - my_http_port)
+    let port_offset = args.grpc_port as i32 - args.port as i32;
+    let mut peer_http_addrs = HashMap::new();
+    for (node_id, grpc_addr) in &args.peers {
+        let peer_http_port = (grpc_addr.port() as i32 - port_offset) as u16;
+        let peer_http_url = format!("http://{}:{}", grpc_addr.ip(), peer_http_port);
+        peer_http_addrs.insert(*node_id, peer_http_url);
+    }
+    tracing::info!("Peer HTTP addresses: {:?}", peer_http_addrs);
+
     // Create app state
     let state = AppState {
         _database_path: std::path::PathBuf::from("./prkdb.db"), // Default path
         websocket_enabled: args.websockets,
         prometheus_enabled: args.prometheus,
         broadcast_tx: broadcast_tx.clone(),
+        peer_http_addrs,
     };
 
     // Build our application with routes
@@ -243,13 +262,11 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
             // Register client service
             let mut router = builder.add_service(PrkDbServiceServer::new(service));
 
-            // Register Raft service for Partition 0 (multiplexed on same port)
+            // Register Raft service for all partitions (multiplexed on same port)
             if let Some(pm) = &db.partition_manager {
-                if let Some(raft_node) = pm.get_partition(0) {
-                    println!("✨ Multiplexing Raft Service for Partition 0 on main port");
-                    let raft_service = RaftServiceImpl::new(raft_node);
-                    router = router.add_service(RaftServiceServer::new(raft_service));
-                }
+                println!("✨ Multiplexing Raft Service (All Partitions) on main port");
+                let raft_service = RaftServiceImpl::new(pm.clone());
+                router = router.add_service(RaftServiceServer::new(raft_service));
             }
 
             if let Err(e) = router.serve(grpc_addr).await {
@@ -395,6 +412,7 @@ async fn get_collection_data_handler(
 }
 
 async fn put_collection_data_handler(
+    State(state): State<AppState>,
     Path(name): Path<String>,
     Json(data): Json<serde_json::Value>,
 ) -> impl IntoResponse {
@@ -411,7 +429,7 @@ async fn put_collection_data_handler(
 
     // Extract ID
     let id = match data.get("id").and_then(|v| v.as_str()) {
-        Some(id) => id,
+        Some(id) => id.to_string(),
         None => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -435,15 +453,59 @@ async fn put_collection_data_handler(
 
     match db.put(key.as_bytes(), &value).await {
         Ok(_) => Json(json!({"success": true, "id": id})).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Err(e) => {
+            let err_str = e.to_string();
+            // Check for NotLeader error and forward to leader
+            if let Some(leader_id) = parse_leader_id(&err_str) {
+                if let Some(leader_url) = state.peer_http_addrs.get(&leader_id) {
+                    // Forward the PUT to the leader's HTTP endpoint
+                    let forward_url = format!("{}/collections/{}/data", leader_url, name);
+                    match reqwest::Client::new()
+                        .put(&forward_url)
+                        .json(&data)
+                        .send()
+                        .await
+                    {
+                        Ok(resp) if resp.status().is_success() => {
+                            Json::<Value>(json!({"success": true, "id": id, "forwarded_to": leader_id}))
+                                .into_response()
+                        }
+                        Ok(resp) => {
+                            let status = resp.status().as_u16();
+                            let body = resp.text().await.unwrap_or_default();
+                            (
+                                StatusCode::from_u16(status)
+                                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                                Json::<Value>(json!({"error": body, "forwarded_to": leader_id})),
+                            )
+                                .into_response()
+                        }
+                        Err(fwd_err) => (
+                            StatusCode::BAD_GATEWAY,
+                            Json::<Value>(json!({"error": format!("Forward failed: {}", fwd_err), "leader_id": leader_id})),
+                        )
+                            .into_response(),
+                    }
+                } else {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({"error": err_str, "leader_id": leader_id})),
+                    )
+                        .into_response()
+                }
+            } else {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": err_str})),
+                )
+                    .into_response()
+            }
+        }
     }
 }
 
 async fn delete_collection_data_handler(
+    State(state): State<AppState>,
     Path((name, id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     let db = match crate::database_manager::get_db_instance().await {
@@ -461,12 +523,60 @@ async fn delete_collection_data_handler(
 
     match db.delete(key.as_bytes()).await {
         Ok(_) => Json(json!({"success": true, "id": id})).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Err(e) => {
+            let err_str = e.to_string();
+            if let Some(leader_id) = parse_leader_id(&err_str) {
+                if let Some(leader_url) = state.peer_http_addrs.get(&leader_id) {
+                    let forward_url = format!("{}/collections/{}/data/{}", leader_url, name, id);
+                    match reqwest::Client::new().delete(&forward_url).send().await {
+                        Ok(resp) if resp.status().is_success() => {
+                            Json::<Value>(json!({"success": true, "id": id, "forwarded_to": leader_id}))
+                                .into_response()
+                        }
+                        Ok(resp) => {
+                            let status = resp.status().as_u16();
+                            let body = resp.text().await.unwrap_or_default();
+                            (
+                                StatusCode::from_u16(status)
+                                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                                Json::<Value>(json!({"error": body, "forwarded_to": leader_id})),
+                            )
+                                .into_response()
+                        }
+                        Err(fwd_err) => (
+                            StatusCode::BAD_GATEWAY,
+                            Json::<Value>(json!({"error": format!("Forward failed: {}", fwd_err), "leader_id": leader_id})),
+                        )
+                            .into_response(),
+                    }
+                } else {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({"error": err_str, "leader_id": leader_id})),
+                    )
+                        .into_response()
+                }
+            } else {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": err_str})),
+                )
+                    .into_response()
+            }
+        }
     }
+}
+
+/// Parse leader node ID from a "Not leader. Leader is Some(N)" error string
+fn parse_leader_id(err: &str) -> Option<u64> {
+    // Match pattern: "Not leader. Leader is Some(N)"
+    if let Some(pos) = err.find("Leader is Some(") {
+        let start = pos + "Leader is Some(".len();
+        if let Some(end) = err[start..].find(')') {
+            return err[start..start + end].parse::<u64>().ok();
+        }
+    }
+    None
 }
 
 async fn get_collection_count_handler(Path(name): Path<String>) -> impl IntoResponse {
