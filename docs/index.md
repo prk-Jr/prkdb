@@ -37,6 +37,8 @@ features:
 ### Core Concepts
 
 - [Replication](/guide/replication)
+- [Schema Registry](/guide/schema-registry)
+- [Cross-Language SDK](/guide/codegen)
 - [Custom Adapters](/guide/custom-adapter)
 - [ORM Dialects](/guide/orm-dialects-quickstart)
 
