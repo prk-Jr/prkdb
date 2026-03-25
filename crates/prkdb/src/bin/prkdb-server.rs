@@ -126,9 +126,10 @@ async fn main() -> anyhow::Result<()> {
     let db_arc = Arc::new(db);
     let admin_token = env::var("PRKDB_ADMIN_TOKEN").unwrap_or_default();
     let schema_path = storage_path.join("schemas");
-    let grpc_service = PrkDbGrpcService::with_schema_storage_path(db_arc.clone(), admin_token, schema_path)
-        .await
-        .into_server();
+    let grpc_service =
+        PrkDbGrpcService::with_schema_storage_path(db_arc.clone(), admin_token, schema_path)
+            .await
+            .into_server();
 
     // Create Raft service for multiplexed Raft traffic
     // We must register this service on the SAME server/port as the client API

@@ -997,9 +997,7 @@ mod tests {
             message_type: vec![msg],
             ..Default::default()
         };
-        let set = prost_types::FileDescriptorSet {
-            file: vec![file],
-        };
+        let set = prost_types::FileDescriptorSet { file: vec![file] };
         set.encode_to_vec()
     }
 
@@ -1007,9 +1005,13 @@ mod tests {
     async fn test_generate_python() {
         let dir = tempdir().unwrap();
         let schema = create_test_schema();
-        generate_python(&dir.path().to_path_buf(), "user", &schema).await.unwrap();
+        generate_python(&dir.path().to_path_buf(), "user", &schema)
+            .await
+            .unwrap();
 
-        let py_code = fs::read_to_string(dir.path().join("user.py")).await.unwrap();
+        let py_code = fs::read_to_string(dir.path().join("user.py"))
+            .await
+            .unwrap();
         assert!(py_code.contains("class User:"));
         assert!(py_code.contains("id: str"));
         assert!(py_code.contains("age: int"));
@@ -1019,9 +1021,13 @@ mod tests {
     async fn test_generate_typescript() {
         let dir = tempdir().unwrap();
         let schema = create_test_schema();
-        generate_typescript(&dir.path().to_path_buf(), "user", &schema).await.unwrap();
+        generate_typescript(&dir.path().to_path_buf(), "user", &schema)
+            .await
+            .unwrap();
 
-        let ts_code = fs::read_to_string(dir.path().join("user.ts")).await.unwrap();
+        let ts_code = fs::read_to_string(dir.path().join("user.ts"))
+            .await
+            .unwrap();
         assert!(ts_code.contains("export interface User {"));
         assert!(ts_code.contains("id: string;"));
         assert!(ts_code.contains("age: number;"));
@@ -1032,9 +1038,13 @@ mod tests {
     async fn test_generate_go() {
         let dir = tempdir().unwrap();
         let schema = create_test_schema();
-        generate_go(&dir.path().to_path_buf(), "user", &schema).await.unwrap();
+        generate_go(&dir.path().to_path_buf(), "user", &schema)
+            .await
+            .unwrap();
 
-        let go_code = fs::read_to_string(dir.path().join("user.go")).await.unwrap();
+        let go_code = fs::read_to_string(dir.path().join("user.go"))
+            .await
+            .unwrap();
         assert!(go_code.contains("type User struct {"));
         assert!(go_code.contains("Id string `json:\"id\"`"));
         assert!(go_code.contains("Age int32 `json:\"age\"`"));

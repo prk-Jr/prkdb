@@ -89,7 +89,6 @@ impl PrkDbGrpcService<FileSchemaStorage> {
 }
 
 impl<S: prkdb_schema::SchemaStorage> PrkDbGrpcService<S> {
-
     pub fn with_public_address(mut self, address: String) -> Self {
         self.public_address = Some(address);
         self
