@@ -310,33 +310,54 @@ pub fn collection_derive(input: TokenStream) -> TokenStream {
             }
 
             fn schema_proto() -> Vec<u8> {
-                // Build a minimal FileDescriptorProto representation
-                // Format: simple binary format that can be parsed by prkdb-schema
-                // [name_len:u32][name:utf8][field_count:u32][fields...]
-                // Each field: [name_len:u32][name:utf8][number:i32][type:i32][optional:u8][repeated:u8]
-                let mut bytes = Vec::with_capacity(256);
-                let name = stringify!(#struct_name);
-                let name_bytes = name.as_bytes();
+                use prost::Message;
 
-                // Write message name
-                bytes.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
-                bytes.extend_from_slice(name_bytes);
-
-                // Write field count and field definitions
+                // Build FieldDescriptorProto for each field
                 let fields = Self::field_definitions();
-                bytes.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+                let proto_fields: Vec<prost_types::FieldDescriptorProto> = fields
+                    .iter()
+                    .map(|f| {
+                        let label = if f.is_repeated {
+                            3 // LABEL_REPEATED
+                        } else if f.is_optional {
+                            1 // LABEL_OPTIONAL
+                        } else {
+                            1 // LABEL_OPTIONAL (proto3 default)
+                        };
 
-                for field in fields {
-                    let field_name = field.name.as_bytes();
-                    bytes.extend_from_slice(&(field_name.len() as u32).to_le_bytes());
-                    bytes.extend_from_slice(field_name);
-                    bytes.extend_from_slice(&field.field_number.to_le_bytes());
-                    bytes.extend_from_slice(&field.proto_type.as_i32().to_le_bytes());
-                    bytes.push(if field.is_optional { 1 } else { 0 });
-                    bytes.push(if field.is_repeated { 1 } else { 0 });
-                }
+                        prost_types::FieldDescriptorProto {
+                            name: Some(f.name.to_string()),
+                            number: Some(f.field_number),
+                            r#type: Some(f.proto_type.as_i32()),
+                            label: Some(label),
+                            proto3_optional: if f.is_optional { Some(true) } else { None },
+                            ..Default::default()
+                        }
+                    })
+                    .collect();
 
-                bytes
+                // Build DescriptorProto (message)
+                let message = prost_types::DescriptorProto {
+                    name: Some(stringify!(#struct_name).to_string()),
+                    field: proto_fields,
+                    ..Default::default()
+                };
+
+                // Build FileDescriptorProto
+                let file = prost_types::FileDescriptorProto {
+                    name: Some(format!("{}.proto", stringify!(#struct_name).to_lowercase())),
+                    package: Some("prkdb.models".to_string()),
+                    syntax: Some("proto3".to_string()),
+                    message_type: vec![message],
+                    ..Default::default()
+                };
+
+                // Wrap in FileDescriptorSet
+                let set = prost_types::FileDescriptorSet {
+                    file: vec![file],
+                };
+
+                set.encode_to_vec()
             }
         }
 

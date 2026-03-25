@@ -5,7 +5,7 @@ use crate::error::{SchemaError, SchemaResult};
 use crate::storage::SchemaStorage;
 use crate::types::{CompatibilityMode, CompatibilityResult, Schema, SchemaInfo};
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// Schema Registry for PrkDB.
 ///

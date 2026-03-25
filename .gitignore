@@ -13,3 +13,5 @@
 *.key
 *.csr
 *.pem
+
+/.agents/

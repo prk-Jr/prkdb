@@ -86,8 +86,10 @@ pub async fn handle_codegen(args: CodegenArgs) -> anyhow::Result<()> {
     // Generate base client library (regardless of schemas)
     match args.lang {
         Language::Python => generate_python_client_lib(&args.out).await?,
+        Language::Go => generate_go_client_lib(&args.out).await?,
         Language::All => {
             generate_python_client_lib(&args.out.join("python")).await?;
+            generate_go_client_lib(&args.out.join("go")).await?;
         }
         _ => {}
     }
@@ -149,7 +151,7 @@ fn collect_messages(msg: &prost_types::DescriptorProto, scope: &str, out: &mut V
 
             FieldInfo {
                 name: f.name.clone().unwrap_or_default(),
-                number: f.number.unwrap_or(0),
+                _number: f.number.unwrap_or(0),
                 proto_type: type_num,
                 type_name: f.type_name.clone(), // Capture type name for messages
                 is_optional: is_explicit_optional || is_message,
@@ -174,7 +176,7 @@ struct MessageInfo {
 #[derive(Debug)]
 struct FieldInfo {
     name: String,
-    number: i32,
+    _number: i32,
     proto_type: i32,
     type_name: Option<String>,
     is_optional: bool,
@@ -534,7 +536,7 @@ export class {}QueryBuilder {{
         code.push_str("}\n"); // Close QueryBuilder
     }
 
-    // Add PrkDbClient class
+    // Add PrkDbClient class with dynamic collection methods
     code.push_str(&format!(
         r#"
 export class PrkDbClient {{
@@ -565,6 +567,16 @@ export class PrkDbClient {{
         return Array.isArray(result) ? result : [];
     }}
 
+    async get<T>(collection: string, id: string): Promise<T | null> {{
+        const response = await fetch(`${{this.host}}/collections/${{collection}}/data/${{id}}`);
+        if (response.status === 404) return null;
+        if (!response.ok) {{
+            throw new Error(`Failed to get record: ${{response.status}}`);
+        }}
+        const data = await response.json();
+        return data.data || null;
+    }}
+
     async put(collection: string, data: any): Promise<void> {{
         const response = await fetch(`${{this.host}}/collections/${{collection}}/data`, {{
             method: 'PUT',
@@ -583,10 +595,6 @@ export class PrkDbClient {{
         if (!response.ok) {{
             throw new Error(`Failed to delete record: ${{response.status}}`);
         }}
-    }}
-
-    user(): UserQueryBuilder {{
-        return new UserQueryBuilder(this);
     }}
 }}
 "#
@@ -654,6 +662,138 @@ func {}FromBytes(data []byte) (*{}, error) {{
     let filename = format!("{}.go", collection.to_lowercase());
     fs::write(out_dir.join(&filename), code).await?;
     println!("  → Generated {}", filename);
+
+    Ok(())
+}
+
+async fn generate_go_client_lib(out_dir: &PathBuf) -> anyhow::Result<()> {
+    fs::create_dir_all(out_dir).await?;
+
+    let code = r#"// Generated PrkDB Go client library
+package models
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+)
+
+// PrkDbClient is a lightweight HTTP client for PrkDB.
+type PrkDbClient struct {
+	Host   string
+	Client *http.Client
+}
+
+// NewPrkDbClient creates a new PrkDB client.
+func NewPrkDbClient(host string) *PrkDbClient {
+	return &PrkDbClient{
+		Host:   host,
+		Client: &http.Client{},
+	}
+}
+
+// ListOptions configures list queries.
+type ListOptions struct {
+	Limit  int
+	Offset int
+	Filter string
+	Sort   string
+}
+
+// ListRaw returns raw JSON results from a collection.
+func (c *PrkDbClient) ListRaw(collection string, opts ListOptions) ([]map[string]interface{}, error) {
+	params := url.Values{}
+	if opts.Limit > 0 {
+		params.Set("limit", strconv.Itoa(opts.Limit))
+	}
+	if opts.Offset > 0 {
+		params.Set("offset", strconv.Itoa(opts.Offset))
+	}
+	if opts.Filter != "" {
+		params.Set("filter", opts.Filter)
+	}
+	if opts.Sort != "" {
+		params.Set("sort", opts.Sort)
+	}
+
+	resp, err := c.Client.Get(fmt.Sprintf("%s/collections/%s/data?%s", c.Host, collection, params.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("list failed with status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read body failed: %w", err)
+	}
+
+	var wrapper struct {
+		Data struct {
+			Data []map[string]interface{} `json:"data"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &wrapper); err != nil {
+		return nil, fmt.Errorf("unmarshal failed: %w", err)
+	}
+
+	return wrapper.Data.Data, nil
+}
+
+// Put inserts or updates a record in the collection.
+func (c *PrkDbClient) Put(collection string, data interface{}) error {
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Errorf("marshal failed: %w", err)
+	}
+
+	req, err := http.NewRequest("PUT", fmt.Sprintf("%s/collections/%s/data", c.Host, collection), bytes.NewReader(jsonData))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("put failed with status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// Delete removes a record from the collection.
+func (c *PrkDbClient) Delete(collection string, id string) error {
+	req, err := http.NewRequest("DELETE", fmt.Sprintf("%s/collections/%s/data/%s", c.Host, collection, id), nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("delete failed with status %d", resp.StatusCode)
+	}
+	return nil
+}
+"#;
+
+    fs::write(out_dir.join("client.go"), code).await?;
+    println!("  → Generated client.go");
 
     Ok(())
 }
@@ -825,4 +965,78 @@ class QueryBuilder:
     println!("  → Generated prkdb_client.py");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prost::Message;
+    use tempfile::tempdir;
+
+    fn create_test_schema() -> Vec<u8> {
+        let field_id = prost_types::FieldDescriptorProto {
+            name: Some("id".to_string()),
+            number: Some(1),
+            r#type: Some(9), // TYPE_STRING
+            ..Default::default()
+        };
+        let field_age = prost_types::FieldDescriptorProto {
+            name: Some("age".to_string()),
+            number: Some(2),
+            r#type: Some(5), // TYPE_INT32
+            ..Default::default()
+        };
+        let msg = prost_types::DescriptorProto {
+            name: Some("User".to_string()),
+            field: vec![field_id, field_age],
+            ..Default::default()
+        };
+        let file = prost_types::FileDescriptorProto {
+            name: Some("user.proto".to_string()),
+            package: Some("test".to_string()),
+            message_type: vec![msg],
+            ..Default::default()
+        };
+        let set = prost_types::FileDescriptorSet {
+            file: vec![file],
+        };
+        set.encode_to_vec()
+    }
+
+    #[tokio::test]
+    async fn test_generate_python() {
+        let dir = tempdir().unwrap();
+        let schema = create_test_schema();
+        generate_python(&dir.path().to_path_buf(), "user", &schema).await.unwrap();
+
+        let py_code = fs::read_to_string(dir.path().join("user.py")).await.unwrap();
+        assert!(py_code.contains("class User:"));
+        assert!(py_code.contains("id: str"));
+        assert!(py_code.contains("age: int"));
+    }
+
+    #[tokio::test]
+    async fn test_generate_typescript() {
+        let dir = tempdir().unwrap();
+        let schema = create_test_schema();
+        generate_typescript(&dir.path().to_path_buf(), "user", &schema).await.unwrap();
+
+        let ts_code = fs::read_to_string(dir.path().join("user.ts")).await.unwrap();
+        assert!(ts_code.contains("export interface User {"));
+        assert!(ts_code.contains("id: string;"));
+        assert!(ts_code.contains("age: number;"));
+        assert!(ts_code.contains("export class UserQueryBuilder"));
+    }
+
+    #[tokio::test]
+    async fn test_generate_go() {
+        let dir = tempdir().unwrap();
+        let schema = create_test_schema();
+        generate_go(&dir.path().to_path_buf(), "user", &schema).await.unwrap();
+
+        let go_code = fs::read_to_string(dir.path().join("user.go")).await.unwrap();
+        assert!(go_code.contains("type User struct {"));
+        assert!(go_code.contains("Id string `json:\"id\"`"));
+        assert!(go_code.contains("Age int32 `json:\"age\"`"));
+    }
 }

@@ -71,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(parent).ok();
     }
 
-    let db = PrkDb::new_multi_raft(num_partitions, config, storage_path)?;
+    let db = PrkDb::new_multi_raft(num_partitions, config, storage_path.clone())?;
 
     // Start Multi-Raft
     let rpc_pool = Arc::new(RpcClientPool::new(node_id));
@@ -125,7 +125,10 @@ async fn main() -> anyhow::Result<()> {
     // Create gRPC service for client data operations
     let db_arc = Arc::new(db);
     let admin_token = env::var("PRKDB_ADMIN_TOKEN").unwrap_or_default();
-    let grpc_service = PrkDbGrpcService::new(db_arc.clone(), admin_token).into_server();
+    let schema_path = storage_path.join("schemas");
+    let grpc_service = PrkDbGrpcService::with_schema_storage_path(db_arc.clone(), admin_token, schema_path)
+        .await
+        .into_server();
 
     // Create Raft service for multiplexed Raft traffic
     // We must register this service on the SAME server/port as the client API
