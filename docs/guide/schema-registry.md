@@ -31,6 +31,7 @@ prkdb schema register --collection Product --proto ./schemas/product.bin
 ```
 
 To view all registered schemas:
+
 ```bash
 prkdb schema list
 ```

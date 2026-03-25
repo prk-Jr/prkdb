@@ -5,11 +5,12 @@ Using PrkDB's centralized Schema Registry, you can automatically generate strong
 ## Supported Languages
 
 PrkDB currently supports generating raw native types and API wrappers for:
+
 - TypeScript
 - Python
 - Go
 
-*(More languages are planned on the roadmap.)*
+_(More languages are planned on the roadmap.)_
 
 ## Generating the SDK
 
@@ -26,6 +27,7 @@ prkdb codegen --lang go --out ./backend/pkg/prkdb
 ```
 
 To generate code for **all** supported languages at once:
+
 ```bash
 prkdb codegen --lang all --out ./generated
 ```
@@ -33,28 +35,29 @@ prkdb codegen --lang all --out ./generated
 ## Generated Code Example
 
 The code generator will create:
+
 1. Native language representations of your Rust `#[derive(Collection)]` structs.
 2. An automatically generated HTTP API client class to interact with PrkDB.
 
 ### TypeScript Example
 
 ```typescript
-import { PrkDbClient } from './prkdb_client';
-import { User } from './user';
+import { PrkDbClient } from './prkdb_client'
+import { User } from './user'
 
 async function main() {
-    const db = new PrkDbClient("http://localhost:8081");
-    
-    // Type-safe put
-    await db.user.put({ 
-        id: "1001",
-        name: "Alice",
-        age: 30
-    });
+  const db = new PrkDbClient('http://localhost:8081')
 
-    // Type-safe get
-    const user = await db.user.get("1001");
-    console.log(user.name);
+  // Type-safe put
+  await db.user.put({
+    id: '1001',
+    name: 'Alice',
+    age: 30,
+  })
+
+  // Type-safe get
+  const user = await db.user.get('1001')
+  console.log(user.name)
 }
 ```
 
