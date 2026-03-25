@@ -31,6 +31,13 @@ export default defineConfig({
         ],
       },
       {
+        text: 'Schema & SDK',
+        items: [
+          { text: 'Schema Registry', link: '/guide/schema-registry' },
+          { text: 'Cross-Language Codegen', link: '/guide/codegen' },
+        ],
+      },
+      {
         text: 'Advanced',
         items: [
           {

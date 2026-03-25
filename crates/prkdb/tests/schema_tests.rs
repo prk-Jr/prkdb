@@ -7,7 +7,7 @@
 //! 4. Schema descriptor parsing
 
 use prkdb_macros::Collection;
-use prkdb_types::schema::{FieldDef, ProtoSchema, ProtoType};
+use prkdb_types::schema::{ProtoSchema, ProtoType};
 use serde::{Deserialize, Serialize};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -134,59 +134,52 @@ fn test_proto_schema_generates_bytes() {
         "schema_proto() should not be empty"
     );
 
-    // Minimum size: name_len(4) + "User"(4) + field_count(4) = 12 bytes minimum
-    assert!(
-        schema_bytes.len() >= 12,
-        "schema_proto() should have minimum header size"
-    );
+    // Should be decodable as FileDescriptorSet
+    use prost::Message;
+    let set = prost_types::FileDescriptorSet::decode(schema_bytes.as_slice())
+        .expect("schema_proto() should produce valid FileDescriptorSet");
+    assert_eq!(set.file.len(), 1);
 }
 
 #[test]
 fn test_proto_schema_bytes_parseable() {
+    use prost::Message;
+
     let schema_bytes = User::schema_proto();
 
-    // Parse the binary format we generate
-    let mut cursor = 0;
+    // Decode as FileDescriptorSet
+    let set = prost_types::FileDescriptorSet::decode(schema_bytes.as_slice())
+        .expect("Should decode as FileDescriptorSet");
 
-    // Read message name length
-    let name_len =
-        u32::from_le_bytes(schema_bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
-    cursor += 4;
+    assert_eq!(set.file.len(), 1);
+    let file = &set.file[0];
 
-    // Read message name
-    let name = String::from_utf8_lossy(&schema_bytes[cursor..cursor + name_len]).to_string();
-    cursor += name_len;
-    assert_eq!(name, "User");
+    // Check file metadata
+    assert_eq!(file.name.as_deref(), Some("user.proto"));
+    assert_eq!(file.package.as_deref(), Some("prkdb.models"));
+    assert_eq!(file.syntax.as_deref(), Some("proto3"));
 
-    // Read field count
-    let field_count =
-        u32::from_le_bytes(schema_bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
-    cursor += 4;
-    assert_eq!(field_count, 4);
+    // Check message
+    assert_eq!(file.message_type.len(), 1);
+    let msg = &file.message_type[0];
+    assert_eq!(msg.name.as_deref(), Some("User"));
 
-    // Parse first field (id)
-    let field_name_len =
-        u32::from_le_bytes(schema_bytes[cursor..cursor + 4].try_into().unwrap()) as usize;
-    cursor += 4;
-    let field_name =
-        String::from_utf8_lossy(&schema_bytes[cursor..cursor + field_name_len]).to_string();
-    cursor += field_name_len;
-    assert_eq!(field_name, "id");
+    // Check fields
+    assert_eq!(msg.field.len(), 4);
 
-    let field_number = i32::from_le_bytes(schema_bytes[cursor..cursor + 4].try_into().unwrap());
-    cursor += 4;
-    assert_eq!(field_number, 1);
+    let id_field = &msg.field[0];
+    assert_eq!(id_field.name.as_deref(), Some("id"));
+    assert_eq!(id_field.number, Some(1));
+    assert_eq!(id_field.r#type, Some(9)); // TYPE_STRING
 
-    let proto_type = i32::from_le_bytes(schema_bytes[cursor..cursor + 4].try_into().unwrap());
-    cursor += 4;
-    assert_eq!(proto_type, ProtoType::String.as_i32());
+    let age_field = &msg.field[2];
+    assert_eq!(age_field.name.as_deref(), Some("age"));
+    assert_eq!(age_field.number, Some(3));
+    assert_eq!(age_field.r#type, Some(13)); // TYPE_UINT32
 
-    let is_optional = schema_bytes[cursor] != 0;
-    cursor += 1;
-    assert!(!is_optional);
-
-    let is_repeated = schema_bytes[cursor] != 0;
-    assert!(!is_repeated);
+    let active_field = &msg.field[3];
+    assert_eq!(active_field.name.as_deref(), Some("active"));
+    assert_eq!(active_field.r#type, Some(8)); // TYPE_BOOL
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

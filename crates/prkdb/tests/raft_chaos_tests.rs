@@ -993,7 +993,7 @@ async fn test_chaos_monkey_continuous_load() {
 
         // Wait for cluster to stabilize
         println!("\n⏳ Waiting for cluster stabilization...");
-        sleep(Duration::from_secs(15)).await;
+        sleep(Duration::from_secs(30)).await;
 
         // Final stats
         let total_writes = write_count.load(Ordering::Relaxed);

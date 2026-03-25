@@ -26,7 +26,7 @@ use crate::raft::rpc::{
     WatchEvent,
     WatchRequest,
 };
-use prkdb_schema::{CompatibilityMode, InMemorySchemaStorage, SchemaRegistry};
+use prkdb_schema::{CompatibilityMode, FileSchemaStorage, InMemorySchemaStorage, SchemaRegistry};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -39,15 +39,15 @@ pub type WatchBroadcast = broadcast::Sender<WatchEvent>;
 
 /// gRPC service implementation for client data operations
 /// This is the binary protocol equivalent to Kafka's producer/consumer API
-pub struct PrkDbGrpcService {
+pub struct PrkDbGrpcService<S: prkdb_schema::SchemaStorage = InMemorySchemaStorage> {
     db: Arc<PrkDb>,
     admin_token: String,
     public_address: Option<String>,
     /// Schema registry for cross-language SDK support
-    schema_registry: Arc<SchemaRegistry<InMemorySchemaStorage>>,
+    schema_registry: Arc<SchemaRegistry<S>>,
 }
 
-impl PrkDbGrpcService {
+impl PrkDbGrpcService<InMemorySchemaStorage> {
     pub fn new(db: Arc<PrkDb>, admin_token: String) -> Self {
         // Initialize schema registry with in-memory storage
         // TODO: In production, use FileSchemaStorage with a configurable path
@@ -61,17 +61,23 @@ impl PrkDbGrpcService {
             schema_registry,
         }
     }
+}
 
+impl PrkDbGrpcService<FileSchemaStorage> {
     /// Create a new gRPC service with file-backed schema storage
-    pub fn with_schema_storage_path(
+    pub async fn with_schema_storage_path(
         db: Arc<PrkDb>,
         admin_token: String,
-        _schema_path: PathBuf,
+        schema_path: PathBuf,
     ) -> Self {
-        let storage = Arc::new(InMemorySchemaStorage::new());
-        // Note: FileSchemaStorage requires mutable load(), so we use InMemory for now
-        // and cache is populated on first access
-        let schema_registry = Arc::new(SchemaRegistry::new(storage));
+        // Create the directory if it doesn't exist
+        std::fs::create_dir_all(&schema_path).ok();
+
+        let mut storage = FileSchemaStorage::new(schema_path);
+        if let Err(e) = storage.load().await {
+            tracing::warn!("Failed to load schema storage: {}. Starting fresh.", e);
+        }
+        let schema_registry = Arc::new(SchemaRegistry::new(Arc::new(storage)));
 
         Self {
             db,
@@ -80,7 +86,9 @@ impl PrkDbGrpcService {
             schema_registry,
         }
     }
+}
 
+impl<S: prkdb_schema::SchemaStorage> PrkDbGrpcService<S> {
     pub fn with_public_address(mut self, address: String) -> Self {
         self.public_address = Some(address);
         self
@@ -92,7 +100,7 @@ impl PrkDbGrpcService {
 }
 
 #[tonic::async_trait]
-impl PrkDbServiceTrait for PrkDbGrpcService {
+impl<S: prkdb_schema::SchemaStorage + 'static> PrkDbServiceTrait for PrkDbGrpcService<S> {
     async fn put(&self, request: Request<PutRequest>) -> Result<Response<PutResponse>, Status> {
         let req = request.into_inner();
 
@@ -1133,7 +1141,7 @@ impl PrkDbServiceTrait for PrkDbGrpcService {
     }
 }
 
-impl PrkDbGrpcService {
+impl<S: prkdb_schema::SchemaStorage> PrkDbGrpcService<S> {
     #[allow(clippy::result_large_err)]
     fn validate_admin_token(&self, token: &str) -> Result<(), Status> {
         // Debug trace for token validation

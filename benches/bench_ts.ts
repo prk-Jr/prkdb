@@ -8,7 +8,7 @@ if (!globalThis.fetch) {
     process.exit(1);
 }
 
-const SERVER_URL = process.env.PRKDB_SERVER || "http://127.0.0.1:50051";
+const SERVER_URL = process.env.PRKDB_SERVER || "http://127.0.0.1:8080";
 const NUM_RECORDS = parseInt(process.env.NUM_RECORDS || "10000");
 const BATCH_SIZE = 100;
 

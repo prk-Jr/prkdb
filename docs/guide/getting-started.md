@@ -82,24 +82,45 @@ tokio = { version = "1.0", features = ["full"] }
 
 ```rust
 use prkdb::client::PrkDbClient;
+use prkdb_macros::Collection;
+use serde::{Deserialize, Serialize};
+
+#[derive(Collection, Serialize, Deserialize, Clone, Debug)]
+pub struct User {
+    #[key]
+    pub id: String,
+    pub name: String,
+    pub age: u32,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Connect to the cluster (provide any node address)
+    // Connect to the cluster
     let client = PrkDbClient::new(vec![
         "http://127.0.0.1:8081".to_string(),
     ]).await?;
 
-    // Put data
-    client.put(b"user:1001", b"{\"name\":\"Alice\"}").await?;
+    // Create a new user
+    let user = User {
+        id: "1001".to_string(),
+        name: "Alice".to_string(),
+        age: 30,
+    };
+
+    // Put data using the typed client interface
+    client.put(&user).await?;
 
     // Linearizable Get (guaranteed latest data)
-    let val = client.get(b"user:1001").await?;
-    println!("Value: {:?}", val);
+    let fetched_user: User = client.get("User", "1001").await?.unwrap();
+    println!("Fetched: {:?}", fetched_user);
 
     Ok(())
 }
 ```
+
+### 4. Cross-Language SDKs
+
+PrkDB supports dynamic code generation for TypeScript, Python, and Go based on your Rust schema. See the [Cross-Language SDK](/guide/codegen) guide for details.
 
 ## Next Steps
 
