@@ -113,6 +113,22 @@ jobs:
       - name: Run Client Features Test (TS)
         run: ./scripts/test_client_features_ts.sh
 
+  client-features-integration-go:
+    name: Client Features Integration (Go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+      - name: Run Client Features Test (Go)
+        run: ./scripts/test_client_features_go.sh
+
   # ═══════════════════════════════════════════════════════════════════════════
   # CHAOS ENGINEERING TESTS (reusable workflow)
   # ═══════════════════════════════════════════════════════════════════════════
