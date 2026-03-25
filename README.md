@@ -61,6 +61,29 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
+## 🌐 Cross-Language Clients (Codegen)
+
+PrkDB includes a built-in schema registry and cross-language client generator for **TypeScript*, **Python**, and **Go**.
+
+First, register your schema (via `#[derive(Collection)]` export or raw `.proto`):
+```bash
+prkdb schema register --collection users --proto user.proto
+```
+
+Then generate a strongly-typed client in your language of choice:
+```bash
+# Generate a TypeScript HTTP client
+prkdb codegen --lang typescript --collection users --out ./src/client
+
+# Generate a Python client
+prkdb codegen --lang python --collection users --out ./app/models
+
+# Generate a Go client
+prkdb codegen --lang go --collection users --out ./pkg/models
+```
+
+Generated clients support fluent queries, pagination, and real-time updates natively!
+
 ## Transactions
 
 PrkDB supports ACID transactions with conflict detection and savepoints.
@@ -792,6 +815,11 @@ prkdb collection list
 prkdb consumer list
 prkdb metrics
 prkdb serve
+
+# Schema & Codegen
+prkdb schema register --collection users --proto schema.desc
+prkdb schema list
+prkdb codegen --collection users --lang typescript --out ./client
 
 # Data Operations
 prkdb put user:101 '{"name": "Alice"}'

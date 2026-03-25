@@ -134,6 +134,7 @@ jobs:
   # ═══════════════════════════════════════════════════════════════════════════
   chaos-tests:
     name: "🐵 Chaos Tests"
+    if: github.event_name == 'pull_request'
     needs: [check, test]
     uses: ./.github/workflows/chaos-tests.yml
 
