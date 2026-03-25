@@ -573,5 +573,5 @@ jobs:
           
           tsx benches/bench_ts.ts
         env:
-          PRKDB_SERVER: http://127.0.0.1:50051
+          PRKDB_SERVER: http://127.0.0.1:8080
           NUM_RECORDS: 10000
