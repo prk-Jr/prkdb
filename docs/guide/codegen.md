@@ -73,3 +73,31 @@ client = PrkDbClient(["http://localhost:8081"])
 user: User = client.user.get("1001")
 print(user.name)
 ```
+
+### Go Example
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+    "your_project/models" // The generated directory
+)
+
+func main() {
+    client := models.NewPrkDbClient("http://localhost:8081")
+
+    // Fetch user by ID
+    results, err := client.ListRaw("users", models.ListOptions{
+        Filter: "id=1001",
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    if len(results) > 0 {
+        fmt.Println(results[0]["name"])
+    }
+}
+```

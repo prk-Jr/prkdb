@@ -77,17 +77,19 @@ async fn main() -> anyhow::Result<()> {
     let rpc_pool = Arc::new(RpcClientPool::new(node_id));
     db.start_multi_raft(rpc_pool, &[]);
 
-    // Wait for leaders
-    info!("Waiting for leader election...");
-    match db
-        .wait_for_leaders(std::time::Duration::from_secs(30))
-        .await
-    {
-        Ok(_) => info!("All partitions have leaders elected"),
-        Err(e) => info!("Leader election timeout (may be normal): {}", e),
-    }
-
-    info!("PrkDB server ready!");
+    // Wait for leaders in the background so the server can bind its network listeners
+    let db_clone = db.clone();
+    tokio::spawn(async move {
+        info!("Waiting for leader election...");
+        match db_clone
+            .wait_for_leaders(std::time::Duration::from_secs(30))
+            .await
+        {
+            Ok(_) => info!("All partitions have leaders elected"),
+            Err(e) => info!("Leader election timeout (may be normal): {}", e),
+        }
+        info!("PrkDB server ready!");
+    });
 
     // Initialize Prometheus metrics
     prkdb::prometheus_metrics::init_prometheus_metrics();

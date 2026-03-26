@@ -31,10 +31,31 @@ export default defineConfig({
         ],
       },
       {
+        text: 'Architecture',
+        items: [
+          { text: 'Partitions & Sharding', link: '/guide/architecture/partitions' },
+          { text: 'Leader Election', link: '/guide/architecture/leader-election' },
+        ],
+      },
+      {
+        text: 'Features',
+        items: [
+          { text: 'Transactions', link: '/guide/features/transactions' },
+          { text: 'Time-To-Live (TTL)', link: '/guide/features/ttl' },
+          { text: 'Secondary Indexes', link: '/guide/features/secondary-indexes' },
+        ],
+      },
+      {
         text: 'Schema & SDK',
         items: [
           { text: 'Schema Registry', link: '/guide/schema-registry' },
           { text: 'Cross-Language Codegen', link: '/guide/codegen' },
+        ],
+      },
+      {
+        text: 'Client Integration',
+        items: [
+          { text: 'Smart Client', link: '/guide/client/smart-client' },
         ],
       },
       {
