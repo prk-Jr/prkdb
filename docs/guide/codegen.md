@@ -1,80 +1,94 @@
-# Cross-Language SDK (Codegen)
+# Cross-Language SDK Code Generation
 
-Using PrkDB's centralized Schema Registry, you can automatically generate strongly-typed client libraries for other languages to safely interact with your database. This eliminates the need to manually keep API interfaces in sync between microservices.
+PrkDB can generate TypeScript, Python, and Go client code from schemas stored in the schema registry.
 
-## Supported Languages
+## Requirements
 
-PrkDB currently supports generating raw native types and API wrappers for:
+- A running PrkDB gRPC endpoint
+- Registered schemas in the schema registry
+- `PRKDB_ADMIN_TOKEN` if the server protects schema listing
 
-- TypeScript
-- Python
-- Go
-
-_(More languages are planned on the roadmap.)_
-
-## Generating the SDK
-
-Once you have defined your schema in Rust and registered it via the `prkdb schema register` command, you can generate client code for your other services.
-
-Note: You must have a running PrkDB server to fetch the latest schemas.
+## Generate Code
 
 ```bash
-# Output TypeScript definitions to ./frontend/src/api
-prkdb codegen --lang typescript --out ./frontend/src/api --server http://localhost:8081
+export PRKDB_ADMIN_TOKEN=change-me
 
-# Generate a Go SDK client wrapper
-prkdb codegen --lang go --out ./backend/pkg/prkdb
+# TypeScript
+prkdb codegen --server http://127.0.0.1:8080 --lang typescript --out ./generated/ts
+
+# Python
+prkdb codegen --server http://127.0.0.1:8080 --lang python --out ./generated/python
+
+# Go
+prkdb codegen --server http://127.0.0.1:8080 --lang go --out ./generated/go
+
+# All supported languages
+prkdb codegen --server http://127.0.0.1:8080 --lang all --out ./generated
 ```
 
-To generate code for **all** supported languages at once:
+To generate code for one collection only:
 
 ```bash
-prkdb codegen --lang all --out ./generated
+prkdb codegen \
+  --server http://127.0.0.1:8080 \
+  --lang typescript \
+  --collection users \
+  --out ./generated/ts
 ```
 
-## Generated Code Example
+If you are pointing codegen at the local gRPC endpoint created by `prkdb-cli serve`, use `http://127.0.0.1:50051` instead.
 
-The code generator will create:
+## Generated Client Shape
 
-1. Native language representations of your Rust `#[derive(Collection)]` structs.
-2. An automatically generated HTTP API client class to interact with PrkDB.
+The generated HTTP client libraries target the `prkdb-cli serve` HTTP API, which defaults to `http://127.0.0.1:8080`.
 
-### TypeScript Example
+### TypeScript
 
 ```typescript
 import { PrkDbClient } from './prkdb_client'
-import { User } from './user'
+import type { User } from './user'
 
 async function main() {
-  const db = new PrkDbClient('http://localhost:8081')
+  const db = new PrkDbClient('http://127.0.0.1:8080')
 
-  // Type-safe put
-  await db.user.put({
+  await db.put('users', {
     id: '1001',
     name: 'Alice',
     age: 30,
   })
 
-  // Type-safe get
-  const user = await db.user.get('1001')
-  console.log(user.name)
+  const user = await db.get<User>('users', '1001')
+  const users = await db.list<User>('users', { filter: 'id=1001' })
+
+  console.log(user)
+  console.log(users.length)
 }
 ```
 
-### Python Example
+### Python
 
 ```python
-from prkdb_client import PrkDbClient
-from user import User
+import asyncio
+from generated.python.prkdb_client import PrkDbClient
 
-client = PrkDbClient(["http://localhost:8081"])
+async def main() -> None:
+    async with PrkDbClient("http://127.0.0.1:8080") as client:
+        await client.put("users", {
+            "id": "1001",
+            "name": "Alice",
+            "age": 30,
+        })
 
-# Fetch dynamically typed objects
-user: User = client.user.get("1001")
-print(user.name)
+        user = await client.get("users", "1001")
+        users = await client.list("users", filter="id=1001")
+
+        print(user)
+        print(len(users))
+
+asyncio.run(main())
 ```
 
-### Go Example
+### Go
 
 ```go
 package main
@@ -82,13 +96,12 @@ package main
 import (
     "fmt"
     "log"
-    "your_project/models" // The generated directory
+    "your_project/models"
 )
 
 func main() {
-    client := models.NewPrkDbClient("http://localhost:8081")
+    client := models.NewPrkDbClient("http://127.0.0.1:8080")
 
-    // Fetch user by ID
     results, err := client.ListRaw("users", models.ListOptions{
         Filter: "id=1001",
     })
@@ -96,8 +109,12 @@ func main() {
         log.Fatal(err)
     }
 
-    if len(results) > 0 {
-        fmt.Println(results[0]["name"])
-    }
+    fmt.Println(results)
 }
 ```
+
+## Notes
+
+- Schema registration and schema listing are admin operations.
+- Generated TypeScript and Python clients support `get(collection, id)` against `GET /collections/:name/data/:id`.
+- Code generation does not create collection-specific `db.users.put(...)` wrappers today; the generated clients expose `list`, `get`, `put`, and `delete`.

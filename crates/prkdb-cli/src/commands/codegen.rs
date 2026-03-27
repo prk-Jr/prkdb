@@ -1,9 +1,9 @@
 //! Codegen command for generating cross-language SDK clients
 //!
 //! Usage:
-//!   prkdb codegen --server http://localhost:50051 --lang python --out ./clients/python/
-//!   prkdb codegen --server http://localhost:50051 --lang typescript --out ./clients/ts/
-//!   prkdb codegen --server http://localhost:50051 --lang go --out ./clients/go/
+//!   prkdb codegen --server http://localhost:8080 --lang python --out ./clients/python/
+//!   prkdb codegen --server http://localhost:8080 --lang typescript --out ./clients/ts/
+//!   prkdb codegen --server http://localhost:8080 --lang go --out ./clients/go/
 
 use clap::{Args, ValueEnum};
 use prkdb_client::PrkDbClient;
@@ -24,8 +24,12 @@ pub enum Language {
 #[derive(Args, Clone)]
 pub struct CodegenArgs {
     /// Server address to fetch schemas from
-    #[arg(long, default_value = "http://127.0.0.1:50051")]
+    #[arg(long, default_value = "http://127.0.0.1:8080")]
     pub server: String,
+
+    /// Admin token used when listing schemas from a secured server
+    #[arg(long, env = "PRKDB_ADMIN_TOKEN")]
+    pub admin_token: Option<String>,
 
     /// Target language for code generation
     #[arg(short, long, value_enum)]
@@ -51,7 +55,13 @@ pub async fn handle_codegen(args: CodegenArgs) -> anyhow::Result<()> {
     println!("   Output: {}", args.out.display());
 
     // Connect to server
-    let client = PrkDbClient::new(vec![args.server.clone()]).await?;
+    let client = if let Some(token) = args.admin_token.clone() {
+        PrkDbClient::new(vec![args.server.clone()])
+            .await?
+            .with_admin_token(token)
+    } else {
+        PrkDbClient::new(vec![args.server.clone()]).await?
+    };
     println!("✓ Connected to server");
 
     // Create output directory
@@ -870,6 +880,17 @@ class PrkDbClient:
         )
         if response.status_code not in (200, 201):
             raise Exception(f"Failed to put record: {response.status_code}")
+
+    async def get(self, collection: str, id: str) -> Optional[Dict[str, Any]]:
+        """Fetch a single record by ID"""
+        response = await self.client.get(f"{self.host}/collections/{collection}/data/{id}")
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            raise Exception(f"Failed to get record: {response.status_code}")
+
+        data = response.json()
+        return data.get("data")
 
     async def delete(self, collection: str, id: str) -> None:
         """Delete a record from the collection"""

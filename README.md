@@ -7,6 +7,8 @@
 [![Chaos Tests](https://img.shields.io/badge/Chaos%20Tests-19%20passing-blue)]()
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange)]()
 
+Docs: https://prk-jr.github.io/prkdb/
+
 ## 🚀 Features
 
 - **21.8x faster than Kafka** - 419 MB/s producer throughput (mmap WAL + batch writes)
@@ -36,11 +38,12 @@ The database is now composed of loosely coupled crates, enabling lightweight cli
 ## Quick Start
 
 ```rust
-use prkdb::{PrkDb, Collection};
+use prkdb::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Collection, Serialize, Deserialize)]
 struct User {
+    #[id]
     id: String,
     name: String,
 }
@@ -52,37 +55,42 @@ async fn main() -> anyhow::Result<()> {
         .register_collection::<User>()
         .build()?;
 
-    // Insert
-    db.put(&User { id: "1".into(), name: "Alice".into() }).await?;
+    let users = db.collection::<User>();
+    users
+        .put(User {
+            id: "1".into(),
+            name: "Alice".into(),
+        })
+        .await?;
 
-    // Query
-    let user: Option<User> = db.get("1").await?;
+    let user = users.get(&"1".to_string()).await?;
     Ok(())
 }
 ```
 
 ## 🌐 Cross-Language Clients (Codegen)
 
-PrkDB includes a built-in schema registry and cross-language client generator for **TypeScript*, **Python**, and **Go**.
+PrkDB includes a built-in schema registry and cross-language client generator for **TypeScript**, **Python**, and **Go**.
 
 First, register your schema (via `#[derive(Collection)]` export or raw `.proto`):
 ```bash
-prkdb schema register --collection users --proto user.proto
+export PRKDB_ADMIN_TOKEN=change-me
+prkdb schema register --server http://127.0.0.1:8080 --collection users --proto user.proto
 ```
 
 Then generate a strongly-typed client in your language of choice:
 ```bash
 # Generate a TypeScript HTTP client
-prkdb codegen --lang typescript --collection users --out ./src/client
+prkdb codegen --server http://127.0.0.1:8080 --lang typescript --collection users --out ./src/client
 
 # Generate a Python client
-prkdb codegen --lang python --collection users --out ./app/models
+prkdb codegen --server http://127.0.0.1:8080 --lang python --collection users --out ./app/models
 
 # Generate a Go client
-prkdb codegen --lang go --collection users --out ./pkg/models
+prkdb codegen --server http://127.0.0.1:8080 --lang go --collection users --out ./pkg/models
 ```
 
-Generated clients support fluent queries, pagination, and real-time updates natively!
+Generated clients target the HTTP API exposed by `prkdb-cli serve`, which defaults to `http://127.0.0.1:8080`. If you are running `prkdb-cli serve` locally, keep using `http://127.0.0.1:50051` for the schema and codegen gRPC commands.
 
 ## Transactions
 
@@ -182,7 +190,7 @@ let config = ClientConfig {
     unhealthy_threshold: 3,
     ..Default::default()
 };
-let client = PrkDbClient::with_config(vec!["127.0.0.1:9090".into()], config).await?;
+let client = PrkDbClient::with_config(vec!["http://127.0.0.1:8080".into()], config).await?;
 ```
 
 ## Secondary Indexes
@@ -733,19 +741,22 @@ let joined = db.query::<Order>()
 ### Manual Setup
 ```bash
 # Terminal 1
-cargo run --release --example raft_node -- \
-  --node-id 1 --listen 127.0.0.1:50051 \
-  --peers 2=127.0.0.1:50052,3=127.0.0.1:50053
+NODE_ID=1 \
+CLUSTER_NODES=1@127.0.0.1:8080,2@127.0.0.1:8081,3@127.0.0.1:8082 \
+STORAGE_PATH=/tmp/prkdb/node1 \
+cargo run --release -p prkdb --bin prkdb-server
 
 # Terminal 2
-cargo run --release --example raft_node -- \
-  --node-id 2 --listen 127.0.0.1:50052 \
-  --peers 1=127.0.0.1:50051,3=127.0.0.1:50053
+NODE_ID=2 \
+CLUSTER_NODES=1@127.0.0.1:8080,2@127.0.0.1:8081,3@127.0.0.1:8082 \
+STORAGE_PATH=/tmp/prkdb/node2 \
+cargo run --release -p prkdb --bin prkdb-server
 
 # Terminal 3
-cargo run --release --example raft_node -- \
-  --node-id 3 --listen 127.0.0.1:50053 \
-  --peers 1=127.0.0.1:50051,2=127.0.0.1:50052
+NODE_ID=3 \
+CLUSTER_NODES=1@127.0.0.1:8080,2@127.0.0.1:8081,3@127.0.0.1:8082 \
+STORAGE_PATH=/tmp/prkdb/node3 \
+cargo run --release -p prkdb --bin prkdb-server
 ```
 
 ### Read Consistency Levels
@@ -777,7 +788,7 @@ let mut partitioner = RangePartitioner::new(3);
 let partition = partitioner.get_partition(key);
 
 // Split hotspots
-partitioner.split_partition(0, b"middle_key")?;
+let new_partition = partitioner.split_partition(b"middle_key".to_vec());
 ```
 
 ## Testing
@@ -813,19 +824,19 @@ docker compose -f docker/docker-compose.yml up -d
 ```bash
 prkdb collection list
 prkdb consumer list
-prkdb metrics
+prkdb metrics show
 prkdb serve
 
 # Schema & Codegen
-prkdb schema register --collection users --proto schema.desc
-prkdb schema list
-prkdb codegen --collection users --lang typescript --out ./client
+prkdb schema register --server http://127.0.0.1:8080 --collection users --proto schema.desc
+prkdb schema list --server http://127.0.0.1:8080
+prkdb codegen --server http://127.0.0.1:8080 --collection users --lang typescript --out ./client
 
 # Data Operations
-prkdb put user:101 '{"name": "Alice"}'
-prkdb get user:101
-prkdb delete user:101
-prkdb batch-put data.txt --separator=,
+prkdb put user:101 '{"name": "Alice"}' --server http://127.0.0.1:8080
+prkdb get user:101 --server http://127.0.0.1:8080
+prkdb delete user:101 --server http://127.0.0.1:8080
+prkdb batch-put data.txt --separator=, --server http://127.0.0.1:8080
 ```
 
 ## Crates

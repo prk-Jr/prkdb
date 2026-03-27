@@ -412,22 +412,32 @@ impl PrkDbClient {
     /// 2. Groups partitions by leader
     /// 3. Sends parallel requests to leaders
     pub async fn batch_put(&self, entries: Vec<(Vec<u8>, Vec<u8>)>) -> anyhow::Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
         // Group entries by partition
         let mut by_partition: HashMap<u64, Vec<KvPair>> = HashMap::new();
-
-        {
+        let num_partitions = {
             let meta = self.metadata.read().await;
-            for (k, v) in entries {
-                let partition = self.hash_key(&k, meta.num_partitions);
-                by_partition
-                    .entry(partition)
-                    .or_default()
-                    .push(KvPair { key: k, value: v });
-            }
+            meta.num_partitions
+        };
+
+        if num_partitions == 0 {
+            anyhow::bail!("Batch put failed: metadata contains zero partitions");
+        }
+
+        for (k, v) in entries {
+            let partition = self.hash_key(&k, num_partitions);
+            by_partition
+                .entry(partition)
+                .or_default()
+                .push(KvPair { key: k, value: v });
         }
 
         // Group partitions by leader
         let mut by_leader: HashMap<u64, Vec<KvPair>> = HashMap::new();
+        let mut routing_errors = Vec::new();
 
         {
             let meta = self.metadata.read().await;
@@ -435,16 +445,18 @@ impl PrkDbClient {
                 if let Some(leader) = meta.partition_leaders.get(&partition) {
                     by_leader.entry(*leader).or_default().extend(items);
                 } else {
-                    // Fallback: if no leader known, maybe pick robustly?
-                    // For now, just error or drop (retry logic needed)
-                    // In a real client, we'd force metadata refresh here.
-                    tracing::warn!("No leader known for partition {}", partition);
+                    routing_errors.push(format!("No leader known for partition {}", partition));
                 }
             }
         }
 
+        if !routing_errors.is_empty() {
+            anyhow::bail!("Batch put failed: {}", routing_errors.join("; "));
+        }
+
         // Execute batch requests in parallel
         let mut handles = Vec::new();
+        let mut dispatch_errors = Vec::new();
 
         for (leader_id, items) in by_leader {
             let pool_opt = {
@@ -457,14 +469,17 @@ impl PrkDbClient {
                 handles.push(tokio::spawn(async move {
                     client.batch_put(BatchPutRequest { pairs: items }).await
                 }));
+            } else {
+                dispatch_errors.push(format!("No client available for node {}", leader_id));
             }
+        }
+
+        if !dispatch_errors.is_empty() {
+            anyhow::bail!("Batch put failed: {}", dispatch_errors.join("; "));
         }
 
         // Wait for all
         let results = futures::future::join_all(handles).await;
-
-        // Phase 15: Collect failed items for retry
-        let failed_items: Vec<KvPair> = Vec::new();
         let mut rpc_errors: Vec<String> = Vec::new();
 
         for res in results {
@@ -472,13 +487,13 @@ impl PrkDbClient {
                 Ok(Ok(response)) => {
                     let resp: prkdb_proto::BatchPutResponse = response.into_inner();
                     if resp.failed_count > 0 {
-                        tracing::warn!("Batch had {} partial failures", resp.failed_count);
-                        // Note: Current proto doesn't return which keys failed
-                        // In a full implementation, the server would return failed keys
-                        // For now, we log and continue
-                        if !resp.errors.is_empty() {
-                            rpc_errors.extend(resp.errors);
-                        }
+                        rpc_errors.push(format!(
+                            "Server reported {} failed writes",
+                            resp.failed_count
+                        ));
+                    }
+                    if !resp.errors.is_empty() {
+                        rpc_errors.extend(resp.errors);
                     }
                 }
                 Ok(Err(e)) => {
@@ -490,39 +505,8 @@ impl PrkDbClient {
             }
         }
 
-        // If there were errors, attempt retry with exponential backoff
         if !rpc_errors.is_empty() {
-            let max_retries = self.config.max_retries;
-            let base_backoff = self.config.base_backoff_ms;
-            let max_backoff = self.config.max_backoff_ms;
-
-            for attempt in 1..=max_retries {
-                let backoff_ms = std::cmp::min(base_backoff * (1 << attempt), max_backoff);
-                tracing::info!(
-                    "Batch put retry attempt {}/{} after {}ms backoff",
-                    attempt,
-                    max_retries,
-                    backoff_ms
-                );
-
-                tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
-
-                // Refresh metadata before retry
-                let _ = self.refresh_metadata().await;
-
-                // For a full implementation, we'd retry only the failed_items
-                // Since we don't have that info, we just log and continue
-                tracing::debug!(
-                    "Retry would process {} failed items (not implemented)",
-                    failed_items.len()
-                );
-                break; // Exit retry loop for now
-            }
-
-            // If still failing, report error
-            if !rpc_errors.is_empty() {
-                tracing::error!("Batch put had errors after retries: {:?}", rpc_errors);
-            }
+            anyhow::bail!("Batch put failed: {}", rpc_errors.join("; "));
         }
 
         Ok(())
@@ -1359,5 +1343,55 @@ mod tests {
             ReadMode::Linearizable as i32
         );
         assert_eq!(i32::from(ReadConsistency::Stale), ReadMode::Stale as i32);
+    }
+
+    fn test_client_with_metadata(metadata: ClusterMetadata) -> PrkDbClient {
+        PrkDbClient {
+            metadata: Arc::new(RwLock::new(metadata)),
+            bootstrap_servers: vec![],
+            admin_token: None,
+            config: ClientConfig::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batch_put_errors_when_partition_has_no_known_leader() {
+        let client = test_client_with_metadata(ClusterMetadata {
+            num_partitions: 1,
+            ..Default::default()
+        });
+
+        let error = client
+            .batch_put(vec![(b"user:1".to_vec(), br#"{"id":"1"}"#.to_vec())])
+            .await
+            .expect_err("batch_put should fail when metadata has no leader");
+
+        assert!(
+            error
+                .to_string()
+                .contains("No leader known for partition 0"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_batch_put_errors_when_leader_has_no_client_pool() {
+        let mut metadata = ClusterMetadata {
+            num_partitions: 1,
+            ..Default::default()
+        };
+        metadata.partition_leaders.insert(0, 7);
+
+        let client = test_client_with_metadata(metadata);
+
+        let error = client
+            .batch_put(vec![(b"user:2".to_vec(), br#"{"id":"2"}"#.to_vec())])
+            .await
+            .expect_err("batch_put should fail when the leader pool is missing");
+
+        assert!(
+            error.to_string().contains("No client available for node 7"),
+            "unexpected error: {error}"
+        );
     }
 }

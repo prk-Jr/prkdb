@@ -52,6 +52,17 @@ class PrkDbClient:
         if response.status_code not in (200, 201):
             raise Exception(f"Failed to put record: {response.status_code}")
 
+    async def get(self, collection: str, id: str) -> Optional[Dict[str, Any]]:
+        """Fetch a single record by ID"""
+        response = await self.client.get(f"{self.host}/collections/{collection}/data/{id}")
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            raise Exception(f"Failed to get record: {response.status_code}")
+
+        data = response.json()
+        return data.get("data")
+
     async def delete(self, collection: str, id: str) -> None:
         """Delete a record from the collection"""
         response = await self.client.delete(f"{self.host}/collections/{collection}/data/{id}")

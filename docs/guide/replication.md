@@ -44,15 +44,16 @@ PrkDB supports tunable consistency levels for reads, allowing you to balance per
 ### Code Example
 
 ```rust
-use prkdb::client::{PrkDbClient, ReadMode};
+use prkdb_client::{PrkDbClient, ReadConsistency};
 
-let client = PrkDbClient::new(vec!["http://localhost:8080".to_string()]).await?;
-
-// Linearizable Read (Default)
+let client = PrkDbClient::new(vec!["http://127.0.0.1:8080".to_string()]).await?;
+// Linearizable read (default)
 let val = client.get(b"key").await?;
 
-// Stale Read (Low Latency)
-let val = client.get_opts(b"key", ReadMode::Stale).await?;
+// Stale read (low latency)
+let val = client
+    .get_with_consistency(b"key", ReadConsistency::Stale)
+    .await?;
 ```
 
 ## Network Transport
@@ -67,9 +68,10 @@ Replication traffic uses **gRPC** for high performance and strict typing.
 
 Key metrics to watch:
 
-- `prkdb_raft_current_term`: High churn indicates frequent elections (instability).
-- `prkdb_raft_commit_index`: Should closely track `last_log_index`.
-- `prkdb_raft_voted_for`: Who this node voted for.
+- `prkdb_raft_term`: High churn indicates frequent elections.
+- `prkdb_raft_commit_index`: Commit progress by partition.
+- `prkdb_raft_state`: Leader, follower, or candidate state.
+- `prkdb_raft_heartbeats_failed_total`: Replication trouble between peers.
 
 See [Metrics Guide](./metrics.md) for a full list.
 

@@ -935,44 +935,34 @@ pub fn try_bincode_to_json(data: &[u8]) -> Result<serde_json::Value> {
     // Try deserializing as various common types and convert to JSON
 
     // First, try to see if it's a simple string
-    if let Ok((s, _)) =
-        bincode::serde::decode_from_slice::<String, _>(data, bincode::config::standard())
-    {
+    if let Some(s) = decode_exact::<String>(data) {
         return Ok(serde_json::Value::String(s));
     }
 
     // Try i64
     if data.len() == 8 {
-        if let Ok((n, _)) =
-            bincode::serde::decode_from_slice::<i64, _>(data, bincode::config::standard())
-        {
+        if let Some(n) = decode_exact::<i64>(data) {
             return Ok(serde_json::json!(n));
         }
     }
 
     // Try f64
     if data.len() == 8 {
-        if let Ok((n, _)) =
-            bincode::serde::decode_from_slice::<f64, _>(data, bincode::config::standard())
-        {
+        if let Some(n) = decode_exact::<f64>(data) {
             return Ok(serde_json::json!(n));
         }
     }
 
     // Try bool
     if data.len() == 1 {
-        if let Ok((b, _)) =
-            bincode::serde::decode_from_slice::<bool, _>(data, bincode::config::standard())
-        {
+        if let Some(b) = decode_exact::<bool>(data) {
             return Ok(serde_json::Value::Bool(b));
         }
     }
 
     // If all else fails, try to decode as a generic serde_json::Value
     // This might work if the original data was JSON-compatible
-    if let Ok((value, _)) =
-        bincode::serde::decode_from_slice::<serde_json::Value, _>(data, bincode::config::standard())
-    {
+    if let Some(value) = decode_exact::<serde_json::Value>(data) {
         return Ok(value);
     }
 
@@ -990,8 +980,11 @@ pub fn try_bincode_to_json(data: &[u8]) -> Result<serde_json::Value> {
 
             for part in readable_parts.iter() {
                 if field_index < field_names.len() {
-                    // Skip very short strings that might be noise
-                    if part.len() >= 2 {
+                    let looks_like_id = field_index == 0
+                        && part
+                            .chars()
+                            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'));
+                    if looks_like_id || part.len() >= 2 {
                         obj.insert(
                             field_names[field_index].to_string(),
                             serde_json::Value::String(part.clone()),
@@ -1051,6 +1044,15 @@ pub fn try_bincode_to_json(data: &[u8]) -> Result<serde_json::Value> {
     Ok(serde_json::Value::Object(obj))
 }
 
+fn decode_exact<T>(data: &[u8]) -> Option<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    bincode::serde::decode_from_slice::<T, _>(data, bincode::config::standard())
+        .ok()
+        .and_then(|(value, consumed)| (consumed == data.len()).then_some(value))
+}
+
 /// Extract readable ASCII strings from binary data
 fn extract_readable_strings(data: &[u8]) -> Vec<String> {
     let mut strings = Vec::new();
@@ -1062,7 +1064,11 @@ fn extract_readable_strings(data: &[u8]) -> Vec<String> {
             current_string.push(byte);
         } else {
             // End of string - save if it's long enough to be meaningful
-            if current_string.len() >= 3 {
+            if current_string.len() >= 3
+                || current_string
+                    .iter()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'-' | b'_'))
+            {
                 if let Ok(s) = String::from_utf8(current_string.clone()) {
                     strings.push(s);
                 }
@@ -1072,7 +1078,11 @@ fn extract_readable_strings(data: &[u8]) -> Vec<String> {
     }
 
     // Don't forget the last string if the data ends with printable chars
-    if current_string.len() >= 3 {
+    if current_string.len() >= 3
+        || current_string
+            .iter()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'-' | b'_'))
+    {
         if let Ok(s) = String::from_utf8(current_string) {
             strings.push(s);
         }

@@ -31,20 +31,24 @@ If a 5-node cluster splits into a 3-node group and a 2-node group:
 Because replication takes time, PrkDB offers configurable read modes to balance latency against strict consistency:
 
 ### 1. Linearizable (Default)
-Ensures that a read always reflects the most recent acknowledged write. This requires contacting the Leader, which may need to verify its leadership with a majority of followers before responding.
-```rust
-use prkdb::raft::rpc::ReadMode;
-let req = tonic::Request::new(GetRequest {
-    key: b"account_balance".to_vec(),
-    read_mode: ReadMode::Linearizable.into(),
-});
-```
+Ensures that a read always reflects the most recent acknowledged write. This requires contacting the leader, which may need to verify its leadership with a majority of followers before responding.
 
-### 2. Follower Reads (Bounded Staleness)
-Permits reads from any Follower node. This dramatically increases read throughput and reduces latency, but the response might not reflect a write that occurred milliseconds ago.
+### 2. Follower Reads (Linearizable via ReadIndex)
+Permits reads from a follower node, while still using `ReadIndex` coordination with the leader to preserve linearizability. This can reduce leader load without weakening correctness guarantees.
+
+### 3. Stale Reads
+Reads directly from local state without `ReadIndex`. This is fastest, but can lag behind the latest committed write.
+
 ```rust
-let req = tonic::Request::new(GetRequest {
-    key: b"user_profile".to_vec(),
-    read_mode: ReadMode::Follower.into(), // Safely reads from local replica
-});
+use prkdb_client::{PrkDbClient, ReadConsistency};
+
+let client = PrkDbClient::new(vec!["http://127.0.0.1:8080".to_string()]).await?;
+
+let latest = client.get(b"account_balance").await?;
+let follower = client
+    .get_with_consistency(b"user_profile", ReadConsistency::Follower)
+    .await?;
+let stale = client
+    .get_with_consistency(b"user_profile", ReadConsistency::Stale)
+    .await?;
 ```

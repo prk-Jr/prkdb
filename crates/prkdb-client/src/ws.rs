@@ -21,6 +21,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
 use tokio::time::sleep;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
@@ -81,7 +83,9 @@ impl WsConfig {
         self
     }
 
-    /// Build the WebSocket URL with query parameters
+    /// Build the WebSocket URL with query parameters.
+    ///
+    /// Authentication is sent via the `Authorization` header, not the URL.
     fn build_url(&self) -> String {
         let base = format!(
             "{}/ws/collections/{}",
@@ -90,9 +94,6 @@ impl WsConfig {
         );
 
         let mut params = Vec::new();
-        if let Some(ref token) = self.auth_token {
-            params.push(format!("token={}", token));
-        }
         if let Some(offset) = self.from_offset {
             params.push(format!("from_offset={}", offset));
         }
@@ -158,9 +159,29 @@ impl WsConsumer {
         async_stream::stream! {
             loop {
                 let url = self.config.build_url();
-                info!(url = %url, "Connecting to WebSocket");
+                let mut request = match url.clone().into_client_request() {
+                    Ok(request) => request,
+                    Err(e) => {
+                        yield WsEvent::Error {
+                            message: format!("Invalid WebSocket URL: {}", e),
+                        };
+                        break;
+                    }
+                };
 
-                match connect_async(&url).await {
+                if let Some(token) = &self.config.auth_token {
+                    if let Ok(header_value) = format!("Bearer {}", token).parse() {
+                        request.headers_mut().insert(AUTHORIZATION, header_value);
+                    }
+                }
+
+                info!(
+                    url = %url,
+                    has_auth_token = self.config.auth_token.is_some(),
+                    "Connecting to WebSocket"
+                );
+
+                match connect_async(request).await {
                     Ok((ws_stream, _)) => {
                         self.reconnect_count = 0;
                         yield WsEvent::Connected {
@@ -259,14 +280,31 @@ mod tests {
     }
 
     #[test]
+    fn test_ws_config_does_not_put_auth_token_in_query_string() {
+        let config = WsConfig::new("ws://localhost:8080", "orders")
+            .with_auth_token("secret123")
+            .with_from_offset(42);
+
+        let url = config.build_url();
+
+        assert_eq!(
+            url,
+            "ws://localhost:8080/ws/collections/orders?from_offset=42"
+        );
+        assert!(!url.contains("secret123"));
+    }
+
+    #[test]
     fn test_ws_config_with_params() {
         let config = WsConfig::new("ws://localhost:8080", "orders")
             .with_auth_token("secret123")
             .with_from_offset(42);
 
         let url = config.build_url();
-        assert!(url.contains("token=secret123"));
-        assert!(url.contains("from_offset=42"));
+        assert_eq!(
+            url,
+            "ws://localhost:8080/ws/collections/orders?from_offset=42"
+        );
     }
 
     #[test]

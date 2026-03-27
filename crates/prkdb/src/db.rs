@@ -433,10 +433,34 @@ impl PrkDb {
 
     /// Get collection names from registered collections
     /// Get collection statistics (count and size)
+    async fn scan_prefix_across_data_stores(
+        &self,
+        prefix: &[u8],
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Error> {
+        if let Some(pm) = &self.partition_manager {
+            let mut entries = Vec::new();
+            for partition_id in 0..pm.partition_count() {
+                if let Some(storage) = pm.get_partition_storage(partition_id as u64) {
+                    let mut partition_entries =
+                        storage.scan_prefix(prefix).await.map_err(Error::Storage)?;
+                    entries.append(&mut partition_entries);
+                }
+            }
+            Ok(entries)
+        } else {
+            self.storage
+                .scan_prefix(prefix)
+                .await
+                .map_err(Error::Storage)
+        }
+    }
+
     pub async fn get_collection_stats(&self, collection_name: &str) -> Result<(u64, u64), Error> {
         // Scan storage for all keys belonging to this collection
         let prefix = format!("{}:", collection_name);
-        let entries = self.storage.scan_prefix(prefix.as_bytes()).await?;
+        let entries = self
+            .scan_prefix_across_data_stores(prefix.as_bytes())
+            .await?;
 
         let item_count = entries.len() as u64;
         let total_size: u64 = entries
@@ -491,7 +515,9 @@ impl PrkDb {
     ) -> Result<u64, Error> {
         // Scan storage for keys matching this collection and partition
         let prefix = format!("{}:{}:", collection, partition);
-        let entries = self.storage.scan_prefix(prefix.as_bytes()).await?;
+        let entries = self
+            .scan_prefix_across_data_stores(prefix.as_bytes())
+            .await?;
         Ok(entries.len() as u64)
     }
 
@@ -540,7 +566,9 @@ impl PrkDb {
     ) -> Result<Vec<serde_json::Value>, Error> {
         // Scan storage for all keys belonging to this collection
         let prefix = format!("{}:", collection_name);
-        let entries = self.storage.scan_prefix(prefix.as_bytes()).await?;
+        let entries = self
+            .scan_prefix_across_data_stores(prefix.as_bytes())
+            .await?;
 
         let mut samples = Vec::new();
         for (key, value) in entries.into_iter().take(limit) {
@@ -663,7 +691,9 @@ impl PrkDb {
     ) -> Result<Vec<(u32, u64, u64, u64, u64, u64)>, Error> {
         // Scan for all partitions of this collection
         let prefix = format!("{}:", collection_name);
-        let entries = self.storage.scan_prefix(prefix.as_bytes()).await?;
+        let entries = self
+            .scan_prefix_across_data_stores(prefix.as_bytes())
+            .await?;
 
         // Group by partition
         let mut partition_data: std::collections::HashMap<u32, (u64, u64)> =
@@ -731,7 +761,9 @@ impl PrkDb {
     ) -> Result<Vec<(u32, u64, u64)>, Error> {
         // Scan storage for all keys belonging to this collection
         let prefix = format!("{}:", collection_name);
-        let entries = self.storage.scan_prefix(prefix.as_bytes()).await?;
+        let entries = self
+            .scan_prefix_across_data_stores(prefix.as_bytes())
+            .await?;
 
         // Group by partition to get partition info
         let mut partition_data: std::collections::HashMap<u32, (u64, u64)> =
@@ -767,7 +799,9 @@ impl PrkDb {
     ) -> Result<Option<(u64, u64, u64, u64)>, Error> {
         // Scan storage for keys in this specific partition
         let prefix = format!("{}:{}:", collection_name, partition);
-        let entries = self.storage.scan_prefix(prefix.as_bytes()).await?;
+        let entries = self
+            .scan_prefix_across_data_stores(prefix.as_bytes())
+            .await?;
 
         if entries.is_empty() {
             return Ok(None);

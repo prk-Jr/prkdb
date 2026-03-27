@@ -1,5 +1,6 @@
 use prkdb::db::PrkDb;
 use prkdb::raft::{ClusterConfig, PrkDbGrpcService, RpcClientPool};
+use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -19,7 +20,7 @@ async fn main() -> anyhow::Result<()> {
         .parse::<u64>()?;
 
     let cluster_nodes_str =
-        env::var("CLUSTER_NODES").unwrap_or_else(|_| "1@127.0.0.1:50000".to_string());
+        env::var("CLUSTER_NODES").unwrap_or_else(|_| "1@127.0.0.1:8080".to_string());
 
     let num_partitions = env::var("NUM_PARTITIONS")
         .unwrap_or_else(|_| "3".to_string())
@@ -41,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
         .iter()
         .find(|(id, _)| *id == node_id)
         .map(|(_, addr)| *addr)
-        .unwrap_or_else(|| "0.0.0.0:50000".parse().unwrap());
+        .unwrap_or_else(|| "0.0.0.0:8080".parse().unwrap());
 
     info!(
         "Starting PrkDB node {} with {} partitions",
@@ -54,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
     let config = ClusterConfig {
         local_node_id: node_id,
         listen_addr,
-        nodes,
+        nodes: nodes.clone(),
         election_timeout_min_ms: 1000,
         election_timeout_max_ms: 2000,
         heartbeat_interval_ms: 200,
@@ -128,9 +129,31 @@ async fn main() -> anyhow::Result<()> {
     let db_arc = Arc::new(db);
     let admin_token = env::var("PRKDB_ADMIN_TOKEN").unwrap_or_default();
     let schema_path = storage_path.join("schemas");
+    let advertised_grpc_address = env::var("PRKDB_ADVERTISED_GRPC_ADDR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| {
+            if value.starts_with("http://") || value.starts_with("https://") {
+                value
+            } else {
+                format!("http://{}", value)
+            }
+        })
+        .unwrap_or_else(|| format!("http://{}", listen_addr));
+    let mut advertised_node_addresses: HashMap<u64, String> = nodes
+        .iter()
+        .map(|(id, addr)| (*id, format!("http://{}", addr)))
+        .collect();
+    advertised_node_addresses.insert(node_id, advertised_grpc_address.clone());
+
+    info!("Advertised client address: {}", advertised_grpc_address);
+
     let grpc_service =
         PrkDbGrpcService::with_schema_storage_path(db_arc.clone(), admin_token, schema_path)
             .await
+            .with_local_node_id(node_id)
+            .with_public_address(advertised_grpc_address)
+            .with_advertised_node_addresses(advertised_node_addresses)
             .into_server();
 
     // Create Raft service for multiplexed Raft traffic
@@ -146,8 +169,20 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Start gRPC data service on port 8080 (like Kafka's binary protocol)
-    let grpc_port = env::var("GRPC_PORT").unwrap_or_else(|_| "8080".to_string());
+    let configured_grpc_port = env::var("GRPC_PORT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.parse::<u16>())
+        .transpose()?;
+    let grpc_port = configured_grpc_port.unwrap_or_else(|| listen_addr.port());
+    if grpc_port != listen_addr.port() {
+        anyhow::bail!(
+            "GRPC_PORT ({}) must match this node's CLUSTER_NODES port ({}) in multiplexed mode",
+            grpc_port,
+            listen_addr.port()
+        );
+    }
+
     let data_addr: SocketAddr = format!("0.0.0.0:{}", grpc_port).parse()?;
     info!("Starting gRPC data service on {}", data_addr);
 

@@ -5,6 +5,7 @@ mod collection_metadata;
 mod commands;
 mod database_manager;
 mod output;
+mod storage_keys;
 mod uptime_tracker;
 
 use commands::*;
@@ -38,8 +39,8 @@ pub struct Cli {
     #[arg(long)]
     pub local: bool,
 
-    /// Bootstrap server address (e.g. http://127.0.0.1:50051)
-    #[arg(long, default_value = "http://127.0.0.1:50051", env = "PRKDB_SERVER")]
+    /// Bootstrap server address (e.g. http://127.0.0.1:8080)
+    #[arg(long, default_value = "http://127.0.0.1:8080", env = "PRKDB_SERVER")]
     pub server: String,
 
     #[command(subcommand)]
@@ -92,6 +93,9 @@ pub enum Commands {
         /// Port to serve gRPC on (for Admin & Raft)
         #[arg(long, default_value = "50051")]
         grpc_port: u16,
+        /// Public gRPC address advertised to smart clients and metadata consumers
+        #[arg(long, env = "PRKDB_ADVERTISED_GRPC_ADDR")]
+        advertised_grpc_address: Option<String>,
         /// Node ID for Raft cluster
         #[arg(long, default_value = "1")]
         id: u64,
@@ -175,6 +179,7 @@ async fn main() -> anyhow::Result<()> {
             websockets,
             id,
             peers,
+            advertised_grpc_address,
             num_partitions,
         } => {
             let raft_options = if let Some(peers_str) = peers {
@@ -217,6 +222,7 @@ async fn main() -> anyhow::Result<()> {
                 websockets: *websockets,
                 id: *id,
                 peers: peers_for_serve,
+                advertised_grpc_address: advertised_grpc_address.clone(),
             };
             commands::serve::handle_serve(args).await
         }

@@ -1,389 +1,158 @@
 # prkdb-cli
 
-**Command-line interface and HTTP server for PrkDB**
+`prkdb-cli` provides:
 
-## Overview
+- remote gRPC data commands
+- admin commands for collections, partitions, consumers, replication, and schema registry
+- an optional HTTP server for browsing data, metrics, and WebSocket streams
 
-`prkdb-cli` provides a powerful CLI tool for managing and monitoring PrkDB clusters, plus an optional HTTP server for web-based access and real-time updates.
-
-## Installation
+## Build
 
 ```bash
-# Build from source
-cd crates/prkdb-cli
-cargo build --release
-
-# Binary location
-./target/release/prkdb
+cargo build --release -p prkdb-cli
 ```
 
-## Quick Start
+The binary is available as:
 
 ```bash
-# Show help
-prkdb --help
+./target/release/prkdb-cli
+```
 
-# List collections
+If you copy it into your `PATH`, the examples below use `prkdb`.
+
+## Connection Defaults
+
+- Collection, consumer, partition, and replication commands use the global `--server` flag and `PRKDB_SERVER`.
+- `get`, `put`, `delete`, `batch-put`, `schema`, and `codegen` have their own `--server` flags.
+- `--local` switches supported admin commands such as `consumer`, `partition`, and `replication` to the embedded database instead of remote gRPC.
+- When `prkdb serve` binds to `0.0.0.0`, set `--advertised-grpc-address` or `PRKDB_ADVERTISED_GRPC_ADDR` so smart clients receive a dialable address.
+
+## Common Commands
+
+### Data
+
+```bash
+prkdb put my-key "hello" --server http://127.0.0.1:8080
+prkdb get my-key --server http://127.0.0.1:8080
+prkdb delete my-key --server http://127.0.0.1:8080
+prkdb batch-put ./data.csv --server http://127.0.0.1:8080
+```
+
+### Collections
+
+```bash
+export PRKDB_ADMIN_TOKEN=change-me
+
+prkdb collection create users
 prkdb collection list
-
-# View metrics
-prkdb metrics show
-
-# Start HTTP server
-prkdb serve --port 8080 --prometheus --cors
+prkdb collection describe users
+prkdb collection count users
+prkdb collection sample users --limit 10
+prkdb collection data users --limit 20 --offset 0 --filter "name=Alice"
+prkdb collection drop users
 ```
 
-## Commands
-
-### Collection Management
+### Consumers
 
 ```bash
-# List all collections
-prkdb collection list
+export PRKDB_ADMIN_TOKEN=change-me
 
-# Create collection
-prkdb collection create my_collection
-
-# Get collection info
-prkdb collection info my_collection
-
-# Delete collection
-prkdb collection delete my_collection
-```
-
-### Consumer Groups
-
-```bash
-# List consumer groups
 prkdb consumer list
-
-# Create consumer group
-prkdb consumer create my_group
-
-# Show consumer lag
-prkdb consumer lag my_group
+prkdb consumer describe my-group
+prkdb consumer lag --group my-group
+prkdb consumer reset my-group --latest
 ```
 
-### Partition Operations
+### Partitions
 
 ```bash
-# List partitions
+export PRKDB_ADMIN_TOKEN=change-me
+
 prkdb partition list
-
-# Show partition details
-prkdb partition info 0
-
-# Rebalance partitions
-prkdb partition rebalance
+prkdb partition list --collection users
+prkdb partition describe users 0
+prkdb partition assignment --group my-group
+prkdb partition rebalance my-group
 ```
 
-### Replication Management
+### Replication
 
 ```bash
-# Show replication status
+export PRKDB_ADMIN_TOKEN=change-me
+
 prkdb replication status
-
-# Add replica
-prkdb replication add-replica --partition 0 --node 2
-
-# Remove replica
-prkdb replication remove-replica --partition 0 --node 2
+prkdb replication nodes
+prkdb replication lag
+prkdb replication start ./replication.toml
 ```
 
-### Metrics & Monitoring
+### Metrics
 
 ```bash
-# Show current metrics
 prkdb metrics show
-
-# Export metrics (Prometheus format)
-prkdb metrics export
-
-# Watch metrics in real-time
-prkdb metrics watch
+prkdb metrics partition --collection users
+prkdb metrics consumer --group my-group
+prkdb metrics reset
 ```
 
-### Database Operations
+### Database
 
 ```bash
-# Show database info
-prkdb database info
+prkdb --database ./prkdb.db database info
+prkdb --database ./prkdb.db database health
+prkdb --database ./prkdb.db database compact
+prkdb --database ./prkdb.db database backup ./backup.tar.gz
+```
 
-# Backup database
-prkdb database backup --path /backup/prkdb
+### Schema Registry
 
-# Restore database
-prkdb database restore --path /backup/prkdb
+```bash
+export PRKDB_ADMIN_TOKEN=change-me
 
-# Compact database
-prkdb database compact
+prkdb schema register --server http://127.0.0.1:8080 --collection users --proto ./schemas/users.binpb
+prkdb schema get --server http://127.0.0.1:8080 --collection users
+prkdb schema list --server http://127.0.0.1:8080
+prkdb schema check --server http://127.0.0.1:8080 --collection users --proto ./schemas/users-v2.binpb
 ```
 
 ## HTTP Server
 
-The `serve` command starts an HTTP server with multiple endpoints:
+Start the HTTP server with:
 
 ```bash
-prkdb serve --port 8080 --prometheus --cors --websockets
-```
+prkdb serve --host 127.0.0.1 --port 8080 --grpc-port 50051 --prometheus --websockets
 
-### Options
-
-- `--port <PORT>` - HTTP port (default: 8080)
-- `--host <HOST>` - Bind address (default: 127.0.0.1)
-- `--prometheus` - Enable Prometheus metrics endpoint
-- `--cors` - Enable CORS for web dashboards
-- `--websockets` - Enable WebSocket for real-time updates
-
-### Endpoints
-
-With `--prometheus` enabled:
-- `GET /metrics` - Prometheus metrics
-- `GET /health` - Health check
-- `GET /ready` - Readiness check
-
-With `--websockets` enabled:
-- `WS /ws` - Real-time updates
-- `GET /subscribe/{topic}` - Topic subscription
-
-## Configuration
-
-### Database Location
-
-```bash
-# Specify database path
-prkdb --database /path/to/db.db collection list
-
-# Or use environment variable
-export PRKDB_DATABASE=/path/to/db.db
-prkdb collection list
-```
-
-### Output Formats
-
-```bash
-# Table format (default)
-prkdb --format table collection list
-
-# JSON format
-prkdb --format json collection list
-
-# YAML format
-prkdb --format yaml collection list
-```
-
-### Verbosity
-
-```bash
-# Verbose output
-prkdb --verbose collection list
-
-# Or short form
-prkdb -v collection list
-```
-
-## Examples
-
-### Monitor Cluster Health
-
-```bash
-# Watch metrics in real-time
-prkdb metrics watch
-
-#Export to file
-prkdb metrics export > metrics.txt
-
-# Check replication status
-prkdb replication status
-```
-
-### Manage Collections
-
-```bash
-# Create and populate
-prkdb collection create users
-# ... use client to add data ...
-prkdb collection info users
-
-# List all with stats
-prkdb collection list --format json | jq
-```
-
-### HTTP Server for Dashboard
-
-```bash
-# Start server with all features
+# Required if clients connect through a different public address
 prkdb serve \
+  --host 0.0.0.0 \
   --port 8080 \
-  --prometheus \
-  --cors \
-  --websockets
-
-# Access Prometheus metrics
-curl http://localhost:8080/metrics
-
-# WebSocket connection
-wscat -c ws://localhost:8080/ws
+  --grpc-port 50051 \
+  --advertised-grpc-address http://db.example.com:50051
 ```
 
-## Implementation Status
+The remote CLI defaults assume `prkdb-server` on `http://127.0.0.1:8080`. When you point admin or data commands at the local gRPC endpoint exposed by `prkdb serve`, use `--server http://127.0.0.1:50051`.
 
-### ✅ Fully Implemented
-- **Collection commands** (list, describe, count, sample, data)
-  - Full schema analysis
-  - Pagination & filtering  
-  - Multiple output formats
-- **Database commands** (info, health, compact, backup)
-- **Metrics commands** (show, partition, consumer, reset)
-- **Serve command** - HTTP server with WebSockets
-- **Output formatting** (table, JSON, YAML)
+With `--cors`, the server enables a restricted CORS policy. You can override the allowed origins with `PRKDB_CORS_ORIGINS`.
 
-### ⚠️ Partially Implemented
-- **Consumer commands** - Basic structure, needs testing
-- **Partition commands** - Interface defined, implementation in progress
-- **Replication commands** - Basic commands, needs cluster integration
+If `PRKDB_WS_TOKEN` is set, `/ws/collections/:name` requires `Authorization: Bearer <token>`.
 
-### 📝 Verified Working
-All collection commands have been tested and work with the storage backend:
-```bash
-# These actually work right now:
-prkdb collection list
-prkdb collection describe my_collection
-prkdb collection count my_collection  
-prkdb collection sample my_collection --limit 10
-prkdb collection data my_collection --limit 20 --filter "field=value"
-```
+## HTTP Endpoints
 
-## Architecture
+- `GET /`
+- `GET /health`
+- `GET /collections`
+- `GET /collections/:name`
+- `GET /collections/:name/data`
+- `PUT /collections/:name/data`
+- `GET /collections/:name/data/:id`
+- `DELETE /collections/:name/data/:id`
+- `GET /collections/:name/count`
+- `GET /collections/:name/schema`
+- `GET /metrics` when `--prometheus` is enabled
+- `WS /ws/collections/:name` when `--websockets` is enabled
 
-### CLI Flow
+## Notes
 
-```
-User Command
-     │
-     ▼
-CLI Parser (clap)
-     │
-     ▼
-Database Manager
-     │
-     ▼
-Storage Backend
-     │
-     ▼
-Output Formatter
-     │
-     ▼
-Console/JSON/YAML
-```
-
-### HTTP Server
-
-Built with `axum`:
-```
-HTTP Request
-     │
-     ▼
-Router (axum)
-     │
-     ├─→ /metrics → Prometheus exporter
-     ├─→ /health → Health checker
-     └─→ /ws → WebSocket handler
-```
-
-## Development
-
-### Building
-
-```bash
-cargo build --release
-```
-
-### Testing
-
-```bash
-# Run tests
-cargo test
-
-# Run with sample data
-cargo run -- collection list
-```
-
-### Adding Commands
-
-1. Add command enum in `src/commands.rs`
-2. Implement handler in `src/commands/{name}.rs`
-3. Add to match in `src/main.rs`
-4. Add tests in `tests/`
-
-## Dependencies
-
-- `clap` - Command-line parsing
-- `axum` - HTTP server
-- `tokio` - Async runtime
-- `serde_json` - JSON output
-- `tabled` - Table formatting
-- `colored` - Terminal colors
-
-## Status
-
-**Implemented**:
-- ✅ CLI framework
-- ✅ Command structure
-- ✅ Output formatting
-- ✅ HTTP server skeleton
-
-**In Progress**:
-- ⚠️ Collection commands
-- ⚠️ Consumer commands
-- ⚠️ Metrics integration
-
-**Planned**:
-- [ ] WebSocket real-time updates
-- [ ] Interactive mode (REPL)
-- [ ] Autocomplete
-- [ ] Config file support
-
-## Usage Tips
-
-### Shell Completion
-
-Generate shell completions:
-```bash
-# Bash
-prkdb --completions bash > /etc/bash_completion.d/prkdb
-
-# Zsh
-prkdb --completions zsh > ~/.zsh/completions/_prkdb
-
-# Fish
-prkdb --completions fish > ~/.config/fish/completions/prkdb.fish
-```
-
-### Aliases
-
-Add to `.bashrc` or `.zshrc`:
-```bash
-alias pk='prkdb'
-alias pkm='prkdb metrics'
-alias pkc='prkdb collection'
-```
-
-### JSON Processing
-
-Combine with `jq`:
-```bash
-# Get collection names
-prkdb collection list --format json | jq -r '.[].name'
-
-# Filter by status
-prkdb replication status --format json | jq '.[] | select(.healthy == true)'
-```
-
-## Contributing
-
-See [CONTRIBUTING.md](../../CONTRIBUTING.md)
-
-## License
-
-Apache-2.0
+- Admin RPCs use `PRKDB_ADMIN_TOKEN`.
+- Remote data commands talk to the gRPC API.
+- Generated TypeScript and Python SDKs talk to the HTTP API.

@@ -7,8 +7,12 @@ use tokio::fs;
 #[derive(Args, Clone)]
 pub struct SchemaArgs {
     /// Server address
-    #[arg(long, default_value = "http://127.0.0.1:50051")]
+    #[arg(long, default_value = "http://127.0.0.1:8080")]
     pub server: String,
+
+    /// Admin token for schema registry write and list operations
+    #[arg(long, env = "PRKDB_ADMIN_TOKEN")]
+    pub admin_token: Option<String>,
 
     #[command(subcommand)]
     pub command: SchemaCommands,
@@ -82,7 +86,13 @@ impl From<CompatibilityModeArg> for CompatibilityMode {
 
 pub async fn handle_schema(args: SchemaArgs) -> anyhow::Result<()> {
     // Connect to server
-    let client = PrkDbClient::new(vec![args.server.clone()]).await?;
+    let client = if let Some(token) = args.admin_token.clone() {
+        PrkDbClient::new(vec![args.server.clone()])
+            .await?
+            .with_admin_token(token)
+    } else {
+        PrkDbClient::new(vec![args.server.clone()]).await?
+    };
 
     match args.command {
         SchemaCommands::Register {

@@ -1,9 +1,8 @@
 use anyhow::{Context, Result};
 use prkdb::prelude::*;
-use prkdb_storage_sled::SledAdapter;
-use prkdb_types::storage::StorageAdapter;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 /// Configuration options for Raft cluster
@@ -18,7 +17,6 @@ pub struct RaftOptions {
 /// Database connection manager that handles Sled's exclusive locking properly
 pub struct DatabaseManager {
     connection: Arc<Mutex<Option<PrkDb>>>,
-    adapter: Arc<Mutex<Option<SledAdapter>>>,
     database_path: String,
     raft_options: Option<RaftOptions>,
 }
@@ -27,7 +25,6 @@ impl DatabaseManager {
     pub fn new(database_path: impl AsRef<Path>, raft_options: Option<RaftOptions>) -> Self {
         Self {
             connection: Arc::new(Mutex::new(None)),
-            adapter: Arc::new(Mutex::new(None)),
             database_path: database_path.as_ref().to_string_lossy().to_string(),
             raft_options,
         }
@@ -73,10 +70,21 @@ impl DatabaseManager {
                     raft_opts.node_id
                 );
 
+                let mut nodes = raft_opts.peers.clone();
+                if let Some(existing) = nodes
+                    .iter_mut()
+                    .find(|(node_id, _)| *node_id == raft_opts.node_id)
+                {
+                    existing.1 = raft_opts.listen_addr;
+                } else {
+                    nodes.push((raft_opts.node_id, raft_opts.listen_addr));
+                }
+                nodes.sort_by_key(|(node_id, _)| *node_id);
+
                 let config = prkdb::raft::ClusterConfig {
                     local_node_id: raft_opts.node_id,
                     listen_addr: raft_opts.listen_addr,
-                    nodes: raft_opts.peers.clone(),
+                    nodes,
                     ..Default::default()
                 };
 
@@ -88,11 +96,10 @@ impl DatabaseManager {
 
                 *conn_guard = Some(db);
             } else {
-                let storage = SledAdapter::open(&self.database_path).with_context(|| {
-                    format!("Failed to open database at: {}", self.database_path)
-                })?;
-
-                *self.adapter.lock().unwrap() = Some(storage.clone());
+                let storage = prkdb_storage_sled::SledAdapter::open(&self.database_path)
+                    .with_context(|| {
+                        format!("Failed to open database at: {}", self.database_path)
+                    })?;
 
                 let db = PrkDb::builder()
                     .with_storage(storage)
@@ -132,41 +139,39 @@ impl DatabaseManager {
 
     /// Get storage adapter directly for simple scan operations
     pub async fn scan_storage(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        // Ensure initialized
-        let _ = self.try_get_connection()?;
+        let db = self.get_connection().await?;
 
-        let adapter = {
-            let adapter_guard = self.adapter.lock().unwrap();
-            adapter_guard.clone()
-        };
-
-        if let Some(adapter) = adapter {
-            return adapter.scan_prefix(b"").await.map_err(|e| e.into());
+        if let Some(pm) = &db.partition_manager {
+            let mut entries = Vec::new();
+            for partition_id in 0..pm.partition_count() {
+                if let Some(storage) = pm.get_partition_storage(partition_id as u64) {
+                    let mut partition_entries = storage.scan_prefix(b"").await?;
+                    entries.append(&mut partition_entries);
+                }
+            }
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            return Ok(entries);
         }
 
-        Err(anyhow::anyhow!("Database adapter not available"))
+        db.storage().scan_prefix(b"").await.map_err(|e| e.into())
+    }
+
+    pub fn schema_storage_path(&self) -> PathBuf {
+        PathBuf::from(&self.database_path).join("schemas")
     }
 }
 
 /// Global database manager instance
-static mut DB_MANAGER: Option<DatabaseManager> = None;
-static INIT: std::sync::Once = std::sync::Once::new();
+static DB_MANAGER: OnceLock<DatabaseManager> = OnceLock::new();
 
 /// Initialize the global database manager
 pub fn init_database_manager(database_path: impl AsRef<Path>, raft_options: Option<RaftOptions>) {
-    INIT.call_once(|| unsafe {
-        DB_MANAGER = Some(DatabaseManager::new(database_path, raft_options));
-    });
+    let _ = DB_MANAGER.set(DatabaseManager::new(database_path, raft_options));
 }
 
 /// Get the global database manager
-#[allow(static_mut_refs)]
 pub fn get_database_manager() -> &'static DatabaseManager {
-    unsafe {
-        DB_MANAGER
-            .as_ref()
-            .expect("Database manager not initialized")
-    }
+    DB_MANAGER.get().expect("Database manager not initialized")
 }
 
 /// Helper function to execute read-only database operations
