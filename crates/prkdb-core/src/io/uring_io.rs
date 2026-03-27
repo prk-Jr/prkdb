@@ -33,6 +33,7 @@ impl UringIO {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(path)?;
 
         let size = std::cmp::max(initial_size, 64 * 1024 * 1024);
@@ -74,7 +75,7 @@ impl PlatformIO for UringIO {
         let end_usize = start + buf.len();
 
         if end_usize > mmap.len() {
-            return Err(io::Error::new(io::ErrorKind::Other, "write beyond bounds"));
+            return Err(io::Error::other("write beyond bounds"));
         }
 
         unsafe {

@@ -553,64 +553,64 @@ export class {}QueryBuilder {{
     // Add PrkDbClient class with dynamic collection methods
     code.push_str(
         r#"
-export class PrkDbClient {{
+export class PrkDbClient {
     private host: string;
 
-    constructor(host: string = "http://127.0.0.1:8080") {{
+    constructor(host: string = "http://127.0.0.1:8080") {
         this.host = host.replace(/\/$/, "");
-    }}
+    }
 
-    async list<T>(collection: string, options: {{ limit?: number, offset?: number, filter?: string, sort?: string }} = {{}}): Promise<T[]> {{
+    async list<T>(collection: string, options: { limit?: number, offset?: number, filter?: string, sort?: string } = {}): Promise<T[]> {
         const params = new URLSearchParams();
         if (options.limit) params.set("limit", options.limit.toString());
         if (options.offset) params.set("offset", options.offset.toString());
         if (options.filter) params.set("filter", options.filter);
         if (options.sort) params.set("sort", options.sort);
 
-        const response = await fetch(`${{this.host}}/collections/${{collection}}/data?${{params}}`);
-        if (!response.ok) {{
-            throw new Error(`Failed to list collection: ${{response.status}}`);
-        }}
+        const response = await fetch(`${this.host}/collections/${collection}/data?${params}`);
+        if (!response.ok) {
+            throw new Error(`Failed to list collection: ${response.status}`);
+        }
 
         const data = await response.json();
         
-        const result = data.data || {{}};
-        if (result && result.data && Array.isArray(result.data)) {{
+        const result = data.data || {};
+        if (result && result.data && Array.isArray(result.data)) {
             return result.data;
-        }}
+        }
         return Array.isArray(result) ? result : [];
-    }}
+    }
 
-    async get<T>(collection: string, id: string): Promise<T | null> {{
-        const response = await fetch(`${{this.host}}/collections/${{collection}}/data/${{id}}`);
+    async get<T>(collection: string, id: string): Promise<T | null> {
+        const response = await fetch(`${this.host}/collections/${collection}/data/${id}`);
         if (response.status === 404) return null;
-        if (!response.ok) {{
-            throw new Error(`Failed to get record: ${{response.status}}`);
-        }}
+        if (!response.ok) {
+            throw new Error(`Failed to get record: ${response.status}`);
+        }
         const data = await response.json();
         return data.data || null;
-    }}
+    }
 
-    async put(collection: string, data: any): Promise<void> {{
-        const response = await fetch(`${{this.host}}/collections/${{collection}}/data`, {{
+    async put(collection: string, data: any): Promise<void> {
+        const response = await fetch(`${this.host}/collections/${collection}/data`, {
             method: 'PUT',
-            headers: {{ 'Content-Type': 'application/json' }},
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(data)
-        }});
-        if (!response.ok) {{
-            throw new Error(`Failed to put record: ${{response.status}}`);
-        }}
-    }}
+        });
+        if (!response.ok) {
+            throw new Error(`Failed to put record: ${response.status}`);
+        }
+    }
 
-    async delete(collection: string, id: string): Promise<void> {{
-        const response = await fetch(`${{this.host}}/collections/${{collection}}/data/${{id}}`, {{
+    async delete(collection: string, id: string): Promise<void> {
+        const response = await fetch(`${this.host}/collections/${collection}/data/${id}`, {
             method: 'DELETE'
-        }});
-        if (!response.ok) {{
-            throw new Error(`Failed to delete record: ${{response.status}}`);
-        }}
-    }}
-}}
+        });
+        if (!response.ok) {
+            throw new Error(`Failed to delete record: ${response.status}`);
+        }
+    }
+}
 "#
     );
 
@@ -1057,6 +1057,10 @@ mod tests {
         assert!(ts_code.contains("id: string;"));
         assert!(ts_code.contains("age: number;"));
         assert!(ts_code.contains("export class UserQueryBuilder"));
+        assert!(ts_code.contains(r#"constructor(host: string = "http://127.0.0.1:8080") {"#));
+        assert!(ts_code.contains("headers: { 'Content-Type': 'application/json' },"));
+        assert!(!ts_code.contains("export class PrkDbClient {{"));
+        assert!(!ts_code.contains("headers: {{ 'Content-Type': 'application/json' }},"));
     }
 
     #[tokio::test]
