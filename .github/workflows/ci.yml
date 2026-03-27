@@ -11,6 +11,31 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  repo-status-snapshot:
+    name: Repo Status Snapshot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run repo status snapshot
+        run: cargo run -p xtask -- repo-status snapshot --fail-on-objective-drift
+      - name: Upload repo status snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repo-status-snapshot-${{ github.run_number }}
+          path: target/repo-status/repo-status.snapshot.json
+          if-no-files-found: error
+      - name: Publish repo status summary
+        if: always()
+        run: |
+          echo "## Repo Status Snapshot" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```json' >> $GITHUB_STEP_SUMMARY
+          cat target/repo-status/repo-status.snapshot.json >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
   check:
     name: Check
     runs-on: ubuntu-latest

@@ -1,0 +1,60 @@
+{
+  "dimensions": [
+    {
+      "id": "verification",
+      "status": "unknown",
+      "confidence": "low",
+      "summary": "Verification checks are not collected in snapshot mode yet."
+    },
+    {
+      "id": "docs_coverage",
+      "status": "red",
+      "confidence": "high",
+      "summary": "2 objective drift finding(s) detected."
+    },
+    {
+      "id": "contract_consistency",
+      "status": "green",
+      "confidence": "high",
+      "summary": "Docs and command-surface contract checks passed for the current snapshot scope."
+    },
+    {
+      "id": "benchmark_credibility",
+      "status": "green",
+      "confidence": "high",
+      "summary": "Benchmark caveat checks passed for the current snapshot scope."
+    }
+  ],
+  "findings": [
+    {
+      "id": "roadmap_feature_drift",
+      "dimension": "docs_coverage",
+      "severity": "error",
+      "confidence": "high",
+      "message": "Roadmap still describes client SDKs as future work even though codegen support exists.",
+      "evidence": [
+        {
+          "file": "docs/guide/roadmap.md",
+          "detail": "Contains a future-work entry for client SDKs."
+        },
+        {
+          "file": "crates/prkdb-cli/src/commands/codegen.rs",
+          "detail": "Exports TypeScript, Python, and Go codegen support."
+        }
+      ]
+    },
+    {
+      "id": "stale_repo_status_summary",
+      "dimension": "docs_coverage",
+      "severity": "error",
+      "confidence": "high",
+      "message": "Committed repo-status page does not match the current repo-status evidence fingerprint.",
+      "evidence": [
+        {
+          "file": "docs/status/repo-status.md",
+          "detail": "Expected evidence fingerprint `repo-status-evidence:v1:verification:unknown:low|docs_coverage:red:high|contract_consistency:green:high|benchmark_credibility:green:high::roadmap_feature_drift:docs_coverage:error` but found `<missing>`."
+        }
+      ]
+    }
+  ]
+}

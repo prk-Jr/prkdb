@@ -1,0 +1,60 @@
+{
+  "dimensions": [
+    {
+      "id": "verification",
+      "status": "unknown",
+      "confidence": "low",
+      "summary": "Verification checks are not collected in snapshot mode yet."
+    },
+    {
+      "id": "docs_coverage",
+      "status": "red",
+      "confidence": "high",
+      "summary": "1 objective drift finding(s) detected."
+    },
+    {
+      "id": "contract_consistency",
+      "status": "green",
+      "confidence": "high",
+      "summary": "Docs and command-surface contract checks passed for the current snapshot scope."
+    },
+    {
+      "id": "benchmark_credibility",
+      "status": "red",
+      "confidence": "high",
+      "summary": "1 objective drift finding(s) detected."
+    }
+  ],
+  "findings": [
+    {
+      "id": "stale_repo_status_summary",
+      "dimension": "docs_coverage",
+      "severity": "error",
+      "confidence": "high",
+      "message": "Committed repo-status page does not match the current repo-status evidence fingerprint.",
+      "evidence": [
+        {
+          "file": "docs/status/repo-status.md",
+          "detail": "Expected evidence fingerprint `repo-status-evidence:v1:verification:unknown:low|docs_coverage:green:high|contract_consistency:green:high|benchmark_credibility:red:high::missing_benchmark_caveat:benchmark_credibility:error` but found `<missing>`."
+        }
+      ]
+    },
+    {
+      "id": "missing_benchmark_caveat",
+      "dimension": "benchmark_credibility",
+      "severity": "error",
+      "confidence": "high",
+      "message": "Benchmark-facing docs are missing the required caveat about non-comparable Kafka and PrkDB measurements.",
+      "evidence": [
+        {
+          "file": "README.md",
+          "detail": "Benchmark section does not include the required caveat language."
+        },
+        {
+          "file": "docs/guide/streaming-kafka-comparison.md",
+          "detail": "Streaming comparison page does not include the required caveat language."
+        }
+      ]
+    }
+  ]
+}

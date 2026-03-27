@@ -1,0 +1,6 @@
+name: CI
+
+jobs:
+  benchmark:
+    name: Benchmarks
+    runs-on: ubuntu-latest

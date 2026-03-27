@@ -810,6 +810,16 @@ cargo run --release --example index_example           # Secondary Indexes demo
 ./scripts/consistency_test.sh # 6 data durability tests
 ```
 
+### Repository Status
+```bash
+cargo run -p xtask -- repo-status snapshot
+cargo run -p xtask -- repo-status audit
+cargo run -p xtask -- repo-status render
+```
+
+Use `cargo run -p xtask -- repo-status snapshot --fail-on-objective-drift` in CI when
+objective roadmap/docs/contract drift should fail the workflow.
+
 ## Monitoring
 
 ```bash
