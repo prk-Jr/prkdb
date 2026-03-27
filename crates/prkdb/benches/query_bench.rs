@@ -44,7 +44,7 @@ fn create_user(id: u64) -> User {
         },
         age: 20 + (id % 50) as u32,
         salary: 50000.0 + (id as f64 * 1000.0) % 100000.0,
-        active: id % 3 != 0,
+        active: !id.is_multiple_of(3),
     }
 }
 

@@ -24,7 +24,8 @@ fn bench_single_put(c: &mut Criterion) {
             let key = b"bench_key".to_vec();
             let value = vec![b'x'; 100];
 
-            black_box(adapter.put(&key, &value).await.unwrap());
+            adapter.put(&key, &value).await.unwrap();
+            black_box(());
         });
     });
 
@@ -53,7 +54,8 @@ fn bench_batch_put(c: &mut Criterion) {
                 items.push((key, value));
             }
 
-            black_box(adapter.put_many(items).await.unwrap());
+            adapter.put_many(items).await.unwrap();
+            black_box(());
         });
     });
 
@@ -139,7 +141,8 @@ fn bench_mixed_workload(c: &mut Criterion) {
                         // 30% writes
                         let key = format!("mixed_new_{}", start_counter + i).into_bytes();
                         let value = vec![b'x'; 100];
-                        black_box(adapter.put(&key, &value).await.unwrap());
+                        adapter.put(&key, &value).await.unwrap();
+                        black_box(());
                     }
                 }
             }

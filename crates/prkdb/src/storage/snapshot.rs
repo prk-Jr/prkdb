@@ -13,6 +13,8 @@ use std::path::Path;
 
 pub const SNAPSHOT_VERSION: u32 = 1;
 
+type SnapshotEntry = (Vec<u8>, Vec<u8>);
+
 /// Helper to write snapshots
 pub struct SnapshotWriter {
     writer: Box<dyn Write>,
@@ -112,7 +114,7 @@ impl SnapshotReader {
     }
 
     /// Returns next entry as (key, value). Returns None on EOF.
-    pub fn next_entry(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>, StorageError> {
+    pub fn next_entry(&mut self) -> Result<Option<SnapshotEntry>, StorageError> {
         let mut len_bytes = [0u8; 4];
         if let Err(e) = self.reader.read_exact(&mut len_bytes) {
             if e.kind() == std::io::ErrorKind::UnexpectedEof {

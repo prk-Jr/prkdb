@@ -8,10 +8,11 @@
 use crate::collection_handle::CollectionHandle;
 use crate::consumer::ConsumerGroupCoordinator;
 use crate::partitioning::Partitioner;
+use crate::raft::node::RaftError;
 use dashmap::DashMap;
 use prkdb_types::collection::Collection;
 use prkdb_types::consumer::OffsetStore;
-use prkdb_types::error::Error;
+use prkdb_types::error::{Error, StorageError};
 use prkdb_types::storage::StorageAdapter;
 use std::any::{Any, TypeId};
 use std::hash::Hash;
@@ -31,6 +32,20 @@ pub type PartitioningRegistry = DashMap<TypeId, PartitioningConfig>;
 
 /// Collection registry to track registered collection names
 pub type CollectionRegistry = DashMap<TypeId, String>;
+
+fn partition_not_found_error(partition_id: u64) -> Error {
+    Error::Storage(StorageError::Internal(format!(
+        "Partition {} not found",
+        partition_id
+    )))
+}
+
+fn raft_error_to_error(error: RaftError) -> Error {
+    match error {
+        RaftError::NotLeader(leader_id) => Error::Storage(StorageError::NotLeader { leader_id }),
+        other => Error::Storage(StorageError::Internal(other.to_string())),
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase 17: Replication Registry
@@ -174,16 +189,18 @@ impl PrkDb {
             };
 
             // Route to correct partition
-            let raft = pm.get_raft_for_key(key);
+            let partition_id = pm.get_partition_for_key(key);
+            let raft = pm
+                .get_raft_for_key(key)
+                .ok_or_else(|| partition_not_found_error(partition_id))?;
 
             // Propose and wait for commit
-            let handle = raft.propose(cmd.serialize()).await.map_err(|e| {
-                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
-            })?;
+            let handle = raft
+                .propose(cmd.serialize())
+                .await
+                .map_err(raft_error_to_error)?;
 
-            handle.wait_commit().await.map_err(|e| {
-                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
-            })?;
+            handle.wait_commit().await.map_err(raft_error_to_error)?;
         } else {
             // Local write (legacy/single-node)
             self.storage.put(key, value).await?;
@@ -199,16 +216,18 @@ impl PrkDb {
             let cmd = Command::Delete { key: key.to_vec() };
 
             // Route to correct partition
-            let raft = pm.get_raft_for_key(key);
+            let partition_id = pm.get_partition_for_key(key);
+            let raft = pm
+                .get_raft_for_key(key)
+                .ok_or_else(|| partition_not_found_error(partition_id))?;
 
             // Propose and wait for commit
-            let handle = raft.propose(cmd.serialize()).await.map_err(|e| {
-                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
-            })?;
+            let handle = raft
+                .propose(cmd.serialize())
+                .await
+                .map_err(raft_error_to_error)?;
 
-            handle.wait_commit().await.map_err(|e| {
-                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
-            })?;
+            handle.wait_commit().await.map_err(raft_error_to_error)?;
         } else {
             // Local delete
             self.storage.delete(key).await?;
@@ -248,9 +267,7 @@ impl PrkDb {
                     Err(e) => {
                         // If not leader, we should forward or fail
                         // For now, fail so client can retry with correct leader
-                        return Err(Error::Storage(prkdb_types::error::StorageError::Internal(
-                            format!("ReadIndex failed (not leader?): {}", e),
-                        )));
+                        return Err(raft_error_to_error(e));
                     }
                 }
             }
@@ -315,9 +332,7 @@ impl PrkDb {
                         }
                     }
                     Err(e) => {
-                        return Err(Error::Storage(prkdb_types::error::StorageError::Internal(
-                            format!("ReadIndex failed: {}", e),
-                        )));
+                        return Err(raft_error_to_error(e));
                     }
                 }
             }
@@ -1097,13 +1112,12 @@ impl PrkDb {
             };
 
             // Propose and wait for commit
-            let handle = raft.propose(cmd.serialize()).await.map_err(|e| {
-                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
-            })?;
+            let handle = raft
+                .propose(cmd.serialize())
+                .await
+                .map_err(raft_error_to_error)?;
 
-            handle.wait_commit().await.map_err(|e| {
-                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
-            })?;
+            handle.wait_commit().await.map_err(raft_error_to_error)?;
         } else {
             // Local/Single-node mode: Write directly to storage with metadata key
             // This ensures behavior is consistent with Raft state machine application
@@ -1185,13 +1199,12 @@ impl PrkDb {
                 name: name.to_string(),
             };
 
-            let handle = raft.propose(cmd.serialize()).await.map_err(|e| {
-                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
-            })?;
+            let handle = raft
+                .propose(cmd.serialize())
+                .await
+                .map_err(raft_error_to_error)?;
 
-            handle.wait_commit().await.map_err(|e| {
-                Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string()))
-            })?;
+            handle.wait_commit().await.map_err(raft_error_to_error)?;
         } else {
             // Local mode
             let metadata_key = format!("meta:col:{}", name).into_bytes();

@@ -118,7 +118,7 @@ fn run_writer_loop(rx: Receiver<WriteRequest>, wal: Arc<MmapParallelWal>, config
 
         // Phase 23: Deferred sync - only sync every N batches
         batch_count += 1;
-        if config.sync_interval > 0 && batch_count % config.sync_interval == 0 {
+        if config.sync_interval > 0 && batch_count.is_multiple_of(config.sync_interval) {
             let _ = tokio::runtime::Handle::try_current().map(|h| h.block_on(wal.sync()));
         }
     }
@@ -236,6 +236,16 @@ struct WalStorageInner {
 impl Drop for WalStorageInner {
     fn drop(&mut self) {
         self.flush_notify.notify_one();
+    }
+}
+
+impl Drop for WalStorageAdapter {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.inner) != 1 {
+            return;
+        }
+
+        Self::flush_on_last_handle_drop(self.inner.clone());
     }
 }
 
@@ -578,6 +588,37 @@ impl WalStorageAdapter {
             .map_err(|e| StorageError::Internal(e.to_string()))?;
 
         Ok(())
+    }
+
+    fn flush_on_last_handle_drop(inner: Arc<WalStorageInner>) {
+        let flush_future = async move {
+            Self::flush_accumulator_inner(&inner).await;
+
+            if let Err(error) = inner.wal.flush().await {
+                warn!("Failed to flush WAL during adapter drop: {}", error);
+            }
+
+            if let Err(error) = inner.wal.sync().await {
+                warn!("Failed to sync WAL during adapter drop: {}", error);
+            }
+        };
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
+        match runtime {
+            Ok(runtime) => {
+                if std::thread::Builder::new()
+                    .name("prkdb-wal-drop-flush".to_string())
+                    .spawn(move || runtime.block_on(flush_future))
+                    .and_then(|handle| handle.join().map_err(|_| std::io::ErrorKind::Other.into()))
+                    .is_err()
+                {
+                    warn!("Failed to complete WAL drop flush thread");
+                }
+            }
+            Err(error) => warn!("Failed to create runtime for WAL drop flush: {}", error),
+        }
     }
 
     /// Append a single Raft entry  to the WAL
@@ -1483,6 +1524,10 @@ impl StorageAdapter for WalStorageAdapter {
             .map(|_| ())
     }
 
+    async fn flush(&self) -> Result<(), StorageError> {
+        WalStorageAdapter::flush(self).await
+    }
+
     /// Retrieve multiple records by key
     ///
     /// Uses a **hybrid strategy** for optimal performance:
@@ -2093,6 +2138,68 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_wal_adapter_recovery_with_multiple_records() {
+        let dir = env::temp_dir().join("test_wal_adapter_recovery_multiple_records");
+        let _ = fs::remove_dir_all(&dir);
+
+        let config = WalConfig {
+            log_dir: dir.clone(),
+            ..WalConfig::test_config()
+        };
+
+        {
+            let adapter = WalStorageAdapter::new(config.clone()).unwrap();
+            for i in 0..10 {
+                let key = format!("cycle_key_{}", i);
+                let value = format!("cycle_value_{}", i);
+                adapter.put(key.as_bytes(), value.as_bytes()).await.unwrap();
+            }
+            adapter.flush().await.unwrap();
+        }
+
+        let adapter = WalStorageAdapter::open(config).unwrap();
+        let scanned = adapter.inner.wal.scan().await.unwrap();
+        assert_eq!(scanned.len(), 10, "reopened WAL should expose all records");
+
+        for i in 0..10 {
+            let key = format!("cycle_key_{}", i);
+            let expected = format!("cycle_value_{}", i).into_bytes();
+            assert_eq!(adapter.get(key.as_bytes()).await.unwrap(), Some(expected));
+        }
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_wal_adapter_recovery_with_tempdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            log_dir: dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        };
+
+        {
+            let adapter = WalStorageAdapter::new(config.clone()).unwrap();
+            for i in 0..10 {
+                let key = format!("cycle_0_key_{}", i);
+                let value = format!("cycle_0_value_{}", i);
+                adapter.put(key.as_bytes(), value.as_bytes()).await.unwrap();
+            }
+            adapter.flush().await.unwrap();
+        }
+
+        let adapter = WalStorageAdapter::open(config).unwrap();
+        let scanned = adapter.inner.wal.scan().await.unwrap();
+        assert_eq!(scanned.len(), 10, "reopened WAL should expose all records");
+
+        for i in 0..10 {
+            let key = format!("cycle_0_key_{}", i);
+            let expected = format!("cycle_0_value_{}", i).into_bytes();
+            assert_eq!(adapter.get(key.as_bytes()).await.unwrap(), Some(expected));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_wal_adapter_replication() {
         let dir = env::temp_dir().join("test_wal_adapter_replication");
         let _ = fs::remove_dir_all(&dir);
@@ -2347,7 +2454,7 @@ mod tests {
                 for seg_entry in std::fs::read_dir(path).unwrap() {
                     let seg_entry = seg_entry.unwrap();
                     let seg_path = seg_entry.path();
-                    if seg_path.extension().map_or(false, |ext| ext == "log") {
+                    if seg_path.extension().is_some_and(|ext| ext == "log") {
                         use std::io::{Read, Seek, Write};
                         let mut file = std::fs::OpenOptions::new()
                             .read(true)
@@ -2413,7 +2520,7 @@ mod tests {
                 for seg_entry in std::fs::read_dir(path).unwrap() {
                     let seg_entry = seg_entry.unwrap();
                     let seg_path = seg_entry.path();
-                    if seg_path.extension().map_or(false, |ext| ext == "log") {
+                    if seg_path.extension().is_some_and(|ext| ext == "log") {
                         use std::io::{Read, Seek, Write};
                         let mut file = std::fs::OpenOptions::new()
                             .read(true)

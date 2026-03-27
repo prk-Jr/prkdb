@@ -709,7 +709,7 @@ impl PrkDbClient {
             }
             Err(e) => {
                 self.record_node_failure(node_id).await;
-                Err(e.into())
+                Err(e)
             }
         }
     }
@@ -761,7 +761,7 @@ impl PrkDbClient {
             }
             Err(e) => {
                 self.record_node_failure(leader_id).await;
-                Err(e.into())
+                Err(e)
             }
         }
     }
@@ -813,7 +813,7 @@ impl PrkDbClient {
             }
             Err(e) => {
                 self.record_node_failure(leader_id).await;
-                Err(e.into())
+                Err(e)
             }
         }
     }

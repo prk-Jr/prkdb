@@ -155,7 +155,7 @@ async fn test_large_dataset() {
         let key = format!("large_key_{}", i).into_bytes();
         let value = harness.workload_gen.next_value(200);
 
-        if let Err(_) = harness.adapter.put(&key, &value).await {
+        if harness.adapter.put(&key, &value).await.is_err() {
             harness.metrics.record_failure();
         } else {
             harness.metrics.record_success(Duration::from_micros(0));

@@ -15,6 +15,7 @@ impl RaftServiceImpl {
     }
 
     /// Helper to get the correct Raft node based on partition ID header
+    #[allow(clippy::result_large_err)]
     fn get_node<T>(&self, request: &Request<T>) -> Result<Arc<RaftNode>, Status> {
         // Extract partition ID from metadata
         let partition_id = if let Some(val) = request.metadata().get("x-prkdb-partition-id") {

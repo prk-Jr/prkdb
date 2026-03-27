@@ -3,16 +3,23 @@ set -euo pipefail
 # End-to-End Schema Application Test - Nested Types
 # Simulates: Schema with nested messages -> Client Gen (Py/TS) -> Usage
 
-echo "🏗️  Building prkdb binary..."
-cargo build -p prkdb-cli --bin prkdb-cli --quiet
-
-PRKDB_BIN="./target/debug/prkdb-cli"
+PRKDB_BIN="${PRKDB_BIN:-./target/debug/prkdb-cli}"
 LOG_FILE="/tmp/prkdb_nested_server.log"
 WORK_DIR="/tmp/prkdb_nested_e2e"
 ADMIN_TOKEN="schema_nested_e2e_test_token"
 DATABASE_PATH="$WORK_DIR/db"
 rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR"
+
+if [ "${SKIP_BUILD:-0}" != "1" ]; then
+    echo "🏗️  Building prkdb binary..."
+    cargo build -p prkdb-cli --bin prkdb-cli --quiet
+fi
+
+if [ ! -x "$PRKDB_BIN" ]; then
+    echo "❌ Expected prkdb binary at $PRKDB_BIN"
+    exit 1
+fi
 
 reserve_port() {
     python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
@@ -135,7 +142,7 @@ assert user2.address.zip == 90210
 # Let's check what we got.
 print(f"Type of user2.address: {type(user2.address)}")
 
-# If our codegen uses `cls(**d)`, nested dicts remain dicts unless __post_init__ or manual conversion happens.
+# If our codegen uses cls(**d), nested dicts remain dicts unless __post_init__ or manual conversion happens.
 # The current codegen is simple. So we EXPECT dicts for nested fields if we didn't add logic.
 # However, if we improve codegen later, this test might need update.
 # For now, let's just assert the data is correct.

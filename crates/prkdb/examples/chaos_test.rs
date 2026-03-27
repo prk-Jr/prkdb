@@ -39,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
         let mut failures = 0;
 
         // Round-robin client selection
-        let nodes_clone = vec![
+        let nodes_clone = [
             "http://127.0.0.1:8081",
             "http://127.0.0.1:8082",
             "http://127.0.0.1:8083",

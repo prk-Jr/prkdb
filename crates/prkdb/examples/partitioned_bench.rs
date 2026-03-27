@@ -71,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
             total_records += batch_count;
             batch_num += 1;
 
-            if batch_num % 10 == 0 {
+            if batch_num.is_multiple_of(10) {
                 let pct = (total_records as f64 / NUM_RECORDS as f64) * 100.0;
                 print!(
                     "\r  Progress: {:.1}% ({}/{})",
@@ -103,21 +103,18 @@ async fn main() -> anyhow::Result<()> {
     println!("║                    📊 SCALING RESULTS 📊                       ║");
     println!("╚════════════════════════════════════════════════════════════════╝");
     println!();
-    println!("┌─────────────┬─────────────────┬─────────────────┬─────────────┐");
-    println!("│ Partitions  │ Records/sec     │ MB/sec          │ vs Kafka    │");
-    println!("├─────────────┼─────────────────┼─────────────────┼─────────────┤");
+    println!("┌─────────────┬─────────────────┬─────────────────┐");
+    println!("│ Partitions  │ Records/sec     │ MB/sec          │");
+    println!("├─────────────┼─────────────────┼─────────────────┤");
 
     for (partitions, records_sec, mb_sec) in &results {
-        let kafka_ratio = mb_sec / 40.86; // Kafka reference from our tests
         println!(
-            "│ {:>11} │ {:>15.0} │ {:>15.2} │ {:>10.1}x │",
-            partitions, records_sec, mb_sec, kafka_ratio
+            "│ {:>11} │ {:>15.0} │ {:>15.2} │",
+            partitions, records_sec, mb_sec
         );
     }
 
-    println!("├─────────────┼─────────────────┼─────────────────┼─────────────┤");
-    println!("│ Kafka (ref) │          428449 │           40.86 │        1.0x │");
-    println!("└─────────────┴─────────────────┴─────────────────┴─────────────┘");
+    println!("└─────────────┴─────────────────┴─────────────────┘");
     println!();
 
     // Calculate scaling efficiency

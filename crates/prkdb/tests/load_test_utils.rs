@@ -11,6 +11,12 @@ pub struct LatencyTracker {
     samples: Arc<Mutex<Vec<Duration>>>,
 }
 
+impl Default for LatencyTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LatencyTracker {
     pub fn new() -> Self {
         Self {
@@ -50,6 +56,12 @@ pub struct MetricsCollector {
     pub successful_ops: AtomicU64,
     pub failed_ops: AtomicU64,
     pub latency_tracker: LatencyTracker,
+}
+
+impl Default for MetricsCollector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MetricsCollector {
@@ -111,6 +123,12 @@ impl MetricsCollector {
 /// Generates realistic workload data
 pub struct WorkloadGenerator {
     counter: AtomicU64,
+}
+
+impl Default for WorkloadGenerator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WorkloadGenerator {

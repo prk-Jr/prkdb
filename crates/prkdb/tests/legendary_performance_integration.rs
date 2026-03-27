@@ -53,7 +53,7 @@ async fn test_optimization_levels() -> anyhow::Result<()> {
     let temp_dir = tempfile::tempdir()?;
 
     // Test all optimization levels compile and work
-    let levels = vec![
+    let levels = [
         OptimizationLevel::Balanced,
         OptimizationLevel::Throughput,
         OptimizationLevel::Legendary,

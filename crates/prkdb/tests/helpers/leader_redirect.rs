@@ -33,13 +33,6 @@ pub async fn connect_with_retry(
 /// - Parse NotLeader errors and redirect to the actual leader
 /// - Retry on connection errors
 /// - Return error after max_retries attempts
-/// Write a key-value pair with automatic leader redirect
-///
-/// This function will:
-/// - Attempt to write to the current known leader
-/// - Parse NotLeader errors and redirect to the actual leader
-/// - Retry on connection errors
-/// - Return error after max_retries attempts
 pub async fn write_with_redirect(
     cluster: &TestCluster,
     key: Vec<u8>,

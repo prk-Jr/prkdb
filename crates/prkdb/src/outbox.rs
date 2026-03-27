@@ -73,28 +73,40 @@ pub async fn outbox_save_batch<C: Collection + Serialize + DeserializeOwned>(
     let batch_record = match &events[0] {
         OutboxRecord::Put(_) => {
             // Collect all Put items into a PutBatch
-            let items: Vec<C> = events
-                .into_iter()
-                .map(|e| match e {
-                    OutboxRecord::Put(item) => item,
-                    _ => panic!("Mixed event types in batch"),
-                })
-                .collect();
+            let mut items = Vec::with_capacity(events.len());
+            for event in events {
+                match event {
+                    OutboxRecord::Put(item) => items.push(item),
+                    _ => {
+                        return Err(StorageError::Validation(
+                            "Mixed outbox event types in batch".to_string(),
+                        ));
+                    }
+                }
+            }
             OutboxRecord::PutBatch(items)
         }
         OutboxRecord::Delete(_) => {
             // Collect all Delete ids into a DeleteBatch
-            let ids: Vec<C::Id> = events
-                .into_iter()
-                .map(|e| match e {
-                    OutboxRecord::Delete(id) => id,
-                    _ => panic!("Mixed event types in batch"),
-                })
-                .collect();
+            let mut ids = Vec::with_capacity(events.len());
+            for event in events {
+                match event {
+                    OutboxRecord::Delete(id) => ids.push(id),
+                    _ => {
+                        return Err(StorageError::Validation(
+                            "Mixed outbox event types in batch".to_string(),
+                        ));
+                    }
+                }
+            }
             OutboxRecord::DeleteBatch(ids)
         }
         OutboxRecord::PutBatch(_) | OutboxRecord::DeleteBatch(_) => {
-            // Already a batch, just use the first one (shouldn't happen in practice)
+            if events.len() != 1 {
+                return Err(StorageError::Validation(
+                    "Outbox batch save expects a single pre-batched event".to_string(),
+                ));
+            }
             events.into_iter().next().unwrap()
         }
     };

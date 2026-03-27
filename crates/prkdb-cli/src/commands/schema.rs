@@ -6,7 +6,11 @@ use tokio::fs;
 
 #[derive(Args, Clone)]
 pub struct SchemaArgs {
-    /// Server address
+    /// gRPC server address.
+    ///
+    /// Use `http://127.0.0.1:8080` for `prkdb-server`, or
+    /// `http://127.0.0.1:50051` for the local gRPC endpoint exposed by
+    /// `prkdb-cli serve`.
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     pub server: String,
 

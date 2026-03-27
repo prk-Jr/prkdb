@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Configuration
 WORK_DIR="/tmp/prkdb_client_features_go"
-PRKDB_CMD="cargo run --quiet -p prkdb-cli --bin prkdb-cli --"
+PRKDB_BIN="${PRKDB_BIN:-./target/debug/prkdb-cli}"
 ADMIN_TOKEN="client_features_go_test_token"
 DATABASE_PATH="$WORK_DIR/db"
 
@@ -38,14 +38,20 @@ if ! command -v go &> /dev/null; then
     exit 1
 fi
 
-# Build binary
-echo "🏗️  Building prkdb binary..."
-cargo build -p prkdb-cli
+if [ "${SKIP_BUILD:-0}" != "1" ]; then
+    echo "🏗️  Building prkdb binary..."
+    cargo build -p prkdb-cli --bin prkdb-cli
+fi
+
+if [ ! -x "$PRKDB_BIN" ]; then
+    echo "❌ Expected prkdb binary at $PRKDB_BIN"
+    exit 1
+fi
 
 # Start server
 echo "🚀 Starting server on port $SERVER_PORT..."
 PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" \
-    $PRKDB_CMD --database "$DATABASE_PATH" --verbose serve --port $SERVER_PORT --grpc-port $GRPC_PORT > "$WORK_DIR/server.log" 2>&1 &
+    "$PRKDB_BIN" --database "$DATABASE_PATH" --verbose serve --port $SERVER_PORT --grpc-port $GRPC_PORT > "$WORK_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 echo $SERVER_PID > "$WORK_DIR/server.pid"
 echo "Server PID: $SERVER_PID"
@@ -54,7 +60,7 @@ echo "Server PID: $SERVER_PID"
 echo "⏳ Waiting for server..."
 for i in {1..30}; do
     if curl -sf "http://127.0.0.1:$SERVER_PORT/health" > /dev/null 2>&1 \
-        && PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" $PRKDB_CMD schema --server "http://127.0.0.1:$GRPC_PORT" list > /dev/null 2>&1; then
+        && PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" "$PRKDB_BIN" schema --server "http://127.0.0.1:$GRPC_PORT" list > /dev/null 2>&1; then
         echo "✅ Server is ready!"
         break
     fi
@@ -85,17 +91,17 @@ protoc --include_imports --descriptor_set_out="$WORK_DIR/user.desc" --proto_path
 
 # Register Schema
 echo "🚀 Registering Schema..."
-PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" $PRKDB_CMD schema --server "http://127.0.0.1:$GRPC_PORT" register --collection users --proto "$WORK_DIR/user.desc"
+PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" "$PRKDB_BIN" schema --server "http://127.0.0.1:$GRPC_PORT" register --collection users --proto "$WORK_DIR/user.desc"
 
 # Insert Data via CLI
 echo "💾 Inserting Test Data..."
-$PRKDB_CMD --server "http://127.0.0.1:$GRPC_PORT" collection put users '{"id": "u1", "name": "Alice", "age": 30}'
-$PRKDB_CMD --server "http://127.0.0.1:$GRPC_PORT" collection put users '{"id": "u2", "name": "Bob", "age": 25}'
-$PRKDB_CMD --server "http://127.0.0.1:$GRPC_PORT" collection put users '{"id": "u3", "name": "Alice", "age": 35}'
+"$PRKDB_BIN" --server "http://127.0.0.1:$GRPC_PORT" collection put users '{"id": "u1", "name": "Alice", "age": 30}'
+"$PRKDB_BIN" --server "http://127.0.0.1:$GRPC_PORT" collection put users '{"id": "u2", "name": "Bob", "age": 25}'
+"$PRKDB_BIN" --server "http://127.0.0.1:$GRPC_PORT" collection put users '{"id": "u3", "name": "Alice", "age": 35}'
 
 # Generate Go Client
 echo "⚙️  Generating Go Client..."
-PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" $PRKDB_CMD codegen \
+PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" "$PRKDB_BIN" codegen \
     --server "http://127.0.0.1:$GRPC_PORT" \
     --collection "users" \
     --lang go \

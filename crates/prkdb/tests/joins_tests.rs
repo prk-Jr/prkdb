@@ -2,7 +2,7 @@
 
 use futures::{stream, StreamExt};
 use prkdb::joins::{JoinConfig, JoinExt, JoinType};
-use prkdb_types::collection::{ChangeEvent, Collection};
+use prkdb_types::collection::Collection;
 use prkdb_types::consumer::ConsumerRecord;
 use prkdb_types::error::Error;
 use serde::{Deserialize, Serialize};
@@ -140,11 +140,10 @@ async fn test_left_join_basic() {
         let (left, right_opt) = result.unwrap();
         assert!(left.is_ok());
 
-        if right_opt.is_some() {
+        if let Some(right_record) = right_opt {
             matched_count += 1;
-            let right_record = right_opt.unwrap().unwrap();
             let left_record = left.unwrap();
-            assert_eq!(left_record.offset, right_record.offset);
+            assert_eq!(left_record.offset, right_record.unwrap().offset);
         } else {
             unmatched_count += 1;
         }

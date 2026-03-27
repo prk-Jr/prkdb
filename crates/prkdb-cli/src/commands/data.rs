@@ -13,7 +13,11 @@ pub struct GetArgs {
     #[arg(short, long, default_value = "linearizable")]
     pub consistency: ReadConsistencyCli,
 
-    /// Bootstrap servers (e.g. http://127.0.0.1:8080)
+    /// gRPC bootstrap servers.
+    ///
+    /// Use `http://127.0.0.1:8080` for `prkdb-server`, or
+    /// `http://127.0.0.1:50051` for the local gRPC endpoint exposed by
+    /// `prkdb-cli serve`.
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     pub server: Vec<String>,
 
@@ -30,7 +34,11 @@ pub struct PutArgs {
     /// Value to write
     pub value: String,
 
-    /// Bootstrap servers
+    /// gRPC bootstrap servers.
+    ///
+    /// Use `http://127.0.0.1:8080` for `prkdb-server`, or
+    /// `http://127.0.0.1:50051` for the local gRPC endpoint exposed by
+    /// `prkdb-cli serve`.
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     pub server: Vec<String>,
 }
@@ -40,7 +48,11 @@ pub struct DeleteArgs {
     /// Key to delete
     pub key: String,
 
-    /// Bootstrap servers
+    /// gRPC bootstrap servers.
+    ///
+    /// Use `http://127.0.0.1:8080` for `prkdb-server`, or
+    /// `http://127.0.0.1:50051` for the local gRPC endpoint exposed by
+    /// `prkdb-cli serve`.
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     pub server: Vec<String>,
 }
@@ -54,7 +66,11 @@ pub struct BatchPutArgs {
     #[arg(short, long, default_value = ",")]
     pub separator: char,
 
-    /// Bootstrap servers
+    /// gRPC bootstrap servers.
+    ///
+    /// Use `http://127.0.0.1:8080` for `prkdb-server`, or
+    /// `http://127.0.0.1:50051` for the local gRPC endpoint exposed by
+    /// `prkdb-cli serve`.
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     pub server: Vec<String>,
 }

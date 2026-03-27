@@ -33,7 +33,7 @@ fn bench_wal_batch_append(c: &mut Criterion) {
     let wal = Arc::new(WriteAheadLog::create(config).unwrap());
 
     for batch_size in [10, 50, 100].iter() {
-        let mut group = c.benchmark_group(format!("wal/batch_append"));
+        let mut group = c.benchmark_group("wal/batch_append");
         group.throughput(Throughput::Elements(*batch_size as u64));
 
         group.bench_function(format!("batch_{}", batch_size), |b| {

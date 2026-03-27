@@ -47,6 +47,7 @@ pub struct BatchHeader {
     pub timestamp: u64,
 }
 
+#[allow(clippy::let_and_return)]
 impl BatchHeader {
     pub const SIZE: usize = std::mem::size_of::<BatchHeader>();
     pub const MAGIC: u32 = 0x50524B42; // "PRKB"

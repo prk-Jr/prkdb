@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Configuration
 WORK_DIR="/tmp/prkdb_client_features"
-PRKDB_BIN="./target/debug/prkdb-cli"
+PRKDB_BIN="${PRKDB_BIN:-./target/debug/prkdb-cli}"
 ADMIN_TOKEN="client_features_test_token"
 DATABASE_PATH="$WORK_DIR/db"
 
@@ -20,8 +20,15 @@ done
 mkdir -p "$WORK_DIR"
 rm -rf "$WORK_DIR"/*
 
-echo "🏗️  Building prkdb binary..."
-cargo build -p prkdb-cli
+if [ "${SKIP_BUILD:-0}" != "1" ]; then
+    echo "🏗️  Building prkdb binary..."
+    cargo build -p prkdb-cli --bin prkdb-cli
+fi
+
+if [ ! -x "$PRKDB_BIN" ]; then
+    echo "❌ Expected prkdb binary at $PRKDB_BIN"
+    exit 1
+fi
 
 echo "🚀 Starting server on port $SERVER_PORT..."
 # Start server in background

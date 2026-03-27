@@ -29,7 +29,8 @@ fn batching_window_benchmarks(c: &mut Criterion) {
                         id: i as u64,
                         value: format!("value_{}", i),
                     };
-                    black_box(handle.put(item).await.unwrap());
+                    handle.put(item).await.unwrap();
+                    black_box(());
                 }
             });
         });
@@ -50,7 +51,8 @@ fn batching_window_benchmarks(c: &mut Criterion) {
                             id: i as u64,
                             value: format!("value_{}", i),
                         };
-                        black_box(handle.put(item).await.unwrap());
+                        handle.put(item).await.unwrap();
+                        black_box(());
                     }
                 });
             },
@@ -72,7 +74,8 @@ fn batching_window_benchmarks(c: &mut Criterion) {
                             id: i as u64,
                             value: format!("value_{}", i),
                         };
-                        black_box(handle.put(item).await.unwrap());
+                        handle.put(item).await.unwrap();
+                        black_box(());
                     }
                 });
             },
@@ -94,7 +97,8 @@ fn batching_window_benchmarks(c: &mut Criterion) {
                             id: i as u64,
                             value: format!("value_{}", i),
                         };
-                        black_box(handle.put(item).await.unwrap());
+                        handle.put(item).await.unwrap();
+                        black_box(());
                     }
                 });
             },

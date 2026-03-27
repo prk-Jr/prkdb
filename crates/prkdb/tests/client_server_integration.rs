@@ -78,7 +78,6 @@ impl TestClient {
                 name: name.to_string(),
                 num_partitions: 1,
                 replication_factor: 1,
-                ..Default::default()
             }))
             .await
             .map_err(|e| e.to_string())?;

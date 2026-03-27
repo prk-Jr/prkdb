@@ -14,9 +14,7 @@
 
 use clap::Parser;
 use prkdb::raft::server::TlsConfig;
-use prkdb::raft::{ClusterConfig, PrkDbStateMachine, RaftNode};
-use prkdb::storage::WalStorageAdapter;
-use prkdb_core::wal::WalConfig;
+use prkdb::raft::{ClusterConfig, PrkDbStateMachine};
 use std::net::SocketAddr;
 use std::sync::Arc;
 

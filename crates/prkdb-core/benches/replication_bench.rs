@@ -96,7 +96,8 @@ fn bench_leader_ack_replication(c: &mut Criterion) {
 
                 let offset = wal.append(record.clone()).unwrap();
                 let mut mgr = manager.lock().await;
-                black_box(mgr.replicate_batch(vec![record], offset).await.unwrap());
+                mgr.replicate_batch(vec![record], offset).await.unwrap();
+                black_box(());
             })
         })
     });
@@ -167,7 +168,8 @@ fn bench_quorum_ack_replication(c: &mut Criterion) {
 
                 let offset = wal.append(record.clone()).unwrap();
                 let mut mgr = manager.lock().await;
-                black_box(mgr.replicate_batch(vec![record], offset).await.unwrap());
+                mgr.replicate_batch(vec![record], offset).await.unwrap();
+                black_box(());
             })
         })
     });
@@ -249,7 +251,8 @@ fn bench_batch_replication(c: &mut Criterion) {
 
                 // Replicate batch
                 let mut mgr = manager.lock().await;
-                black_box(mgr.replicate_batch(records, offset).await.unwrap());
+                mgr.replicate_batch(records, offset).await.unwrap();
+                black_box(());
             })
         })
     });

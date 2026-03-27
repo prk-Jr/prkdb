@@ -99,13 +99,11 @@ async fn test_snapshot_backup_restore() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_snapshot_corruption() {
-    use std::io::Write;
     let dir = tempdir().unwrap();
     let snap_path = dir.path().join("corrupt.snap");
 
     // Create a valid snapshot first
     {
-        let header = prkdb::storage::snapshot::SnapshotHeader::new(100, 1, CompressionType::None);
         // Note: SnapshotWriter is not pub in prkdb::storage::snapshot directly?
         // Logic check: snapshot.rs has `pub struct SnapshotWriter`.
         // prkdb re-exports it?

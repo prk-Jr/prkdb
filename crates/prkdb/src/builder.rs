@@ -33,6 +33,7 @@ pub struct Builder {
     collection_registry: crate::db::CollectionRegistry,
     namespace: Option<Vec<u8>>,
     data_dir: Option<std::path::PathBuf>,
+    optimized_storage_level: Option<OptimizationLevel>,
     event_capacity: usize,
     schema_dialect: SqlDialect,
     schema_migrations: Vec<String>,
@@ -48,6 +49,7 @@ impl Default for Builder {
             collection_registry: Default::default(),
             namespace: None,
             data_dir: None,
+            optimized_storage_level: None,
             event_capacity: 16,
             schema_dialect: DefaultDialect::current(),
             schema_migrations: Vec::new(),
@@ -93,24 +95,9 @@ impl Builder {
     }
 
     pub fn with_data_dir(mut self, path: impl AsRef<std::path::Path>) -> Self {
-        let path_buf = path.as_ref().to_path_buf();
-
-        // LEGENDARY performance by default! 🏆
-        // 1.2M ops/sec with collection-level partitioning and adaptive batching
-        let config = prkdb_core::wal::WalConfig {
-            log_dir: path_buf.clone(),
-            segment_bytes: 512 * 1024 * 1024, // 512MB segments
-            batch_size: 500,                  // Proven optimal (783K→1.2M!)
-            compression: prkdb_core::wal::CompressionConfig::none(),
-            ..prkdb_core::wal::WalConfig::benchmark_config()
-        };
-
-        // Use CollectionPartitionedAdapter for maximum performance!
-        let adapter = crate::storage::CollectionPartitionedAdapter::new(config)
-            .expect("Failed to create storage");
-
-        self.storage = Some(Arc::new(adapter));
-        self.data_dir = Some(path_buf);
+        self.storage = None;
+        self.data_dir = Some(path.as_ref().to_path_buf());
+        self.optimized_storage_level = Some(OptimizationLevel::Legendary);
         self
     }
 
@@ -151,37 +138,9 @@ impl Builder {
         data_dir: impl AsRef<std::path::Path>,
         level: OptimizationLevel,
     ) -> Self {
-        let path = data_dir.as_ref().to_path_buf();
-
-        let config = match level {
-            OptimizationLevel::Balanced => prkdb_core::wal::WalConfig {
-                log_dir: path.clone(),
-                segment_bytes: 256 * 1024 * 1024, // 256MB segments
-                batch_size: 300,                  // Medium batches
-                compression: prkdb_core::wal::CompressionConfig::none(),
-                ..prkdb_core::wal::WalConfig::benchmark_config()
-            },
-            OptimizationLevel::Throughput => prkdb_core::wal::WalConfig {
-                log_dir: path.clone(),
-                segment_bytes: 512 * 1024 * 1024, // 512MB segments
-                batch_size: 500,                  // Optimal for most workloads
-                compression: prkdb_core::wal::CompressionConfig::none(),
-                ..prkdb_core::wal::WalConfig::benchmark_config()
-            },
-            OptimizationLevel::Legendary => prkdb_core::wal::WalConfig {
-                log_dir: path.clone(),
-                segment_bytes: 512 * 1024 * 1024, // 512MB segments
-                batch_size: 500,                  // Proven optimal
-                compression: prkdb_core::wal::CompressionConfig::none(),
-                ..prkdb_core::wal::WalConfig::benchmark_config()
-            },
-        };
-
-        let adapter = crate::storage::CollectionPartitionedAdapter::new(config)
-            .expect("Failed to create optimized storage");
-
-        self.storage = Some(Arc::new(adapter));
-        self.data_dir = Some(path);
+        self.storage = None;
+        self.data_dir = Some(data_dir.as_ref().to_path_buf());
+        self.optimized_storage_level = Some(level);
         self
     }
 
@@ -198,36 +157,14 @@ impl Builder {
             namespace,
             schema_migrations,
             data_dir,
+            optimized_storage_level,
             ..
         } = self;
 
         let has_migrations = !schema_migrations.is_empty();
         let ddls = schema_migrations;
 
-        let storage = if let Some(storage) = storage {
-            storage
-        } else if let Some(path) = data_dir {
-            let wal_config = prkdb_core::wal::WalConfig {
-                log_dir: path,
-                segment_bytes: 64 * 1024 * 1024,
-                index_interval_bytes: 4096,
-                retention_ms: None,
-                compaction: prkdb_core::wal::CompactionPolicy::None,
-                compression: prkdb_core::wal::CompressionConfig::default(),
-                batch_size: 100,
-                flush_interval_ms: 10,
-                segment_count: 4,
-                shard_count: Some(16), // Multi-WAL sharding for 5-10x performance
-                workload_profile: prkdb_core::wal::adaptive::WorkloadProfile::Balanced,
-                adaptive_config: prkdb_core::wal::adaptive::AdaptiveBatchConfig::default(),
-            };
-
-            // WalStorageAdapter::new is synchronous, so we don't need async context or blocking.
-            let adapter = crate::storage::WalStorageAdapter::new(wal_config)?;
-            Arc::new(adapter) as Arc<dyn StorageAdapter>
-        } else {
-            Arc::new(crate::storage_old_inmemory::InMemoryAdapter::new()) as Arc<dyn StorageAdapter>
-        };
+        let storage = Self::build_storage(storage, data_dir, optimized_storage_level)?;
 
         let db = Self::finish(
             storage,
@@ -261,31 +198,11 @@ impl Builder {
             namespace,
             schema_migrations,
             data_dir,
+            optimized_storage_level,
             ..
         } = self;
 
-        let storage = if let Some(storage) = storage {
-            storage
-        } else if let Some(path) = data_dir {
-            let wal_config = prkdb_core::wal::WalConfig {
-                log_dir: path,
-                segment_bytes: 64 * 1024 * 1024,
-                index_interval_bytes: 4096,
-                retention_ms: None, // Infinite retention by default
-                compaction: prkdb_core::wal::CompactionPolicy::None,
-                compression: prkdb_core::wal::CompressionConfig::default(), // Use LZ4 by default
-                batch_size: 100,
-                flush_interval_ms: 10,
-                segment_count: 4,
-                shard_count: Some(16), // Multi-WAL sharding for 5-10x performance
-                workload_profile: prkdb_core::wal::adaptive::WorkloadProfile::Balanced,
-                adaptive_config: prkdb_core::wal::adaptive::AdaptiveBatchConfig::default(),
-            };
-            let adapter = crate::storage::WalStorageAdapter::new(wal_config)?;
-            Arc::new(adapter) as Arc<dyn StorageAdapter>
-        } else {
-            Arc::new(crate::storage_old_inmemory::InMemoryAdapter::new()) as Arc<dyn StorageAdapter>
-        };
+        let storage = Self::build_storage(storage, data_dir, optimized_storage_level)?;
 
         let ddls = schema_migrations;
         let db = Self::finish(
@@ -325,6 +242,70 @@ impl Builder {
             partition_manager: None,
             replication_targets: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         })
+    }
+
+    fn build_storage(
+        storage: Option<Arc<dyn StorageAdapter>>,
+        data_dir: Option<std::path::PathBuf>,
+        optimized_storage_level: Option<OptimizationLevel>,
+    ) -> Result<Arc<dyn StorageAdapter>, DbError> {
+        if let Some(storage) = storage {
+            return Ok(storage);
+        }
+
+        if let Some(path) = data_dir {
+            if let Some(level) = optimized_storage_level {
+                let adapter = crate::storage::CollectionPartitionedAdapter::new(
+                    Self::optimized_wal_config(path, level),
+                )?;
+                return Ok(Arc::new(adapter) as Arc<dyn StorageAdapter>);
+            }
+
+            let adapter = crate::storage::WalStorageAdapter::new(Self::default_wal_config(path))?;
+            return Ok(Arc::new(adapter) as Arc<dyn StorageAdapter>);
+        }
+
+        Ok(
+            Arc::new(crate::storage_old_inmemory::InMemoryAdapter::new())
+                as Arc<dyn StorageAdapter>,
+        )
+    }
+
+    fn default_wal_config(path: std::path::PathBuf) -> prkdb_core::wal::WalConfig {
+        prkdb_core::wal::WalConfig {
+            log_dir: path,
+            segment_bytes: 64 * 1024 * 1024,
+            index_interval_bytes: 4096,
+            retention_ms: None,
+            compaction: prkdb_core::wal::CompactionPolicy::None,
+            compression: prkdb_core::wal::CompressionConfig::default(),
+            batch_size: 100,
+            flush_interval_ms: 10,
+            segment_count: 4,
+            shard_count: Some(16),
+            workload_profile: prkdb_core::wal::adaptive::WorkloadProfile::Balanced,
+            adaptive_config: prkdb_core::wal::adaptive::AdaptiveBatchConfig::default(),
+        }
+    }
+
+    fn optimized_wal_config(
+        path: std::path::PathBuf,
+        level: OptimizationLevel,
+    ) -> prkdb_core::wal::WalConfig {
+        let (segment_bytes, batch_size) = match level {
+            OptimizationLevel::Balanced => (256 * 1024 * 1024, 300),
+            OptimizationLevel::Throughput | OptimizationLevel::Legendary => {
+                (512 * 1024 * 1024, 500)
+            }
+        };
+
+        prkdb_core::wal::WalConfig {
+            log_dir: path,
+            segment_bytes,
+            batch_size,
+            compression: prkdb_core::wal::CompressionConfig::none(),
+            ..prkdb_core::wal::WalConfig::benchmark_config()
+        }
     }
 
     fn add_collection<C: Collection>(&mut self) {
