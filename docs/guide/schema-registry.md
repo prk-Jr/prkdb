@@ -26,14 +26,17 @@ Before a client can interact with a collection, the schema must be registered wi
 
 ### Registering via CLI
 
+`register` and `list` are admin operations, so set `PRKDB_ADMIN_TOKEN` first:
+
 ```bash
-prkdb schema register --collection Product --proto ./schemas/product.bin
+export PRKDB_ADMIN_TOKEN=change-me
+prkdb schema register --server http://127.0.0.1:8080 --collection Product --proto ./schemas/product.bin
 ```
 
 To view all registered schemas:
 
 ```bash
-prkdb schema list
+prkdb schema list --server http://127.0.0.1:8080
 ```
 
 ## Compatibility Modes
@@ -48,7 +51,9 @@ When you evolve your schemas (e.g., adding or removing fields), PrkDB validates 
 You can specify the compatibility mode during registration:
 
 ```bash
-prkdb schema register --collection Product --proto ./schemas/product_v2.bin --compatibility backward
+prkdb schema register --server http://127.0.0.1:8080 --collection Product --proto ./schemas/product_v2.bin --compatibility backward
 ```
 
 If a change is incompatible, the registry will reject the update unless you provide a `--migration-id`.
+
+When you are using the development HTTP server (`prkdb-cli serve`), the schema-registry gRPC endpoint remains `http://127.0.0.1:50051`.

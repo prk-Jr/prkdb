@@ -114,8 +114,8 @@ impl raft_service_server::RaftService for RaftServiceImpl {
             node.get_config().await.partition_id
         );
 
-        let (term, success) = node
-            .handle_append_entries(
+        let response = node
+            .handle_append_entries_detailed(
                 req.term,
                 req.leader_id,
                 req.prev_log_index,
@@ -125,7 +125,12 @@ impl raft_service_server::RaftService for RaftServiceImpl {
             )
             .await;
 
-        Ok(Response::new(AppendEntriesResponse { term, success }))
+        Ok(Response::new(AppendEntriesResponse {
+            term: response.term,
+            success: response.success,
+            conflict_index: response.conflict_index,
+            conflict_term: response.conflict_term,
+        }))
     }
 
     async fn read_index(

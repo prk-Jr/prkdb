@@ -48,5 +48,6 @@ prost-types.workspace = true
 reqwest = { version = "0.11", features = ["json"] }
 
 [dev-dependencies]
+prkdb-proto = { path = "../prkdb-proto" }
 rand = "0.8"
 tempfile = "3.8"

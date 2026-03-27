@@ -1,42 +1,36 @@
 # PrkDB Deployment Guide
 
-This guide covers deploying PrkDB v2 in production environments.
+This guide reflects the current `prkdb-server` binary and the current `prkdb-cli` verification workflow.
 
 ## Architecture
 
-PrkDB v2 uses a **shared-nothing, multi-leader** architecture (via Multi-Raft).
+- Inter-node Raft traffic uses the addresses in `CLUSTER_NODES`.
+- Client gRPC traffic is multiplexed on the same address and port as the local node entry in `CLUSTER_NODES`.
+- `GRPC_PORT` is optional. When set, it must match the local node's `CLUSTER_NODES` port.
+- Use `PRKDB_ADVERTISED_GRPC_ADDR` when the bind address differs from the dialable client address.
+- Use `PRKDB_ADVERTISED_NODE_ADDRS` when peer nodes also need explicit dialable client addresses in metadata, for example `2=http://db-2.example.com:8081,3=http://db-3.example.com:8082`.
+- Metrics bind to `127.0.0.1:(9090 + NODE_ID)` by default. Set `PRKDB_METRICS_ADDR` to override or `PRKDB_DISABLE_METRICS=1` to disable them.
+- Schema registry data is persisted under `${STORAGE_PATH}/schemas`.
 
-- **Nodes**: Independent processes with local storage.
-- **Raft Groups**: Data is partitioned into shards, each managed by a Raft consensus group.
-- **Discovery**: Nodes communicate via gRPC (default port 50051).
-
-## Hardware Recommendations
-
-| Component   | Minimum  | Recommended   | Note                                           |
-| ----------- | -------- | ------------- | ---------------------------------------------- |
-| **CPU**     | 2 cores  | 4+ cores      | Heavily threaded (gRPC + Raft)                 |
-| **RAM**     | 4 GB     | 16 GB+        | OS page cache is critical for read performance |
-| **Disk**    | NVMe SSD | NVMe SSD RAID | WAL fsync latency dominates write throughput   |
-| **Network** | 1 Gbps   | 10 Gbps       | Low latency is crucial for Raft consensus      |
-
-## Production Cluster (3-Node Setup)
-
-A minimal high-availability cluster requires 3 nodes.
-
-### 1. Binary Setup
-
-Compile the server binary:
+## Build
 
 ```bash
-cargo build --release --bin prkdb-server
+cargo build --release --bin prkdb-server --bin prkdb-cli
 cp target/release/prkdb-server /usr/local/bin/
+cp target/release/prkdb-cli /usr/local/bin/prkdb
 ```
 
-### 2. Systemd Service
+## Example 3-Node Cluster
+
+### Node addresses
+
+- Node 1 address: `10.0.0.1:8080`
+- Node 2 address: `10.0.0.2:8081`
+- Node 3 address: `10.0.0.3:8082`
+
+### Systemd unit
 
 Create `/etc/systemd/system/prkdb.service` on each node.
-
-**Node 1 Configuration:**
 
 ```ini
 [Unit]
@@ -46,28 +40,29 @@ After=network.target
 [Service]
 Type=simple
 User=prkdb
-# Node ID 1, listening on 0.0.0.0:8081
-ExecStart=/usr/local/bin/prkdb-server \
-  --id 1 \
-  --listen 0.0.0.0:8081 \
-  --peers "1=10.0.0.1:8081,2=10.0.0.2:8081,3=10.0.0.3:8081" \
-  --data-dir /var/lib/prkdb
+WorkingDirectory=/var/lib/prkdb
+Environment=NODE_ID=1
+Environment=CLUSTER_NODES=1@10.0.0.1:8080,2@10.0.0.2:8081,3@10.0.0.3:8082
+Environment=STORAGE_PATH=/var/lib/prkdb/node1
+Environment=PRKDB_ADMIN_TOKEN=change-me
+Environment=PRKDB_ADVERTISED_GRPC_ADDR=http://db-1.example.com:8080
+Environment=PRKDB_ADVERTISED_NODE_ADDRS=2=http://db-2.example.com:8081,3=http://db-3.example.com:8082
+ExecStart=/usr/local/bin/prkdb-server
 Restart=always
+RestartSec=5
 LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-**Node 2 Configuration:**
-Update `--id 2` and `--listen 0.0.0.0:8081` (binds to local interface).
+For node 2 and node 3, change:
 
-**Node 3 Configuration:**
-Update `--id 3` and `--listen 0.0.0.0:8081`.
+- `NODE_ID`
+- `STORAGE_PATH`
+- the local address inside `CLUSTER_NODES`
 
-### 3. Start Cluster
-
-Enable and start the service on all nodes:
+## Start the Cluster
 
 ```bash
 sudo systemctl daemon-reload
@@ -75,61 +70,48 @@ sudo systemctl enable prkdb
 sudo systemctl start prkdb
 ```
 
-### 4. Verify Cluster
+## Verify the Deployment
 
-Use the CLI from any node to check health:
+### Check metrics
 
-```bash
-prkdb-cli --target http://127.0.0.1:8081 health
-```
-
-## Docker Deployment
-
-PrkDB can be deployed using Docker.
-
-```yaml
-version: '3'
-services:
-  node1:
-    image: prkdb/server:latest
-    command: --id 1 --peers "1=node1:8081,2=node2:8081,3=node3:8081"
-    volumes:
-      - data1:/var/lib/prkdb
-    ports:
-      - '8081:8081'
-
-  node2:
-    image: prkdb/server:latest
-    command: --id 2 --peers "1=node1:8081,2=node2:8081,3=node3:8081"
-    volumes:
-      - data2:/var/lib/prkdb
-
-  node3:
-    image: prkdb/server:latest
-    command: --id 3 --peers "1=node1:8081,2=node2:8081,3=node3:8081"
-    volumes:
-      - data3:/var/lib/prkdb
-
-volumes:
-  data1:
-  data2:
-  data3:
-```
-
-## OS Tuning
-
-For maximum performance, apply these sysctl settings:
+On node 1:
 
 ```bash
-# Increase max open files
-fs.file-max = 1000000
-
-# TCP optimizations for internal traffic
-net.ipv4.tcp_keepalive_time = 60
-net.ipv4.tcp_keepalive_intvl = 10
-net.ipv4.tcp_keepalive_probes = 6
+curl http://127.0.0.1:9091/metrics | grep prkdb_up
 ```
 
-## Security (Coming Soon)
+On node 2:
 
-V2.1 will add native TLS support. For now, we verify deployment inside a private VPC or using a service mesh (Linkerd/Istio) for mTLS termination.
+```bash
+curl http://127.0.0.1:9092/metrics | grep prkdb_up
+```
+
+### Check the gRPC API
+
+```bash
+export PRKDB_ADMIN_TOKEN=change-me
+prkdb --server http://127.0.0.1:8080 collection list
+```
+
+### Check schema registry persistence
+
+```bash
+export PRKDB_ADMIN_TOKEN=change-me
+prkdb schema list --server http://127.0.0.1:8080
+```
+
+## Operational Notes
+
+- `CLUSTER_NODES` should contain every node in the cluster, including the local node.
+- Smart clients consume the addresses returned by metadata. Do not advertise `0.0.0.0`; set `PRKDB_ADVERTISED_GRPC_ADDR` if clients connect through DNS or a load balancer.
+- If peer nodes have different bind and public addresses, configure `PRKDB_ADVERTISED_NODE_ADDRS` so metadata never falls back to an internal-only socket.
+- `PRKDB_ADMIN_TOKEN` protects admin RPCs such as collection management and schema registration.
+- If you expose the HTTP server from `prkdb-cli serve`, restrict CORS origins explicitly with `PRKDB_CORS_ORIGINS`.
+- WebSocket auth is header-based. Set `PRKDB_WS_TOKEN` when you want bearer-token enforcement for `/ws/collections/:name`.
+
+## Security Checklist
+
+- Run the cluster behind TLS termination or a private network boundary.
+- Keep `PRKDB_ADMIN_TOKEN` and `PRKDB_WS_TOKEN` out of shell history and process listings where possible.
+- Persist `STORAGE_PATH` on durable local disks.
+- Scrape metrics from the node-local metrics bind address instead of exposing it publicly.

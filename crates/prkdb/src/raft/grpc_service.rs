@@ -3,6 +3,7 @@ use crate::raft::rpc::prk_db_service_server::{
     PrkDbService as PrkDbServiceTrait, PrkDbServiceServer,
 };
 use crate::raft::rpc::{
+    watch_event::EventType as WatchEventType,
     // Schema Registry types
     CheckCompatibilityRequest,
     CheckCompatibilityResponse,
@@ -27,8 +28,10 @@ use crate::raft::rpc::{
     WatchRequest,
 };
 use prkdb_schema::{CompatibilityMode, FileSchemaStorage, InMemorySchemaStorage, SchemaRegistry};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
@@ -36,6 +39,7 @@ use tonic::{Request, Response, Status};
 
 // Phase 19: Type alias for watch broadcast channel
 pub type WatchBroadcast = broadcast::Sender<WatchEvent>;
+const DEFAULT_WATCH_CHANNEL_CAPACITY: usize = 1024;
 
 /// gRPC service implementation for client data operations
 /// This is the binary protocol equivalent to Kafka's producer/consumer API
@@ -43,6 +47,10 @@ pub struct PrkDbGrpcService<S: prkdb_schema::SchemaStorage = InMemorySchemaStora
     db: Arc<PrkDb>,
     admin_token: String,
     public_address: Option<String>,
+    local_node_id: u64,
+    advertised_node_addresses: HashMap<u64, String>,
+    watch_tx: WatchBroadcast,
+    watch_sequence: AtomicU64,
     /// Schema registry for cross-language SDK support
     schema_registry: Arc<SchemaRegistry<S>>,
 }
@@ -53,11 +61,16 @@ impl PrkDbGrpcService<InMemorySchemaStorage> {
         // TODO: In production, use FileSchemaStorage with a configurable path
         let storage = Arc::new(InMemorySchemaStorage::new());
         let schema_registry = Arc::new(SchemaRegistry::new(storage));
+        let (watch_tx, _) = broadcast::channel(DEFAULT_WATCH_CHANNEL_CAPACITY);
 
         Self {
             db,
             admin_token,
             public_address: None,
+            local_node_id: 1,
+            advertised_node_addresses: HashMap::new(),
+            watch_tx,
+            watch_sequence: AtomicU64::new(0),
             schema_registry,
         }
     }
@@ -78,11 +91,16 @@ impl PrkDbGrpcService<FileSchemaStorage> {
             tracing::warn!("Failed to load schema storage: {}. Starting fresh.", e);
         }
         let schema_registry = Arc::new(SchemaRegistry::new(Arc::new(storage)));
+        let (watch_tx, _) = broadcast::channel(DEFAULT_WATCH_CHANNEL_CAPACITY);
 
         Self {
             db,
             admin_token,
             public_address: None,
+            local_node_id: 1,
+            advertised_node_addresses: HashMap::new(),
+            watch_tx,
+            watch_sequence: AtomicU64::new(0),
             schema_registry,
         }
     }
@@ -94,8 +112,124 @@ impl<S: prkdb_schema::SchemaStorage> PrkDbGrpcService<S> {
         self
     }
 
+    pub fn with_local_node_id(mut self, node_id: u64) -> Self {
+        self.local_node_id = node_id;
+        self
+    }
+
+    pub fn with_advertised_node_addresses(
+        mut self,
+        advertised_node_addresses: HashMap<u64, String>,
+    ) -> Self {
+        self.advertised_node_addresses = advertised_node_addresses;
+        self
+    }
+
     pub fn into_server(self) -> PrkDbServiceServer<Self> {
         PrkDbServiceServer::new(self)
+    }
+
+    fn configured_node_addresses(
+        &self,
+        cluster_config: Option<&crate::raft::ClusterConfig>,
+    ) -> HashMap<u64, String> {
+        let mut node_addresses: HashMap<u64, String> = cluster_config
+            .map(|config| {
+                config
+                    .nodes
+                    .iter()
+                    .filter_map(|(node_id, address)| {
+                        (!address.ip().is_unspecified())
+                            .then(|| (*node_id, format!("http://{}", address)))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        node_addresses.extend(self.advertised_node_addresses.clone());
+
+        let local_node_id = cluster_config
+            .map(|config| config.local_node_id)
+            .unwrap_or(self.local_node_id);
+        if let Some(public_address) = &self.public_address {
+            node_addresses.insert(local_node_id, public_address.clone());
+        }
+
+        node_addresses
+    }
+
+    fn advertised_address_for_node(
+        &self,
+        node_id: u64,
+        node_addresses: &HashMap<u64, String>,
+    ) -> Result<String, Status> {
+        node_addresses.get(&node_id).cloned().ok_or_else(|| {
+            Status::failed_precondition(format!(
+                "No advertised client address configured for node {}",
+                node_id
+            ))
+        })
+    }
+}
+
+async fn execute_read_mode<
+    T,
+    E,
+    StaleRead,
+    StaleFuture,
+    FollowerRead,
+    FollowerFuture,
+    LeaderRead,
+    LeaderFuture,
+>(
+    read_mode: crate::raft::rpc::ReadMode,
+    stale_read: StaleRead,
+    follower_read: FollowerRead,
+    leader_read: LeaderRead,
+) -> Result<T, E>
+where
+    StaleRead: FnOnce() -> StaleFuture,
+    StaleFuture: std::future::Future<Output = Result<T, E>>,
+    FollowerRead: FnOnce() -> FollowerFuture,
+    FollowerFuture: std::future::Future<Output = Result<T, E>>,
+    LeaderRead: FnOnce() -> LeaderFuture,
+    LeaderFuture: std::future::Future<Output = Result<T, E>>,
+{
+    match read_mode {
+        crate::raft::rpc::ReadMode::Stale => stale_read().await,
+        crate::raft::rpc::ReadMode::Follower => follower_read().await,
+        crate::raft::rpc::ReadMode::Linearizable => leader_read().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::raft::rpc::ReadMode;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn follower_reads_do_not_fallback_to_leader_reads() {
+        let leader_called = Arc::new(AtomicBool::new(false));
+        let leader_called_clone = leader_called.clone();
+
+        let result = execute_read_mode(
+            ReadMode::Follower,
+            || async { Ok::<Option<Vec<u8>>, &'static str>(Some(b"stale".to_vec())) },
+            || async { Err::<Option<Vec<u8>>, &'static str>("follower failed") },
+            move || {
+                leader_called_clone.store(true, Ordering::SeqCst);
+                async { Ok::<Option<Vec<u8>>, &'static str>(Some(b"leader".to_vec())) }
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(
+            !leader_called.load(Ordering::SeqCst),
+            "leader fallback should not be invoked for follower reads"
+        );
     }
 }
 
@@ -112,6 +246,7 @@ impl<S: prkdb_schema::SchemaStorage + 'static> PrkDbServiceTrait for PrkDbGrpcSe
                 } else {
                     0
                 };
+                self.publish_watch_event(WatchEventType::Put, &req.key, req.value);
 
                 Ok(Response::new(PutResponse {
                     success: true,
@@ -125,31 +260,15 @@ impl<S: prkdb_schema::SchemaStorage + 'static> PrkDbServiceTrait for PrkDbGrpcSe
     async fn get(&self, request: Request<GetRequest>) -> Result<Response<GetResponse>, Status> {
         let req = request.into_inner();
 
-        // Handle different read modes
-        use crate::raft::rpc::ReadMode;
         let read_mode = req.read_mode();
 
-        let result = match read_mode {
-            ReadMode::Stale => {
-                // Direct local read - fastest but may be stale
-                self.db.get_local(&req.key).await
-            }
-            ReadMode::Follower => {
-                // Follower read: get ReadIndex from leader, wait, then local read
-                match self.db.get_follower_read(&req.key).await {
-                    Ok(v) => Ok(v),
-                    Err(e) => {
-                        // Fall back to leader read if follower read fails
-                        tracing::debug!("Follower read failed, falling back to leader: {}", e);
-                        self.db.get(&req.key).await
-                    }
-                }
-            }
-            ReadMode::Linearizable => {
-                // Default: linearizable read from leader
-                self.db.get(&req.key).await
-            }
-        };
+        let result = execute_read_mode(
+            read_mode,
+            || self.db.get_local(&req.key),
+            || self.db.get_follower_read(&req.key),
+            || self.db.get(&req.key),
+        )
+        .await;
 
         match result {
             Ok(Some(value)) => Ok(Response::new(GetResponse {
@@ -176,6 +295,7 @@ impl<S: prkdb_schema::SchemaStorage + 'static> PrkDbServiceTrait for PrkDbGrpcSe
             .delete(key)
             .await
             .map_err(|e| Status::internal(format!("Delete failed: {}", e)))?;
+        self.publish_watch_event(WatchEventType::Delete, key, Vec::new());
 
         Ok(Response::new(DeleteResponse { success: true }))
     }
@@ -213,6 +333,8 @@ impl<S: prkdb_schema::SchemaStorage + 'static> PrkDbServiceTrait for PrkDbGrpcSe
 
         if let Some(pm) = &self.db.partition_manager {
             let topology = pm.get_topology().await;
+            let cluster_config = pm.get_cluster_config().await;
+            let node_addresses = self.configured_node_addresses(cluster_config.as_ref());
 
             for (partition_id, leader_id, replicas) in topology {
                 partitions.push(PartitionInfo {
@@ -224,34 +346,27 @@ impl<S: prkdb_schema::SchemaStorage + 'static> PrkDbServiceTrait for PrkDbGrpcSe
                 // Collect unique nodes
                 for node_id in replicas {
                     if seen_nodes.insert(node_id) {
-                        // In a real system, we'd look up the address from the cluster config
-                        // For this prototype, we'll construct it based on convention
-                        // Node 1 -> 127.0.0.1:8081, Node 2 -> 127.0.0.1:8082, etc.
-                        // This is a hack for the demo, but sufficient for the benchmark
-                        let port = 50050 + node_id as u32;
-                        let address = format!("http://127.0.0.1:{}", port);
+                        let address = self.advertised_address_for_node(node_id, &node_addresses)?;
 
                         nodes.push(NodeInfo { node_id, address });
                     }
                 }
             }
         } else {
-            // Single node mode / No partition manager
-            // Return a default node so clients can connect
-            let address = self
-                .public_address
-                .clone()
-                .unwrap_or_else(|| "http://127.0.0.1:50051".to_string());
+            let address = self.advertised_address_for_node(
+                self.local_node_id,
+                &self.configured_node_addresses(None),
+            )?;
 
             nodes.push(NodeInfo {
-                node_id: 1,
+                node_id: self.local_node_id,
                 address,
             });
             // We can also return a default partition 0 that this node leads
             partitions.push(PartitionInfo {
                 partition_id: 0,
-                leader_id: 1,
-                replicas: vec![1],
+                leader_id: self.local_node_id,
+                replicas: vec![self.local_node_id],
             });
         }
 
@@ -275,7 +390,10 @@ impl<S: prkdb_schema::SchemaStorage + 'static> PrkDbServiceTrait for PrkDbGrpcSe
         // Sequential processing is fastest - Raft serializes anyway
         for pair in req.pairs {
             match self.db.put(&pair.key, &pair.value).await {
-                Ok(_) => successful_count += 1,
+                Ok(_) => {
+                    successful_count += 1;
+                    self.publish_watch_event(WatchEventType::Put, &pair.key, pair.value);
+                }
                 Err(e) => {
                     failed_count += 1;
                     errors.push(format!("Put failed: {}", e));
@@ -811,16 +929,7 @@ impl<S: prkdb_schema::SchemaStorage + 'static> PrkDbServiceTrait for PrkDbGrpcSe
         let prefix = req.key_prefix;
 
         tracing::info!("Watch: Client subscribed with prefix len={}", prefix.len());
-
-        // Create a broadcast channel for this subscription
-        // In a real implementation, we'd subscribe to a global event bus
-        let (tx, rx) = broadcast::channel::<WatchEvent>(1024);
-
-        // Store the sender somewhere accessible to put/delete operations
-        // For now, we'll just return an empty stream as a placeholder
-        // TODO: Integrate with actual write path to publish events
-
-        let _ = tx; // Suppress unused warning
+        let rx = self.watch_tx.subscribe();
 
         let stream = BroadcastStream::new(rx).filter_map(move |result| {
             match result {
@@ -968,6 +1077,7 @@ impl<S: prkdb_schema::SchemaStorage + 'static> PrkDbServiceTrait for PrkDbGrpcSe
         request: Request<RegisterSchemaRequest>,
     ) -> Result<Response<RegisterSchemaResponse>, Status> {
         let req = request.into_inner();
+        self.validate_admin_token(&req.admin_token)?;
 
         tracing::info!(
             "RegisterSchema: collection='{}', compatibility={:?}",
@@ -1067,7 +1177,8 @@ impl<S: prkdb_schema::SchemaStorage + 'static> PrkDbServiceTrait for PrkDbGrpcSe
         &self,
         request: Request<ListSchemasRequest>,
     ) -> Result<Response<ListSchemasResponse>, Status> {
-        let _req = request.into_inner();
+        let req = request.into_inner();
+        self.validate_admin_token(&req.admin_token)?;
 
         tracing::debug!("ListSchemas: listing all schemas");
 
@@ -1142,15 +1253,20 @@ impl<S: prkdb_schema::SchemaStorage + 'static> PrkDbServiceTrait for PrkDbGrpcSe
 }
 
 impl<S: prkdb_schema::SchemaStorage> PrkDbGrpcService<S> {
+    fn publish_watch_event(&self, event_type: WatchEventType, key: &[u8], value: Vec<u8>) {
+        let offset = self.watch_sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        let event = WatchEvent {
+            event_type: event_type as i32,
+            key: key.to_vec(),
+            value,
+            offset,
+            timestamp: chrono::Utc::now().timestamp_millis() as u64,
+        };
+        let _ = self.watch_tx.send(event);
+    }
+
     #[allow(clippy::result_large_err)]
     fn validate_admin_token(&self, token: &str) -> Result<(), Status> {
-        // Debug trace for token validation
-        tracing::debug!(
-            "validate_admin_token: received='{}', expected='{}'",
-            token,
-            self.admin_token
-        );
-
         if self.admin_token.is_empty() {
             // If no token configured on server, deny all admin ops
             return Err(Status::unauthenticated(

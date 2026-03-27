@@ -53,6 +53,27 @@ where
 }
 
 impl<C: Collection> CollectionHandle<C> {
+    fn ensure_event_sender(&self) -> broadcast::Sender<ChangeEvent<C>>
+    where
+        C: Clone + Send + Sync + 'static,
+    {
+        const WATCH_CHANNEL_CAPACITY: usize = 1024;
+
+        if let Some(sender) = self.db.event_bus.get(&TypeId::of::<C>()).and_then(|entry| {
+            entry
+                .downcast_ref::<broadcast::Sender<ChangeEvent<C>>>()
+                .cloned()
+        }) {
+            return sender;
+        }
+
+        let (sender, _) = broadcast::channel::<ChangeEvent<C>>(WATCH_CHANNEL_CAPACITY);
+        self.db
+            .event_bus
+            .insert(TypeId::of::<C>(), Box::new(sender.clone()));
+        sender
+    }
+
     fn apply_namespace(&self, key: Vec<u8>) -> Vec<u8> {
         if let Some(ns) = &self.db.namespace {
             let mut out = Vec::with_capacity(ns.len() + 1 + key.len());
@@ -621,15 +642,7 @@ where
     }
 
     pub fn watch(&self) -> broadcast::Receiver<ChangeEvent<C>> {
-        self.db
-            .event_bus
-            .get(&TypeId::of::<C>())
-            .and_then(|s| {
-                s.downcast_ref::<broadcast::Sender<ChangeEvent<C>>>()
-                    .cloned()
-            })
-            .expect("Collection must be registered to be watched.")
-            .subscribe()
+        self.ensure_event_sender().subscribe()
     }
 
     /// Iterate over keys with the collection prefix; yields deserialized items.

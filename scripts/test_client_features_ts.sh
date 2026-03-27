@@ -1,11 +1,21 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 # Configuration
-SERVER_PORT=50056
-GRPC_PORT=50053
 WORK_DIR="/tmp/prkdb_client_features_ts"
 PRKDB_CMD="cargo run --quiet -p prkdb-cli --bin prkdb-cli --"
+ADMIN_TOKEN="client_features_ts_test_token"
+DATABASE_PATH="$WORK_DIR/db"
+
+reserve_port() {
+    python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
+}
+
+SERVER_PORT=$(reserve_port)
+GRPC_PORT=$(reserve_port)
+while [ "$SERVER_PORT" = "$GRPC_PORT" ]; do
+    GRPC_PORT=$(reserve_port)
+done
 
 # Cleanup function
 cleanup() {
@@ -42,7 +52,8 @@ cargo build -p prkdb-cli
 
 # Start server
 echo "🚀 Starting server on port $SERVER_PORT..."
-$PRKDB_CMD --verbose serve --port $SERVER_PORT --grpc-port $GRPC_PORT > "$WORK_DIR/server.log" 2>&1 &
+PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" \
+    $PRKDB_CMD --database "$DATABASE_PATH" --verbose serve --port $SERVER_PORT --grpc-port $GRPC_PORT > "$WORK_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 echo $SERVER_PID > "$WORK_DIR/server.pid"
 echo "Server PID: $SERVER_PID"
@@ -50,7 +61,8 @@ echo "Server PID: $SERVER_PID"
 # Wait for server
 echo "⏳ Waiting for server..."
 for i in {1..30}; do
-    if curl -s "http://127.0.0.1:$SERVER_PORT/health" > /dev/null; then
+    if curl -sf "http://127.0.0.1:$SERVER_PORT/health" > /dev/null 2>&1 \
+        && PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" $PRKDB_CMD schema --server "http://127.0.0.1:$GRPC_PORT" list > /dev/null 2>&1; then
         echo "✅ Server is ready!"
         break
     fi
@@ -81,7 +93,7 @@ protoc --include_imports --descriptor_set_out="$WORK_DIR/user.desc" --proto_path
 
 # Register Schema
 echo "🚀 Registering Schema..."
-$PRKDB_CMD schema --server "http://127.0.0.1:$GRPC_PORT" register --collection users --proto "$WORK_DIR/user.desc"
+PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" $PRKDB_CMD schema --server "http://127.0.0.1:$GRPC_PORT" register --collection users --proto "$WORK_DIR/user.desc"
 
 # Insert Data via CLI (since HTTP API is read-only)
 echo "💾 Inserting Test Data..."
@@ -92,7 +104,7 @@ $PRKDB_CMD --server "http://127.0.0.1:$GRPC_PORT" collection put users '{"id": "
 
 # Generate TypeScript Client
 echo "⚙️  Generating TypeScript Client..."
-$PRKDB_CMD codegen \
+PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" $PRKDB_CMD codegen \
     --server "http://127.0.0.1:$GRPC_PORT" \
     --collection "users" \
     --lang typescript \

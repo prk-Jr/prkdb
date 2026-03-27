@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -14,11 +14,22 @@ cargo build --release -p prkdb-cli
 
 # Variables
 PRKDB_BIN="./target/release/prkdb-cli"
-HTTP_PORT=50052
-GRPC_PORT=50053
+WORK_DIR=$(mktemp -d)
+ADMIN_TOKEN="local_benchmark_token"
+DATABASE_PATH="$WORK_DIR/db"
+
+reserve_port() {
+    python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
+}
+
+HTTP_PORT=$(reserve_port)
+GRPC_PORT=$(reserve_port)
+while [ "$HTTP_PORT" = "$GRPC_PORT" ]; do
+    GRPC_PORT=$(reserve_port)
+done
+
 SERVER_HTTP_URL="http://127.0.0.1:$HTTP_PORT"
 SERVER_GRPC_URL="http://127.0.0.1:$GRPC_PORT"
-WORK_DIR=$(mktemp -d)
 
 # Cleanup function
 cleanup() {
@@ -37,16 +48,17 @@ trap cleanup EXIT
 
 # 2. Start Server
 echo -e "${GREEN}🔥 Starting PrkDB Server (HTTP: $HTTP_PORT, gRPC: $GRPC_PORT)...${NC}"
-$PRKDB_BIN serve --port $HTTP_PORT --grpc-port $GRPC_PORT > "$WORK_DIR/server.log" 2>&1 &
+PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" \
+    $PRKDB_BIN --database "$DATABASE_PATH" serve --port $HTTP_PORT --grpc-port $GRPC_PORT > "$WORK_DIR/server.log" 2>&1 &
 SERVER_PID=$!
-sleep 5 # Wait for startup
 
-# Check if server is running
-if ! ps -p $SERVER_PID > /dev/null; then
-    echo -e "${RED}❌ Server failed to start! Check logs:${NC}"
-    cat "$WORK_DIR/server.log"
-    exit 1
-fi
+for _ in {1..40}; do
+    if curl -sf "${SERVER_HTTP_URL}/health" >/dev/null 2>&1 \
+        && PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" "$PRKDB_BIN" schema --server "$SERVER_GRPC_URL" list >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
 
 # 3. Define Schema
 echo -e "${GREEN}📜 Defining Schema...${NC}"
@@ -70,17 +82,17 @@ protoc --descriptor_set_out=bench.desc --include_imports bench.proto
 
 echo -e "${GREEN}📝 Registering Schema...${NC}"
 # Schema registration uses gRPC
-$PRKDB_BIN schema --server $SERVER_GRPC_URL register --collection benchmark --proto bench.desc
+PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" "$PRKDB_BIN" schema --server $SERVER_GRPC_URL register --collection benchmark --proto bench.desc
 
 # 4. Generate Clients
 echo -e "${GREEN}🛠️ Generating Clients...${NC}"
 mkdir -p benches/client_py benches/client_ts
 
 # Python (Uses gRPC to fetch schema)
-$PRKDB_BIN codegen --server $SERVER_GRPC_URL --lang python --out benches/client_py --collection benchmark
+PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" "$PRKDB_BIN" codegen --server $SERVER_GRPC_URL --lang python --out benches/client_py --collection benchmark
 
 # TypeScript (Uses gRPC to fetch schema)
-$PRKDB_BIN codegen --server $SERVER_GRPC_URL --lang typescript --out benches/client_ts --collection benchmark
+PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" "$PRKDB_BIN" codegen --server $SERVER_GRPC_URL --lang typescript --out benches/client_ts --collection benchmark
 
 # 5. Run Python Benchmark
 echo -e "${GREEN}🐍 Running Python Benchmark...${NC}"

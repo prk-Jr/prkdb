@@ -1,11 +1,21 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 # Configuration
-SERVER_PORT=50055
-GRPC_PORT=50052
 WORK_DIR="/tmp/prkdb_client_features"
 PRKDB_BIN="./target/debug/prkdb-cli"
+ADMIN_TOKEN="client_features_test_token"
+DATABASE_PATH="$WORK_DIR/db"
+
+reserve_port() {
+    python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
+}
+
+SERVER_PORT=$(reserve_port)
+GRPC_PORT=$(reserve_port)
+while [ "$SERVER_PORT" = "$GRPC_PORT" ]; do
+    GRPC_PORT=$(reserve_port)
+done
 
 mkdir -p "$WORK_DIR"
 rm -rf "$WORK_DIR"/*
@@ -15,7 +25,8 @@ cargo build -p prkdb-cli
 
 echo "🚀 Starting server on port $SERVER_PORT..."
 # Start server in background
-$PRKDB_BIN --verbose serve --port $SERVER_PORT --grpc-port $GRPC_PORT > "$WORK_DIR/server.log" 2>&1 &
+PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" \
+    $PRKDB_BIN --database "$DATABASE_PATH" --verbose serve --port $SERVER_PORT --grpc-port $GRPC_PORT > "$WORK_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 echo "Server PID: $SERVER_PID"
 
@@ -23,12 +34,17 @@ cleanup() {
     echo "🧹 Cleaning up..."
     kill $SERVER_PID || true
     wait $SERVER_PID || true
-    rm -rf prkdb.db # Cleanup default db if created
 }
 trap cleanup EXIT
 
 echo "⏳ Waiting for server..."
-sleep 2
+for _ in {1..40}; do
+    if curl -sf "http://127.0.0.1:$SERVER_PORT/health" > /dev/null 2>&1 \
+        && PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" "$PRKDB_BIN" schema --server "http://127.0.0.1:$GRPC_PORT" list >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
 
 # Define Schema
 echo "📝 Defining Schema..."
@@ -49,7 +65,7 @@ protoc --include_imports --descriptor_set_out="$WORK_DIR/user.desc" --proto_path
 
 # Register Schema
 echo "🚀 Registering Schema..."
-$PRKDB_BIN schema --server "http://127.0.0.1:$GRPC_PORT" register --collection users --proto "$WORK_DIR/user.desc"
+PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" "$PRKDB_BIN" schema --server "http://127.0.0.1:$GRPC_PORT" register --collection users --proto "$WORK_DIR/user.desc"
 
 # Insert Data via CLI (since Python client is read-only HTTP for now)
 echo "💾 Inserting Test Data..."
@@ -59,7 +75,7 @@ $PRKDB_BIN --server "http://127.0.0.1:$GRPC_PORT" collection put users '{"id": "
 
 # Generate Client
 echo "⚙️  Generating Python Client..."
-$PRKDB_BIN codegen \
+PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" "$PRKDB_BIN" codegen \
     --server "http://127.0.0.1:$GRPC_PORT" \
     --lang python \
     --out "$WORK_DIR/client_py" \

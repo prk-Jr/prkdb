@@ -4,22 +4,17 @@ PrkDB uses advanced partitioning strategies to distribute data across the cluste
 
 ## Partitioning Strategies
 
-When initializing a new `PrkDb` instance, you can choose between two main partitioning strategies:
+PrkDB exposes two core partitioning primitives internally and in tests/examples:
 
 ### 1. Consistent Hashing (Default)
 Consistent Hashing minimizes data movement when nodes are added or removed from the cluster. It distributes data using a hash ring (often with virtual nodes to ensure even distribution).
 
 ```rust
-use prkdb::raft::{ConsistentHashRing, PartitionStrategy};
+use prkdb::raft::ConsistentHashRing;
 
 // Create a ring with 3 partitions and 150 virtual nodes per partition
 let ring = ConsistentHashRing::new(3, 150);
-
-let db = PrkDb::builder()
-    .with_data_dir("./data")
-    .with_partition_strategy(Box::new(ring))
-    .build()
-    .unwrap();
+let partition = ring.get_partition(b"user:123");
 ```
 **Best for**: Highly distributed workloads where keys are accessed uniformly and cluster topology might change.
 
@@ -27,16 +22,11 @@ let db = PrkDb::builder()
 Range Partitioning assigns contiguous blocks of keys to specific partitions. This strategy is extremely efficient for time-series data or when you frequently perform **range queries** (e.g., fetching all users with an age between 18 and 30).
 
 ```rust
-use prkdb::raft::{RangePartitioner, PartitionStrategy};
+use prkdb::raft::RangePartitioner;
 
 // Create a partitioner with 3 initial partitions
-let mut partitioner = RangePartitioner::new(3);
-
-let db = PrkDb::builder()
-    .with_data_dir("./data")
-    .with_partition_strategy(Box::new(partitioner))
-    .build()
-    .unwrap();
+let partitioner = RangePartitioner::new(3);
+let partition = partitioner.get_partition(b"user:123");
 ```
 **Best for**: Ordered access patterns and heavy range-scan workloads.
 
@@ -47,8 +37,8 @@ Sometimes, a specific subset of your data becomes significantly more popular tha
 When using the `RangePartitioner`, you can dynamically split a busy partition to distribute the load:
 
 ```rust
-// Split partition 0 at the key "middle_key"
-partitioner.split_partition(0, b"middle_key").unwrap();
+// Split the current range at "middle_key" and return the new partition id
+let new_partition = partitioner.split_partition(b"middle_key".to_vec());
 ```
 
 ## Client-Side Routing
@@ -59,5 +49,5 @@ The client fetches the partition map from the cluster and automatically routes p
 
 ```rust
 // The client knows which node holds the partition for "user:123"
-let user = client.get("user:123").await?; 
+let user = client.get(b"user:123").await?;
 ```

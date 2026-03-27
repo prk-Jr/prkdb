@@ -125,6 +125,29 @@ async fn test_get_non_existent_item_returns_none() {
 }
 
 #[tokio::test]
+async fn test_watch_initializes_channel_for_unregistered_collection() {
+    let db = PrkDb::builder()
+        .with_storage(InMemoryAdapter::new())
+        .build()
+        .unwrap();
+    let users = db.collection::<User>();
+    let mut watcher = users.watch();
+    let user = User {
+        id: 7,
+        name: "Grace".to_string(),
+    };
+
+    users.put(user.clone()).await.unwrap();
+
+    let event = timeout(Duration::from_secs(1), watcher.recv())
+        .await
+        .expect("watch should not time out")
+        .expect("watch channel should be active");
+
+    assert_eq!(event, ChangeEvent::Put(user));
+}
+
+#[tokio::test]
 async fn test_put_and_get() {
     let db = build_test_db();
     let users = db.collection::<User>();

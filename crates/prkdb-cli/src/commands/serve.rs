@@ -4,23 +4,32 @@ use axum::{
         ws::{Message, WebSocket},
         Path, Query, State, WebSocketUpgrade,
     },
-    http::StatusCode,
+    http::{
+        header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE},
+        HeaderMap, Method, StatusCode,
+    },
     response::IntoResponse,
-    routing::{delete, get},
+    routing::get,
     Json, Router,
 };
 use clap::Args;
+use prkdb_types::storage::StorageAdapter;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::sync::broadcast;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::commands::collection::{self};
 use crate::commands::CollectionCommands;
 use crate::database_manager;
-use crate::Commands;
+use crate::storage_keys::{
+    is_internal_metadata_key, logical_collection_name, parse_storage_key, ParsedStorageKey,
+};
+
+const HTTP_BROADCAST_CHANNEL_CAPACITY: usize = 100;
+const WEBSOCKET_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 #[derive(Args, Clone)]
 pub struct ServeArgs {
@@ -55,13 +64,31 @@ pub struct ServeArgs {
     /// Peer node addresses (node_id -> gRPC SocketAddr), set programmatically
     #[arg(skip)]
     pub peers: Vec<(u64, SocketAddr)>,
+
+    /// Public gRPC address advertised to smart clients and metadata consumers
+    #[arg(skip)]
+    pub advertised_grpc_address: Option<String>,
+
+    /// Public HTTP address advertised to peer nodes for write forwarding
+    #[arg(skip)]
+    pub advertised_http_address: Option<String>,
+
+    /// Explicit peer gRPC addresses advertised to smart clients (node_id -> URL)
+    #[arg(skip)]
+    pub peer_advertised_grpc_addresses: Option<String>,
+
+    /// Explicit peer HTTP base URLs used for leader forwarding (node_id -> URL)
+    #[arg(skip)]
+    pub peer_http_addresses: Option<String>,
 }
 
 #[derive(Clone)]
 struct AppState {
     _database_path: std::path::PathBuf,
+    node_id: u64,
     websocket_enabled: bool,
     prometheus_enabled: bool,
+    websocket_auth_token: Option<String>,
     #[allow(dead_code)] // Used for future broadcast features
     broadcast_tx: broadcast::Sender<String>,
     /// Maps node_id -> HTTP base URL (e.g., 2 -> "http://127.0.0.1:8082")
@@ -87,8 +114,14 @@ struct ApiResponse<T> {
 #[derive(Deserialize)]
 struct WsParams {
     from_offset: Option<u64>,
-    #[allow(dead_code)] // Reserved for future authentication
-    token: Option<String>,
+}
+
+struct CollectionRecord {
+    key: Vec<u8>,
+    raw_collection: String,
+    logical_collection: String,
+    id_hint: Option<String>,
+    value: Vec<u8>,
 }
 
 impl<T> ApiResponse<T> {
@@ -122,6 +155,7 @@ impl<T> ApiResponse<T> {
 
 pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
+    let node_id_label = args.id.to_string();
 
     println!("🚀 Starting PrkDB server on http://{}", addr);
 
@@ -138,24 +172,53 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     }
 
     // Create broadcast channel for WebSocket updates
-    let (broadcast_tx, _) = broadcast::channel::<String>(100);
+    let (broadcast_tx, _) = broadcast::channel::<String>(HTTP_BROADCAST_CHANNEL_CAPACITY);
+    let websocket_auth_token = std::env::var("PRKDB_WS_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty());
 
-    // Build peer HTTP address map
-    // Derive each peer's HTTP port using the offset: http_port = grpc_port - (my_grpc_port - my_http_port)
-    let port_offset = args.grpc_port as i32 - args.port as i32;
-    let mut peer_http_addrs = HashMap::new();
-    for (node_id, grpc_addr) in &args.peers {
-        let peer_http_port = (grpc_addr.port() as i32 - port_offset) as u16;
-        let peer_http_url = format!("http://{}:{}", grpc_addr.ip(), peer_http_port);
-        peer_http_addrs.insert(*node_id, peer_http_url);
+    if args.prometheus {
+        prkdb::prometheus_metrics::init_prometheus_metrics();
+        prkdb::prometheus_metrics::SERVER_UP
+            .with_label_values(&[&node_id_label])
+            .set(1.0);
+    }
+
+    let peer_grpc_overrides =
+        parse_node_address_overrides(args.peer_advertised_grpc_addresses.as_deref())?;
+    let peer_http_overrides = parse_node_address_overrides(args.peer_http_addresses.as_deref())?;
+    let advertised_http_address = resolve_advertised_http_address(
+        &args.host,
+        args.port,
+        args.advertised_http_address.as_deref(),
+    )?;
+    let peer_http_addrs = build_peer_http_addresses(
+        args.id,
+        advertised_http_address.as_deref(),
+        &args.peers,
+        &peer_http_overrides,
+    )?;
+    let missing_peer_http_targets: Vec<u64> = args
+        .peers
+        .iter()
+        .map(|(node_id, _)| *node_id)
+        .filter(|node_id| !peer_http_addrs.contains_key(node_id))
+        .collect();
+    if !missing_peer_http_targets.is_empty() {
+        tracing::warn!(
+            "HTTP forwarding targets were not configured for peer nodes {:?}; follower write forwarding will be unavailable for those leaders",
+            missing_peer_http_targets
+        );
     }
     tracing::info!("Peer HTTP addresses: {:?}", peer_http_addrs);
 
     // Create app state
     let state = AppState {
-        _database_path: std::path::PathBuf::from("./prkdb.db"), // Default path
+        _database_path: std::path::PathBuf::from("./prkdb.db"),
+        node_id: args.id,
         websocket_enabled: args.websockets,
         prometheus_enabled: args.prometheus,
+        websocket_auth_token,
         broadcast_tx: broadcast_tx.clone(),
         peer_http_addrs,
     };
@@ -172,7 +235,7 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         )
         .route(
             "/collections/:name/data/:id",
-            delete(delete_collection_data_handler),
+            get(get_collection_item_handler).delete(delete_collection_data_handler),
         )
         .route(
             "/collections/:name/count",
@@ -198,12 +261,7 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
 
     // Add CORS middleware if enabled
     let app = if args.cors {
-        app.layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
+        app.layer(build_cors_layer(&args.host, args.port)?)
     } else {
         app
     };
@@ -233,10 +291,23 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     let grpc_addr: SocketAddr = grpc_addr_str
         .parse()
         .map_err(|e| anyhow::anyhow!("Failed to parse gRPC address '{}': {}", grpc_addr_str, e))?;
+    let advertised_grpc_address = resolve_advertised_grpc_address(
+        &args.host,
+        grpc_port,
+        args.advertised_grpc_address.as_deref(),
+    )?;
+    let advertised_node_addresses = build_advertised_node_addresses(
+        args.id,
+        &advertised_grpc_address,
+        &args.peers,
+        &peer_grpc_overrides,
+    );
 
     // Get DB instance for gRPC service
     if let Ok(db) = crate::database_manager::get_db_instance().await {
         println!("🚀 Starting PrkDB gRPC server on {}", grpc_addr);
+        let schema_storage_path =
+            crate::database_manager::try_get_database_manager()?.schema_storage_path();
 
         // Start Multi-Raft partitions (background tasks)
         // Skip serving Partition 0's Raft server here, as we'll multiplex it on the main gRPC server below
@@ -254,8 +325,15 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
 
             use std::env;
             let admin_token = env::var("PRKDB_ADMIN_TOKEN").unwrap_or_default();
-            let service = PrkDbGrpcService::new(Arc::new(db.clone()), admin_token)
-                .with_public_address(format!("http://{}", grpc_addr));
+            let service = PrkDbGrpcService::with_schema_storage_path(
+                Arc::new(db.clone()),
+                admin_token,
+                schema_storage_path,
+            )
+            .await
+            .with_local_node_id(args.id)
+            .with_public_address(advertised_grpc_address)
+            .with_advertised_node_addresses(advertised_node_addresses);
 
             let mut builder = Server::builder();
 
@@ -281,6 +359,12 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     axum::serve(listener, app.into_make_service()).await?;
+
+    if args.prometheus {
+        prkdb::prometheus_metrics::SERVER_UP
+            .with_label_values(&[&node_id_label])
+            .set(0.0);
+    }
 
     println!("\n👋 Server shutting down...");
     Ok(())
@@ -325,19 +409,27 @@ async fn root_handler() -> impl IntoResponse {
 }
 
 async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
-    // Try to access the database to check health
-    match database_manager::get_database_manager()
-        .scan_storage()
-        .await
-    {
-        Ok(_) => Json(json!({
-            "status": "healthy",
-            "database": "connected",
-            "websockets": state.websocket_enabled,
-            "metrics": state.prometheus_enabled,
-            "timestamp": chrono::Utc::now().to_rfc3339()
-        }))
-        .into_response(),
+    match crate::database_manager::get_db_instance().await {
+        Ok(db) => {
+            let (partitions, leaders_ready) = if let Some(pm) = &db.partition_manager {
+                let stats = pm.get_statistics().await;
+                (stats.total_partitions, stats.leaders_count)
+            } else {
+                (1, 1)
+            };
+
+            Json(json!({
+                "status": "healthy",
+                "database": "connected",
+                "node_id": state.node_id,
+                "websockets": state.websocket_enabled,
+                "metrics": state.prometheus_enabled,
+                "partitions": partitions,
+                "leaders_ready": leaders_ready,
+                "timestamp": chrono::Utc::now().to_rfc3339()
+            }))
+            .into_response()
+        }
         Err(e) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
@@ -381,15 +473,6 @@ async fn get_collection_data_handler(
     Path(name): Path<String>,
     Query(params): Query<DataQuery>,
 ) -> impl IntoResponse {
-    println!(
-        "DEBUG: get_collection_data_handler called for collection: '{}'",
-        name
-    );
-    println!(
-        "DEBUG: params: limit={:?}, offset={:?}, filter={:?}, sort={:?}",
-        params.limit, params.offset, params.filter, params.sort
-    );
-
     let limit = params.limit.unwrap_or(20);
     let offset = params.offset.unwrap_or(0);
 
@@ -409,6 +492,118 @@ async fn get_collection_data_handler(
         )
             .into_response(),
     }
+}
+
+async fn get_collection_item_handler(
+    Path((name, id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let db = match crate::database_manager::get_db_instance().await {
+        Ok(db) => db,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<Value>::error(e.to_string())),
+            )
+                .into_response()
+        }
+    };
+
+    if db.partition_manager.is_none() {
+        let direct_key = format!("{}:{}", name, id);
+        match db.get_local(direct_key.as_bytes()).await {
+            Ok(Some(bytes)) => {
+                return match decode_stored_value(&bytes) {
+                    Ok(value) => Json(ApiResponse::success(value)).into_response(),
+                    Err(e) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ApiResponse::<Value>::error(e.to_string())),
+                    )
+                        .into_response(),
+                };
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResponse::<Value>::error(e.to_string())),
+                )
+                    .into_response()
+            }
+        }
+    }
+
+    let records = match scan_collection_records(&name).await {
+        Ok(records) => records,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<Value>::error(e.to_string())),
+            )
+                .into_response()
+        }
+    };
+
+    for record in records {
+        let matches_id = if record.id_hint.as_deref() == Some(id.as_str()) {
+            true
+        } else {
+            match decode_stored_value(&record.value) {
+                Ok(value) => json_value_matches_id(&value, &id),
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ApiResponse::<Value>::error(e.to_string())),
+                    )
+                        .into_response()
+                }
+            }
+        };
+
+        if !matches_id {
+            continue;
+        }
+
+        let bytes = if db.partition_manager.is_some() {
+            match db.get_follower_read(&record.key).await {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => continue,
+                Err(e) => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(ApiResponse::<Value>::error(format!(
+                            "Consistent collection read failed: {}",
+                            e
+                        ))),
+                    )
+                        .into_response()
+                }
+            }
+        } else {
+            record.value
+        };
+
+        return match decode_stored_value(&bytes) {
+            Ok(value) => Json(ApiResponse::success(enrich_collection_value(
+                value,
+                record.id_hint.as_deref(),
+            )))
+            .into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<Value>::error(e.to_string())),
+            )
+                .into_response(),
+        };
+    }
+
+    (
+        StatusCode::NOT_FOUND,
+        Json(ApiResponse::<Value>::error(format!(
+            "Record '{}' not found in collection '{}'",
+            id, name
+        ))),
+    )
+        .into_response()
 }
 
 async fn put_collection_data_handler(
@@ -579,6 +774,119 @@ fn parse_leader_id(err: &str) -> Option<u64> {
     None
 }
 
+fn resolve_advertised_grpc_address(
+    host: &str,
+    grpc_port: u16,
+    explicit_address: Option<&str>,
+) -> Result<String> {
+    if let Some(address) = explicit_address {
+        return normalize_http_address(address);
+    }
+
+    if matches!(host, "0.0.0.0" | "::" | "[::]") {
+        anyhow::bail!(
+            "A public gRPC address must be provided with --advertised-grpc-address or PRKDB_ADVERTISED_GRPC_ADDR when binding to {}",
+            host
+        );
+    }
+
+    Ok(format!("http://{}:{}", host, grpc_port))
+}
+
+fn normalize_http_address(address: &str) -> Result<String> {
+    if address.starts_with("http://") || address.starts_with("https://") {
+        return Ok(address.to_string());
+    }
+
+    Ok(format!("http://{}", address))
+}
+
+fn resolve_advertised_http_address(
+    host: &str,
+    port: u16,
+    explicit_address: Option<&str>,
+) -> Result<Option<String>> {
+    if let Some(address) = explicit_address {
+        return normalize_http_address(address).map(Some);
+    }
+
+    if matches!(host, "0.0.0.0" | "::" | "[::]") {
+        return Ok(None);
+    }
+
+    Ok(Some(format!("http://{}:{}", host, port)))
+}
+
+fn parse_node_address_overrides(value: Option<&str>) -> Result<HashMap<u64, String>> {
+    let mut overrides = HashMap::new();
+
+    let Some(value) = value else {
+        return Ok(overrides);
+    };
+
+    for entry in value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let (node_id_str, address) = entry
+            .split_once('=')
+            .or_else(|| entry.split_once('@'))
+            .ok_or_else(|| anyhow::anyhow!("Invalid node address override '{entry}'"))?;
+        let node_id = node_id_str
+            .parse::<u64>()
+            .map_err(|_| anyhow::anyhow!("Invalid node ID in override '{entry}'"))?;
+        let normalized = normalize_http_address(address)?;
+
+        if overrides.insert(node_id, normalized).is_some() {
+            anyhow::bail!("Duplicate node address override for node {node_id}");
+        }
+    }
+
+    Ok(overrides)
+}
+
+fn build_advertised_node_addresses(
+    local_node_id: u64,
+    local_public_address: &str,
+    peers: &[(u64, SocketAddr)],
+    overrides: &HashMap<u64, String>,
+) -> HashMap<u64, String> {
+    let mut node_addresses: HashMap<u64, String> = peers
+        .iter()
+        .filter_map(|(node_id, address)| {
+            overrides
+                .get(node_id)
+                .cloned()
+                .or_else(|| (!address.ip().is_unspecified()).then(|| format!("http://{}", address)))
+                .map(|value| (*node_id, value))
+        })
+        .collect();
+    node_addresses.insert(local_node_id, local_public_address.to_string());
+    node_addresses
+}
+
+fn build_peer_http_addresses(
+    local_node_id: u64,
+    local_public_address: Option<&str>,
+    peers: &[(u64, SocketAddr)],
+    overrides: &HashMap<u64, String>,
+) -> Result<HashMap<u64, String>> {
+    let mut node_addresses = HashMap::new();
+
+    if let Some(address) = local_public_address {
+        node_addresses.insert(local_node_id, normalize_http_address(address)?);
+    }
+
+    for (node_id, _) in peers {
+        if let Some(address) = overrides.get(node_id) {
+            node_addresses.insert(*node_id, address.clone());
+        }
+    }
+
+    Ok(node_addresses)
+}
+
 async fn get_collection_count_handler(Path(name): Path<String>) -> impl IntoResponse {
     match execute_collection_command(CollectionCommands::Count { name }).await {
         Ok(output) => Json(ApiResponse::success(output)).into_response(),
@@ -619,8 +927,23 @@ async fn websocket_handler(
     Path(collection_name): Path<String>,
     Query(params): Query<WsParams>,
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    if let Some(expected_token) = &state.websocket_auth_token {
+        let provided_token = extract_bearer_token(&headers);
+        if provided_token.as_deref() != Some(expected_token.as_str()) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiResponse::<Value>::error(
+                    "Missing or invalid WebSocket bearer token".to_string(),
+                )),
+            )
+                .into_response();
+        }
+    }
+
     ws.on_upgrade(move |socket| websocket_connection(socket, collection_name, params, state))
+        .into_response()
 }
 
 async fn websocket_connection(
@@ -660,8 +983,7 @@ async fn websocket_connection(
         {
             // Simple scan to find max sequence (expensive for large history, but okay for MVP/small collections)
             let prefix = format!("{}:", collection_name);
-            // Use storage() getter which we added to PrkDb
-            match db.storage().outbox_list().await {
+            match load_outbox_entries(&db).await {
                 Ok(entries) => {
                     for (id, _) in entries {
                         if id.starts_with(&prefix) {
@@ -698,13 +1020,13 @@ async fn websocket_connection(
     }
 
     // Poll loop
-    let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+    let mut interval = tokio::time::interval(WEBSOCKET_POLL_INTERVAL);
     let prefix = format!("{}:", collection_name);
 
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                match db.storage().outbox_list().await {
+                match load_outbox_entries(&db).await {
                     Ok(entries) => {
                         let mut new_sequence = last_sequence;
                         let mut updates = Vec::new();
@@ -793,23 +1115,7 @@ async fn websocket_connection(
 }
 
 async fn metrics_handler() -> impl IntoResponse {
-    // Basic Prometheus metrics
-    let metrics = format!(
-        "# HELP prkdb_collections_total Total number of collections\n\
-         # TYPE prkdb_collections_total counter\n\
-         prkdb_collections_total {}\n\
-         \n\
-         # HELP prkdb_server_uptime_seconds Server uptime in seconds\n\
-         # TYPE prkdb_server_uptime_seconds gauge\n\
-         prkdb_server_uptime_seconds {}\n\
-         \n\
-         # HELP prkdb_requests_total Total number of HTTP requests\n\
-         # TYPE prkdb_requests_total counter\n\
-         prkdb_requests_total {}\n",
-        get_collections_count().await.unwrap_or(0),
-        get_uptime_seconds(),
-        get_request_count()
-    );
+    let metrics = prkdb::prometheus_metrics::export_metrics();
 
     (
         StatusCode::OK,
@@ -819,19 +1125,6 @@ async fn metrics_handler() -> impl IntoResponse {
 }
 
 async fn execute_collection_command(cmd: CollectionCommands) -> Result<Value> {
-    // Create a minimal CLI instance for executing commands
-    let _cli = crate::Cli {
-        database: std::path::PathBuf::from("./prkdb.db"),
-        format: crate::OutputFormat::Json,
-        verbose: false,
-        admin_token: None,
-        local: false,
-        server: "http://127.0.0.1:50051".to_string(),
-        command: Commands::Collection(cmd.clone()),
-    };
-
-    // Since the execute function doesn't return data directly,
-    // we'll get data directly from storage for JSON output
     match cmd {
         CollectionCommands::List => get_collections_list().await,
         CollectionCommands::Describe { name } => get_collection_description(&name).await,
@@ -854,28 +1147,17 @@ async fn execute_collection_command(cmd: CollectionCommands) -> Result<Value> {
 
 // Helper functions to get data directly from storage
 async fn get_collections_list() -> Result<Value> {
-    let data = database_manager::get_database_manager()
-        .scan_storage()
-        .await?;
-    let mut collections = std::collections::HashSet::new();
+    let db = crate::database_manager::get_db_instance().await?;
+    let mut collections: std::collections::BTreeSet<String> =
+        db.list_collections().await?.into_iter().collect();
 
-    for (key, _) in data {
-        let key_str = String::from_utf8_lossy(&key);
+    for (key, _) in database_manager::scan_storage().await? {
+        if is_internal_metadata_key(&key) {
+            continue;
+        }
 
-        // Handle both formats: "collection:id" and "collection::Type:id"
-        let collection_name = if key_str.contains("::") {
-            // Format: "collection::Type:id" -> extract "collection"
-            key_str.split(':').next()
-        } else {
-            // Format: "collection:id" -> extract "collection"
-            key_str.split(':').next()
-        };
-
-        if let Some(collection_type) = collection_name {
-            // Skip metadata keys when counting business collections
-            if !collection_type.starts_with("__prkdb_metadata") {
-                collections.insert(collection_type.to_string());
-            }
+        if let Some(name) = logical_collection_name(&key) {
+            collections.insert(name);
         }
     }
 
@@ -888,35 +1170,18 @@ async fn get_collections_list() -> Result<Value> {
 }
 
 async fn get_collection_description(name: &str) -> Result<Value> {
-    let data = database_manager::get_database_manager()
-        .scan_storage()
-        .await?;
-    let mut items = Vec::new();
-    let mut total = 0;
-
-    for (key, value) in data {
-        let key_str = String::from_utf8_lossy(&key);
-
-        // Handle both formats: "collection:id" and "collection::Type:id"
-        let matches_collection = if key_str.contains("::") {
-            // Format: "collection::Type:id" - check if starts with our collection name
-            key_str.starts_with(&format!("{}::", name))
-        } else {
-            // Format: "collection:id" - check if starts with our collection name
-            key_str.starts_with(&format!("{}:", name))
-        };
-
-        if matches_collection {
-            if let Ok(parsed) = collection::try_bincode_to_json(&value) {
-                items.push(parsed);
-            }
-            total += 1;
-            if items.len() >= 5 {
-                // Limit sample for description
-                break;
-            }
-        }
+    let db = crate::database_manager::get_db_instance().await?;
+    let total_items = scan_collection_records(name).await?.len() as u64;
+    let collections = db.list_collections().await?;
+    if total_items == 0 && !collections.iter().any(|collection| collection == name) {
+        return Err(anyhow::anyhow!("Collection '{}' not found", name));
     }
+    let sample_output = get_collection_data(name, 5, 0, None, None).await?;
+    let items = sample_output
+        .get("data")
+        .and_then(|data| data.as_array())
+        .cloned()
+        .unwrap_or_default();
 
     // Analyze schema from the items
     let schema_info = if !items.is_empty() {
@@ -931,25 +1196,14 @@ async fn get_collection_description(name: &str) -> Result<Value> {
 
     Ok(json!({
         "name": name,
-        "total_items": total,
+        "total_items": total_items,
         "schema_info": schema_info,
         "sample_data": items
     }))
 }
 
 async fn get_collection_count(name: &str) -> Result<Value> {
-    let data = database_manager::get_database_manager()
-        .scan_storage()
-        .await?;
-    let prefix = format!("collection::{}:", name);
-    let mut count = 0;
-
-    for (key, _) in data {
-        let key_str = String::from_utf8_lossy(&key);
-        if key_str.starts_with(&prefix) {
-            count += 1;
-        }
-    }
+    let count = scan_collection_records(name).await?.len() as u64;
 
     Ok(json!({
         "collection": name,
@@ -964,57 +1218,30 @@ async fn get_collection_data(
     filter: Option<String>,
     sort: Option<String>,
 ) -> Result<Value> {
-    let data = database_manager::get_database_manager()
-        .scan_storage()
-        .await?;
+    let data = scan_collection_records(name).await?;
     let mut collection_entries = Vec::new();
 
-    for (key, value) in &data {
-        let key_str = String::from_utf8_lossy(key);
+    for record in data {
+        if let Ok(mut json_entry) = decode_stored_value(&record.value)
+            .map(|value| enrich_collection_value(value, record.id_hint.as_deref()))
+        {
+            let full_key = std::str::from_utf8(&record.key)
+                .map(ToString::to_string)
+                .unwrap_or_else(|_| storage_key_display(&record));
+            let key_part = record.id_hint.as_deref().unwrap_or("unknown").to_string();
 
-        // Handle both formats: "collection:id" and "collection::Type:id"
-        let matches_collection = if key_str.contains("::") {
-            // Format: "collection::Type:id" - check if starts with our collection name
-            key_str.starts_with(&format!("{}::", name))
-        } else {
-            // Format: "collection:id" - check if starts with our collection name
-            key_str.starts_with(&format!("{}:", name))
-        };
-
-        if matches_collection {
-            // Try multiple deserialization approaches
-            let mut entry = None;
-
-            // 1. Try JSON first (for backward compatibility)
-            if let Ok(json_value) = serde_json::from_slice::<serde_json::Value>(value) {
-                entry = Some(json_value);
+            if let Some(obj) = json_entry.as_object_mut() {
+                obj.insert("_key".to_string(), serde_json::Value::String(key_part));
+                obj.insert(
+                    "_full_key".to_string(),
+                    serde_json::Value::String(full_key.clone()),
+                );
+                obj.insert(
+                    "_collection".to_string(),
+                    serde_json::Value::String(record.logical_collection.clone()),
+                );
             }
-            // 2. Try bincode deserialization
-            else if let Ok(json_value) = crate::commands::collection::try_bincode_to_json(value) {
-                entry = Some(json_value);
-            }
-
-            if let Some(mut json_entry) = entry {
-                let key_part = if key_str.contains("::") {
-                    // Extract ID from "collection::Type:id" format
-                    key_str.split(':').next_back().unwrap_or("unknown")
-                } else {
-                    // Extract ID from "collection:id" format
-                    key_str.split(':').nth(1).unwrap_or("unknown")
-                };
-
-                if let Some(obj) = json_entry.as_object_mut() {
-                    obj.insert(
-                        "_key".to_string(),
-                        serde_json::Value::String(key_part.to_string()),
-                    );
-                    obj.insert(
-                        "_full_key".to_string(),
-                        serde_json::Value::String(key_str.to_string()),
-                    );
-                }
-                collection_entries.push((key_str.to_string(), json_entry));
-            }
+            collection_entries.push((full_key, json_entry));
         }
     }
 
@@ -1064,6 +1291,77 @@ async fn get_collection_data(
         "offset": offset,
         "returned": items.len()
     }))
+}
+
+async fn scan_collection_records(name: &str) -> Result<Vec<CollectionRecord>> {
+    let data = database_manager::scan_storage().await?;
+    let mut records = Vec::new();
+
+    for (key, value) in data {
+        let ParsedStorageKey::Data {
+            raw_collection,
+            logical_collection,
+            id_hint,
+            ..
+        } = parse_storage_key(&key)
+        else {
+            continue;
+        };
+
+        if collection_matches_name(name, &raw_collection, &logical_collection) {
+            records.push(CollectionRecord {
+                key,
+                raw_collection,
+                logical_collection,
+                id_hint,
+                value,
+            });
+        }
+    }
+
+    records.sort_by(|left, right| storage_key_display(left).cmp(&storage_key_display(right)));
+
+    Ok(records)
+}
+
+fn collection_matches_name(name: &str, raw_collection: &str, logical_collection: &str) -> bool {
+    name == logical_collection || name == raw_collection
+}
+
+fn storage_key_display(record: &CollectionRecord) -> String {
+    match &record.id_hint {
+        Some(id_hint) => format!("{}:{}", record.raw_collection, id_hint),
+        None => record.raw_collection.clone(),
+    }
+}
+
+fn json_value_matches_id(value: &Value, expected_id: &str) -> bool {
+    value.get("id").and_then(json_scalar_to_string).as_deref() == Some(expected_id)
+}
+
+fn enrich_collection_value(mut value: Value, id_hint: Option<&str>) -> Value {
+    if let (Some(id_hint), Some(object)) = (id_hint, value.as_object_mut()) {
+        let needs_id = match object.get("id") {
+            None | Some(Value::Null) => true,
+            Some(Value::String(current)) => current.is_empty(),
+            _ => false,
+        };
+
+        if needs_id {
+            object.insert("id".to_string(), Value::String(id_hint.to_string()));
+        }
+    }
+
+    value
+}
+
+fn json_scalar_to_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
 }
 
 /// Apply simple filter to collection entries
@@ -1197,25 +1495,121 @@ fn analyze_schema(items: &[Value]) -> Value {
     })
 }
 
-async fn get_collections_count() -> Result<usize> {
-    if let Ok(collections) = get_collections_list().await {
-        if let Some(total) = collections.get("total").and_then(|t| t.as_u64()) {
-            return Ok(total as usize);
-        }
+fn decode_stored_value(value: &[u8]) -> Result<Value> {
+    if let Ok(json_value) = serde_json::from_slice::<Value>(value) {
+        return Ok(json_value);
     }
-    Ok(0)
+
+    Ok(collection::try_bincode_to_json(value)?)
 }
 
-fn get_uptime_seconds() -> u64 {
-    // Simple uptime - could be enhanced with actual start time tracking
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        % 86400 // Reset daily for demo
+async fn load_outbox_entries(db: &std::sync::Arc<prkdb::PrkDb>) -> Result<Vec<(String, Vec<u8>)>> {
+    if let Some(pm) = &db.partition_manager {
+        let mut entries = Vec::new();
+        for partition_id in 0..pm.partition_count() {
+            if let Some(storage) = pm.get_partition_storage(partition_id as u64) {
+                let mut partition_entries = storage.outbox_list().await?;
+                entries.append(&mut partition_entries);
+            }
+        }
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(entries)
+    } else {
+        Ok(db.storage().outbox_list().await?)
+    }
 }
 
-fn get_request_count() -> u64 {
-    // Simple counter - could be enhanced with actual request tracking
-    42 // Placeholder
+fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(|value| value.trim().to_string())
+}
+
+fn build_cors_layer(host: &str, port: u16) -> Result<CorsLayer> {
+    let configured_origins = std::env::var("PRKDB_CORS_ORIGINS")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+
+    let origins: Vec<axum::http::HeaderValue> = if let Some(value) = configured_origins {
+        value
+            .split(',')
+            .map(|origin| origin.trim().parse())
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    } else {
+        let mut defaults = vec![
+            format!("http://localhost:{port}").parse()?,
+            format!("http://127.0.0.1:{port}").parse()?,
+        ];
+
+        if host != "127.0.0.1" && host != "localhost" && host != "0.0.0.0" {
+            defaults.push(format!("http://{host}:{port}").parse()?);
+        }
+
+        defaults
+    };
+
+    Ok(CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([Method::GET, Method::PUT, Method::DELETE])
+        .allow_headers([ACCEPT, AUTHORIZATION, CONTENT_TYPE]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_node_address_overrides_normalizes_bare_addresses() {
+        let overrides =
+            parse_node_address_overrides(Some("2=db-2.example.com:18081,3=http://db-3:18082"))
+                .unwrap();
+
+        assert_eq!(
+            overrides.get(&2).map(String::as_str),
+            Some("http://db-2.example.com:18081")
+        );
+        assert_eq!(
+            overrides.get(&3).map(String::as_str),
+            Some("http://db-3:18082")
+        );
+    }
+
+    #[test]
+    fn build_advertised_node_addresses_uses_peer_overrides() {
+        let peers = vec![(2, "127.0.0.1:50052".parse().unwrap())];
+        let overrides = parse_node_address_overrides(Some("2=db-2.example.com:18081")).unwrap();
+
+        let addresses =
+            build_advertised_node_addresses(1, "http://db-1.example.com:18080", &peers, &overrides);
+
+        assert_eq!(
+            addresses.get(&1).map(String::as_str),
+            Some("http://db-1.example.com:18080")
+        );
+        assert_eq!(
+            addresses.get(&2).map(String::as_str),
+            Some("http://db-2.example.com:18081")
+        );
+    }
+
+    #[test]
+    fn build_peer_http_addresses_requires_explicit_peer_urls() {
+        let peers = vec![(2, "127.0.0.1:50052".parse().unwrap())];
+
+        let addresses = build_peer_http_addresses(
+            1,
+            Some("http://db-1.example.com:8080"),
+            &peers,
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            addresses.get(&1).map(String::as_str),
+            Some("http://db-1.example.com:8080")
+        );
+        assert!(!addresses.contains_key(&2));
+    }
 }

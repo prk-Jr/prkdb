@@ -34,8 +34,8 @@ impl Default for ClusterConfig {
     fn default() -> Self {
         Self {
             local_node_id: 1,
-            listen_addr: "127.0.0.1:50051".parse().unwrap(),
-            nodes: vec![(1, "127.0.0.1:50051".parse().unwrap())],
+            listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            nodes: vec![(1, "127.0.0.1:8080".parse().unwrap())],
             election_timeout_min_ms: 500,
             election_timeout_max_ms: 1000,
             heartbeat_interval_ms: 100,

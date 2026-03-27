@@ -4,7 +4,6 @@ use super::state_machine::StateMachine;
 use crate::storage::wal_adapter::WalStorageAdapter;
 use prkdb_core::wal::WalConfig;
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -150,7 +149,7 @@ impl PartitionManager {
     pub fn start_all(
         &self,
         rpc_pool: Arc<super::rpc_client::RpcClientPool>,
-        skip_server_partitions: &[u64],
+        _skip_server_partitions: &[u64],
     ) {
         tracing::info!("Starting all {} partitions", self.num_partitions);
 
@@ -316,6 +315,15 @@ impl PartitionManager {
         }
 
         topology
+    }
+
+    /// Return the cluster configuration shared by all partitions.
+    pub async fn get_cluster_config(&self) -> Option<ClusterConfig> {
+        if let Some((_, raft_node)) = self.raft_groups.iter().next() {
+            Some(raft_node.get_config().await)
+        } else {
+            None
+        }
     }
 }
 

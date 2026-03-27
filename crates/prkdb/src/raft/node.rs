@@ -54,6 +54,14 @@ impl ProposeHandle {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct AppendEntriesResult {
+    pub term: u64,
+    pub success: bool,
+    pub conflict_index: u64,
+    pub conflict_term: u64,
+}
+
 /// Log entry in the Raft log
 #[derive(Debug, Clone)]
 pub struct LogEntry {
@@ -278,6 +286,22 @@ impl RaftNode {
             snapshot_data: Arc::new(RwLock::new(snapshot_data_val)),
             last_heartbeat_time: Arc::new(RwLock::new(Instant::now())),
             election_timeout_min: std::time::Duration::from_millis(config.election_timeout_min_ms),
+        }
+    }
+
+    async fn find_last_index_of_term(&self, term: u64) -> Option<u64> {
+        let log = self.log.read().await;
+        if let Some(entry) = log.iter().rev().find(|entry| entry.term == term) {
+            return Some(entry.index);
+        }
+        drop(log);
+
+        let snapshot_index = *self.snapshot_index.read().await;
+        let snapshot_term = *self.snapshot_term.read().await;
+        if snapshot_term == term && snapshot_index > 0 {
+            Some(snapshot_index)
+        } else {
+            None
         }
     }
 
@@ -944,6 +968,28 @@ impl RaftNode {
         leader_commit: u64,
         entries: Vec<super::rpc::LogEntry>,
     ) -> (u64, bool) {
+        let response = self
+            .handle_append_entries_detailed(
+                term,
+                leader_id,
+                prev_log_index,
+                prev_log_term,
+                leader_commit,
+                entries,
+            )
+            .await;
+        (response.term, response.success)
+    }
+
+    pub async fn handle_append_entries_detailed(
+        &self,
+        term: u64,
+        leader_id: NodeId,
+        prev_log_index: u64,
+        prev_log_term: u64,
+        leader_commit: u64,
+        entries: Vec<super::rpc::LogEntry>,
+    ) -> AppendEntriesResult {
         let mut current_term = self.current_term.write().await;
         let mut state = self.state.write().await;
         let mut commit_index = self.commit_index.write().await;
@@ -957,7 +1003,12 @@ impl RaftNode {
 
         // 1. Reply false if term < currentTerm
         if term < *current_term {
-            return (*current_term, false);
+            return AppendEntriesResult {
+                term: *current_term,
+                success: false,
+                conflict_index: 0,
+                conflict_term: 0,
+            };
         }
 
         // If RPC request or response contains term > currentTerm:
@@ -1007,13 +1058,32 @@ impl RaftNode {
                 let vec_idx = (prev_log_index - log_start) as usize;
                 if vec_idx >= log.len() {
                     // Missing entries
-                    return (*current_term, false);
+                    return AppendEntriesResult {
+                        term: *current_term,
+                        success: false,
+                        conflict_index: log_start + log.len() as u64,
+                        conflict_term: 0,
+                    };
                 }
 
                 let prev_entry = &log[vec_idx];
                 if prev_entry.term != prev_log_term {
                     // Term mismatch
-                    return (*current_term, false);
+                    let conflict_term = prev_entry.term;
+                    let mut conflict_index = prev_log_index;
+                    while conflict_index > log_start {
+                        let previous_vec_idx = (conflict_index - 1 - log_start) as usize;
+                        if log[previous_vec_idx].term != conflict_term {
+                            break;
+                        }
+                        conflict_index -= 1;
+                    }
+                    return AppendEntriesResult {
+                        term: *current_term,
+                        success: false,
+                        conflict_index,
+                        conflict_term,
+                    };
                 }
             } else {
                 // prev_log_index has been compacted, check against snapshot
@@ -1028,7 +1098,12 @@ impl RaftNode {
                         snapshot_index,
                         snapshot_term
                     );
-                    return (*current_term, false);
+                    return AppendEntriesResult {
+                        term: *current_term,
+                        success: false,
+                        conflict_index: snapshot_index.saturating_add(1),
+                        conflict_term: snapshot_term,
+                    };
                 }
             }
         }
@@ -1093,11 +1168,21 @@ impl RaftNode {
                     Ok(Ok(_)) => {}
                     Ok(Err(e)) => {
                         tracing::error!("Failed to append entry to WAL: {}", e);
-                        return (*current_term, false);
+                        return AppendEntriesResult {
+                            term: *current_term,
+                            success: false,
+                            conflict_index: 0,
+                            conflict_term: 0,
+                        };
                     }
                     Err(e) => {
                         tracing::error!("Failed to join persistence task: {}", e);
-                        return (*current_term, false);
+                        return AppendEntriesResult {
+                            term: *current_term,
+                            success: false,
+                            conflict_index: 0,
+                            conflict_term: 0,
+                        };
                     }
                 }
             }
@@ -1119,7 +1204,12 @@ impl RaftNode {
             false
         };
 
-        let result = (*current_term, true);
+        let result = AppendEntriesResult {
+            term: *current_term,
+            success: true,
+            conflict_index: 0,
+            conflict_term: 0,
+        };
 
         // Notify apply loop (event-driven!) AFTER dropping locks
         if should_notify {
@@ -1824,17 +1914,35 @@ impl RaftNode {
                                 // Recalculate commit_index
                                 self_clone.update_commit_index().await;
                             } else {
-                                // Follower rejected - decrement next_index and retry
+                                // Follower rejected - use conflict hints to jump next_index back quickly
+                                let mut target_next_index = response.conflict_index.max(1);
+                                if response.conflict_term > 0 {
+                                    if let Some(last_index_for_term) = self_clone
+                                        .find_last_index_of_term(response.conflict_term)
+                                        .await
+                                    {
+                                        target_next_index = last_index_for_term.saturating_add(1);
+                                    }
+                                }
+
                                 let mut followers_map = self_clone.followers.write().await;
                                 if let Some(state) = followers_map.get_mut(&follower_id) {
-                                    // Decrement and retry
                                     let prev_next = state.next_index;
-                                    state.handle_failure(prev_next.saturating_sub(1).max(1));
+                                    let fallback_next_index = prev_next.saturating_sub(1).max(1);
+                                    let new_next_index = if response.conflict_index > 0 {
+                                        target_next_index.max(1)
+                                    } else {
+                                        fallback_next_index
+                                    };
+                                    state.handle_failure(new_next_index);
 
                                     tracing::debug!(
-                                        "Follower {} rejected AppendEntries, decremented next_index to {}",
+                                        "Follower {} rejected AppendEntries, adjusted next_index from {} to {} (conflict_index={}, conflict_term={})",
                                         follower_id,
-                                        state.next_index
+                                        prev_next,
+                                        state.next_index,
+                                        response.conflict_index,
+                                        response.conflict_term
                                     );
                                 }
                             }
@@ -2030,5 +2138,51 @@ mod tests {
         let (_, success) = node.handle_append_entries(1, 1, 0, 0, 0, entries).await;
 
         assert!(success, "AppendEntries should succeed");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_append_entries_reports_conflict_index_when_prev_log_is_missing() {
+        let config = ClusterConfig::default();
+        let (storage, _temp) = create_test_storage();
+        let node = RaftNode::new(config, storage, Arc::new(MockStateMachine));
+
+        let response = node
+            .handle_append_entries_detailed(1, 1, 2, 1, 0, vec![])
+            .await;
+
+        assert!(!response.success);
+        assert_eq!(response.conflict_index, 1);
+        assert_eq!(response.conflict_term, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_append_entries_reports_conflict_term_for_term_mismatch() {
+        let config = ClusterConfig::default();
+        let (storage, _temp) = create_test_storage();
+        let node = RaftNode::new(config, storage, Arc::new(MockStateMachine));
+
+        let (_, success) = node
+            .handle_append_entries(
+                1,
+                1,
+                0,
+                0,
+                0,
+                vec![crate::raft::rpc::LogEntry {
+                    index: 1,
+                    term: 1,
+                    data: b"entry".to_vec(),
+                }],
+            )
+            .await;
+        assert!(success);
+
+        let response = node
+            .handle_append_entries_detailed(1, 1, 1, 2, 0, vec![])
+            .await;
+
+        assert!(!response.success);
+        assert_eq!(response.conflict_index, 1);
+        assert_eq!(response.conflict_term, 1);
     }
 }
