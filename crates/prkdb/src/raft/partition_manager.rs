@@ -238,12 +238,9 @@ impl PartitionManager {
     }
 
     /// Get the RaftNode responsible for a given key
-    pub fn get_raft_for_key(&self, key: &[u8]) -> Arc<RaftNode> {
+    pub fn get_raft_for_key(&self, key: &[u8]) -> Option<Arc<RaftNode>> {
         let partition_id = self.get_partition_for_key(key);
-        self.raft_groups
-            .get(&partition_id)
-            .expect("Partition not found")
-            .clone()
+        self.raft_groups.get(&partition_id).cloned()
     }
 
     /// Get a specific partition's RaftNode by ID

@@ -1,0 +1,60 @@
+{
+  "dimensions": [
+    {
+      "id": "verification",
+      "status": "unknown",
+      "confidence": "low",
+      "summary": "Verification checks are not collected in snapshot mode yet."
+    },
+    {
+      "id": "docs_coverage",
+      "status": "red",
+      "confidence": "high",
+      "summary": "1 objective drift finding(s) detected."
+    },
+    {
+      "id": "contract_consistency",
+      "status": "red",
+      "confidence": "high",
+      "summary": "1 objective drift finding(s) detected."
+    },
+    {
+      "id": "benchmark_credibility",
+      "status": "green",
+      "confidence": "high",
+      "summary": "Benchmark caveat checks passed for the current snapshot scope."
+    }
+  ],
+  "findings": [
+    {
+      "id": "stale_repo_status_summary",
+      "dimension": "docs_coverage",
+      "severity": "error",
+      "confidence": "high",
+      "message": "Committed repo-status page does not match the current repo-status evidence fingerprint.",
+      "evidence": [
+        {
+          "file": "docs/status/repo-status.md",
+          "detail": "Expected evidence fingerprint `repo-status-evidence:v1:verification:unknown:low|docs_coverage:green:high|contract_consistency:red:high|benchmark_credibility:green:high::docs_contract_mismatch:contract_consistency:error` but found `<missing>`."
+        }
+      ]
+    },
+    {
+      "id": "docs_contract_mismatch",
+      "dimension": "contract_consistency",
+      "severity": "error",
+      "confidence": "high",
+      "message": "Codegen docs point `prkdb-cli serve` users at the HTTP port instead of the local gRPC port.",
+      "evidence": [
+        {
+          "file": "docs/guide/codegen.md",
+          "detail": "Shows `prkdb codegen --server http://127.0.0.1:8080` for `prkdb-cli serve`."
+        },
+        {
+          "file": "crates/prkdb-cli/src/commands/codegen.rs",
+          "detail": "Documents `http://127.0.0.1:50051` as the local gRPC endpoint exposed by `prkdb-cli serve`."
+        }
+      ]
+    }
+  ]
+}

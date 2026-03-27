@@ -11,6 +11,31 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  repo-status-snapshot:
+    name: Repo Status Snapshot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run repo status snapshot
+        run: cargo run -p xtask -- repo-status snapshot --fail-on-objective-drift
+      - name: Upload repo status snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repo-status-snapshot-${{ github.run_number }}
+          path: target/repo-status/repo-status.snapshot.json
+          if-no-files-found: error
+      - name: Publish repo status summary
+        if: always()
+        run: |
+          echo "## Repo Status Snapshot" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```json' >> $GITHUB_STEP_SUMMARY
+          cat target/repo-status/repo-status.snapshot.json >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
   check:
     name: Check
     runs-on: ubuntu-latest
@@ -43,7 +68,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace -- -W clippy::all
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
     name: Test
@@ -76,8 +101,13 @@ jobs:
           python-version: '3.10'
       - name: Install Python dependencies
         run: pip install httpx
+      - name: Build PrkDB CLI
+        run: cargo build -p prkdb-cli --bin prkdb-cli
       - name: Run Schema E2E Test
         run: ./scripts/test_schema_app_e2e.sh
+        env:
+          PRKDB_BIN: ./target/debug/prkdb-cli
+          SKIP_BUILD: "1"
 
   client-features-integration:
     name: Client Features Integration
@@ -94,8 +124,13 @@ jobs:
           python-version: '3.10'
       - name: Install Python dependencies
         run: pip install httpx
+      - name: Build PrkDB CLI
+        run: cargo build -p prkdb-cli --bin prkdb-cli
       - name: Run Client Features Test
         run: ./scripts/test_client_features.sh
+        env:
+          PRKDB_BIN: ./target/debug/prkdb-cli
+          SKIP_BUILD: "1"
 
   client-features-integration-ts:
     name: Client Features Integration (TypeScript)
@@ -110,8 +145,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+      - name: Build PrkDB CLI
+        run: cargo build -p prkdb-cli --bin prkdb-cli
       - name: Run Client Features Test (TS)
         run: ./scripts/test_client_features_ts.sh
+        env:
+          PRKDB_BIN: ./target/debug/prkdb-cli
+          SKIP_BUILD: "1"
 
   client-features-integration-go:
     name: Client Features Integration (Go)
@@ -126,8 +166,13 @@ jobs:
         uses: actions/setup-go@v4
         with:
           go-version: '1.21'
+      - name: Build PrkDB CLI
+        run: cargo build -p prkdb-cli --bin prkdb-cli
       - name: Run Client Features Test (Go)
         run: ./scripts/test_client_features_go.sh
+        env:
+          PRKDB_BIN: ./target/debug/prkdb-cli
+          SKIP_BUILD: "1"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # CHAOS ENGINEERING TESTS (reusable workflow)
@@ -139,16 +184,15 @@ jobs:
     uses: ./.github/workflows/chaos-tests.yml
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # COMPREHENSIVE KAFKA vs PrkDB BENCHMARK
+  # LOCAL PRKDB BENCHMARKS + KAFKA REFERENCE RUNS
   # Features:
-  #   - Producer throughput comparison
-  #   - Consumer throughput comparison
-  #   - Latency percentiles (p50, p95, p99)
-  #   - Multiple runs (3x) for statistical accuracy
-  #   - End-to-end testing
+  #   - Local PrkDB producer/consumer/latency measurements
+  #   - Kafka perf-tool reference runs on a single broker
+  #   - Multiple runs (3x) for trend tracking
+  #   - Explicit caveat: not an apples-to-apples system comparison
   # ═══════════════════════════════════════════════════════════════════════════
   benchmark:
-    name: "📊 Benchmark: Kafka vs PrkDB"
+    name: "📊 Benchmarks: Local PrkDB + Kafka Reference"
     runs-on: ubuntu-latest
     
     services:
@@ -193,13 +237,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       
-      - name: Build PrkDB
-        run: cargo build --release -p prkdb
-        
       - name: Build benchmarks
-        run: |
-          cargo build --release --example comprehensive_bench
-          cargo build --release --example partitioned_bench
+        run: cargo build --release --example comprehensive_bench --example partitioned_bench
           
       - name: Wait for Kafka
         run: |
@@ -312,7 +351,7 @@ jobs:
         id: prkdb_comprehensive
         run: |
           echo "Running PrkDB comprehensive benchmark..."
-          OUTPUT=$(cargo run --release --example comprehensive_bench 2>&1)
+          OUTPUT=$(./target/release/examples/comprehensive_bench 2>&1)
           echo "$OUTPUT"
           
           # Extract metrics from output
@@ -356,8 +395,7 @@ jobs:
         id: prkdb_sustained
         run: |
           echo "Running PrkDB sustained load test (10M records)..."
-          # Run with 10M records argument
-          OUTPUT=$(cargo run --release --example comprehensive_bench -- 10000000 2>&1)
+          OUTPUT=$(./target/release/examples/comprehensive_bench 10000000 2>&1)
           echo "$OUTPUT"
           
           MBPS=$(echo "$OUTPUT" | grep "producer_avg_mbps=" | cut -d= -f2)
@@ -367,7 +405,7 @@ jobs:
         id: prkdb_partitioned
         run: |
           echo "Running PrkDB partitioned benchmark..."
-          OUTPUT=$(cargo run --release --example partitioned_bench 2>&1)
+          OUTPUT=$(./target/release/examples/partitioned_bench 2>&1)
           echo "$OUTPUT"
           
           PEAK_MBPS=$(echo "$OUTPUT" | grep "Peak throughput" | grep -oE '[0-9]+\.[0-9]+' || echo "0")
@@ -396,21 +434,13 @@ jobs:
           KAFKA_SUST="${{ steps.kafka_sustained.outputs.kafka_sustained_mbps }}"
           PRKDB_SUST="${{ steps.prkdb_sustained.outputs.prkdb_sustained_mbps }}"
           
-          # Calculate ratios
-          PROD_RATIO=$(echo "scale=1; $PRKDB_PROD / $KAFKA_PROD" | bc 2>/dev/null || echo "N/A")
-          CONS_RATIO=$(echo "scale=1; $PRKDB_CONS / $KAFKA_CONS" | bc 2>/dev/null || echo "N/A")
-          SUST_RATIO=$(echo "scale=1; $PRKDB_SUST / $KAFKA_SUST" | bc 2>/dev/null || echo "N/A")
-          
-          # Convert Kafka latency to microseconds for comparison
-          KAFKA_LAT_US=$(echo "scale=0; $KAFKA_LAT * 1000" | bc 2>/dev/null || echo "N/A")
-          KAFKA_P99_US=$(echo "scale=0; $KAFKA_P99 * 1000" | bc 2>/dev/null || echo "N/A")
-          
           # Generate JSON
           cat > benchmark_results/results.json << EOF
           {
             "timestamp": "$(date -Iseconds)",
             "runner": "${{ runner.os }}-${{ runner.arch }}",
             "runs": 3,
+            "notes": "Kafka results are single-broker perf-tool reference runs. PrkDB results are local native storage-engine benchmarks. These numbers are not apples-to-apples product comparisons.",
             "kafka": {
               "producer_mbps": $KAFKA_PROD,
               "consumer_mbps": ${KAFKA_CONS:-0},
@@ -427,61 +457,60 @@ jobs:
               "latency_p95_us": $PRKDB_P95,
               "latency_p99_us": $PRKDB_P99,
               "partitioned_peak_mbps": ${PRKDB_PEAK:-0}
-            },
-            "ratios": {
-              "producer": "$PROD_RATIO",
-              "consumer": "$CONS_RATIO",
-              "sustained": "$SUST_RATIO"
             }
           }
           EOF
           
           # Generate Markdown summary
           cat > benchmark_results/BENCHMARK_RESULTS.md << 'EOF'
-          # 🔬 PrkDB vs Kafka Benchmark Results
+          # 🔬 Benchmark Results
           
+          **Important:** these results combine two different reference lanes:
+          - Kafka single-broker runs using the official perf tools
+          - local PrkDB native storage-engine benchmarks
+
+          They are useful for regression tracking in this repo, but they are **not** an apples-to-apples product comparison.
+
           **Test Configuration:**
           - Records: 1,000,000 (Standard) / 10,000,000 (Sustained)
           - Record Size: 100 bytes
           - Batch Size: 10,000
           - Runs: 3 (averaged)
           
-          ## 📈 Throughput Comparison
+          ## Kafka Reference
           
-          | Metric | Kafka | PrkDB | PrkDB Advantage |
-          |--------|-------|-------|-----------------|
+          | Metric | Value |
+          |--------|-------|
           EOF
           
-          echo "| **Producer (1M)** | ${KAFKA_PROD} MB/s | ${PRKDB_PROD} MB/s | **${PROD_RATIO}x faster** |" >> benchmark_results/BENCHMARK_RESULTS.md
-          echo "| **Sustained (10M)** | ${KAFKA_SUST:-N/A} MB/s | ${PRKDB_SUST:-N/A} MB/s | **${SUST_RATIO:-N/A}x faster** |" >> benchmark_results/BENCHMARK_RESULTS.md
-          echo "| **Consumer** | ${KAFKA_CONS:-N/A} MB/s | ${PRKDB_CONS} MB/s | **${CONS_RATIO:-N/A}x faster** |" >> benchmark_results/BENCHMARK_RESULTS.md
-          echo "| **Partitioned Peak** | - | ${PRKDB_PEAK:-N/A} MB/s | - |" >> benchmark_results/BENCHMARK_RESULTS.md
+          echo "| **Producer (1M)** | ${KAFKA_PROD} MB/s |" >> benchmark_results/BENCHMARK_RESULTS.md
+          echo "| **Sustained (10M)** | ${KAFKA_SUST:-N/A} MB/s |" >> benchmark_results/BENCHMARK_RESULTS.md
+          echo "| **Consumer** | ${KAFKA_CONS:-N/A} MB/s |" >> benchmark_results/BENCHMARK_RESULTS.md
+          echo "| **Average latency** | ${KAFKA_LAT} ms |" >> benchmark_results/BENCHMARK_RESULTS.md
+          echo "| **p99 latency** | ${KAFKA_P99} ms |" >> benchmark_results/BENCHMARK_RESULTS.md
           
           cat >> benchmark_results/BENCHMARK_RESULTS.md << EOF
           
-          ## ⏱️ Latency Comparison
+          ## PrkDB Local Benchmarks
           
-          | Percentile | Kafka | PrkDB |
-          |------------|-------|-------|
-          | **Average** | ${KAFKA_LAT} ms | ${PRKDB_LAT} μs |
-          | **p99** | ${KAFKA_P99} ms | ${PRKDB_P99} μs |
-          
-          > Note: Kafka latency is in **milliseconds**, PrkDB is in **microseconds**
+          | Metric | Value |
+          |--------|-------|
+          | **Producer (1M)** | ${PRKDB_PROD} MB/s |
+          | **Sustained (10M)** | ${PRKDB_SUST:-N/A} MB/s |
+          | **Consumer** | ${PRKDB_CONS} MB/s |
+          | **Partitioned peak** | ${PRKDB_PEAK:-N/A} MB/s |
+          | **Average batch latency** | ${PRKDB_LAT} μs |
+          | **p50 batch latency** | ${PRKDB_P50} μs |
+          | **p95 batch latency** | ${PRKDB_P95} μs |
+          | **p99 batch latency** | ${PRKDB_P99} μs |
           
           ## 🔬 Methodology
           
           - **Kafka**: Official \`kafka-producer-perf-test\` and \`kafka-consumer-perf-test\`
-          - **PrkDB**: Native Rust benchmarks with mmap WAL
+          - **PrkDB**: Native Rust local benchmarks with mmap WAL
           - **Environment**: GitHub Actions ubuntu-latest
           - **Runs**: 3 runs per test, results averaged
-          - **Data**: Real writes to disk, no mocking
-          
-          ## 🎯 Key Findings
-          
-          1. **Producer**: PrkDB is **${PROD_RATIO}x faster** than Kafka
-          2. **Consumer**: PrkDB is **${CONS_RATIO:-N/A}x faster** than Kafka
-          3. **Latency**: PrkDB has **sub-millisecond** latency vs Kafka's ~${KAFKA_LAT}ms average
-          4. **Consistency**: Results averaged over 3 runs for statistical accuracy
+          - **Interpretation**: use for trend tracking, not apples-to-apples claims
           
           ---
           *Generated: $(date -Iseconds)*

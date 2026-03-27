@@ -1,6 +1,4 @@
 use prkdb::raft::{ClusterConfig, PartitionManager, PrkDbStateMachine, RaftNode, RpcClientPool};
-use prkdb::storage::WalStorageAdapter;
-use prkdb_core::wal::WalConfig;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tempfile::TempDir;

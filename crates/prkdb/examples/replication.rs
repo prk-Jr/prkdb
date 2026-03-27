@@ -272,7 +272,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     id: order_id,
                     customer_id: order_id % 5,
                     amount: order_id * 100,
-                    status: if order_id % 3 == 0 {
+                    status: if order_id.is_multiple_of(3) {
                         "completed"
                     } else {
                         "pending"
@@ -286,7 +286,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // Write 1 user every few iterations
-            if order_id % 6 == 0 {
+            if order_id.is_multiple_of(6) {
                 let user = User {
                     id: user_id,
                     name: format!("User {}", user_id),

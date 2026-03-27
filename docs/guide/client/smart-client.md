@@ -19,11 +19,11 @@ let config = ClientConfig {
     ..Default::default()
 };
 
-// Provide a seed node. The client will discover the rest!
+// Provide a gRPC seed node. The client will discover the rest!
 let client = PrkDbClient::with_config(vec!["http://127.0.0.1:8080".into()], config).await?;
 ```
 
-Use any dialable `prkdb-server` node as the seed. For local development with `prkdb-cli serve`, use its gRPC endpoint such as `http://127.0.0.1:50051`.
+Use any dialable `prkdb-server` gRPC node as the seed. For local development with `prkdb-cli serve`, use its gRPC endpoint such as `http://127.0.0.1:50051`, not the HTTP port on `:8080`.
 
 ## Features and Resilience
 
@@ -31,7 +31,7 @@ Use any dialable `prkdb-server` node as the seed. For local development with `pr
 The smart client caches the topological layout of the entire cluster. When you request a write mapped to `Partition 2`, the client automatically directs the gRPC request straight to the **Leader of Partition 2**, avoiding secondary network hops from blind proxies.
 
 ### Head-Of-Line Blocking Prevention
-Rather than utilizing single synchronous pipes, the smart client spawns and manages a distinct asynchronous connection pool (`max_connections_per_node`) for every peer in the cluster, multiplying available network throughput to Kafka-beating levels.
+Rather than utilizing single synchronous pipes, the smart client spawns and manages a distinct asynchronous connection pool (`max_connections_per_node`) for every peer in the cluster, increasing usable network throughput under leader changes and concurrent load.
 
 ### Dynamic Health Checks
 The client actively monitors the success rates of its node connections. If a node suddenly crash-loops or drops below the `unhealthy_threshold`, the client temporarily blocks routes to that address, automatically hunting for the new Raft leader until the topology stabilizes.

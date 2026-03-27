@@ -214,7 +214,7 @@ impl AsyncLogSegment {
 
         // Get approximate file position from index
         let index = self.index.lock().await;
-        let file_pos = index.lookup(offset).unwrap_or(0) as u64;
+        let file_pos = index.lookup(offset).unwrap_or(0);
         drop(index);
 
         // Scan from that position

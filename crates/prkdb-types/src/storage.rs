@@ -64,6 +64,11 @@ pub trait StorageAdapter: Send + Sync + 'static {
     /// Delete a key.
     async fn delete(&self, key: &[u8]) -> Result<(), StorageError>;
 
+    /// Flush pending writes for graceful shutdown.
+    async fn flush(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
+
     /// Optional: persist an outbox event (id, payload) for later draining.
     async fn outbox_save(&self, _id: &str, _payload: &[u8]) -> Result<(), StorageError> {
         Err(StorageError::BackendError("outbox not supported".into()))

@@ -33,20 +33,11 @@ pub fn dlq_topic_name<C: Collection>() -> String {
 }
 
 /// Internal state for tracking retries per record
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[allow(dead_code)] // Reserved for per-record retry tracking
 pub(crate) struct RetryState {
     pub retry_count: u8,
     pub last_error: Option<String>,
-}
-
-impl Default for RetryState {
-    fn default() -> Self {
-        Self {
-            retry_count: 0,
-            last_error: None,
-        }
-    }
 }
 
 /// Send a record to the Dead Letter Queue
@@ -234,9 +225,11 @@ mod tests {
 
     #[test]
     fn test_processing_stats() {
-        let mut stats = ProcessingStats::default();
-        stats.processed = 8;
-        stats.dlq_sent = 2;
+        let stats = ProcessingStats {
+            processed: 8,
+            dlq_sent: 2,
+            ..Default::default()
+        };
 
         assert_eq!(stats.total(), 10);
         assert!((stats.success_rate() - 0.8).abs() < 0.001);

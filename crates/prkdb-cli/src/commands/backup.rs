@@ -68,13 +68,11 @@ pub async fn handle_restore(args: RestoreArgs) -> anyhow::Result<()> {
     tracing::info!("Starting restore to {:?}", args.data_dir);
 
     // 1. Check directory
-    if args.data_dir.exists() {
-        if args.data_dir.read_dir()?.next().is_some() && !args.force {
-            anyhow::bail!(
-                "Target directory {:?} is not empty. Use --force to overwrite.",
-                args.data_dir
-            );
-        }
+    if args.data_dir.exists() && args.data_dir.read_dir()?.next().is_some() && !args.force {
+        anyhow::bail!(
+            "Target directory {:?} is not empty. Use --force to overwrite.",
+            args.data_dir
+        );
     }
 
     // 2. Open snapshot reader

@@ -138,10 +138,8 @@ impl<S: prkdb_schema::SchemaStorage> PrkDbGrpcService<S> {
                 config
                     .nodes
                     .iter()
-                    .filter_map(|(node_id, address)| {
-                        (!address.ip().is_unspecified())
-                            .then(|| (*node_id, format!("http://{}", address)))
-                    })
+                    .filter(|(_, address)| !address.ip().is_unspecified())
+                    .map(|(node_id, address)| (*node_id, format!("http://{}", address)))
                     .collect()
             })
             .unwrap_or_default();
@@ -158,6 +156,7 @@ impl<S: prkdb_schema::SchemaStorage> PrkDbGrpcService<S> {
         node_addresses
     }
 
+    #[allow(clippy::result_large_err)]
     fn advertised_address_for_node(
         &self,
         node_id: u64,
@@ -203,6 +202,7 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use crate::raft::rpc::ReadMode;

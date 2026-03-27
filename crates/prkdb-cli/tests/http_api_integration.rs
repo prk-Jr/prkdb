@@ -77,7 +77,7 @@ impl TestServer {
             command.env("PRKDB_ADVERTISED_GRPC_ADDR", advertised_grpc_addr);
         }
 
-        let child = command.spawn().expect("failed to spawn prkdb-cli");
+        let mut child = command.spawn().expect("failed to spawn prkdb-cli");
         let client = reqwest::Client::new();
         let health_url = format!("http://127.0.0.1:{http_port}/health");
         let grpc_url = format!("http://127.0.0.1:{grpc_port}");
@@ -106,6 +106,8 @@ impl TestServer {
             sleep(Duration::from_millis(100)).await;
         }
 
+        let _ = child.kill();
+        let _ = child.wait();
         panic!("server failed to start");
     }
 }
@@ -199,6 +201,20 @@ async fn test_http_can_get_item_by_id_and_report_count() {
     let count_body: Value = count_response.json().await.unwrap();
     assert_eq!(count_body["success"], true);
     assert_eq!(count_body["data"]["count"], 1);
+}
+
+#[tokio::test]
+async fn test_http_root_reports_current_package_version() {
+    let server = TestServer::start(false).await;
+    let response = reqwest::get(format!("http://127.0.0.1:{}/", server.http_port))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["name"], "PrkDB HTTP API");
+    assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
 }
 
 #[tokio::test]

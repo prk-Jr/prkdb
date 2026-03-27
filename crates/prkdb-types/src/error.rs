@@ -56,6 +56,9 @@ pub enum StorageError {
     #[error("Replication failed: {0}")]
     Replication(String),
 
+    #[error("Not leader. Leader is {leader_id:?}")]
+    NotLeader { leader_id: Option<u64> },
+
     #[error("Internal error: {0}")]
     Internal(String),
 

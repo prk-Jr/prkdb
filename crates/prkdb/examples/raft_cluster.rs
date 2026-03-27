@@ -1,6 +1,4 @@
-use prkdb::raft::{ClusterConfig, RaftNode, RpcClientPool};
-use prkdb::storage::WalStorageAdapter;
-use prkdb_core::wal::WalConfig;
+use prkdb::raft::{ClusterConfig, RpcClientPool};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};

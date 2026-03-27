@@ -37,9 +37,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build prkdb-server
-        run: cargo build --release -p prkdb-cli
-
       - name: Run Chaos Monkey Test
         run: |
           echo "🐵 Starting Chaos Monkey Test..."

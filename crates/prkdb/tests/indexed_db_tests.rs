@@ -148,28 +148,8 @@ async fn test_range_query_pagination_integration() {
         .collect();
     db.insert_batch(&users).await.unwrap();
 
-    // Pages of 10
-    let mut _pages = 0;
-    let mut _cursor: Option<Vec<u8>> = None;
-    let mut _all_ids: Vec<String> = Vec::new();
-
-    loop {
-        // Query score >= 0 (all users)
-        // Since we don't have a "query_range_with_cursor", we use standard cursor query
-        // which iterates the index.
-        // Wait, query_with_cursor iterates the index for EQUAL values currently in my implementation.
-        // I implemented `query_with_cursor` for exact match filtering.
-        // Range query pagination requires `query_range_with_cursor`.
-        // Let's test standard cursor pagination on the "score" index?
-        // No, `query_with_cursor` takes a value and finds matches.
-        // So let's add a "group" field/index to query against.
-
-        // Actually, let's just test `query_range_lockfree` (which returns full list)
-        // and standard pagination separately.
-        break;
-    }
-
-    // Let's re-verify range query correctness
+    // Range query pagination is not implemented yet, so this integration test
+    // only verifies the lock-free range query path returns the expected window.
     let range_res: Vec<TestUser> = db.query_range_lockfree("score", &10, &19).await.unwrap();
     assert_eq!(range_res.len(), 10);
     for u in range_res {

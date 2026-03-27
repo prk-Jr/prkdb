@@ -16,7 +16,7 @@ use database_manager::init_database_manager;
 #[command(
     name = "prkdb",
     about = "PrkDB - A reactive database with compute facilities",
-    version = "0.1.0",
+    version = env!("CARGO_PKG_VERSION"),
     long_about = None
 )]
 pub struct Cli {
@@ -40,7 +40,11 @@ pub struct Cli {
     #[arg(long)]
     pub local: bool,
 
-    /// Bootstrap server address (e.g. http://127.0.0.1:8080)
+    /// gRPC bootstrap server address.
+    ///
+    /// Use `http://127.0.0.1:8080` for `prkdb-server`, or
+    /// `http://127.0.0.1:50051` for the local gRPC endpoint exposed by
+    /// `prkdb-cli serve`.
     #[arg(long, default_value = "http://127.0.0.1:8080", env = "PRKDB_SERVER")]
     pub server: String,
 

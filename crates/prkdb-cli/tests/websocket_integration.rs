@@ -60,6 +60,24 @@ impl TestServer {
             attempts += 1;
         }
 
+        let grpc_url = format!("http://127.0.0.1:{}", grpc_port);
+        let mut grpc_attempts = 0;
+        loop {
+            if PrkDbClient::with_config(vec![grpc_url.clone()], ClientConfig::default())
+                .await
+                .is_ok()
+            {
+                break;
+            }
+
+            if grpc_attempts > 30 {
+                panic!("gRPC server failed to start after 3 seconds");
+            }
+
+            sleep(Duration::from_millis(100)).await;
+            grpc_attempts += 1;
+        }
+
         Self {
             process: child,
             http_port,
@@ -82,7 +100,6 @@ impl Drop for TestServer {
 }
 
 #[tokio::test]
-#[ignore] // Integration test: requires server binary, may be flaky in CI
 async fn test_websocket_streaming_flow() {
     // 1. Start Server
     let server = TestServer::start().await;
@@ -135,14 +152,11 @@ async fn test_websocket_streaming_flow() {
         tokio::select! {
             Some(event) = stream.next() => {
                 println!("Received event: {:?}", event);
-                match event {
-                    WsEvent::Update { data, .. } => {
-                        if data == value {
-                            found = true;
-                            break;
-                        }
-                    },
-                    _ => {}
+                if let WsEvent::Update { data, .. } = event {
+                    if data == value {
+                        found = true;
+                        break;
+                    }
                 }
             }
             _ = &mut timeout => {
@@ -155,7 +169,6 @@ async fn test_websocket_streaming_flow() {
 }
 
 #[tokio::test]
-#[ignore] // Integration test: requires server binary, may be flaky in CI
 async fn test_websocket_resume_from_offset() {
     let server = TestServer::start().await;
     let collection = "resume-test";

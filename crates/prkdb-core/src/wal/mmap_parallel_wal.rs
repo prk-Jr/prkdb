@@ -468,8 +468,10 @@ mod tests {
         );
 
         // Change adaptive config directly
-        let mut custom_config = crate::wal::adaptive::AdaptiveBatchConfig::default();
-        custom_config.initial_batch_size = 500;
+        let custom_config = crate::wal::adaptive::AdaptiveBatchConfig {
+            initial_batch_size: 500,
+            ..Default::default()
+        };
         wal.set_adaptive_config(custom_config).await;
 
         assert_eq!(

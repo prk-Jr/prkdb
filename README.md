@@ -2,8 +2,7 @@
 
 **A high-performance, Rust-native event streaming database**
 
-[![Performance](https://img.shields.io/badge/Producer-21.8x%20faster%20than%20Kafka-brightgreen)]()
-[![Consumer](https://img.shields.io/badge/Consumer-24.5x%20faster-brightgreen)]()
+[![Benchmarks](https://img.shields.io/badge/Benchmarks-Raw%20artifacts-blue)]()
 [![Chaos Tests](https://img.shields.io/badge/Chaos%20Tests-19%20passing-blue)]()
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange)]()
 
@@ -11,8 +10,8 @@ Docs: https://prk-jr.github.io/prkdb/
 
 ## 🚀 Features
 
-- **21.8x faster than Kafka** - 419 MB/s producer throughput (mmap WAL + batch writes)
-- **24.5x faster consumer** - 1.6 GB/s read throughput (zero-copy transfer)
+- **High-throughput local writes** - mmap WAL + batch writes tuned for embedded and single-node deployments
+- **Fast local replay** - optimized append/read paths for local streaming workloads
 - **894K queries/sec** - Lock-free indexed lookups
 - **ACID Transactions** - Commit/rollback, savepoints, conflict detection
 - **TTL/Expiration** - Auto-expire records after configurable duration
@@ -75,22 +74,22 @@ PrkDB includes a built-in schema registry and cross-language client generator fo
 First, register your schema (via `#[derive(Collection)]` export or raw `.proto`):
 ```bash
 export PRKDB_ADMIN_TOKEN=change-me
-prkdb schema register --server http://127.0.0.1:8080 --collection users --proto user.proto
+prkdb schema register --server http://127.0.0.1:50051 --collection users --proto user.proto
 ```
 
 Then generate a strongly-typed client in your language of choice:
 ```bash
 # Generate a TypeScript HTTP client
-prkdb codegen --server http://127.0.0.1:8080 --lang typescript --collection users --out ./src/client
+prkdb codegen --server http://127.0.0.1:50051 --lang typescript --collection users --out ./src/client
 
 # Generate a Python client
-prkdb codegen --server http://127.0.0.1:8080 --lang python --collection users --out ./app/models
+prkdb codegen --server http://127.0.0.1:50051 --lang python --collection users --out ./app/models
 
 # Generate a Go client
-prkdb codegen --server http://127.0.0.1:8080 --lang go --collection users --out ./pkg/models
+prkdb codegen --server http://127.0.0.1:50051 --lang go --collection users --out ./pkg/models
 ```
 
-Generated clients target the HTTP API exposed by `prkdb-cli serve`, which defaults to `http://127.0.0.1:8080`. If you are running `prkdb-cli serve` locally, keep using `http://127.0.0.1:50051` for the schema and codegen gRPC commands.
+Generated clients target the HTTP API exposed by `prkdb-cli serve`, which defaults to `http://127.0.0.1:8080`. Use `http://127.0.0.1:50051` for schema/codegen gRPC commands against `prkdb-cli serve`, or `http://127.0.0.1:8080` when talking directly to `prkdb-server`.
 
 ## Transactions
 
@@ -811,6 +810,16 @@ cargo run --release --example index_example           # Secondary Indexes demo
 ./scripts/consistency_test.sh # 6 data durability tests
 ```
 
+### Repository Status
+```bash
+cargo run -p xtask -- repo-status snapshot
+cargo run -p xtask -- repo-status audit
+cargo run -p xtask -- repo-status render
+```
+
+Use `cargo run -p xtask -- repo-status snapshot --fail-on-objective-drift` in CI when
+objective roadmap/docs/contract drift should fail the workflow.
+
 ## Monitoring
 
 ```bash
@@ -829,15 +838,15 @@ prkdb metrics show
 prkdb serve
 
 # Schema & Codegen
-prkdb schema register --server http://127.0.0.1:8080 --collection users --proto schema.desc
-prkdb schema list --server http://127.0.0.1:8080
-prkdb codegen --server http://127.0.0.1:8080 --collection users --lang typescript --out ./client
+prkdb schema register --server http://127.0.0.1:50051 --collection users --proto schema.desc
+prkdb schema list --server http://127.0.0.1:50051
+prkdb codegen --server http://127.0.0.1:50051 --collection users --lang typescript --out ./client
 
 # Data Operations
-prkdb put user:101 '{"name": "Alice"}' --server http://127.0.0.1:8080
-prkdb get user:101 --server http://127.0.0.1:8080
-prkdb delete user:101 --server http://127.0.0.1:8080
-prkdb batch-put data.txt --separator=, --server http://127.0.0.1:8080
+prkdb put user:101 '{"name": "Alice"}' --server http://127.0.0.1:50051
+prkdb get user:101 --server http://127.0.0.1:50051
+prkdb delete user:101 --server http://127.0.0.1:50051
+prkdb batch-put data.txt --separator=, --server http://127.0.0.1:50051
 ```
 
 ## Crates
@@ -855,23 +864,13 @@ prkdb batch-put data.txt --separator=, --server http://127.0.0.1:8080
 | `prkdb-metrics` | Prometheus |
 | `prkdb-storage-*` | Storage backends |
 
-## 🔬 Performance vs Kafka
+## 🔬 Benchmarks
 
-**Benchmark Configuration:**
-- Records: 1,000,000 (standard) / 10,000,000 (sustained load)
-- Record Size: 100 bytes
-- Batch Size: 10,000
-- Environment: GitHub Actions ubuntu-latest
+CI publishes raw benchmark artifacts for:
+- local PrkDB storage-engine measurements
+- single-broker Kafka perf-tool reference runs
 
-| Metric | Kafka | PrkDB | PrkDB Advantage |
-|--------|-------|-------|----------------|
-| **Producer (1M)** | 19.21 MB/s | 419.80 MB/s | **21.8x faster** |
-| **Sustained (10M)** | 41.34 MB/s | 153.95 MB/s | **3.7x faster** |
-| **Consumer** | 65.38 MB/s | 1604.19 MB/s | **24.5x faster** |
-| **Avg Latency** | 94.76 ms | 1.45 ms | **65x lower** |
-| **p99 Latency** | 274 ms | 21.4 ms | **12.8x lower** |
-
-> Benchmarks use official `kafka-producer-perf-test` and native Rust benchmarks.
+Those numbers are useful for trend tracking inside this repo, but they are not an apples-to-apples database comparison. The PrkDB runs are local native benchmarks; the Kafka runs exercise a networked broker with the official perf tools. Treat them as separate reference points unless the methodology is explicitly aligned.
 
 ## 🐵 Chaos Engineering
 
@@ -906,7 +905,7 @@ cargo test --test corruption_tests -- --ignored --nocapture
 
 | Category | Status |
 |----------|--------|
-| Kafka Benchmark | ✅ 21.8x faster producer, 24.5x faster consumer |
+| Local Benchmarks | ✅ Raw PrkDB and Kafka reference artifacts published in CI |
 | Chaos Engineering | ✅ 19 tests (Raft + Jepsen + Extended + Corruption) |
 | Raft Cluster | ✅ 5-node chaos monkey with 99.4% success |
 | Storage Backends | ✅ 8 tests |

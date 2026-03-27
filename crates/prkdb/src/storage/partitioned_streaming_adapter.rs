@@ -179,7 +179,7 @@ impl PartitionedStreamingAdapter {
 
         let record_count = records.len();
         let partition_count = self.inner.partition_count;
-        let chunk_size = (record_count + partition_count - 1) / partition_count;
+        let chunk_size = record_count.div_ceil(partition_count);
 
         // Split records into chunks for each partition
         let chunks: Vec<Vec<StreamingRecord>> = records

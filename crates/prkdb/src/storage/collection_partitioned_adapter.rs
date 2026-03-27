@@ -372,6 +372,20 @@ impl StorageAdapter for CollectionPartitionedAdapter {
         result
     }
 
+    async fn flush(&self) -> Result<(), StorageError> {
+        let adapters: Vec<_> = self
+            .collections
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+
+        for adapter in adapters {
+            adapter.flush().await?;
+        }
+
+        Ok(())
+    }
+
     async fn put_batch(&self, entries: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), StorageError> {
         // Group entries by collection for maximum parallelism
         let mut collection_batches: std::collections::HashMap<String, Vec<(Vec<u8>, Vec<u8>)>> =

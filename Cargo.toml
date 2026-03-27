@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "xtask",
     "crates/prkdb",
     "crates/prkdb-cli",
     "crates/prkdb-client",

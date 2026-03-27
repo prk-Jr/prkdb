@@ -54,7 +54,7 @@ async fn test_log_compaction() {
     assert!(snapshot_result.is_ok(), "Snapshot creation should succeed");
 
     let snapshot_data = snapshot_result.unwrap();
-    assert!(snapshot_data.len() > 0, "Snapshot should contain data");
+    assert!(!snapshot_data.is_empty(), "Snapshot should contain data");
 
     println!("✅ Snapshot created: {} bytes", snapshot_data.len());
 

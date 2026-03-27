@@ -52,14 +52,15 @@ curl http://127.0.0.1:8080/health
 ### gRPC key-value operations
 
 ```bash
+# `prkdb-cli serve` exposes gRPC on --grpc-port (50051 by default)
 # Write a value
-cargo run -p prkdb-cli -- put my-key "Hello PrkDB" --server http://127.0.0.1:8080
+cargo run -p prkdb-cli -- put my-key "Hello PrkDB" --server http://127.0.0.1:50051
 
 # Read it back
-cargo run -p prkdb-cli -- get my-key --server http://127.0.0.1:8080
+cargo run -p prkdb-cli -- get my-key --server http://127.0.0.1:50051
 
 # Delete it
-cargo run -p prkdb-cli -- delete my-key --server http://127.0.0.1:8080
+cargo run -p prkdb-cli -- delete my-key --server http://127.0.0.1:50051
 ```
 
 ### HTTP collection operations
@@ -97,7 +98,7 @@ use prkdb_client::{PrkDbClient, ReadConsistency};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = PrkDbClient::new(vec![
-        "http://127.0.0.1:8080".to_string(),
+        "http://127.0.0.1:50051".to_string(),
     ]).await?;
 
     let payload = serde_json::json!({
@@ -128,8 +129,8 @@ Use `http://127.0.0.1:8080` when talking to `prkdb-server`, or `http://127.0.0.1
 
 ```bash
 export PRKDB_ADMIN_TOKEN=change-me
-prkdb schema register --server http://127.0.0.1:8080 --collection users --proto ./schemas/users.binpb
-prkdb schema list --server http://127.0.0.1:8080
+prkdb schema register --server http://127.0.0.1:50051 --collection users --proto ./schemas/users.binpb
+prkdb schema list --server http://127.0.0.1:50051
 ```
 
 ## Next Steps

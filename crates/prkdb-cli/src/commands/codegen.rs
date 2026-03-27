@@ -1,9 +1,9 @@
 //! Codegen command for generating cross-language SDK clients
 //!
 //! Usage:
-//!   prkdb codegen --server http://localhost:8080 --lang python --out ./clients/python/
-//!   prkdb codegen --server http://localhost:8080 --lang typescript --out ./clients/ts/
-//!   prkdb codegen --server http://localhost:8080 --lang go --out ./clients/go/
+//!   prkdb codegen --server http://localhost:50051 --lang python --out ./clients/python/
+//!   prkdb codegen --server http://localhost:50051 --lang typescript --out ./clients/ts/
+//!   prkdb codegen --server http://localhost:50051 --lang go --out ./clients/go/
 
 use clap::{Args, ValueEnum};
 use prkdb_client::PrkDbClient;
@@ -23,7 +23,11 @@ pub enum Language {
 
 #[derive(Args, Clone)]
 pub struct CodegenArgs {
-    /// Server address to fetch schemas from
+    /// gRPC server address used to fetch schemas.
+    ///
+    /// Use `http://127.0.0.1:8080` for `prkdb-server`, or
+    /// `http://127.0.0.1:50051` for the local gRPC endpoint exposed by
+    /// `prkdb-cli serve`.
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     pub server: String,
 
@@ -74,7 +78,7 @@ pub async fn handle_codegen(args: CodegenArgs) -> anyhow::Result<()> {
             Ok(schema) => vec![(collection.clone(), schema)],
             Err(e) => {
                 eprintln!("Failed to fetch schema for '{}': {}", collection, e);
-                return Err(e.into());
+                return Err(e);
             }
         }
     } else {
@@ -148,7 +152,7 @@ fn parse_schema_messages(schema_bytes: &[u8]) -> Vec<MessageInfo> {
     messages
 }
 
-fn collect_messages(msg: &prost_types::DescriptorProto, scope: &str, out: &mut Vec<MessageInfo>) {
+fn collect_messages(msg: &prost_types::DescriptorProto, _scope: &str, out: &mut Vec<MessageInfo>) {
     let name = msg.name.clone().unwrap_or_default();
     let fields = msg
         .field
@@ -174,7 +178,7 @@ fn collect_messages(msg: &prost_types::DescriptorProto, scope: &str, out: &mut V
 
     // Recurse into nested types
     for nested in &msg.nested_type {
-        collect_messages(nested, scope, out);
+        collect_messages(nested, _scope, out);
     }
 }
 
@@ -208,7 +212,7 @@ impl FieldInfo {
             _ => {
                 // Return class name for messages (strip path)
                 if let Some(name) = &self.type_name {
-                    name.split('.').last().unwrap_or("Any")
+                    name.split('.').next_back().unwrap_or("Any")
                 } else {
                     "Any"
                 }
@@ -233,7 +237,7 @@ impl FieldInfo {
             12 => "Uint8Array",               // Bytes
             _ => {
                 if let Some(name) = &self.type_name {
-                    name.split('.').last().unwrap_or("any")
+                    name.split('.').next_back().unwrap_or("any")
                 } else {
                     "any"
                 }
@@ -264,7 +268,7 @@ impl FieldInfo {
             16 => "int64",
             _ => {
                 if let Some(name) = &self.type_name {
-                    name.split('.').last().unwrap_or("interface{}")
+                    name.split('.').next_back().unwrap_or("interface{}")
                 } else {
                     "interface{}"
                 }
@@ -338,7 +342,7 @@ class {}:
                 // TYPE_MESSAGE
                 // Extract class name from type_name (e.g. ".models.Address" -> "Address")
                 if let Some(type_name_full) = &field.type_name {
-                    let type_name = type_name_full.split('.').last().unwrap_or("Any");
+                    let type_name = type_name_full.split('.').next_back().unwrap_or("Any");
                     if type_name != "Any" {
                         let field_name = &field.name;
                         if field.is_repeated {
@@ -547,68 +551,68 @@ export class {}QueryBuilder {{
     }
 
     // Add PrkDbClient class with dynamic collection methods
-    code.push_str(&format!(
+    code.push_str(
         r#"
-export class PrkDbClient {{
+export class PrkDbClient {
     private host: string;
 
-    constructor(host: string = "http://127.0.0.1:8080") {{
+    constructor(host: string = "http://127.0.0.1:8080") {
         this.host = host.replace(/\/$/, "");
-    }}
+    }
 
-    async list<T>(collection: string, options: {{ limit?: number, offset?: number, filter?: string, sort?: string }} = {{}}): Promise<T[]> {{
+    async list<T>(collection: string, options: { limit?: number, offset?: number, filter?: string, sort?: string } = {}): Promise<T[]> {
         const params = new URLSearchParams();
         if (options.limit) params.set("limit", options.limit.toString());
         if (options.offset) params.set("offset", options.offset.toString());
         if (options.filter) params.set("filter", options.filter);
         if (options.sort) params.set("sort", options.sort);
 
-        const response = await fetch(`${{this.host}}/collections/${{collection}}/data?${{params}}`);
-        if (!response.ok) {{
-            throw new Error(`Failed to list collection: ${{response.status}}`);
-        }}
+        const response = await fetch(`${this.host}/collections/${collection}/data?${params}`);
+        if (!response.ok) {
+            throw new Error(`Failed to list collection: ${response.status}`);
+        }
 
         const data = await response.json();
         
-        const result = data.data || {{}};
-        if (result && result.data && Array.isArray(result.data)) {{
+        const result = data.data || {};
+        if (result && result.data && Array.isArray(result.data)) {
             return result.data;
-        }}
+        }
         return Array.isArray(result) ? result : [];
-    }}
+    }
 
-    async get<T>(collection: string, id: string): Promise<T | null> {{
-        const response = await fetch(`${{this.host}}/collections/${{collection}}/data/${{id}}`);
+    async get<T>(collection: string, id: string): Promise<T | null> {
+        const response = await fetch(`${this.host}/collections/${collection}/data/${id}`);
         if (response.status === 404) return null;
-        if (!response.ok) {{
-            throw new Error(`Failed to get record: ${{response.status}}`);
-        }}
+        if (!response.ok) {
+            throw new Error(`Failed to get record: ${response.status}`);
+        }
         const data = await response.json();
         return data.data || null;
-    }}
+    }
 
-    async put(collection: string, data: any): Promise<void> {{
-        const response = await fetch(`${{this.host}}/collections/${{collection}}/data`, {{
+    async put(collection: string, data: any): Promise<void> {
+        const response = await fetch(`${this.host}/collections/${collection}/data`, {
             method: 'PUT',
-            headers: {{ 'Content-Type': 'application/json' }},
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(data)
-        }});
-        if (!response.ok) {{
-            throw new Error(`Failed to put record: ${{response.status}}`);
-        }}
-    }}
+        });
+        if (!response.ok) {
+            throw new Error(`Failed to put record: ${response.status}`);
+        }
+    }
 
-    async delete(collection: string, id: string): Promise<void> {{
-        const response = await fetch(`${{this.host}}/collections/${{collection}}/data/${{id}}`, {{
+    async delete(collection: string, id: string): Promise<void> {
+        const response = await fetch(`${this.host}/collections/${collection}/data/${id}`, {
             method: 'DELETE'
-        }});
-        if (!response.ok) {{
-            throw new Error(`Failed to delete record: ${{response.status}}`);
-        }}
-    }}
-}}
+        });
+        if (!response.ok) {
+            throw new Error(`Failed to delete record: ${response.status}`);
+        }
+    }
+}
 "#
-    ));
+    );
 
     let filename = format!("{}.ts", collection.to_lowercase());
     fs::write(out_dir.join(&filename), code).await?;
@@ -1053,6 +1057,10 @@ mod tests {
         assert!(ts_code.contains("id: string;"));
         assert!(ts_code.contains("age: number;"));
         assert!(ts_code.contains("export class UserQueryBuilder"));
+        assert!(ts_code.contains(r#"constructor(host: string = "http://127.0.0.1:8080") {"#));
+        assert!(ts_code.contains("headers: { 'Content-Type': 'application/json' },"));
+        assert!(!ts_code.contains("export class PrkDbClient {{"));
+        assert!(!ts_code.contains("headers: {{ 'Content-Type': 'application/json' }},"));
     }
 
     #[tokio::test]

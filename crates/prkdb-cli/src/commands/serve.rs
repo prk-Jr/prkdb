@@ -13,6 +13,7 @@ use axum::{
     Json, Router,
 };
 use clap::Args;
+use prkdb_types::error::{Error as PrkdbError, StorageError};
 use prkdb_types::storage::StorageAdapter;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -357,8 +358,19 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
 
     // Start the server
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    let shutdown_db = crate::database_manager::get_db_instance().await.ok();
 
-    axum::serve(listener, app.into_make_service()).await?;
+    axum::serve(listener, app.into_make_service())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+
+            if let Some(db) = shutdown_db {
+                if let Err(error) = flush_db_state(&db).await {
+                    eprintln!("⚠️ Failed to flush storage during shutdown: {}", error);
+                }
+            }
+        })
+        .await?;
 
     if args.prometheus {
         prkdb::prometheus_metrics::SERVER_UP
@@ -398,7 +410,7 @@ async fn shutdown_signal() {
 async fn root_handler() -> impl IntoResponse {
     Json(json!({
         "name": "PrkDB HTTP API",
-        "version": "0.1.0",
+        "version": env!("CARGO_PKG_VERSION"),
         "description": "HTTP API for PrkDB collections and metrics",
         "endpoints": {
             "collections": "/collections",
@@ -651,7 +663,7 @@ async fn put_collection_data_handler(
         Err(e) => {
             let err_str = e.to_string();
             // Check for NotLeader error and forward to leader
-            if let Some(leader_id) = parse_leader_id(&err_str) {
+            if let Some(leader_id) = leader_id_from_error(&e) {
                 if let Some(leader_url) = state.peer_http_addrs.get(&leader_id) {
                     // Forward the PUT to the leader's HTTP endpoint
                     let forward_url = format!("{}/collections/{}/data", leader_url, name);
@@ -720,7 +732,7 @@ async fn delete_collection_data_handler(
         Ok(_) => Json(json!({"success": true, "id": id})).into_response(),
         Err(e) => {
             let err_str = e.to_string();
-            if let Some(leader_id) = parse_leader_id(&err_str) {
+            if let Some(leader_id) = leader_id_from_error(&e) {
                 if let Some(leader_url) = state.peer_http_addrs.get(&leader_id) {
                     let forward_url = format!("{}/collections/{}/data/{}", leader_url, name, id);
                     match reqwest::Client::new().delete(&forward_url).send().await {
@@ -762,8 +774,18 @@ async fn delete_collection_data_handler(
     }
 }
 
-/// Parse leader node ID from a "Not leader. Leader is Some(N)" error string
-fn parse_leader_id(err: &str) -> Option<u64> {
+fn leader_id_from_error(err: &PrkdbError) -> Option<u64> {
+    match err {
+        PrkdbError::Storage(StorageError::NotLeader { leader_id }) => *leader_id,
+        PrkdbError::Storage(StorageError::Internal(message)) | PrkdbError::Internal(message) => {
+            parse_leader_id_from_message(message)
+        }
+        _ => None,
+    }
+}
+
+/// Parse leader node ID from a legacy "Not leader. Leader is Some(N)" error string
+fn parse_leader_id_from_message(err: &str) -> Option<u64> {
     // Match pattern: "Not leader. Leader is Some(N)"
     if let Some(pos) = err.find("Leader is Some(") {
         let start = pos + "Leader is Some(".len();
@@ -964,8 +986,7 @@ async fn websocket_connection(
                         "type": "error",
                         "message": format!("Failed to get database instance: {}", e)
                     })
-                    .to_string()
-                    .into(),
+                    .to_string(),
                 ))
                 .await;
             return;
@@ -983,20 +1004,17 @@ async fn websocket_connection(
         {
             // Simple scan to find max sequence (expensive for large history, but okay for MVP/small collections)
             let prefix = format!("{}:", collection_name);
-            match load_outbox_entries(&db).await {
-                Ok(entries) => {
-                    for (id, _) in entries {
-                        if id.starts_with(&prefix) {
-                            // Find max sequence
-                            if let Some(seq_str) = id.rsplit(':').next() {
-                                if let Ok(seq) = seq_str.parse::<u64>() {
-                                    last_sequence = last_sequence.max(seq);
-                                }
+            if let Ok(entries) = load_outbox_entries(&db).await {
+                for (id, _) in entries {
+                    if id.starts_with(&prefix) {
+                        // Find max sequence
+                        if let Some(seq_str) = id.rsplit(':').next() {
+                            if let Ok(seq) = seq_str.parse::<u64>() {
+                                last_sequence = last_sequence.max(seq);
                             }
                         }
                     }
                 }
-                Err(_) => {}
             }
         }
     }
@@ -1010,8 +1028,7 @@ async fn websocket_connection(
                 "timestamp": chrono::Utc::now().to_rfc3339(),
                 "start_offset": last_sequence
             })
-            .to_string()
-            .into(),
+            .to_string(),
         ))
         .await
         .is_err()
@@ -1072,7 +1089,7 @@ async fn websocket_connection(
                                 "timestamp": chrono::Utc::now().to_rfc3339()
                             });
 
-                            if socket.send(Message::Text(message.to_string().into())).await.is_err() {
+                            if socket.send(Message::Text(message.to_string())).await.is_err() {
                                 return;
                             }
                         }
@@ -1086,8 +1103,7 @@ async fn websocket_connection(
                                     "type": "error",
                                     "message": e.to_string()
                                 })
-                                .to_string()
-                                .into(),
+                                .to_string(),
                             ))
                             .await;
                         break;
@@ -1319,7 +1335,7 @@ async fn scan_collection_records(name: &str) -> Result<Vec<CollectionRecord>> {
         }
     }
 
-    records.sort_by(|left, right| storage_key_display(left).cmp(&storage_key_display(right)));
+    records.sort_by_key(storage_key_display);
 
     Ok(records)
 }
@@ -1500,7 +1516,7 @@ fn decode_stored_value(value: &[u8]) -> Result<Value> {
         return Ok(json_value);
     }
 
-    Ok(collection::try_bincode_to_json(value)?)
+    collection::try_bincode_to_json(value)
 }
 
 async fn load_outbox_entries(db: &std::sync::Arc<prkdb::PrkDb>) -> Result<Vec<(String, Vec<u8>)>> {
@@ -1517,6 +1533,20 @@ async fn load_outbox_entries(db: &std::sync::Arc<prkdb::PrkDb>) -> Result<Vec<(S
     } else {
         Ok(db.storage().outbox_list().await?)
     }
+}
+
+async fn flush_db_state(db: &prkdb::PrkDb) -> Result<()> {
+    if let Some(pm) = &db.partition_manager {
+        for partition_id in 0..pm.partition_count() {
+            if let Some(storage) = pm.get_partition_storage(partition_id as u64) {
+                storage.flush().await?;
+            }
+        }
+    } else {
+        db.storage().flush().await?;
+    }
+
+    Ok(())
 }
 
 fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
@@ -1611,5 +1641,19 @@ mod tests {
             Some("http://db-1.example.com:8080")
         );
         assert!(!addresses.contains_key(&2));
+    }
+
+    #[test]
+    fn leader_id_from_error_prefers_typed_not_leader_errors() {
+        let err = PrkdbError::Storage(StorageError::NotLeader { leader_id: Some(7) });
+        assert_eq!(leader_id_from_error(&err), Some(7));
+    }
+
+    #[test]
+    fn leader_id_from_error_supports_legacy_string_errors() {
+        let err = PrkdbError::Storage(StorageError::Internal(
+            "ReadIndex failed (not leader?): Not leader. Leader is Some(9)".to_string(),
+        ));
+        assert_eq!(leader_id_from_error(&err), Some(9));
     }
 }

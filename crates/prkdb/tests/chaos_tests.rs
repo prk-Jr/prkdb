@@ -114,7 +114,7 @@ async fn chaos_test_concurrent_mixed_operations() {
 
 /// Chaos testing: Rapid open/close cycles
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore] // Intermittent failure - recovery timing issue
+#[ignore = "Manual investigation: integration harness still diverges from WAL recovery unit tests"]
 async fn chaos_test_rapid_recovery() {
     let dir = tempfile::tempdir().unwrap();
     let config = WalConfig {
@@ -131,8 +131,8 @@ async fn chaos_test_rapid_recovery() {
                 let value = format!("cycle_{}_value_{}", cycle, i).into_bytes();
                 adapter.put(&key, &value).await.unwrap();
             }
-            // Wait for flush (increased for reliability)
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            adapter.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
         // Reopen and verify

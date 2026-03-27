@@ -2,20 +2,15 @@
 set -euo pipefail
 # Schema CLI Integration Test
 
-echo "🏗️  Building prkdb binary..."
-cargo build -p prkdb-cli --quiet
+PRKDB_BIN="${PRKDB_BIN:-./target/debug/prkdb-cli}"
 
-PRKDB_BIN="./target/debug/prkdb"
-if [ ! -f "$PRKDB_BIN" ]; then
-    if [ -f "./target/debug/prkdb-cli" ]; then
-        PRKDB_BIN="./target/debug/prkdb-cli"
-    elif [ -f "./target/debug/prkdb-server" ]; then
-        PRKDB_BIN="./target/debug/prkdb-server"
-    fi
+if [ "${SKIP_BUILD:-0}" != "1" ]; then
+    echo "🏗️  Building prkdb binary..."
+    cargo build -p prkdb-cli --bin prkdb-cli --quiet
 fi
 
-if [ ! -f "$PRKDB_BIN" ]; then
-    echo "❌ Could not find prkdb binary"
+if [ ! -x "$PRKDB_BIN" ]; then
+    echo "❌ Expected prkdb binary at $PRKDB_BIN"
     exit 1
 fi
 

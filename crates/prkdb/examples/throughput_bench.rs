@@ -76,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
         batch_num += 1;
 
         // Progress indicator
-        if batch_num % 10 == 0 {
+        if batch_num.is_multiple_of(10) {
             let pct = (total_records as f64 / NUM_RECORDS as f64) * 100.0;
             print!(
                 "\r  Progress: {:.1}% ({}/{})",

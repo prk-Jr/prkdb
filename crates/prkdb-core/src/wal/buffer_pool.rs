@@ -94,7 +94,7 @@ mod tests {
         // Pool should have at most 2 buffers (may have less due to timing)
         let buffers = pool.buffers.lock().await;
         assert!(buffers.len() <= 2);
-        assert!(buffers.len() >= 1); // At least one should be pooled
+        assert!(!buffers.is_empty()); // At least one should be pooled
     }
 
     #[tokio::test]

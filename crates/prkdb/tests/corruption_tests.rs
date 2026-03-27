@@ -42,7 +42,7 @@ async fn test_single_byte_corruption_detected() {
     let wal_files: Vec<_> = fs::read_dir(dir.path())
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "wal"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "wal"))
         .collect();
 
     if wal_files.is_empty() {
@@ -155,7 +155,7 @@ async fn test_truncated_wal_recovery() {
     let wal_files: Vec<_> = fs::read_dir(dir.path())
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "wal"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "wal"))
         .collect();
 
     if let Some(wal_entry) = wal_files.first() {
@@ -218,7 +218,7 @@ async fn test_header_corruption_detected() {
     let wal_files: Vec<_> = fs::read_dir(dir.path())
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "wal"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "wal"))
         .collect();
 
     if let Some(wal_entry) = wal_files.first() {

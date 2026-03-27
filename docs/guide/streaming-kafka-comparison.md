@@ -1,9 +1,9 @@
-# PrkDB vs Kafka: Streaming Comparison
+# PrkDB and Kafka: Streaming Comparison
 
 ## Overview
 
 This document compares PrkDB's streaming capabilities with Apache Kafka,
-analyzing features, performance, and use cases.
+focusing on architecture, operational tradeoffs, and use cases.
 
 ---
 
@@ -24,35 +24,24 @@ analyzing features, performance, and use cases.
 
 ---
 
-## Performance Comparison
+## Benchmark Notes
 
-Based on latest benchmarks (Feb 2026), PrkDB significantly outperforms Kafka in both throughput and latency.
+The repo CI publishes two separate kinds of measurements:
 
-### 📈 Throughput
+- local PrkDB storage-engine benchmarks written in native Rust
+- single-broker Kafka reference runs using the official perf tools
 
-| Metric               | Kafka      | PrkDB            | Advantage        |
-| -------------------- | ---------- | ---------------- | ---------------- |
-| **Producer (1M)**    | 31.20 MB/s | **330.16 MB/s**  | **10.5x faster** |
-| **Sustained (10M)**  | 71.07 MB/s | **249.22 MB/s**  | **3.5x faster**  |
-| **Consumer**         | 94.09 MB/s | **2385.55 MB/s** | **25.3x faster** |
-| **Partitioned Peak** | -          | **483.82 MB/s**  | -                |
-
-### ⏱️ Latency
-
-| Percentile  | Kafka     | PrkDB                  |
-| ----------- | --------- | ---------------------- |
-| **Average** | 150.61 ms | **2.05 ms** (2049 μs)  |
-| **p99**     | 265 ms    | **54.9 ms** (54927 μs) |
-
-> Note: PrkDB achieves sub-millisecond average latency in optimized scenarios.
+Those results are useful for tracking regressions inside this repo, but they are not a fair head-to-head system comparison. Kafka numbers include a networked broker and protocol/tooling overhead; the PrkDB numbers are local storage-engine paths. Use the raw artifacts as reference points, not as proof that one system universally outperforms the other.
 
 ### 🔬 Methodology
 
-- **Records**: 1,000,000 (Standard) / 10,000,000 (Sustained)
+- **Records**: 1,000,000 (standard) / 10,000,000 (sustained)
 - **Record Size**: 100 bytes
 - **Batch Size**: 10,000
-- **Environment**: GitHub Actions (ubuntu-latest), Native Rust benchmarks with mmap WAL.
-- **Data**: Real writes to disk (fsync enabled), no mocking.
+- **Environment**: GitHub Actions (`ubuntu-latest`)
+- **Kafka lane**: official `kafka-producer-perf-test` and `kafka-consumer-perf-test` against a single broker
+- **PrkDB lane**: native Rust local benchmarks over mmap/WAL storage
+- **Interpretation**: suitable for internal trend tracking, not apples-to-apples product claims
 
 ---
 
@@ -120,10 +109,10 @@ while (true) {
 ### Use PrkDB When:
 
 - ✅ **Embedded event streaming** (no external services)
-- ✅ **Ultra-low latency** (microseconds vs milliseconds)
+- ✅ **Low-latency local pipelines**
 - ✅ **Single binary deployment** (no JVM, no Zookeeper)
 - ✅ **Edge computing** (limited resources)
-- ✅ **Fast reads** (7M+ ops/sec from cache)
+- ✅ **Fast local reads and replay**
 - ✅ **Rust/native integration**
 
 ### Use Kafka When:
@@ -188,12 +177,10 @@ let consumer2 = EventStream::<Order>::new(db.clone(), config2).await?;
 
 | Aspect           | Winner                                   |
 | ---------------- | ---------------------------------------- |
-| Latency          | 🏆 **PrkDB** (sub-millisecond)           |
-| Read throughput  | 🏆 **PrkDB** (25x faster consumer)       |
-| Write throughput | 🏆 **PrkDB** (10.5x faster producer)     |
+| Local deployment | 🏆 **PrkDB** (embedded or single binary) |
 | Resource usage   | 🏆 **PrkDB** (10x less)                  |
 | Scalability      | Kafka (horizontal scaling)               |
 | Simplicity       | 🏆 **PrkDB** (embedded or single binary) |
 
-**PrkDB is ideal for high-performance streaming where latency and throughput are critical.**
+**PrkDB is ideal for high-performance local streaming and embedded deployments.**
 **Kafka remains the standard for massive, multi-tenant enterprise data hubs.**

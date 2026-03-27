@@ -178,7 +178,7 @@ async fn main() -> Result<()> {
         );
     }
 
-    let data_addr: SocketAddr = format!("0.0.0.0:{}", grpc_port).parse()?;
+    let data_addr = resolve_grpc_bind_address(listen_addr, grpc_port);
     info!("Starting gRPC data service on {}", data_addr);
 
     //  Run gRPC server until shutdown
@@ -188,9 +188,16 @@ async fn main() -> Result<()> {
         router = router.add_service(raft_service);
     }
 
+    let shutdown_db = db_arc.clone();
+
     router
         .serve_with_shutdown(data_addr, async {
             signal::ctrl_c().await.ok();
+
+            if let Err(error) = flush_db_state(&shutdown_db).await {
+                tracing::warn!("Failed to flush storage during shutdown: {}", error);
+            }
+
             info!("Shutting down...");
             prkdb::prometheus_metrics::SERVER_UP
                 .with_label_values(&[&node_id.to_string()])
@@ -370,6 +377,24 @@ fn resolve_metrics_bind_address(
     Ok(Some(metrics_addr))
 }
 
+fn resolve_grpc_bind_address(listen_addr: SocketAddr, grpc_port: u16) -> SocketAddr {
+    SocketAddr::new(listen_addr.ip(), grpc_port)
+}
+
+async fn flush_db_state(db: &Arc<PrkDb>) -> Result<()> {
+    if let Some(pm) = &db.partition_manager {
+        for partition_id in 0..pm.partition_count() {
+            if let Some(storage) = pm.get_partition_storage(partition_id as u64) {
+                storage.flush().await?;
+            }
+        }
+    } else {
+        db.storage().flush().await?;
+    }
+
+    Ok(())
+}
+
 fn env_var_is_truthy(key: &str) -> bool {
     env::var(key)
         .ok()
@@ -423,6 +448,15 @@ mod tests {
         assert_eq!(
             resolve_metrics_bind_address(2, false, Some("127.0.0.1:9910")).unwrap(),
             Some("127.0.0.1:9910".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn resolve_grpc_bind_address_reuses_listen_host() {
+        let listen_addr: SocketAddr = "127.0.0.1:50051".parse().unwrap();
+        assert_eq!(
+            resolve_grpc_bind_address(listen_addr, 50051),
+            "127.0.0.1:50051".parse::<SocketAddr>().unwrap()
         );
     }
 }

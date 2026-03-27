@@ -3,16 +3,23 @@ set -euo pipefail
 # End-to-End Schema Application Test
 # Simulates: Schema V1 -> App V1 -> Schema V2 (Breaking) -> Migration -> App V2
 
-echo "🏗️  Building prkdb binary..."
-cargo build -p prkdb-cli --bin prkdb-cli --quiet
-
-PRKDB_BIN="./target/debug/prkdb-cli"
+PRKDB_BIN="${PRKDB_BIN:-./target/debug/prkdb-cli}"
 ADMIN_TOKEN="schema_e2e_test_token"
 LOG_FILE="/tmp/prkdb_server_e2e.log"
 WORK_DIR="/tmp/prkdb_e2e"
 DATABASE_PATH="$WORK_DIR/db"
 rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR"
+
+if [ "${SKIP_BUILD:-0}" != "1" ]; then
+    echo "🏗️  Building prkdb binary..."
+    cargo build -p prkdb-cli --bin prkdb-cli --quiet
+fi
+
+if [ ! -x "$PRKDB_BIN" ]; then
+    echo "❌ Expected prkdb binary at $PRKDB_BIN"
+    exit 1
+fi
 
 reserve_port() {
     python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
