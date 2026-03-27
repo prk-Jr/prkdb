@@ -14,23 +14,23 @@ PrkDB can generate TypeScript, Python, and Go client code from schemas stored in
 export PRKDB_ADMIN_TOKEN=change-me
 
 # TypeScript
-prkdb codegen --server http://127.0.0.1:8080 --lang typescript --out ./generated/ts
+prkdb codegen --server http://127.0.0.1:50051 --lang typescript --out ./generated/ts
 
 # Python
-prkdb codegen --server http://127.0.0.1:8080 --lang python --out ./generated/python
+prkdb codegen --server http://127.0.0.1:50051 --lang python --out ./generated/python
 
 # Go
-prkdb codegen --server http://127.0.0.1:8080 --lang go --out ./generated/go
+prkdb codegen --server http://127.0.0.1:50051 --lang go --out ./generated/go
 
 # All supported languages
-prkdb codegen --server http://127.0.0.1:8080 --lang all --out ./generated
+prkdb codegen --server http://127.0.0.1:50051 --lang all --out ./generated
 ```
 
 To generate code for one collection only:
 
 ```bash
 prkdb codegen \
-  --server http://127.0.0.1:8080 \
+  --server http://127.0.0.1:50051 \
   --lang typescript \
   --collection users \
   --out ./generated/ts

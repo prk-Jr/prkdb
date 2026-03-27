@@ -40,7 +40,5 @@ fn has_codegen_contract_mismatch(snapshot: &RepoSnapshot) -> bool {
     let command_documents_grpc_port = codegen_command.contains("http://127.0.0.1:50051")
         && codegen_command.contains("prkdb-cli serve");
 
-    docs_use_http_port
-        && (docs_reference_serve || command_documents_grpc_port)
-        && command_documents_grpc_port
+    docs_use_http_port && docs_reference_serve && command_documents_grpc_port
 }

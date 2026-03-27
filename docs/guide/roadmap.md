@@ -49,7 +49,7 @@
 
 - [ ] **Web Dashboard**: React/Next.js admin UI for cluster management.
 - [ ] **SQL Layer**: Expand `prkdb-orm` with more SQL dialect support.
-- [ ] **Client SDKs**: Go and Python clients.
+- [ ] **Native Clients**: Go and Python clients.
 
 ---
 
