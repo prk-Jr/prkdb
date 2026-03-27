@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 # End-to-End Schema Application Test - Nested Types
 # Simulates: Schema with nested messages -> Client Gen (Py/TS) -> Usage
 
@@ -7,29 +7,56 @@ echo "🏗️  Building prkdb binary..."
 cargo build -p prkdb-cli --bin prkdb-cli --quiet
 
 PRKDB_BIN="./target/debug/prkdb-cli"
-SERVER_PORT=50054
-SERVER_URL="http://127.0.0.1:${SERVER_PORT}"
 LOG_FILE="/tmp/prkdb_nested_server.log"
 WORK_DIR="/tmp/prkdb_nested_e2e"
+ADMIN_TOKEN="schema_nested_e2e_test_token"
+DATABASE_PATH="$WORK_DIR/db"
 rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR"
 
+reserve_port() {
+    python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
+}
+
+HTTP_PORT=$(reserve_port)
+GRPC_PORT=$(reserve_port)
+while [ "$HTTP_PORT" = "$GRPC_PORT" ]; do
+    GRPC_PORT=$(reserve_port)
+done
+
+SERVER_HTTP_URL="http://127.0.0.1:${HTTP_PORT}"
+SERVER_GRPC_URL="http://127.0.0.1:${GRPC_PORT}"
+
+wait_for_server() {
+    echo "⏳ Waiting for server..."
+    for _ in {1..40}; do
+        if curl -sf "${SERVER_HTTP_URL}/health" >/dev/null 2>&1 \
+            && PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" "$PRKDB_BIN" schema --server "$SERVER_GRPC_URL" list >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+    done
+
+    echo "❌ Server failed to become ready"
+    cat "$LOG_FILE"
+    exit 1
+}
+
 cleanup() {
     echo "🧹 Cleaning up..."
-    if [ -n "$SERVER_PID" ]; then
+    if [ -n "${SERVER_PID:-}" ]; then
         kill $SERVER_PID || true
     fi
 }
 trap cleanup EXIT
 
 # 1. Start server
-echo "🚀 Starting server on port $SERVER_PORT..."
-$PRKDB_BIN serve --grpc-port $SERVER_PORT > "$LOG_FILE" 2>&1 &
+echo "🚀 Starting server on HTTP $HTTP_PORT / gRPC $GRPC_PORT..."
+PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" \
+    $PRKDB_BIN --database "$DATABASE_PATH" serve --port "$HTTP_PORT" --grpc-port "$GRPC_PORT" > "$LOG_FILE" 2>&1 &
 SERVER_PID=$!
 echo "Server PID: $SERVER_PID"
-
-echo "⏳ Waiting for server..."
-sleep 5
+wait_for_server
 
 # 2. Define Nested Schema
 echo "📝 Defining Nested Schema..."
@@ -56,21 +83,21 @@ protoc --include_imports --descriptor_set_out="$WORK_DIR/user_nested.desc" -I "$
 
 # 3. Register
 echo "🚀 Registering Schema..."
-$PRKDB_BIN schema --server "$SERVER_URL" register \
+PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" "$PRKDB_BIN" schema --server "$SERVER_GRPC_URL" register \
     --collection users \
     --proto "$WORK_DIR/user_nested.desc"
 
 # 4. Generate Client (Python)
 echo "⚙️  Generating Client (Python)..."
-$PRKDB_BIN codegen \
-    --server "$SERVER_URL" \
+PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" "$PRKDB_BIN" codegen \
+    --server "$SERVER_GRPC_URL" \
     --lang python \
     --out "$WORK_DIR/client_py"
 
 # 5. Generate Client (TypeScript)
 echo "⚙️  Generating Client (TypeScript)..."
-$PRKDB_BIN codegen \
-    --server "$SERVER_URL" \
+PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" "$PRKDB_BIN" codegen \
+    --server "$SERVER_GRPC_URL" \
     --lang typescript \
     --out "$WORK_DIR/client_ts"
 

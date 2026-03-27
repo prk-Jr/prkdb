@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 # Schema CLI Integration Test
 
 echo "🏗️  Building prkdb binary..."
@@ -19,12 +19,23 @@ if [ ! -f "$PRKDB_BIN" ]; then
     exit 1
 fi
 
-SERVER_PORT=50052
-GRPC_PORT=50054
-SERVER_URL="http://127.0.0.1:${SERVER_PORT}"
-GRPC_URL="http://127.0.0.1:${GRPC_PORT}"
 WORK_DIR="/tmp/prkdb_schema_cli_test"
 LOG_FILE="$WORK_DIR/server.log"
+ADMIN_TOKEN="schema_cli_test_token"
+DATABASE_PATH="$WORK_DIR/db"
+
+reserve_port() {
+    python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
+}
+
+SERVER_PORT=$(reserve_port)
+GRPC_PORT=$(reserve_port)
+while [ "$SERVER_PORT" = "$GRPC_PORT" ]; do
+    GRPC_PORT=$(reserve_port)
+done
+
+SERVER_URL="http://127.0.0.1:${SERVER_PORT}"
+GRPC_URL="http://127.0.0.1:${GRPC_PORT}"
 
 # Cleanup function
 cleanup() {
@@ -40,14 +51,16 @@ mkdir -p "$WORK_DIR"
 
 # 1. Start server
 echo "🚀 Starting server on port $SERVER_PORT (gRPC $GRPC_PORT)..."
-$PRKDB_BIN serve --port $SERVER_PORT --grpc-port $GRPC_PORT > "$LOG_FILE" 2>&1 &
+PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" \
+    $PRKDB_BIN --database "$DATABASE_PATH" serve --port $SERVER_PORT --grpc-port $GRPC_PORT > "$LOG_FILE" 2>&1 &
 SERVER_PID=$!
 echo $SERVER_PID > "$WORK_DIR/server.pid"
 echo "Server PID: $SERVER_PID"
 
 echo "⏳ Waiting for server to be ready..."
 for i in {1..30}; do
-    if curl -s "http://127.0.0.1:$SERVER_PORT/health" > /dev/null; then
+    if curl -sf "http://127.0.0.1:$SERVER_PORT/health" > /dev/null 2>&1 \
+        && PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" "$PRKDB_BIN" schema --server "$GRPC_URL" list >/dev/null 2>&1; then
         echo "✅ Server is ready!"
         break
     fi
@@ -89,7 +102,7 @@ protoc --include_imports --descriptor_set_out="$WORK_DIR/test_schema.desc" --pro
 
 # 3. Test Register
 echo "🧪 Testing 'schema register'..."
-if $PRKDB_BIN schema --server "$GRPC_URL" register --collection test_col --proto "$WORK_DIR/test_schema.desc"; then
+if PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" "$PRKDB_BIN" schema --server "$GRPC_URL" register --collection test_col --proto "$WORK_DIR/test_schema.desc"; then
     echo "✅ Schema registered successfully"
 else
     echo "❌ Schema registration failed"
@@ -98,7 +111,7 @@ fi
 
 # 4. Test List
 echo "🧪 Testing 'schema list'..."
-LIST_OUT=$($PRKDB_BIN schema --server "$GRPC_URL" list)
+LIST_OUT=$(PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" "$PRKDB_BIN" schema --server "$GRPC_URL" list)
 echo "$LIST_OUT"
 if echo "$LIST_OUT" | grep -q "test_col"; then
     echo "✅ Schema list contains test_col"
@@ -109,7 +122,7 @@ fi
 
 # 5. Test Get
 echo "🧪 Testing 'schema get'..."
-if $PRKDB_BIN schema --server "$GRPC_URL" get --collection test_col > "$WORK_DIR/fetched.desc"; then
+if PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" "$PRKDB_BIN" schema --server "$GRPC_URL" get --collection test_col > "$WORK_DIR/fetched.desc"; then
     echo "✅ Schema fetched successfully"
     # Verify size > 0
     if [ -s "$WORK_DIR/fetched.desc" ]; then
@@ -125,7 +138,7 @@ fi
 
 # 6. Test Check (Compatibility)
 echo "🧪 Testing 'schema check'..."
-if $PRKDB_BIN schema --server "$GRPC_URL" check --collection test_col --proto "$WORK_DIR/test_schema.desc"; then
+if PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" "$PRKDB_BIN" schema --server "$GRPC_URL" check --collection test_col --proto "$WORK_DIR/test_schema.desc"; then
     echo "✅ Schema compatibility check passed"
 else
     echo "❌ Schema compatibility check failed"

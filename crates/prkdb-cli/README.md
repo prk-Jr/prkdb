@@ -132,6 +132,12 @@ prkdb serve \
 
 The remote CLI defaults assume `prkdb-server` on `http://127.0.0.1:8080`. When you point admin or data commands at the local gRPC endpoint exposed by `prkdb serve`, use `--server http://127.0.0.1:50051`.
 
+When `prkdb serve` participates in a Raft cluster, HTTP leader forwarding is explicit now:
+
+- Set `PRKDB_ADVERTISED_HTTP_ADDR` if this node's HTTP bind address is not dialable by peers.
+- Set `PRKDB_PEER_HTTP_ADDRS` with `node_id=url` pairs so follower nodes can forward writes to the current leader without guessing ports.
+- Set `PRKDB_PEER_ADVERTISED_GRPC_ADDRS` when peer gRPC metadata addresses differ from their bind sockets.
+
 With `--cors`, the server enables a restricted CORS policy. You can override the allowed origins with `PRKDB_CORS_ORIGINS`.
 
 If `PRKDB_WS_TOKEN` is set, `/ws/collections/:name` requires `Authorization: Bearer <token>`.

@@ -1,6 +1,7 @@
+use anyhow::{Context, Result};
 use prkdb::db::PrkDb;
 use prkdb::raft::{ClusterConfig, PrkDbGrpcService, RpcClientPool};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -10,7 +11,7 @@ use tonic::transport::Server;
 use tracing::info;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<()> {
     // Initialize logging
     tracing_subscriber::fmt::init();
 
@@ -26,23 +27,8 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "3".to_string())
         .parse::<usize>()?;
 
-    // Parse cluster nodes
-    let mut nodes = Vec::new();
-    for node_str in cluster_nodes_str.split(',') {
-        let parts: Vec<&str> = node_str.split('@').collect();
-        if parts.len() == 2 {
-            let id = parts[0].parse::<u64>()?;
-            let addr: SocketAddr = parts[1].parse()?;
-            nodes.push((id, addr));
-        }
-    }
-
-    // Get listen address for this node
-    let listen_addr = nodes
-        .iter()
-        .find(|(id, _)| *id == node_id)
-        .map(|(_, addr)| *addr)
-        .unwrap_or_else(|| "0.0.0.0:8080".parse().unwrap());
+    let nodes = parse_cluster_nodes(&cluster_nodes_str)?;
+    let listen_addr = resolve_listen_addr(node_id, &nodes)?;
 
     info!(
         "Starting PrkDB node {} with {} partitions",
@@ -99,52 +85,61 @@ async fn main() -> anyhow::Result<()> {
         .set(1.0);
 
     // Start metrics HTTP server on port 9090 + node_id (unique per node)
-    let metrics_port = 9090 + node_id as u16;
-    let metrics_addr: SocketAddr = format!("0.0.0.0:{}", metrics_port).parse()?;
-    tokio::spawn(async move {
-        use axum::{routing::get, Router};
+    let disable_metrics = env_var_is_truthy("PRKDB_DISABLE_METRICS");
+    let metrics_addr_override = env::var("PRKDB_METRICS_ADDR")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    if let Some(metrics_addr) =
+        resolve_metrics_bind_address(node_id, disable_metrics, metrics_addr_override.as_deref())?
+    {
+        tokio::spawn(async move {
+            use axum::{routing::get, Router};
 
-        async fn metrics_handler() -> String {
-            prkdb::prometheus_metrics::export_metrics()
-        }
-
-        let app = Router::new().route("/metrics", get(metrics_handler));
-
-        let listener = match tokio::net::TcpListener::bind(metrics_addr).await {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::warn!("Failed to bind metrics server: {}", e);
-                return;
+            async fn metrics_handler() -> String {
+                prkdb::prometheus_metrics::export_metrics()
             }
-        };
 
-        info!("Prometheus metrics server listening on {}", metrics_addr);
+            let app = Router::new().route("/metrics", get(metrics_handler));
 
-        if let Err(e) = axum::serve(listener, app).await {
-            tracing::error!("Metrics server error: {}", e);
-        }
-    });
+            let listener = match tokio::net::TcpListener::bind(metrics_addr).await {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!("Failed to bind metrics server: {}", e);
+                    return;
+                }
+            };
+
+            info!("Prometheus metrics server listening on {}", metrics_addr);
+
+            if let Err(e) = axum::serve(listener, app).await {
+                tracing::error!("Metrics server error: {}", e);
+            }
+        });
+    } else {
+        info!("Prometheus metrics server disabled");
+    }
 
     // Create gRPC service for client data operations
     let db_arc = Arc::new(db);
     let admin_token = env::var("PRKDB_ADMIN_TOKEN").unwrap_or_default();
     let schema_path = storage_path.join("schemas");
-    let advertised_grpc_address = env::var("PRKDB_ADVERTISED_GRPC_ADDR")
+    let explicit_advertised_grpc_address = env::var("PRKDB_ADVERTISED_GRPC_ADDR")
         .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| {
-            if value.starts_with("http://") || value.starts_with("https://") {
-                value
-            } else {
-                format!("http://{}", value)
-            }
-        })
-        .unwrap_or_else(|| format!("http://{}", listen_addr));
-    let mut advertised_node_addresses: HashMap<u64, String> = nodes
-        .iter()
-        .map(|(id, addr)| (*id, format!("http://{}", addr)))
-        .collect();
-    advertised_node_addresses.insert(node_id, advertised_grpc_address.clone());
+        .filter(|value| !value.trim().is_empty());
+    let advertised_grpc_address =
+        resolve_advertised_grpc_address(listen_addr, explicit_advertised_grpc_address.as_deref())?;
+    let node_address_overrides = parse_node_address_overrides(
+        env::var("PRKDB_ADVERTISED_NODE_ADDRS")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .as_deref(),
+    )?;
+    let advertised_node_addresses = build_advertised_node_addresses(
+        &nodes,
+        node_id,
+        &advertised_grpc_address,
+        &node_address_overrides,
+    )?;
 
     info!("Advertised client address: {}", advertised_grpc_address);
 
@@ -204,4 +199,230 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     Ok(())
+}
+
+fn parse_cluster_nodes(cluster_nodes_str: &str) -> Result<Vec<(u64, SocketAddr)>> {
+    if cluster_nodes_str.trim().is_empty() {
+        anyhow::bail!("CLUSTER_NODES must not be empty");
+    }
+
+    let mut nodes = Vec::new();
+    let mut seen_ids = HashSet::new();
+
+    for node_str in cluster_nodes_str
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let (id_str, address_str) = node_str
+            .split_once('@')
+            .with_context(|| format!("Invalid CLUSTER_NODES entry '{node_str}'"))?;
+        let node_id = id_str
+            .parse::<u64>()
+            .with_context(|| format!("Invalid node ID in CLUSTER_NODES entry '{node_str}'"))?;
+        let address = address_str.parse::<SocketAddr>().with_context(|| {
+            format!("Invalid socket address in CLUSTER_NODES entry '{node_str}'")
+        })?;
+
+        if !seen_ids.insert(node_id) {
+            anyhow::bail!("Duplicate node ID {node_id} in CLUSTER_NODES");
+        }
+
+        nodes.push((node_id, address));
+    }
+
+    if nodes.is_empty() {
+        anyhow::bail!("CLUSTER_NODES must define at least one node");
+    }
+
+    nodes.sort_by_key(|(node_id, _)| *node_id);
+    Ok(nodes)
+}
+
+fn resolve_listen_addr(node_id: u64, nodes: &[(u64, SocketAddr)]) -> Result<SocketAddr> {
+    nodes
+        .iter()
+        .find(|(candidate_id, _)| *candidate_id == node_id)
+        .map(|(_, address)| *address)
+        .ok_or_else(|| anyhow::anyhow!("NODE_ID {node_id} is not present in CLUSTER_NODES"))
+}
+
+fn normalize_http_address(address: &str) -> Result<String> {
+    let trimmed = address.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("Advertised address must not be empty");
+    }
+
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return Ok(trimmed.to_string());
+    }
+
+    Ok(format!("http://{trimmed}"))
+}
+
+fn parse_node_address_overrides(value: Option<&str>) -> Result<HashMap<u64, String>> {
+    let mut overrides = HashMap::new();
+
+    let Some(value) = value else {
+        return Ok(overrides);
+    };
+
+    for entry in value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let (node_id_str, address) = entry
+            .split_once('=')
+            .or_else(|| entry.split_once('@'))
+            .with_context(|| format!("Invalid advertised node address override '{entry}'"))?;
+        let node_id = node_id_str
+            .parse::<u64>()
+            .with_context(|| format!("Invalid node ID in override '{entry}'"))?;
+        let normalized = normalize_http_address(address)?;
+
+        if overrides.insert(node_id, normalized).is_some() {
+            anyhow::bail!("Duplicate advertised address override for node {node_id}");
+        }
+    }
+
+    Ok(overrides)
+}
+
+fn resolve_advertised_grpc_address(
+    listen_addr: SocketAddr,
+    explicit_address: Option<&str>,
+) -> Result<String> {
+    if let Some(address) = explicit_address {
+        return normalize_http_address(address);
+    }
+
+    if listen_addr.ip().is_unspecified() {
+        anyhow::bail!(
+            "PRKDB_ADVERTISED_GRPC_ADDR must be set when CLUSTER_NODES advertises an unspecified listen address ({listen_addr})"
+        );
+    }
+
+    Ok(format!("http://{listen_addr}"))
+}
+
+fn build_advertised_node_addresses(
+    nodes: &[(u64, SocketAddr)],
+    local_node_id: u64,
+    local_public_address: &str,
+    overrides: &HashMap<u64, String>,
+) -> Result<HashMap<u64, String>> {
+    let known_nodes: HashSet<u64> = nodes.iter().map(|(node_id, _)| *node_id).collect();
+    if let Some(unknown_node_id) = overrides
+        .keys()
+        .copied()
+        .find(|node_id| !known_nodes.contains(node_id))
+    {
+        anyhow::bail!("Advertised address override provided for unknown node {unknown_node_id}");
+    }
+
+    let mut advertised = HashMap::with_capacity(nodes.len());
+
+    for (node_id, address) in nodes {
+        let public_address = if *node_id == local_node_id {
+            local_public_address.to_string()
+        } else if let Some(address) = overrides.get(node_id) {
+            address.clone()
+        } else if address.ip().is_unspecified() {
+            anyhow::bail!(
+                "Node {node_id} uses unspecified listen address {address} and has no advertised override"
+            );
+        } else {
+            format!("http://{address}")
+        };
+
+        advertised.insert(*node_id, public_address);
+    }
+
+    Ok(advertised)
+}
+
+fn resolve_metrics_bind_address(
+    node_id: u64,
+    disabled: bool,
+    explicit_address: Option<&str>,
+) -> Result<Option<SocketAddr>> {
+    if disabled {
+        return Ok(None);
+    }
+
+    if let Some(address) = explicit_address {
+        let parsed = address
+            .parse::<SocketAddr>()
+            .with_context(|| format!("Invalid PRKDB_METRICS_ADDR value '{address}'"))?;
+        return Ok(Some(parsed));
+    }
+
+    let node_offset = u16::try_from(node_id)
+        .with_context(|| format!("NODE_ID {node_id} is too large to derive a metrics port"))?;
+    let port = 9090u16
+        .checked_add(node_offset)
+        .context("Derived metrics port overflowed u16")?;
+    let metrics_addr = format!("127.0.0.1:{port}")
+        .parse::<SocketAddr>()
+        .context("Failed to build metrics bind address")?;
+
+    Ok(Some(metrics_addr))
+}
+
+fn env_var_is_truthy(key: &str) -> bool {
+    env::var(key)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_listen_addr_requires_local_node_membership() {
+        let nodes = vec![(2, "127.0.0.1:8081".parse().unwrap())];
+
+        let err = resolve_listen_addr(1, &nodes).unwrap_err().to_string();
+        assert!(err.contains("NODE_ID 1"));
+    }
+
+    #[test]
+    fn build_advertised_node_addresses_prefers_explicit_peer_overrides() {
+        let nodes = vec![
+            (1, "127.0.0.1:8080".parse().unwrap()),
+            (2, "127.0.0.1:8081".parse().unwrap()),
+        ];
+        let overrides = parse_node_address_overrides(Some("2=db-2.example.com:18081")).unwrap();
+
+        let addresses =
+            build_advertised_node_addresses(&nodes, 1, "http://db-1.example.com:18080", &overrides)
+                .unwrap();
+
+        assert_eq!(
+            addresses.get(&1).map(String::as_str),
+            Some("http://db-1.example.com:18080")
+        );
+        assert_eq!(
+            addresses.get(&2).map(String::as_str),
+            Some("http://db-2.example.com:18081")
+        );
+    }
+
+    #[test]
+    fn resolve_metrics_bind_address_supports_disable_and_override() {
+        assert_eq!(resolve_metrics_bind_address(1, true, None).unwrap(), None);
+
+        assert_eq!(
+            resolve_metrics_bind_address(2, false, Some("127.0.0.1:9910")).unwrap(),
+            Some("127.0.0.1:9910".parse().unwrap())
+        );
+    }
 }

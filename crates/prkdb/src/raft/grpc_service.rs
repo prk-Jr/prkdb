@@ -138,7 +138,10 @@ impl<S: prkdb_schema::SchemaStorage> PrkDbGrpcService<S> {
                 config
                     .nodes
                     .iter()
-                    .map(|(node_id, address)| (*node_id, format!("http://{}", address)))
+                    .filter_map(|(node_id, address)| {
+                        (!address.ip().is_unspecified())
+                            .then(|| (*node_id, format!("http://{}", address)))
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -169,6 +172,67 @@ impl<S: prkdb_schema::SchemaStorage> PrkDbGrpcService<S> {
     }
 }
 
+async fn execute_read_mode<
+    T,
+    E,
+    StaleRead,
+    StaleFuture,
+    FollowerRead,
+    FollowerFuture,
+    LeaderRead,
+    LeaderFuture,
+>(
+    read_mode: crate::raft::rpc::ReadMode,
+    stale_read: StaleRead,
+    follower_read: FollowerRead,
+    leader_read: LeaderRead,
+) -> Result<T, E>
+where
+    StaleRead: FnOnce() -> StaleFuture,
+    StaleFuture: std::future::Future<Output = Result<T, E>>,
+    FollowerRead: FnOnce() -> FollowerFuture,
+    FollowerFuture: std::future::Future<Output = Result<T, E>>,
+    LeaderRead: FnOnce() -> LeaderFuture,
+    LeaderFuture: std::future::Future<Output = Result<T, E>>,
+{
+    match read_mode {
+        crate::raft::rpc::ReadMode::Stale => stale_read().await,
+        crate::raft::rpc::ReadMode::Follower => follower_read().await,
+        crate::raft::rpc::ReadMode::Linearizable => leader_read().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::raft::rpc::ReadMode;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn follower_reads_do_not_fallback_to_leader_reads() {
+        let leader_called = Arc::new(AtomicBool::new(false));
+        let leader_called_clone = leader_called.clone();
+
+        let result = execute_read_mode(
+            ReadMode::Follower,
+            || async { Ok::<Option<Vec<u8>>, &'static str>(Some(b"stale".to_vec())) },
+            || async { Err::<Option<Vec<u8>>, &'static str>("follower failed") },
+            move || {
+                leader_called_clone.store(true, Ordering::SeqCst);
+                async { Ok::<Option<Vec<u8>>, &'static str>(Some(b"leader".to_vec())) }
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(
+            !leader_called.load(Ordering::SeqCst),
+            "leader fallback should not be invoked for follower reads"
+        );
+    }
+}
+
 #[tonic::async_trait]
 impl<S: prkdb_schema::SchemaStorage + 'static> PrkDbServiceTrait for PrkDbGrpcService<S> {
     async fn put(&self, request: Request<PutRequest>) -> Result<Response<PutResponse>, Status> {
@@ -196,31 +260,15 @@ impl<S: prkdb_schema::SchemaStorage + 'static> PrkDbServiceTrait for PrkDbGrpcSe
     async fn get(&self, request: Request<GetRequest>) -> Result<Response<GetResponse>, Status> {
         let req = request.into_inner();
 
-        // Handle different read modes
-        use crate::raft::rpc::ReadMode;
         let read_mode = req.read_mode();
 
-        let result = match read_mode {
-            ReadMode::Stale => {
-                // Direct local read - fastest but may be stale
-                self.db.get_local(&req.key).await
-            }
-            ReadMode::Follower => {
-                // Follower read: get ReadIndex from leader, wait, then local read
-                match self.db.get_follower_read(&req.key).await {
-                    Ok(v) => Ok(v),
-                    Err(e) => {
-                        // Fall back to leader read if follower read fails
-                        tracing::debug!("Follower read failed, falling back to leader: {}", e);
-                        self.db.get(&req.key).await
-                    }
-                }
-            }
-            ReadMode::Linearizable => {
-                // Default: linearizable read from leader
-                self.db.get(&req.key).await
-            }
-        };
+        let result = execute_read_mode(
+            read_mode,
+            || self.db.get_local(&req.key),
+            || self.db.get_follower_read(&req.key),
+            || self.db.get(&req.key),
+        )
+        .await;
 
         match result {
             Ok(Some(value)) => Ok(Response::new(GetResponse {

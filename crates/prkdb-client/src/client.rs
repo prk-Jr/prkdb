@@ -84,6 +84,8 @@ pub struct ClientConfig {
     pub rpc_timeout_ms: u64,
     /// Number of consecutive failures before marking node unhealthy
     pub unhealthy_threshold: u32,
+    /// Cooldown before an unhealthy node becomes probe-able again
+    pub unhealthy_cooldown_secs: u64,
     /// Maximum number of concurrent connections per node
     pub max_connections_per_node: usize,
 }
@@ -96,6 +98,7 @@ impl Default for ClientConfig {
             max_backoff_ms: 5000,
             rpc_timeout_ms: 30000,
             unhealthy_threshold: 3,
+            unhealthy_cooldown_secs: 30,
             max_connections_per_node: 4,
         }
     }
@@ -191,6 +194,9 @@ struct ClusterMetadata {
     /// Partition ID -> Leader Node ID
     partition_leaders: HashMap<u64, u64>,
 
+    /// Partition ID -> Replica node IDs
+    partition_replicas: HashMap<u64, Vec<u64>>,
+
     /// Connection pool: Node ID -> Connection Pool
     clients: HashMap<u64, Arc<ConnectionPool>>,
 
@@ -276,10 +282,75 @@ impl PrkDbClient {
     async fn is_node_healthy(&self, node_id: u64) -> bool {
         let metadata = self.metadata.read().await;
         if let Some(health) = metadata.node_health.get(&node_id) {
-            health.is_healthy(self.config.unhealthy_threshold, 30) // 30 sec cooldown
+            health.is_healthy(
+                self.config.unhealthy_threshold,
+                self.config.unhealthy_cooldown_secs,
+            )
         } else {
             true // Unknown nodes are assumed healthy
         }
+    }
+
+    fn total_attempts(&self) -> u32 {
+        self.config.max_retries.max(1)
+    }
+
+    fn retry_delay_for_attempt(&self, attempt: u32) -> tokio::time::Duration {
+        let multiplier = 1u64.checked_shl(attempt.min(20)).unwrap_or(u64::MAX);
+        let delay_ms = self
+            .config
+            .base_backoff_ms
+            .saturating_mul(multiplier)
+            .min(self.config.max_backoff_ms);
+        tokio::time::Duration::from_millis(delay_ms)
+    }
+
+    fn rpc_timeout(&self) -> tokio::time::Duration {
+        tokio::time::Duration::from_millis(self.config.rpc_timeout_ms)
+    }
+
+    async fn execute_rpc<T, F>(
+        &self,
+        operation_name: &str,
+        future: F,
+    ) -> anyhow::Result<Response<T>>
+    where
+        F: std::future::Future<Output = Result<Response<T>, tonic::Status>>,
+    {
+        match tokio::time::timeout(self.rpc_timeout(), future).await {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(error)) => Err(error.into()),
+            Err(_) => anyhow::bail!(
+                "{} timed out after {}ms",
+                operation_name,
+                self.config.rpc_timeout_ms
+            ),
+        }
+    }
+
+    async fn select_read_node(
+        &self,
+        partition_id: u64,
+        consistency: ReadConsistency,
+    ) -> anyhow::Result<u64> {
+        let candidates = {
+            let metadata = self.metadata.read().await;
+            read_candidates_for_partition(&metadata, partition_id, consistency)?
+        };
+
+        for node_id in &candidates {
+            if self.is_node_healthy(*node_id).await {
+                return Ok(*node_id);
+            }
+        }
+
+        candidates.first().copied().ok_or_else(|| {
+            anyhow::anyhow!(
+                "No readable node available for partition {} ({:?})",
+                partition_id,
+                consistency
+            )
+        })
     }
 
     /// Refresh cluster metadata from any available node
@@ -327,7 +398,9 @@ impl PrkDbClient {
 
         let request = tonic::Request::new(MetadataRequest { topics: vec![] });
 
-        let response = client.metadata(request).await?;
+        let response = self
+            .execute_rpc("metadata", client.metadata(request))
+            .await?;
         let metadata_response = response.into_inner();
 
         // Update cached metadata
@@ -337,6 +410,7 @@ impl PrkDbClient {
         // For simplicity, we recreate. In prod, reuse channels.
         metadata.nodes.clear();
         metadata.partition_leaders.clear();
+        metadata.partition_replicas.clear();
         metadata.clients.clear();
 
         // Update nodes
@@ -368,6 +442,9 @@ impl PrkDbClient {
                     .partition_leaders
                     .insert(partition_info.partition_id, partition_info.leader_id);
             }
+            metadata
+                .partition_replicas
+                .insert(partition_info.partition_id, partition_info.replicas.clone());
         }
 
         metadata.num_partitions = metadata_response.partitions.len();
@@ -383,18 +460,18 @@ impl PrkDbClient {
 
     /// Put a key-value pair
     pub async fn put(&self, key: &[u8], value: &[u8]) -> anyhow::Result<()> {
-        const MAX_RETRIES: usize = 3;
+        let total_attempts = self.total_attempts();
 
-        for attempt in 0..MAX_RETRIES {
+        for attempt in 0..total_attempts {
             match self.put_internal(key, value).await {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     tracing::debug!("Put failed (attempt {}): {}", attempt + 1, e);
 
                     // Refresh metadata and retry
-                    if attempt < MAX_RETRIES - 1 {
+                    if attempt + 1 < total_attempts {
                         let _ = self.refresh_metadata().await;
-                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                        tokio::time::sleep(self.retry_delay_for_attempt(attempt)).await;
                     } else {
                         return Err(e);
                     }
@@ -402,7 +479,7 @@ impl PrkDbClient {
             }
         }
 
-        anyhow::bail!("Put failed after {} retries", MAX_RETRIES)
+        anyhow::bail!("Put failed after {} attempts", total_attempts)
     }
 
     /// Batch put multiple key-value pairs
@@ -458,6 +535,8 @@ impl PrkDbClient {
         let mut handles = Vec::new();
         let mut dispatch_errors = Vec::new();
 
+        let rpc_timeout = self.rpc_timeout();
+        let rpc_timeout_ms = self.config.rpc_timeout_ms;
         for (leader_id, items) in by_leader {
             let pool_opt = {
                 let meta = self.metadata.read().await;
@@ -467,7 +546,18 @@ impl PrkDbClient {
             if let Some(pool) = pool_opt {
                 let mut client = pool.get_client();
                 handles.push(tokio::spawn(async move {
-                    client.batch_put(BatchPutRequest { pairs: items }).await
+                    match tokio::time::timeout(
+                        rpc_timeout,
+                        client.batch_put(BatchPutRequest { pairs: items }),
+                    )
+                    .await
+                    {
+                        Ok(result) => result.map_err(anyhow::Error::from),
+                        Err(_) => Err(anyhow::anyhow!(
+                            "batch_put timed out after {}ms",
+                            rpc_timeout_ms
+                        )),
+                    }
                 }));
             } else {
                 dispatch_errors.push(format!("No client available for node {}", leader_id));
@@ -524,17 +614,17 @@ impl PrkDbClient {
         key: &[u8],
         consistency: ReadConsistency,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        const MAX_RETRIES: usize = 3;
+        let total_attempts = self.total_attempts();
 
-        for attempt in 0..MAX_RETRIES {
+        for attempt in 0..total_attempts {
             match self.get_internal(key, consistency).await {
                 Ok(value) => return Ok(value),
                 Err(e) => {
                     tracing::debug!("Get failed (attempt {}): {}", attempt + 1, e);
 
-                    if attempt < MAX_RETRIES - 1 {
+                    if attempt + 1 < total_attempts {
                         let _ = self.refresh_metadata().await;
-                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                        tokio::time::sleep(self.retry_delay_for_attempt(attempt)).await;
                     } else {
                         return Err(e);
                     }
@@ -542,21 +632,21 @@ impl PrkDbClient {
             }
         }
 
-        anyhow::bail!("Get failed after {} retries", MAX_RETRIES)
+        anyhow::bail!("Get failed after {} attempts", total_attempts)
     }
 
     /// Delete a key
     pub async fn delete(&self, key: &[u8]) -> anyhow::Result<()> {
-        const MAX_RETRIES: usize = 3;
+        let total_attempts = self.total_attempts();
 
-        for attempt in 0..MAX_RETRIES {
+        for attempt in 0..total_attempts {
             match self.delete_internal(key).await {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     tracing::debug!("Delete failed (attempt {}): {}", attempt + 1, e);
-                    if attempt < MAX_RETRIES - 1 {
+                    if attempt + 1 < total_attempts {
                         let _ = self.refresh_metadata().await;
-                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                        tokio::time::sleep(self.retry_delay_for_attempt(attempt)).await;
                     } else {
                         return Err(e);
                     }
@@ -564,7 +654,7 @@ impl PrkDbClient {
             }
         }
 
-        anyhow::bail!("Delete failed after {} retries", MAX_RETRIES)
+        anyhow::bail!("Delete failed after {} attempts", total_attempts)
     }
 
     /// Internal get implementation with health tracking
@@ -573,31 +663,25 @@ impl PrkDbClient {
         key: &[u8],
         consistency: ReadConsistency,
     ) -> anyhow::Result<Option<Vec<u8>>> {
-        let (partition_id, leader_id, client) = {
+        let partition_id = {
             let metadata = self.metadata.read().await;
-            let partition_id = self.hash_key(key, metadata.num_partitions);
-
-            let leader_id = *metadata
-                .partition_leaders
-                .get(&partition_id)
-                .ok_or_else(|| anyhow::anyhow!("No leader for partition {}", partition_id))?;
-
+            self.hash_key(key, metadata.num_partitions)
+        };
+        let node_id = self.select_read_node(partition_id, consistency).await?;
+        let client = {
+            let metadata = self.metadata.read().await;
             let pool = metadata
                 .clients
-                .get(&leader_id)
-                .ok_or_else(|| anyhow::anyhow!("No client for node {}", leader_id))?
+                .get(&node_id)
+                .ok_or_else(|| anyhow::anyhow!("No client for node {}", node_id))?
                 .clone();
-
-            let client = pool.get_client(); // Get specific connection from pool
-
-            (partition_id, leader_id, client)
+            pool.get_client()
         };
 
-        // Phase 18: Check if leader is healthy before sending
-        if !self.is_node_healthy(leader_id).await {
+        if !self.is_node_healthy(node_id).await {
             tracing::warn!(
-                "Leader {} for partition {} is unhealthy, attempting anyway",
-                leader_id,
+                "Read target {} for partition {} is unhealthy, attempting anyway",
+                node_id,
                 partition_id
             );
         }
@@ -608,9 +692,9 @@ impl PrkDbClient {
         });
 
         // Phase 18: Track health based on response
-        match client.clone().get(request).await {
+        match self.execute_rpc("get", client.clone().get(request)).await {
             Ok(response) => {
-                self.record_node_success(leader_id).await;
+                self.record_node_success(node_id).await;
                 let resp = response.into_inner();
 
                 if !resp.success {
@@ -624,7 +708,7 @@ impl PrkDbClient {
                 }
             }
             Err(e) => {
-                self.record_node_failure(leader_id).await;
+                self.record_node_failure(node_id).await;
                 Err(e.into())
             }
         }
@@ -667,7 +751,7 @@ impl PrkDbClient {
         });
 
         // Phase 18: Track health based on response
-        match client.clone().put(request).await {
+        match self.execute_rpc("put", client.clone().put(request)).await {
             Ok(response) => {
                 self.record_node_success(leader_id).await;
                 if !response.into_inner().success {
@@ -716,7 +800,10 @@ impl PrkDbClient {
         let request = tonic::Request::new(DeleteRequest { key: key.to_vec() });
 
         // Phase 18: Track health based on response
-        match client.clone().delete(request).await {
+        match self
+            .execute_rpc("delete", client.clone().delete(request))
+            .await
+        {
             Ok(response) => {
                 self.record_node_success(leader_id).await;
                 if !response.into_inner().success {
@@ -1276,6 +1363,37 @@ impl PrkDbClient {
     }
 }
 
+fn read_candidates_for_partition(
+    metadata: &ClusterMetadata,
+    partition_id: u64,
+    consistency: ReadConsistency,
+) -> anyhow::Result<Vec<u64>> {
+    let leader_id = *metadata
+        .partition_leaders
+        .get(&partition_id)
+        .ok_or_else(|| anyhow::anyhow!("No leader for partition {}", partition_id))?;
+    let replicas = metadata
+        .partition_replicas
+        .get(&partition_id)
+        .cloned()
+        .unwrap_or_else(|| vec![leader_id]);
+
+    match consistency {
+        ReadConsistency::Linearizable => Ok(vec![leader_id]),
+        ReadConsistency::Stale | ReadConsistency::Follower => {
+            let followers: Vec<u64> = replicas
+                .into_iter()
+                .filter(|node_id| *node_id != leader_id)
+                .collect();
+            if followers.is_empty() {
+                Ok(vec![leader_id])
+            } else {
+                Ok(followers)
+            }
+        }
+    }
+}
+
 /// Schema information returned by list_schemas
 #[derive(Debug, Clone)]
 pub struct SchemaInfo {
@@ -1354,6 +1472,15 @@ mod tests {
         }
     }
 
+    fn test_client_with_config(metadata: ClusterMetadata, config: ClientConfig) -> PrkDbClient {
+        PrkDbClient {
+            metadata: Arc::new(RwLock::new(metadata)),
+            bootstrap_servers: vec![],
+            admin_token: None,
+            config,
+        }
+    }
+
     #[tokio::test]
     async fn test_batch_put_errors_when_partition_has_no_known_leader() {
         let client = test_client_with_metadata(ClusterMetadata {
@@ -1392,6 +1519,110 @@ mod tests {
         assert!(
             error.to_string().contains("No client available for node 7"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stale_reads_prefer_a_follower_replica_when_available() {
+        let mut metadata = ClusterMetadata {
+            num_partitions: 1,
+            ..Default::default()
+        };
+        metadata.partition_leaders.insert(0, 1);
+        metadata.partition_replicas.insert(0, vec![1, 2, 3]);
+
+        let client = test_client_with_metadata(metadata);
+
+        let selected_node = client
+            .select_read_node(0, ReadConsistency::Stale)
+            .await
+            .expect("stale reads should select a replica");
+
+        assert_eq!(selected_node, 2);
+    }
+
+    #[tokio::test]
+    async fn test_follower_reads_prefer_a_follower_replica_when_available() {
+        let mut metadata = ClusterMetadata {
+            num_partitions: 1,
+            ..Default::default()
+        };
+        metadata.partition_leaders.insert(0, 1);
+        metadata.partition_replicas.insert(0, vec![1, 4]);
+
+        let client = test_client_with_metadata(metadata);
+
+        let selected_node = client
+            .select_read_node(0, ReadConsistency::Follower)
+            .await
+            .expect("follower reads should select a follower replica");
+
+        assert_eq!(selected_node, 4);
+    }
+
+    #[test]
+    fn test_retry_delay_respects_configured_backoff_bounds() {
+        let client = test_client_with_config(
+            ClusterMetadata::default(),
+            ClientConfig {
+                max_retries: 5,
+                base_backoff_ms: 250,
+                max_backoff_ms: 900,
+                rpc_timeout_ms: 1234,
+                unhealthy_threshold: 3,
+                unhealthy_cooldown_secs: 7,
+                max_connections_per_node: 4,
+            },
+        );
+
+        assert_eq!(
+            client.retry_delay_for_attempt(0),
+            tokio::time::Duration::from_millis(250)
+        );
+        assert_eq!(
+            client.retry_delay_for_attempt(1),
+            tokio::time::Duration::from_millis(500)
+        );
+        assert_eq!(
+            client.retry_delay_for_attempt(3),
+            tokio::time::Duration::from_millis(900)
+        );
+    }
+
+    #[test]
+    fn test_total_attempts_uses_client_config() {
+        let client = test_client_with_config(
+            ClusterMetadata::default(),
+            ClientConfig {
+                max_retries: 5,
+                ..ClientConfig::default()
+            },
+        );
+
+        assert_eq!(client.total_attempts(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_node_health_uses_configured_cooldown() {
+        let client = test_client_with_config(
+            ClusterMetadata::default(),
+            ClientConfig {
+                unhealthy_threshold: 2,
+                unhealthy_cooldown_secs: 3600,
+                ..ClientConfig::default()
+            },
+        );
+
+        {
+            let mut metadata = client.metadata.write().await;
+            let health = metadata.node_health.entry(9).or_default();
+            health.record_failure();
+            health.record_failure();
+        }
+
+        assert!(
+            !client.is_node_healthy(9).await,
+            "node should remain unhealthy until the configured cooldown expires"
         );
     }
 }

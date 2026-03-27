@@ -68,6 +68,18 @@ pub struct ServeArgs {
     /// Public gRPC address advertised to smart clients and metadata consumers
     #[arg(skip)]
     pub advertised_grpc_address: Option<String>,
+
+    /// Public HTTP address advertised to peer nodes for write forwarding
+    #[arg(skip)]
+    pub advertised_http_address: Option<String>,
+
+    /// Explicit peer gRPC addresses advertised to smart clients (node_id -> URL)
+    #[arg(skip)]
+    pub peer_advertised_grpc_addresses: Option<String>,
+
+    /// Explicit peer HTTP base URLs used for leader forwarding (node_id -> URL)
+    #[arg(skip)]
+    pub peer_http_addresses: Option<String>,
 }
 
 #[derive(Clone)]
@@ -172,16 +184,32 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
             .set(1.0);
     }
 
-    // Build peer HTTP address map
-    // Derive each peer's HTTP port using the offset: http_port = grpc_port - (my_grpc_port - my_http_port)
-    let port_offset = args.grpc_port as i32 - args.port as i32;
-    let mut peer_http_addrs = HashMap::new();
-    for (node_id, grpc_addr) in &args.peers {
-        let peer_http_port = (grpc_addr.port() as i32 - port_offset) as u16;
-        let peer_http_url = format!("http://{}:{}", grpc_addr.ip(), peer_http_port);
-        peer_http_addrs.insert(*node_id, peer_http_url);
+    let peer_grpc_overrides =
+        parse_node_address_overrides(args.peer_advertised_grpc_addresses.as_deref())?;
+    let peer_http_overrides = parse_node_address_overrides(args.peer_http_addresses.as_deref())?;
+    let advertised_http_address = resolve_advertised_http_address(
+        &args.host,
+        args.port,
+        args.advertised_http_address.as_deref(),
+    )?;
+    let peer_http_addrs = build_peer_http_addresses(
+        args.id,
+        advertised_http_address.as_deref(),
+        &args.peers,
+        &peer_http_overrides,
+    )?;
+    let missing_peer_http_targets: Vec<u64> = args
+        .peers
+        .iter()
+        .map(|(node_id, _)| *node_id)
+        .filter(|node_id| !peer_http_addrs.contains_key(node_id))
+        .collect();
+    if !missing_peer_http_targets.is_empty() {
+        tracing::warn!(
+            "HTTP forwarding targets were not configured for peer nodes {:?}; follower write forwarding will be unavailable for those leaders",
+            missing_peer_http_targets
+        );
     }
-    peer_http_addrs.insert(args.id, format!("http://{}:{}", args.host, args.port));
     tracing::info!("Peer HTTP addresses: {:?}", peer_http_addrs);
 
     // Create app state
@@ -268,14 +296,18 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         grpc_port,
         args.advertised_grpc_address.as_deref(),
     )?;
-    let advertised_node_addresses =
-        build_advertised_node_addresses(args.id, &advertised_grpc_address, &args.peers);
+    let advertised_node_addresses = build_advertised_node_addresses(
+        args.id,
+        &advertised_grpc_address,
+        &args.peers,
+        &peer_grpc_overrides,
+    );
 
     // Get DB instance for gRPC service
     if let Ok(db) = crate::database_manager::get_db_instance().await {
         println!("🚀 Starting PrkDB gRPC server on {}", grpc_addr);
         let schema_storage_path =
-            crate::database_manager::get_database_manager().schema_storage_path();
+            crate::database_manager::try_get_database_manager()?.schema_storage_path();
 
         // Start Multi-Raft partitions (background tasks)
         // Skip serving Partition 0's Raft server here, as we'll multiplex it on the main gRPC server below
@@ -769,17 +801,90 @@ fn normalize_http_address(address: &str) -> Result<String> {
     Ok(format!("http://{}", address))
 }
 
+fn resolve_advertised_http_address(
+    host: &str,
+    port: u16,
+    explicit_address: Option<&str>,
+) -> Result<Option<String>> {
+    if let Some(address) = explicit_address {
+        return normalize_http_address(address).map(Some);
+    }
+
+    if matches!(host, "0.0.0.0" | "::" | "[::]") {
+        return Ok(None);
+    }
+
+    Ok(Some(format!("http://{}:{}", host, port)))
+}
+
+fn parse_node_address_overrides(value: Option<&str>) -> Result<HashMap<u64, String>> {
+    let mut overrides = HashMap::new();
+
+    let Some(value) = value else {
+        return Ok(overrides);
+    };
+
+    for entry in value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let (node_id_str, address) = entry
+            .split_once('=')
+            .or_else(|| entry.split_once('@'))
+            .ok_or_else(|| anyhow::anyhow!("Invalid node address override '{entry}'"))?;
+        let node_id = node_id_str
+            .parse::<u64>()
+            .map_err(|_| anyhow::anyhow!("Invalid node ID in override '{entry}'"))?;
+        let normalized = normalize_http_address(address)?;
+
+        if overrides.insert(node_id, normalized).is_some() {
+            anyhow::bail!("Duplicate node address override for node {node_id}");
+        }
+    }
+
+    Ok(overrides)
+}
+
 fn build_advertised_node_addresses(
     local_node_id: u64,
     local_public_address: &str,
     peers: &[(u64, SocketAddr)],
+    overrides: &HashMap<u64, String>,
 ) -> HashMap<u64, String> {
     let mut node_addresses: HashMap<u64, String> = peers
         .iter()
-        .map(|(node_id, address)| (*node_id, format!("http://{}", address)))
+        .filter_map(|(node_id, address)| {
+            overrides
+                .get(node_id)
+                .cloned()
+                .or_else(|| (!address.ip().is_unspecified()).then(|| format!("http://{}", address)))
+                .map(|value| (*node_id, value))
+        })
         .collect();
     node_addresses.insert(local_node_id, local_public_address.to_string());
     node_addresses
+}
+
+fn build_peer_http_addresses(
+    local_node_id: u64,
+    local_public_address: Option<&str>,
+    peers: &[(u64, SocketAddr)],
+    overrides: &HashMap<u64, String>,
+) -> Result<HashMap<u64, String>> {
+    let mut node_addresses = HashMap::new();
+
+    if let Some(address) = local_public_address {
+        node_addresses.insert(local_node_id, normalize_http_address(address)?);
+    }
+
+    for (node_id, _) in peers {
+        if let Some(address) = overrides.get(node_id) {
+            node_addresses.insert(*node_id, address.clone());
+        }
+    }
+
+    Ok(node_addresses)
 }
 
 async fn get_collection_count_handler(Path(name): Path<String>) -> impl IntoResponse {
@@ -1046,10 +1151,7 @@ async fn get_collections_list() -> Result<Value> {
     let mut collections: std::collections::BTreeSet<String> =
         db.list_collections().await?.into_iter().collect();
 
-    for (key, _) in database_manager::get_database_manager()
-        .scan_storage()
-        .await?
-    {
+    for (key, _) in database_manager::scan_storage().await? {
         if is_internal_metadata_key(&key) {
             continue;
         }
@@ -1192,9 +1294,7 @@ async fn get_collection_data(
 }
 
 async fn scan_collection_records(name: &str) -> Result<Vec<CollectionRecord>> {
-    let data = database_manager::get_database_manager()
-        .scan_storage()
-        .await?;
+    let data = database_manager::scan_storage().await?;
     let mut records = Vec::new();
 
     for (key, value) in data {
@@ -1454,4 +1554,62 @@ fn build_cors_layer(host: &str, port: u16) -> Result<CorsLayer> {
         .allow_origin(AllowOrigin::list(origins))
         .allow_methods([Method::GET, Method::PUT, Method::DELETE])
         .allow_headers([ACCEPT, AUTHORIZATION, CONTENT_TYPE]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_node_address_overrides_normalizes_bare_addresses() {
+        let overrides =
+            parse_node_address_overrides(Some("2=db-2.example.com:18081,3=http://db-3:18082"))
+                .unwrap();
+
+        assert_eq!(
+            overrides.get(&2).map(String::as_str),
+            Some("http://db-2.example.com:18081")
+        );
+        assert_eq!(
+            overrides.get(&3).map(String::as_str),
+            Some("http://db-3:18082")
+        );
+    }
+
+    #[test]
+    fn build_advertised_node_addresses_uses_peer_overrides() {
+        let peers = vec![(2, "127.0.0.1:50052".parse().unwrap())];
+        let overrides = parse_node_address_overrides(Some("2=db-2.example.com:18081")).unwrap();
+
+        let addresses =
+            build_advertised_node_addresses(1, "http://db-1.example.com:18080", &peers, &overrides);
+
+        assert_eq!(
+            addresses.get(&1).map(String::as_str),
+            Some("http://db-1.example.com:18080")
+        );
+        assert_eq!(
+            addresses.get(&2).map(String::as_str),
+            Some("http://db-2.example.com:18081")
+        );
+    }
+
+    #[test]
+    fn build_peer_http_addresses_requires_explicit_peer_urls() {
+        let peers = vec![(2, "127.0.0.1:50052".parse().unwrap())];
+
+        let addresses = build_peer_http_addresses(
+            1,
+            Some("http://db-1.example.com:8080"),
+            &peers,
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            addresses.get(&1).map(String::as_str),
+            Some("http://db-1.example.com:8080")
+        );
+        assert!(!addresses.contains_key(&2));
+    }
 }

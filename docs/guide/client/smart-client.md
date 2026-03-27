@@ -15,6 +15,7 @@ let config = ClientConfig {
     max_retries: 5,
     max_connections_per_node: 8,
     unhealthy_threshold: 3,
+    unhealthy_cooldown_secs: 30,
     ..Default::default()
 };
 
@@ -35,6 +36,8 @@ Rather than utilizing single synchronous pipes, the smart client spawns and mana
 ### Dynamic Health Checks
 The client actively monitors the success rates of its node connections. If a node suddenly crash-loops or drops below the `unhealthy_threshold`, the client temporarily blocks routes to that address, automatically hunting for the new Raft leader until the topology stabilizes.
 
+`unhealthy_cooldown_secs` controls how long a node stays out of rotation before the client probes it again.
+
 ## Read Consistency Modes
 
 While write operations are exclusively forwarded to partition leaders, read operations give you fine-grained control over network load using `ReadConsistency`.
@@ -45,13 +48,17 @@ use prkdb_client::ReadConsistency;
 // Linearizable read from the leader
 let latest = client.get(b"user_profile").await?;
 
-// Linearizable follower read using ReadIndex under the hood
+// Linearizable follower read using ReadIndex under the hood.
+// The client prefers follower replicas when a partition has them.
 let replica_read = client
     .get_with_consistency(b"user_profile", ReadConsistency::Follower)
     .await?;
 
-// Fast local read that may be stale
+// Fast local read that may be stale.
+// This also prefers follower replicas to reduce leader load.
 let stale = client
     .get_with_consistency(b"user_profile", ReadConsistency::Stale)
     .await?;
 ```
+
+If a partition only has a single replica, both follower and stale reads fall back to that leader because there is no follower to target.

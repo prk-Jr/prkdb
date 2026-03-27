@@ -80,17 +80,28 @@ impl TestServer {
         let child = command.spawn().expect("failed to spawn prkdb-cli");
         let client = reqwest::Client::new();
         let health_url = format!("http://127.0.0.1:{http_port}/health");
+        let grpc_url = format!("http://127.0.0.1:{grpc_port}");
 
         for _ in 0..40 {
-            if let Ok(response) = client.get(&health_url).send().await {
-                if response.status().is_success() {
-                    return Self {
-                        process: child,
-                        http_port,
-                        grpc_port,
-                        _temp_dir: temp_dir,
-                    };
-                }
+            let http_ready = match client.get(&health_url).send().await {
+                Ok(response) => response.status().is_success(),
+                Err(_) => false,
+            };
+            let grpc_ready = match PrkDbServiceClient::connect(grpc_url.clone()).await {
+                Ok(mut grpc_client) => grpc_client
+                    .metadata(tonic::Request::new(MetadataRequest { topics: vec![] }))
+                    .await
+                    .is_ok(),
+                Err(_) => false,
+            };
+
+            if http_ready && grpc_ready {
+                return Self {
+                    process: child,
+                    http_port,
+                    grpc_port,
+                    _temp_dir: temp_dir,
+                };
             }
             sleep(Duration::from_millis(100)).await;
         }

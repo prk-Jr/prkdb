@@ -8,7 +8,8 @@ This guide reflects the current `prkdb-server` binary and the current `prkdb-cli
 - Client gRPC traffic is multiplexed on the same address and port as the local node entry in `CLUSTER_NODES`.
 - `GRPC_PORT` is optional. When set, it must match the local node's `CLUSTER_NODES` port.
 - Use `PRKDB_ADVERTISED_GRPC_ADDR` when the bind address differs from the dialable client address.
-- Metrics are exposed on `9090 + NODE_ID`.
+- Use `PRKDB_ADVERTISED_NODE_ADDRS` when peer nodes also need explicit dialable client addresses in metadata, for example `2=http://db-2.example.com:8081,3=http://db-3.example.com:8082`.
+- Metrics bind to `127.0.0.1:(9090 + NODE_ID)` by default. Set `PRKDB_METRICS_ADDR` to override or `PRKDB_DISABLE_METRICS=1` to disable them.
 - Schema registry data is persisted under `${STORAGE_PATH}/schemas`.
 
 ## Build
@@ -45,6 +46,7 @@ Environment=CLUSTER_NODES=1@10.0.0.1:8080,2@10.0.0.2:8081,3@10.0.0.3:8082
 Environment=STORAGE_PATH=/var/lib/prkdb/node1
 Environment=PRKDB_ADMIN_TOKEN=change-me
 Environment=PRKDB_ADVERTISED_GRPC_ADDR=http://db-1.example.com:8080
+Environment=PRKDB_ADVERTISED_NODE_ADDRS=2=http://db-2.example.com:8081,3=http://db-3.example.com:8082
 ExecStart=/usr/local/bin/prkdb-server
 Restart=always
 RestartSec=5
@@ -102,6 +104,7 @@ prkdb schema list --server http://127.0.0.1:8080
 
 - `CLUSTER_NODES` should contain every node in the cluster, including the local node.
 - Smart clients consume the addresses returned by metadata. Do not advertise `0.0.0.0`; set `PRKDB_ADVERTISED_GRPC_ADDR` if clients connect through DNS or a load balancer.
+- If peer nodes have different bind and public addresses, configure `PRKDB_ADVERTISED_NODE_ADDRS` so metadata never falls back to an internal-only socket.
 - `PRKDB_ADMIN_TOKEN` protects admin RPCs such as collection management and schema registration.
 - If you expose the HTTP server from `prkdb-cli serve`, restrict CORS origins explicitly with `PRKDB_CORS_ORIGINS`.
 - WebSocket auth is header-based. Set `PRKDB_WS_TOKEN` when you want bearer-token enforcement for `/ws/collections/:name`.
@@ -111,4 +114,4 @@ prkdb schema list --server http://127.0.0.1:8080
 - Run the cluster behind TLS termination or a private network boundary.
 - Keep `PRKDB_ADMIN_TOKEN` and `PRKDB_WS_TOKEN` out of shell history and process listings where possible.
 - Persist `STORAGE_PATH` on durable local disks.
-- Scrape metrics from the node-local metrics port instead of exposing it publicly.
+- Scrape metrics from the node-local metrics bind address instead of exposing it publicly.

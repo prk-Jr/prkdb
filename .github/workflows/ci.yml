@@ -506,6 +506,8 @@ jobs:
   cross-lang-benchmark:
     name: "🌍 Cross-Language Benchmarks"
     runs-on: ubuntu-latest
+    env:
+      PRKDB_ADMIN_TOKEN: benchmark_ci_admin_token
     steps:
       - uses: actions/checkout@v4
       - name: Install Protoc
@@ -532,9 +534,20 @@ jobs:
 
       - name: Start PrkDB Server
         run: |
-          ./target/release/prkdb-cli serve --port 8080 --grpc-port 50051 &
+          ./target/release/prkdb-cli --database /tmp/prkdb-cross-lang-benchmark.db serve --port 8080 --grpc-port 50051 &
           echo "Waiting for server..."
-          sleep 5
+          for i in {1..30}; do
+            if curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1 \
+              && ./target/release/prkdb-cli schema --server http://127.0.0.1:50051 list >/dev/null 2>&1; then
+              echo "PrkDB is ready!"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "PrkDB failed to become ready"
+              exit 1
+            fi
+            sleep 1
+          done
           
       - name: Define Benchmark Schema
         run: |

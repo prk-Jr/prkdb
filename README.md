@@ -188,6 +188,7 @@ let config = ClientConfig {
     max_retries: 5,
     max_connections_per_node: 8,
     unhealthy_threshold: 3,
+    unhealthy_cooldown_secs: 30,
     ..Default::default()
 };
 let client = PrkDbClient::with_config(vec!["http://127.0.0.1:8080".into()], config).await?;

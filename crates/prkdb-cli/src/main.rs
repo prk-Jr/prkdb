@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 mod collection_metadata;
@@ -182,24 +183,31 @@ async fn main() -> anyhow::Result<()> {
             advertised_grpc_address,
             num_partitions,
         } => {
+            let advertised_http_address = std::env::var("PRKDB_ADVERTISED_HTTP_ADDR")
+                .ok()
+                .filter(|value| !value.trim().is_empty());
+            let peer_advertised_grpc_addresses = std::env::var("PRKDB_PEER_ADVERTISED_GRPC_ADDRS")
+                .ok()
+                .filter(|value| !value.trim().is_empty());
+            let peer_http_addresses = std::env::var("PRKDB_PEER_HTTP_ADDRS")
+                .ok()
+                .filter(|value| !value.trim().is_empty());
             let raft_options = if let Some(peers_str) = peers {
-                let peers_vec: Vec<(u64, std::net::SocketAddr)> = peers_str
-                    .split(',')
-                    .filter_map(|s| {
-                        let parts: Vec<&str> = s.split('=').collect();
-                        if parts.len() == 2 {
-                            let id = parts[0].parse().ok()?;
-                            let addr = parts[1].parse().ok()?;
-                            Some((id, addr))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
+                let peers_vec = parse_peer_nodes(peers_str)?;
+                let listen_addr = format!("{}:{}", host, grpc_port)
+                    .parse::<SocketAddr>()
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "Invalid serve listen address '{}:{}': {}",
+                            host,
+                            grpc_port,
+                            error
+                        )
+                    })?;
 
                 Some(database_manager::RaftOptions {
                     node_id: *id,
-                    listen_addr: format!("{}:{}", host, grpc_port).parse().unwrap(),
+                    listen_addr,
                     peers: peers_vec,
                     num_partitions: *num_partitions,
                 })
@@ -223,6 +231,9 @@ async fn main() -> anyhow::Result<()> {
                 id: *id,
                 peers: peers_for_serve,
                 advertised_grpc_address: advertised_grpc_address.clone(),
+                advertised_http_address,
+                peer_advertised_grpc_addresses,
+                peer_http_addresses,
             };
             commands::serve::handle_serve(args).await
         }
@@ -242,5 +253,46 @@ async fn main() -> anyhow::Result<()> {
 
         // Schema command (pure remote)
         Commands::Schema(args) => schema::handle_schema(args.clone()).await,
+    }
+}
+
+fn parse_peer_nodes(peers: &str) -> anyhow::Result<Vec<(u64, SocketAddr)>> {
+    let mut parsed = Vec::new();
+
+    for entry in peers
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let (node_id_str, address_str) = entry
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("Invalid peer entry '{entry}'"))?;
+        let node_id = node_id_str
+            .parse::<u64>()
+            .map_err(|error| anyhow::anyhow!("Invalid peer node ID in '{entry}': {}", error))?;
+        let address = address_str.parse::<SocketAddr>().map_err(|error| {
+            anyhow::anyhow!("Invalid peer socket address in '{entry}': {}", error)
+        })?;
+        parsed.push((node_id, address));
+    }
+
+    if parsed.is_empty() {
+        anyhow::bail!("At least one valid peer must be provided when --peers is set");
+    }
+
+    Ok(parsed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_peer_nodes_rejects_invalid_entries() {
+        let error = parse_peer_nodes("2=127.0.0.1:not-a-port")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("2=127.0.0.1:not-a-port"));
     }
 }

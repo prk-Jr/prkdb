@@ -45,8 +45,6 @@ impl TestCluster {
         // Use atomic offset to avoid port conflicts in parallel tests
         let offset = CLUSTER_OFFSET.fetch_add(10, Ordering::Relaxed);
         let base_data_port = 19000 + offset; // Start from 19000 block
-        let base_raft_port = 60000 + offset; // Start from 60000 block
-
         for i in 0..num_nodes {
             let node_id = (i + 1) as u64;
             let data_port = base_data_port + i as u16;
@@ -181,6 +179,7 @@ impl TestCluster {
             .env("NUM_PARTITIONS", num_partitions.to_string())
             .env("STORAGE_PATH", node.data_dir.to_str().unwrap())
             .env("GRPC_PORT", node.data_port.to_string())
+            .env("PRKDB_DISABLE_METRICS", "1")
             .env("RUST_LOG", "prkdb::raft=debug,info")
             .env("CHAOS_CONFIG_PATH", chaos_config_path)
             .stdout(Stdio::from(log_file.try_clone()?))

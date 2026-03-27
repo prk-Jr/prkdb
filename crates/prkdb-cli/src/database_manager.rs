@@ -60,7 +60,10 @@ impl DatabaseManager {
     }
 
     fn try_get_connection(&self) -> Result<PrkDb> {
-        let mut conn_guard = self.connection.lock().unwrap();
+        let mut conn_guard = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Database manager connection state is poisoned"))?;
 
         if conn_guard.is_none() {
             // Check if Raft is enabled
@@ -110,7 +113,10 @@ impl DatabaseManager {
             }
         }
 
-        Ok(conn_guard.as_ref().unwrap().clone())
+        conn_guard
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Database manager failed to initialize a connection"))
     }
 
     /// Get direct access to the database instance (for gRPC server)
@@ -169,9 +175,10 @@ pub fn init_database_manager(database_path: impl AsRef<Path>, raft_options: Opti
     let _ = DB_MANAGER.set(DatabaseManager::new(database_path, raft_options));
 }
 
-/// Get the global database manager
-pub fn get_database_manager() -> &'static DatabaseManager {
-    DB_MANAGER.get().expect("Database manager not initialized")
+pub fn try_get_database_manager() -> Result<&'static DatabaseManager> {
+    DB_MANAGER
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("Database manager not initialized"))
 }
 
 /// Helper function to execute read-only database operations
@@ -180,15 +187,15 @@ where
     F: FnOnce(PrkDb) -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
-    get_database_manager().with_read_only(operation).await
+    try_get_database_manager()?.with_read_only(operation).await
 }
 
 /// Helper function to scan storage
 pub async fn scan_storage() -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-    get_database_manager().scan_storage().await
+    try_get_database_manager()?.scan_storage().await
 }
 
 /// Helper function to get database instance directly
 pub async fn get_db_instance() -> Result<PrkDb> {
-    get_database_manager().get_db_instance().await
+    try_get_database_manager()?.get_db_instance().await
 }
