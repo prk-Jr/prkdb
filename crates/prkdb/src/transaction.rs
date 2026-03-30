@@ -358,6 +358,12 @@ impl Transaction {
         }
         self.check_timeout()?;
 
+        let _serializable_guard = if self.config.isolation_level == IsolationLevel::Serializable {
+            Some(self.storage.acquire_transaction_write_guard().await)
+        } else {
+            None
+        };
+
         // Conflict detection for Serializable isolation
         if self.config.isolation_level == IsolationLevel::Serializable && !self.read_set.is_empty()
         {
@@ -399,12 +405,12 @@ impl Transaction {
 
         // Apply writes using batch path (high performance!)
         if !puts.is_empty() {
-            self.storage.put_batch(puts).await?;
+            self.storage.put_batch_unlocked(puts).await?;
         }
 
         // Apply deletes
-        for key in deletes {
-            self.storage.delete(&key).await?;
+        if !deletes.is_empty() {
+            self.storage.delete_many_unlocked(deletes).await?;
         }
 
         self.status = TransactionStatus::Committed;

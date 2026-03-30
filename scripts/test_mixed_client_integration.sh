@@ -179,6 +179,15 @@ wait_for_pid() {
     local log_dir="$3"
 
     if wait "$pid"; then
+        echo "✅ ${label} completed"
+        if [ -s "$log_dir/stdout.log" ]; then
+            echo "📄 ${label} stdout:"
+            cat "$log_dir/stdout.log"
+        fi
+        if [ -s "$log_dir/stderr.log" ]; then
+            echo "📄 ${label} stderr:"
+            cat "$log_dir/stderr.log"
+        fi
         return 0
     fi
 

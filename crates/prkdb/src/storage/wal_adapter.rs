@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
-use tokio::sync::{oneshot, Mutex, Notify};
+use tokio::sync::{oneshot, Mutex, Notify, OwnedRwLockWriteGuard, RwLock};
 use tracing::{info, instrument, warn};
 
 // Phase 2: Dedicated Sync Writer Thread
@@ -225,6 +225,7 @@ struct WalStorageInner {
     metrics: Arc<StorageMetrics>,
     accumulator: Mutex<AdaptiveBatchAccumulator<PendingWrite>>,
     flush_notify: Arc<Notify>,
+    transaction_barrier: Arc<RwLock<()>>,
     // Phase 8: Track max offset for compaction and change detection
     max_offset: AtomicU64,
     // Phase 9: Checkpoint path for fast recovery
@@ -250,9 +251,125 @@ impl Drop for WalStorageAdapter {
 }
 
 impl WalStorageAdapter {
+    pub(crate) async fn acquire_transaction_write_guard(&self) -> OwnedRwLockWriteGuard<()> {
+        self.inner.transaction_barrier.clone().write_owned().await
+    }
+
     /// Create a builder for WalStorageAdapter
     pub fn builder(log_dir: PathBuf) -> WalStorageAdapterBuilder {
         WalStorageAdapterBuilder::new(log_dir)
+    }
+
+    async fn put_batch_impl(&self, entries: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), StorageError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let batch_size = entries.len();
+
+        let total_bytes: u64 = entries
+            .iter()
+            .map(|(key, value)| (key.len() + value.len()) as u64)
+            .sum();
+        self.inner.metrics.record_write(total_bytes);
+
+        let records: Vec<LogRecord> = entries
+            .iter()
+            .map(|(key, value)| {
+                LogRecord::new(LogOperation::Put {
+                    collection: String::new(),
+                    id: key.clone(),
+                    data: value.clone(),
+                })
+            })
+            .collect();
+
+        let offsets = self
+            .inner
+            .wal
+            .append_batch(records)
+            .await
+            .map_err(|e| StorageError::Internal(format!("WAL batch write failed: {}", e)))?;
+
+        if offsets.len() != batch_size {
+            return Err(StorageError::Internal(format!(
+                "WAL returned {} offsets for {} records",
+                offsets.len(),
+                batch_size
+            )));
+        }
+
+        if let Some((_, max_off)) = offsets.last() {
+            self.inner.max_offset.fetch_max(*max_off, Ordering::Relaxed);
+        }
+
+        let cache_entries: Vec<_> = entries
+            .into_iter()
+            .enumerate()
+            .map(|(i, (key, value))| {
+                let (_segment_id, offset) = offsets[i];
+                self.inner.index.pin().insert(key.clone(), offset);
+                (key, value)
+            })
+            .collect();
+
+        self.inner.cache.put_batch(cache_entries).await;
+
+        Ok(())
+    }
+
+    async fn delete_many_impl(&self, keys: Vec<Vec<u8>>) -> Result<(), StorageError> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+
+        let batch_size = keys.len();
+
+        let total_bytes: u64 = keys.iter().map(|key| key.len() as u64).sum();
+        self.inner
+            .metrics
+            .record_write_batch(batch_size as u64, total_bytes);
+
+        let records: Vec<LogRecord> = keys
+            .iter()
+            .map(|key| {
+                LogRecord::new(LogOperation::Delete {
+                    collection: String::new(),
+                    id: key.clone(),
+                })
+            })
+            .collect();
+
+        self.inner
+            .wal
+            .append_batch(records)
+            .await
+            .map_err(|e| StorageError::Internal(format!("WAL batch delete failed: {}", e)))?;
+
+        {
+            let index_pin = self.inner.index.pin();
+            for key in &keys {
+                index_pin.remove(key);
+            }
+        }
+
+        self.inner.cache.remove_batch(keys).await;
+
+        Ok(())
+    }
+
+    pub(crate) async fn put_batch_unlocked(
+        &self,
+        entries: Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> Result<(), StorageError> {
+        self.put_batch_impl(entries).await
+    }
+
+    pub(crate) async fn delete_many_unlocked(
+        &self,
+        keys: Vec<Vec<u8>>,
+    ) -> Result<(), StorageError> {
+        self.delete_many_impl(keys).await
     }
 
     /// Create a new WAL storage adapter with default configuration
@@ -315,6 +432,7 @@ impl WalStorageAdapter {
             metrics,
             accumulator: Mutex::new(AdaptiveBatchAccumulator::new(config.batching.clone())),
             flush_notify: Arc::new(Notify::new()),
+            transaction_barrier: Arc::new(RwLock::new(())),
             max_offset: AtomicU64::new(0),
             checkpoint_path: config.wal.log_dir.join("checkpoint.json"),
             _writer_handle: Some(writer_handle),
@@ -390,6 +508,7 @@ impl WalStorageAdapter {
                 storage_config.batching.clone(),
             )),
             flush_notify: Arc::new(Notify::new()),
+            transaction_barrier: Arc::new(RwLock::new(())),
             max_offset: AtomicU64::new(0),
             checkpoint_path: storage_config.wal.log_dir.join("checkpoint.json"),
             _writer_handle: Some(writer_handle),
@@ -467,6 +586,7 @@ impl WalStorageAdapter {
                 storage_config.batching.clone(),
             )),
             flush_notify: Arc::new(Notify::new()),
+            transaction_barrier: Arc::new(RwLock::new(())),
             max_offset: AtomicU64::new(0),
             checkpoint_path: storage_config.wal.log_dir.join("checkpoint.json"),
             _writer_handle: Some(writer_handle),
@@ -550,6 +670,7 @@ impl WalStorageAdapter {
                 storage_config.batching.clone(),
             )),
             flush_notify: Arc::new(Notify::new()),
+            transaction_barrier: Arc::new(RwLock::new(())),
             max_offset: AtomicU64::new(0),
             checkpoint_path: storage_config.wal.log_dir.join("checkpoint.json"),
             _writer_handle: Some(writer_handle),
@@ -1005,6 +1126,8 @@ impl WalStorageAdapter {
             return;
         }
 
+        let _transaction_barrier = inner.transaction_barrier.read().await;
+
         // Group by collection to create batches
         // We use a preserved order map or just iterate and group?
         // Since we want to batch per collection, let's group by collection first.
@@ -1332,39 +1455,9 @@ impl StorageAdapter for WalStorageAdapter {
     ///
     /// FIX: Direct WAL write path - bypasses accumulator flush loop deadlock
     async fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
-        // Record write metrics
-        self.inner
-            .metrics
-            .record_write((key.len() + value.len()) as u64);
-
-        let record = LogRecord::new(LogOperation::Put {
-            collection: String::new(),
-            id: key.to_vec(),
-            data: value.to_vec(),
-        });
-
-        // DIRECT WAL WRITE: Bypass accumulator to fix deadlock
-        // Write directly to WAL - simpler and guaranteed to work
-        let results = self
-            .inner
-            .wal
-            .append_batch(vec![record])
+        let _guard = self.inner.transaction_barrier.read().await;
+        self.put_batch_impl(vec![(key.to_vec(), value.to_vec())])
             .await
-            .map_err(|e| StorageError::Internal(format!("WAL write failed: {}", e)))?;
-
-        // Get offset from result
-        let offset = results.first().map(|(_, off)| *off).unwrap_or(0);
-
-        // Track max offset for compaction
-        self.inner.max_offset.fetch_max(offset, Ordering::Relaxed);
-
-        // Update index
-        self.inner.index.pin().insert(key.to_vec(), offset);
-
-        // Update cache (async)
-        self.inner.cache.put(key.to_vec(), value.to_vec()).await;
-
-        Ok(())
     }
 
     /// Put multiple key-value pairs in a single batch operation
@@ -1381,74 +1474,13 @@ impl StorageAdapter for WalStorageAdapter {
     /// - Old (accumulator): 62K ops/sec (bottleneck)
     /// - New (direct WAL): 3M+ ops/sec! 🚀
     async fn put_batch(&self, entries: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), StorageError> {
-        if entries.is_empty() {
-            return Ok(());
-        }
-
-        let batch_size = entries.len();
-
-        // Record metrics
-        let total_bytes: u64 = entries
-            .iter()
-            .map(|(k, v)| (k.len() + v.len()) as u64)
-            .sum();
-        self.inner.metrics.record_write(total_bytes);
-
-        // Build all LogRecords
-        let records: Vec<LogRecord> = entries
-            .iter()
-            .map(|(key, value)| {
-                LogRecord::new(LogOperation::Put {
-                    collection: String::new(),
-                    id: key.clone(),
-                    data: value.clone(),
-                })
-            })
-            .collect();
-
-        // CRITICAL: Direct WAL batch write (bypasses accumulator!)
-        // This is the key to 3M+ ops/sec performance
-        let offsets = self
-            .inner
-            .wal
-            .append_batch(records)
-            .await
-            .map_err(|e| StorageError::Internal(format!("WAL batch write failed: {}", e)))?;
-
-        // Verify we got correct number of offsets
-        if offsets.len() != batch_size {
-            return Err(StorageError::Internal(format!(
-                "WAL returned {} offsets for {} records",
-                offsets.len(),
-                batch_size
-            )));
-        }
-
-        // Track max offset from this batch
-        if let Some((_, max_off)) = offsets.last() {
-            self.inner.max_offset.fetch_max(*max_off, Ordering::Relaxed);
-        }
-
-        // Bulk update: Single cache lock for entire batch!
-        // Bulk update index and cache using put_batch
-        let cache_entries: Vec<_> = entries
-            .into_iter()
-            .enumerate()
-            .map(|(i, (key, value))| {
-                let (_segment_id, offset) = offsets[i];
-                self.inner.index.pin().insert(key.clone(), offset);
-                (key, value)
-            })
-            .collect();
-
-        // Bulk cache update (sharded, concurrent)
-        self.inner.cache.put_batch(cache_entries).await;
-
-        Ok(())
+        let _guard = self.inner.transaction_barrier.read().await;
+        self.put_batch_impl(entries).await
     }
 
     /// Put multiple key-value pairs
     async fn put_many(&self, items: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), StorageError> {
+        let _guard = self.inner.transaction_barrier.read().await;
         // Calculate total bytes for metrics
         let total_bytes: u64 = items.iter().map(|(k, v)| (k.len() + v.len()) as u64).sum();
 
@@ -1489,39 +1521,8 @@ impl StorageAdapter for WalStorageAdapter {
 
     /// Delete a key
     async fn delete(&self, key: &[u8]) -> Result<(), StorageError> {
-        tracing::debug!(
-            "WalStorageAdapter::delete called for key {:?}",
-            String::from_utf8_lossy(key)
-        );
-        // Record write metrics (delete is a write operation)
-        self.inner.metrics.record_write(key.len() as u64);
-
-        // Invalidate cache first
-        {
-            // Remove from sharded cache (async)
-            self.inner.cache.remove(&key.to_vec()).await;
-        }
-
-        let record = LogRecord::new(LogOperation::Delete {
-            collection: String::new(),
-            id: key.to_vec(),
-        });
-
-        let (tx, rx) = oneshot::channel();
-
-        let should_flush = {
-            let mut acc = self.inner.accumulator.lock().await;
-            acc.add(PendingWrite { record, tx });
-            true
-        };
-
-        if should_flush {
-            self.inner.flush_notify.notify_one();
-        }
-
-        rx.await
-            .map_err(|_| StorageError::Internal("Channel closed".to_string()))
-            .map(|_| ())
+        let _guard = self.inner.transaction_barrier.read().await;
+        self.delete_many_impl(vec![key.to_vec()]).await
     }
 
     async fn flush(&self) -> Result<(), StorageError> {
@@ -1763,50 +1764,8 @@ impl StorageAdapter for WalStorageAdapter {
     /// - Old (accumulator): Individual delete records - slow
     /// - New (direct WAL): Single batch operation - fast!
     async fn delete_many(&self, keys: Vec<Vec<u8>>) -> Result<(), StorageError> {
-        if keys.is_empty() {
-            return Ok(());
-        }
-
-        let batch_size = keys.len();
-
-        // Calculate total bytes for metrics
-        let total_bytes: u64 = keys.iter().map(|k| k.len() as u64).sum();
-        self.inner
-            .metrics
-            .record_write_batch(batch_size as u64, total_bytes);
-
-        // Build all LogRecords for batch delete
-        let records: Vec<LogRecord> = keys
-            .iter()
-            .map(|key| {
-                LogRecord::new(LogOperation::Delete {
-                    collection: String::new(),
-                    id: key.clone(),
-                })
-            })
-            .collect();
-
-        // CRITICAL: Direct WAL batch write (bypasses accumulator!)
-        // This is the key optimization for high throughput deletes
-        let _offsets = self
-            .inner
-            .wal
-            .append_batch(records)
-            .await
-            .map_err(|e| StorageError::Internal(format!("WAL batch delete failed: {}", e)))?;
-
-        // Bulk update: Remove from index and cache
-        {
-            let index_pin = self.inner.index.pin();
-            for key in &keys {
-                index_pin.remove(key);
-            }
-        } // index_pin dropped here before await
-
-        // Bulk cache invalidation
-        self.inner.cache.remove_batch(keys).await;
-
-        Ok(())
+        let _guard = self.inner.transaction_barrier.read().await;
+        self.delete_many_impl(keys).await
     }
 
     async fn outbox_save(&self, id: &str, payload: &[u8]) -> Result<(), StorageError> {

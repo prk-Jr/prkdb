@@ -12,6 +12,7 @@ use helpers::{
     OperationHistory,
 };
 use prkdb::storage::WalStorageAdapter;
+use prkdb::transaction::{IsolationLevel, TransactionConfig, TransactionError, TransactionExt};
 use prkdb_core::wal::WalConfig;
 use prkdb_types::storage::StorageAdapter;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -341,8 +342,9 @@ async fn test_monotonic_reads() {
 ///
 /// Scenario:
 /// 1. Initialize counter to 0
-/// 2. N workers each increment counter M times
-/// 3. Final value should equal N * M
+/// 2. N workers each increment counter M times through serializable transactions
+/// 3. Conflicting increments retry until they commit
+/// 4. Final value should equal N * M
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_lost_update_detection() {
     let dir = tempfile::tempdir().unwrap();
@@ -360,22 +362,57 @@ async fn test_lost_update_detection() {
     // Initialize counter
     storage.put(&key, &0u64.to_le_bytes()).await.unwrap();
 
-    // Use atomic counter for coordination (simulating CAS)
-    let global_counter = Arc::new(AtomicU64::new(0));
+    let conflict_retries = Arc::new(AtomicU64::new(0));
+    let max_retries = 1_000;
 
     let mut handles = vec![];
 
-    for _ in 0..num_workers {
-        let counter = global_counter.clone();
+    for worker_id in 0..num_workers {
+        let conflict_retries = conflict_retries.clone();
         let storage = storage.clone();
         let key = key.clone();
 
         handles.push(tokio::spawn(async move {
             for _ in 0..increments_per_worker {
-                // Atomic increment
-                let new_val = counter.fetch_add(1, Ordering::SeqCst) + 1;
-                storage.put(&key, &new_val.to_le_bytes()).await.unwrap();
-                tokio::time::sleep(Duration::from_micros(10)).await;
+                let mut attempts = 0;
+
+                loop {
+                    attempts += 1;
+
+                    let config = TransactionConfig {
+                        isolation_level: IsolationLevel::Serializable,
+                        ..Default::default()
+                    };
+                    let mut tx = storage.begin_transaction_with_config(config);
+
+                    let current_value = tx
+                        .get(&key)
+                        .await
+                        .unwrap()
+                        .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap()))
+                        .unwrap_or(0);
+                    let next_value = current_value + 1;
+                    tx.put(key.clone(), next_value.to_le_bytes()).unwrap();
+
+                    match tx.commit().await {
+                        Ok(_) => break,
+                        Err(TransactionError::ConflictDetected { .. })
+                            if attempts < max_retries =>
+                        {
+                            conflict_retries.fetch_add(1, Ordering::Relaxed);
+                            tokio::task::yield_now().await;
+                        }
+                        Err(TransactionError::ConflictDetected { .. }) => {
+                            panic!(
+                                "worker {} exceeded retry budget while incrementing counter",
+                                worker_id
+                            );
+                        }
+                        Err(error) => {
+                            panic!("worker {} increment failed: {}", worker_id, error);
+                        }
+                    }
+                }
             }
         }));
     }
@@ -387,16 +424,17 @@ async fn test_lost_update_detection() {
     // Verify final value
     let final_value = storage.get(&key).await.unwrap().unwrap();
     let final_counter = u64::from_le_bytes(final_value.try_into().unwrap());
+    let retries = conflict_retries.load(Ordering::Relaxed);
 
     if final_counter == expected_final {
         println!(
-            "✅ Lost Update Detection Test: Final counter = {} (expected {})",
-            final_counter, expected_final
+            "✅ Lost Update Detection Test: Final counter = {} (expected {}), retries = {}",
+            final_counter, expected_final, retries
         );
     } else {
         panic!(
-            "❌ Lost updates detected: Final counter = {} but expected {}",
-            final_counter, expected_final
+            "❌ Lost updates detected after {} retries: Final counter = {} but expected {}",
+            retries, final_counter, expected_final
         );
     }
 }

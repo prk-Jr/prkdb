@@ -150,6 +150,15 @@ func runWrite(config runnerConfig) {
 			os.Exit(1)
 		}
 	}
+
+	fmt.Printf(
+		"✅ Go mixed-client write: collection=%s records=%d range=%s-000001..%s-%06d\n",
+		config.Collection,
+		config.Records,
+		config.IDPrefix,
+		config.IDPrefix,
+		config.Records,
+	)
 }
 
 func runRead(config runnerConfig) {
@@ -174,6 +183,13 @@ func runRead(config runnerConfig) {
 			os.Exit(1)
 		}
 	}
+
+	fmt.Printf(
+		"✅ Go mixed-client read: collection=%s sample_ids=%d fetched_rows=%d\n",
+		config.Collection,
+		len(config.SampleIDs),
+		len(rowsByID),
+	)
 }
 
 func main() {

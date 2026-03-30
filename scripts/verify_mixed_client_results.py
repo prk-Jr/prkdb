@@ -118,7 +118,9 @@ def main() -> None:
 
     print(
         "✅ verified mixed-client results: "
+        + f"collection={args.collection}, total={len(rows)}, "
         + ", ".join(f"{prefix}={count}" for prefix, count in expected.items())
+        + f", sample_ids={len(args.sample_id)}"
     )
 
 

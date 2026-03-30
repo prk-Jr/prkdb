@@ -84,9 +84,14 @@ async def run_write(client_class, server: str, collection: str, id_prefix: str, 
         for index in range(records):
             record = build_record(index, id_prefix)
             await client.put(collection, record)
+    print(
+        f"✅ Python mixed-client write: collection={collection} records={records} "
+        f"range={id_prefix}-000001..{id_prefix}-{records:06d}"
+    )
 
 
 async def run_read(client_class, server: str, collection: str, sample_ids: Iterable[str]) -> None:
+    sample_ids = list(sample_ids)
     async with client_class(host=server) as client:
         rows = await client.list(collection, limit=10000)
         rows_by_id = {str(row.get("id")): row for row in rows if isinstance(row, dict)}
@@ -94,6 +99,10 @@ async def run_read(client_class, server: str, collection: str, sample_ids: Itera
         missing_rows = [sample_id for sample_id in sample_ids if sample_id not in rows_by_id]
         if missing_rows:
             raise RuntimeError(f"missing expected sample ids: {', '.join(missing_rows)}")
+    print(
+        f"✅ Python mixed-client read: collection={collection} sample_ids={len(sample_ids)} "
+        f"fetched_rows={len(rows_by_id)}"
+    )
 
 
 async def main() -> None:

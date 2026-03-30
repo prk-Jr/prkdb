@@ -152,6 +152,11 @@ async function runWrite(args: RunnerArgs) {
   for (let index = 0; index < args.records; index += 1) {
     await client.put(args.collection, buildRecord(index, args.idPrefix));
   }
+
+  console.log(
+    `✅ TypeScript mixed-client write: collection=${args.collection} records=${args.records} ` +
+      `range=${args.idPrefix}-000001..${args.idPrefix}-${String(args.records).padStart(6, '0')}`,
+  );
 }
 
 async function runRead(args: RunnerArgs) {
@@ -173,6 +178,11 @@ async function runRead(args: RunnerArgs) {
       throw new Error(`missing expected sample id: ${sampleId}`);
     }
   }
+
+  console.log(
+    `✅ TypeScript mixed-client read: collection=${args.collection} sample_ids=${args.sampleIds.length} ` +
+      `fetched_rows=${rowsById.size}`,
+  );
 }
 
 async function main() {
