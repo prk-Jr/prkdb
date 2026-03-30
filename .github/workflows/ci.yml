@@ -554,6 +554,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      - name: Setup Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
           
       - name: Build PrkDB CLI
         run: cargo build --release -p prkdb-cli
@@ -597,23 +602,41 @@ jobs:
           
       - name: Generate Clients
         run: |
-          # Python
           ./target/release/prkdb-cli codegen --server http://127.0.0.1:50051 --lang python --out benches/client_py --collection benchmark
-          # TypeScript
           ./target/release/prkdb-cli codegen --server http://127.0.0.1:50051 --lang typescript --out benches/client_ts --collection benchmark
+          ./target/release/prkdb-cli codegen --server http://127.0.0.1:50051 --lang go --out benches/client_go --collection benchmark
           
       - name: "🐍 Run Python Benchmark"
         run: |
-          python3 benches/bench_python.py --server http://127.0.0.1:8080 --records 10000
+          python3 benches/bench_python.py
+        env:
+          PRKDB_SERVER: http://127.0.0.1:8080
+          NUM_RECORDS: 10000
+          PRKDB_COLLECTION: benchmark
+          PRKDB_ID_PREFIX: bench_py
+          PRKDB_CLIENT_DIR: benches/client_py
           
       - name: "📘 Run TypeScript Benchmark"
         run: |
-          # Compile TS if needed or run with tsx (simpler ESM support)
           npm install -g tsx typescript
-          # Fix import path in generated file if necessary? 
-          # The benchmark script imports from ./client_ts/benchmark.ts
-          
           tsx benches/bench_ts.ts
         env:
           PRKDB_SERVER: http://127.0.0.1:8080
           NUM_RECORDS: 10000
+          PRKDB_COLLECTION: benchmark
+          PRKDB_ID_PREFIX: bench_ts
+
+      - name: "🐹 Run Go Benchmark"
+        run: |
+          go_bench_dir="$(mktemp -d)"
+          trap 'rm -rf "$go_bench_dir" benches/client_go' EXIT
+          cp benches/bench_go.go "$go_bench_dir/main.go"
+          cp -R benches/client_go "$go_bench_dir/client_go"
+          cd "$go_bench_dir"
+          go mod init benchclient >/dev/null 2>&1
+          go run .
+        env:
+          PRKDB_SERVER: http://127.0.0.1:8080
+          NUM_RECORDS: 10000
+          PRKDB_COLLECTION: benchmark
+          PRKDB_ID_PREFIX: bench_go
