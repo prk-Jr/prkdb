@@ -195,13 +195,15 @@ and count correctness.
 
 ### Verification Mechanism
 
-Use one shared verification path rather than three language-specific verifiers. The verifier
-can be implemented in the language with the lowest operational cost in CI, but it must use
-repo-supported interfaces and keep the logic simple.
+Use one shared verification path rather than three language-specific verifiers. To keep the
+implementation low-friction in CI, the verifier should be a Python script that talks to the
+live HTTP API directly with `httpx`. This keeps verification language-agnostic while
+reusing a dependency the repo already installs for Python client checks.
 
 Recommended approach:
 
-- verify via generated or existing client access to the live server
+- implement `scripts/verify_mixed_client_results.py`
+- verify via direct HTTP API access to the live server
 - page through collection data if needed
 - count records by ID prefix
 - validate sampled IDs directly
@@ -248,12 +250,17 @@ understandable and maintenance cost stays low.
 
 ## Script And File Layout
 
-Exact filenames may vary slightly during implementation, but the design expects:
+Use these filenames unless a concrete repo constraint forces a rename:
 
-- one new mixed-client integration shell script under `scripts/`
-- one verifier script or runner used by that integration flow
-- one new Go benchmark runner under `benches/`
-- updates to existing Python and TypeScript benchmark scripts under `benches/`
+- `scripts/test_mixed_client_integration.sh`
+- `scripts/verify_mixed_client_results.py`
+- `scripts/mixed_client_writer.py`
+- `scripts/mixed_client_writer.ts`
+- `scripts/mixed_client_writer.go`
+- `benches/bench_go.go`
+- updates to `benches/bench_python.py`
+- updates to `benches/bench_ts.ts`
+- updates to `scripts/run_benchmarks_local.sh`
 - CI workflow updates in `.github/workflows/ci.yml`
 
 The mixed-client integration should use temporary working directories and should not leave
@@ -296,7 +303,8 @@ Expected doc updates:
   - mention mixed-client integration coverage
   - reflect that the cross-language benchmark category includes Go
   - preserve the existing caveat that CI benchmark numbers are trend-tracking telemetry
-- optionally related guide pages if they directly describe the old benchmark coverage
+- guide pages only if a targeted search finds wording that would become false after the CI
+  update
 
 Generated status docs such as `docs/status/repo-status.md` should only be updated if the
 normal repo-status generation flow requires it. They should not be hand-edited casually.
