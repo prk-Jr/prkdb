@@ -7,16 +7,17 @@ It also runs a "cross-language benchmark" job, but that job only exercises Pytho
 TypeScript, and it does so sequentially. That leaves two gaps:
 
 1. There is no correctness-focused CI job proving that multiple generated clients can write
-   to the same live PrkDB server at the same time.
+   to and read from the same live PrkDB server in one shared run.
 2. The benchmark coverage is incomplete for this category because Go is not included.
 
-This design adds a mixed-client integration job for correctness under concurrent writes and
-expands the existing benchmark category to cover Go as well.
+This design adds a mixed-client integration job for correctness under concurrent writes plus
+cross-language read validation, and expands the existing benchmark category to cover Go as
+well.
 
 ## Goals
 
 - Prove that generated Python, TypeScript, and Go clients can concurrently write to one live
-  PrkDB server in CI.
+  PrkDB server in CI and then read back expected data through generated client surfaces.
 - Verify the mixed-client run deterministically, even when each language writes a different
   number of records.
 - Keep existing isolated per-language client feature checks for failure isolation.
@@ -66,7 +67,8 @@ performance-oriented CI job.
   - one PrkDB server
   - one schema and one target collection
   - generated Python, TypeScript, and Go clients
-  - all three client writers launched concurrently
+  - all three client runners launched concurrently for writes
+  - deterministic cross-language read validation
   - deterministic post-run verification of expected records
 - **Updated job:** cross-language benchmark
   - keep this as benchmark telemetry
@@ -90,7 +92,8 @@ These jobs should not be replaced by the mixed-client integration test.
 
 ### 2. Add Mixed-Client Integration Job
 
-Add a new CI job dedicated to correctness under concurrent mixed-language writes.
+Add a new CI job dedicated to correctness under concurrent mixed-language writes plus
+cross-language reads.
 
 Responsibilities:
 
@@ -98,8 +101,9 @@ Responsibilities:
 - start one PrkDB server with one HTTP port and one gRPC port
 - define and register a benchmark/integration schema
 - generate Python, TypeScript, and Go clients for the same collection
-- launch one writer per language concurrently
-- wait for all writers to finish
+- launch one language runner per language concurrently for writes
+- wait for all write phases to finish
+- run cross-language read validation through each generated client
 - run a deterministic verification pass
 - print a concise summary
 - clean up temporary files and background processes
@@ -133,36 +137,39 @@ The server lifecycle is owned by one shell script that:
 - waits for both HTTP health and schema gRPC readiness
 - registers the schema
 - generates the three clients
-- launches the language runners concurrently
+- launches the language runners concurrently for writes
+- coordinates the read-validation phase
 - runs verification
 - tears everything down in `trap` cleanup
 
-### Writer Shape
+### Runner Shape
 
-Each language gets a dedicated writer script:
+Each language gets a dedicated runner script:
 
-- Python writer
-- TypeScript writer
-- Go writer
+- Python runner
+- TypeScript runner
+- Go runner
 
-Each writer accepts configuration from environment variables or CLI arguments:
+Each runner accepts configuration from environment variables or CLI arguments:
 
 - server URL
 - record count
 - ID prefix
 - collection name
+- read sample configuration
 
-Each writer emits deterministic IDs such as:
+Each runner emits deterministic IDs such as:
 
 - `py-000001`
 - `ts-000001`
 - `go-000001`
 
-Each writer prints:
+Each runner prints:
 
 - start banner
 - configured record count
 - completion count
+- read-validation summary
 - duration
 
 Timing is diagnostic only.
@@ -176,11 +183,39 @@ configuring different record totals per language, for example:
 - TypeScript: 1000
 - Go: 1300
 
-The verifier uses configured expected counts instead of assuming equal load.
+The verifier and read phase use configured expected counts instead of assuming equal load.
+
+### Read Validation Model
+
+The mixed-client integration must validate reads as a first-class part of the scenario, not
+just as a final aggregate count check.
+
+Recommended structure:
+
+1. run concurrent writes from all three generated clients
+2. after all writes complete, run read validation from each generated client
+3. finish with one shared aggregate verifier
+
+Each generated client must read a deterministic sample of records written by:
+
+- Python
+- TypeScript
+- Go
+
+To keep the flow deterministic and cheap, the sample set should be derived from configured
+prefixes and counts rather than discovered dynamically. A simple rule such as first ID and
+last ID per language is sufficient.
+
+This ensures the mixed-client job proves:
+
+- each language can write successfully
+- each language can read records written by itself
+- each language can read records written by the other generated clients
+- final collection contents match expectations
 
 ### Verification Model
 
-After all writers finish, one verifier checks:
+After the read-validation phase completes, one verifier checks:
 
 - total record count equals the sum of all expected counts
 - Python-prefixed record count equals expected Python count
@@ -195,10 +230,11 @@ and count correctness.
 
 ### Verification Mechanism
 
-Use one shared verification path rather than three language-specific verifiers. To keep the
-implementation low-friction in CI, the verifier should be a Python script that talks to the
-live HTTP API directly with `httpx`. This keeps verification language-agnostic while
-reusing a dependency the repo already installs for Python client checks.
+Use one shared aggregate verification path rather than three language-specific verifiers. To
+keep the implementation low-friction in CI, the verifier should be a Python script that
+talks to the live HTTP API directly with `httpx`. This keeps final verification
+language-agnostic while reusing a dependency the repo already installs for Python client
+checks.
 
 Recommended approach:
 
@@ -254,9 +290,9 @@ Use these filenames unless a concrete repo constraint forces a rename:
 
 - `scripts/test_mixed_client_integration.sh`
 - `scripts/verify_mixed_client_results.py`
-- `scripts/mixed_client_writer.py`
-- `scripts/mixed_client_writer.ts`
-- `scripts/mixed_client_writer.go`
+- `scripts/mixed_client_runner.py`
+- `scripts/mixed_client_runner.ts`
+- `scripts/mixed_client_runner.go`
 - `benches/bench_go.go`
 - updates to `benches/bench_python.py`
 - updates to `benches/bench_ts.ts`
@@ -319,10 +355,11 @@ Required behavior:
 - print server logs on failure when useful
 - validate required external tools before starting work
 - fail if generated clients are missing expected files
-- fail if any language writer exits non-zero
+- fail if any language runner exits non-zero
+- fail if any language read-validation phase exits non-zero
 - fail if verification counts do not match expectations
 
-Writers should report failed request counts clearly enough that CI logs identify which
+Runners should report failed write or read checks clearly enough that CI logs identify which
 language failed.
 
 ## Testing Strategy
@@ -354,9 +391,10 @@ Do not turn this effort into a generalized benchmark framework. The scope is:
 
 Recommended implementation order:
 
-1. add or normalize standalone writer scripts for Python, TypeScript, and Go
+1. add or normalize standalone runner scripts for Python, TypeScript, and Go
 2. add the Go benchmark runner
-3. add the mixed-client integration orchestration and verification flow
+3. add the mixed-client integration orchestration, read validation, and aggregate
+   verification flow
 4. wire new and updated jobs into `.github/workflows/ci.yml`
 5. update README wording
 6. run the relevant local verification paths
@@ -368,8 +406,9 @@ Recommended implementation order:
 Mitigation:
 
 - use deterministic IDs
+- run read checks after writes complete
 - verify by counts and direct retrieval, not ordering
-- wait for all writers before verification
+- wait for all write phases before read validation
 
 ### Risk: benchmark output overread as precise comparison
 
@@ -395,13 +434,17 @@ Mitigation:
   - No. Uneven counts are allowed as long as verification uses configured expectations.
 - **Should Go be added to this benchmark category?**
   - Yes.
+- **Should the mixed-client job validate reads as well as writes?**
+  - Yes. It should include a cross-language read phase before final aggregate verification.
 
 ## Success Criteria
 
 This work is successful when:
 
 - CI has a dedicated mixed-client integration job that runs Python, TypeScript, and Go
-  writers concurrently against one live PrkDB server
+  runners concurrently against one live PrkDB server
+- the mixed-client job validates that each generated client can read records written by all
+  three languages
 - the mixed-client job deterministically verifies the final result set
 - the benchmark category includes Go alongside Python and TypeScript
 - benchmark and integration scripts clean up after themselves
