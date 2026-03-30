@@ -1,65 +1,107 @@
-
-import { PrkDbClient } from './client_ts/benchmark'; // Assumes client is generated here
 import { performance } from 'perf_hooks';
+import { PrkDbClient } from './client_ts/benchmark';
 
-// Polyfill for fetch if running in older Node.js environments (though Node 18+ has it native)
 if (!globalThis.fetch) {
-    console.error("❌ Error: fetch API not found. Please use Node.js 18+");
-    process.exit(1);
+  console.error('❌ Error: fetch API not found. Please use Node.js 18+');
+  process.exit(1);
 }
 
-const SERVER_URL = process.env.PRKDB_SERVER || "http://127.0.0.1:8080";
-const NUM_RECORDS = parseInt(process.env.NUM_RECORDS || "10000");
 const BATCH_SIZE = 100;
+const PAYLOAD = 'x'.repeat(100);
 
-function randomString(length: number): string {
-    let result = '';
-    const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    const charactersLength = characters.length;
-    for (let i = 0; i < length; i++) {
-        result += characters.charAt(Math.floor(Math.random() * charactersLength));
-    }
-    return result;
+function getEnv(name: string, fallback: string): string {
+  const value = process.env[name];
+  if (value === undefined) {
+    return fallback;
+  }
+  if (value.trim() === '') {
+    throw new Error(`${name} must not be empty`);
+  }
+  return value;
+}
+
+function getPositiveIntEnv(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (value === undefined) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || Number.isNaN(parsed)) {
+    throw new Error(`${name} must be an integer, got ${JSON.stringify(value)}`);
+  }
+  if (parsed <= 0) {
+    throw new Error(`${name} must be greater than 0, got ${parsed}`);
+  }
+
+  return parsed;
+}
+
+function getConfig() {
+  return {
+    serverUrl: getEnv('PRKDB_SERVER', 'http://127.0.0.1:8080'),
+    numRecords: getPositiveIntEnv('NUM_RECORDS', 10000),
+    collection: getEnv('PRKDB_COLLECTION', 'benchmark'),
+    idPrefix: getEnv('PRKDB_ID_PREFIX', 'bench_ts'),
+  };
+}
+
+function buildRecord(index: number, idPrefix: string) {
+  return {
+    id: `${idPrefix}_${index}`,
+    payload: PAYLOAD,
+    timestamp: Date.now(),
+  };
 }
 
 async function runBenchmark() {
-    console.log(`🚀 Connecting to ${SERVER_URL}...`);
-    const client = new PrkDbClient(SERVER_URL);
+  const config = getConfig();
 
-    console.log(`  📤 Starting Producer: ${NUM_RECORDS} records...`);
-    const start = performance.now();
-    let successCount = 0;
+  console.log(`🚀 Connecting to ${config.serverUrl}...`);
+  const client = new PrkDbClient(config.serverUrl);
 
-    // We use a semaphore-like pattern to limit concurrency if needed, 
-    // but for max throughput we can just fire promises in batches.
-    for (let i = 0; i < NUM_RECORDS; i += BATCH_SIZE) {
-        const batchPromises: Promise<void>[] = [];
-        const limit = Math.min(i + BATCH_SIZE, NUM_RECORDS);
+  console.log(`  📤 Starting Producer: ${config.numRecords} records...`);
+  const start = performance.now();
+  let successCount = 0;
+  let failureCount = 0;
 
-        for (let j = i; j < limit; j++) {
-            const data = {
-                id: `bench_ts_${j}`,
-                payload: randomString(100),
-                timestamp: Date.now()
-            };
+  for (let batchStart = 0; batchStart < config.numRecords; batchStart += BATCH_SIZE) {
+    const batchPromises: Promise<void>[] = [];
+    const batchEnd = Math.min(batchStart + BATCH_SIZE, config.numRecords);
 
-            // Fire request
-            batchPromises.push(
-                client.put('benchmark', data)
-                    .then(() => { successCount++; })
-                    .catch(e => console.error(`Error: ${e.message}`))
-            );
-        }
-
-        await Promise.all(batchPromises);
+    for (let index = batchStart; index < batchEnd; index += 1) {
+      batchPromises.push(
+        client
+          .put(config.collection, buildRecord(index, config.idPrefix))
+          .then(() => {
+            successCount += 1;
+          })
+          .catch((error: Error) => {
+            failureCount += 1;
+            console.error(`Error: ${error.message}`);
+          })
+      );
     }
 
-    const duration = (performance.now() - start) / 1000; // seconds
-    const mbps = (NUM_RECORDS * 100) / duration / 1024 / 1024;
+    await Promise.all(batchPromises);
+  }
 
-    console.log(`✅ Producer Finished: ${successCount}/${NUM_RECORDS} records`);
-    console.log(`⏱️  Duration: ${duration.toFixed(2)}s`);
-    console.log(`📈 Throughput: ${mbps.toFixed(2)} MB/s`);
+  const duration = (performance.now() - start) / 1000;
+  const mbps = (successCount * PAYLOAD.length) / duration / 1024 / 1024;
+
+  console.log(`✅ Producer Finished: ${successCount}/${config.numRecords} records`);
+  if (failureCount > 0) {
+    console.log(`❌ Failed Writes: ${failureCount}`);
+  }
+  console.log(`⏱️  Duration: ${duration.toFixed(2)}s`);
+  console.log(`📈 Throughput: ${mbps.toFixed(2)} MB/s`);
+
+  if (failureCount > 0) {
+    throw new Error(`benchmark failed with ${failureCount} write errors`);
+  }
 }
 
-runBenchmark().catch(console.error);
+runBenchmark().catch((error: Error) => {
+  console.error(`❌ ${error.message}`);
+  process.exit(1);
+});
