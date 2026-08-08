@@ -63,7 +63,7 @@ wiring — land Plan A Task 8 first to avoid conflicts in `rpc_client.rs`.
 - Modify: `crates/prkdb/src/raft/state_machine.rs`
 - Test: `crates/prkdb/tests/authz_model.rs`
 
-- [ ] **Step 0: Add `rstest` — it is not a dependency yet**
+- [x] **Step 0: Add `rstest` — it is not a dependency yet**
 
 ```bash
 grep -rn 'rstest' Cargo.toml crates/*/Cargo.toml || echo "confirmed absent"
@@ -82,7 +82,7 @@ and `rstest = { workspace = true }` to `crates/prkdb`'s `[dev-dependencies]`.
 > Version checked against the registry on 2026-08-08: latest is **0.26.1**. An earlier draft of
 > this plan said `0.23`, which was three minor releases stale.
 
-- [ ] **Step 1: Write the permission table test first**
+- [x] **Step 1: Write the permission table test first**
 
 Authorization is decision logic over a small input space, so an exhaustive table is cheaper than
 reasoning about cases — and it is the artifact you will reread in a year:
@@ -110,13 +110,13 @@ fn permits(
 }
 ```
 
-- [ ] **Step 2: Run and watch it fail**
+- [x] **Step 2: Run and watch it fail**
 
 ```bash
 cargo test -p prkdb --test authz_model -- --nocapture
 ```
 
-- [ ] **Step 3: Implement `Principal`, `Role`, `Grant`, `Permission`**
+- [x] **Step 3: Implement `Principal`, `Role`, `Grant`, `Permission`**
 
 Keep it to what spec R12 defines. Explicitly **not** in scope: groups, permission inheritance,
 row/field rules, external identity providers, token expiry.
@@ -140,12 +140,12 @@ async fn bootstrap_creates_one_admin_then_refuses() { /* ... */ }
 `PRKDB_BOOTSTRAP_TOKEN` creates a single admin principal on first start and is refused once any
 principal exists.
 
-- [ ] **Step 5: Cache resolved grants in memory**
+- [x] **Step 5: Cache resolved grants in memory**
 
 Authorization is on the hot path. Resolve principal-to-grants into an in-memory map, invalidated
 by the Raft apply that changes it. Do not read through to storage per request.
 
-- [ ] **Step 6: Verify**
+- [x] **Step 6: Verify**
 
 ```bash
 cargo test -p prkdb --test authz_model -- --nocapture

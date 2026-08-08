@@ -12,6 +12,7 @@ name = "load_tests"
 path = "tests/load_tests.rs"
 
 [dependencies]
+subtle = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 bincode = { workspace = true }
@@ -76,6 +77,7 @@ prkdb-metrics = { workspace = true }
 
 
 tempfile = "3"
+rstest = { workspace = true }
 sqlx = { version = "0.8.2", default-features = false, features = [
     "runtime-tokio",
     "sqlite",
