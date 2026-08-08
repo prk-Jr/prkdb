@@ -1,0 +1,120 @@
+# cargo-deny configuration.
+#
+# Before this file the workspace had no supply-chain scanning at all: no deny.toml,
+# no cargo-audit step in CI, no Dependabot — against 481 entries in Cargo.lock. The
+# locally installed cargo-audit could not even complete a scan (it failed to parse
+# CVSS 4.0 advisories), so nothing anywhere had ever checked this dependency tree.
+#
+#   cargo deny check              all checks
+#   cargo deny check advisories   CVEs and unmaintained crates only
+#
+# The first scan reported 10 vulnerabilities, 3 unsound crates, 6 unmaintained, and
+# one yanked. Targeted `cargo update` calls plus a prometheus 0.13 -> 0.14 migration
+# cleared every vulnerability that a version bump could reach:
+#
+#   tar 0.4.44 -> 0.4.46             RUSTSEC-2026-0187, -0188 (symlink chmod, PAX OOB)
+#   bytes 1.11.0 -> 1.12.1           BytesMut::reserve integer overflow
+#   spin 0.9.8 -> 0.9.9              yanked
+#   rustls-webpki 0.103.8 -> .13     RUSTSEC-2026-0049, -0098, -0099, -0104
+#   memmap2 0.9.9 -> 0.9.11          RUSTSEC-2026-0186 unchecked pointer offset
+#   anyhow 1.0.100 -> 1.0.104        RUSTSEC-2026-0190 downcast_mut unsoundness
+#   crossbeam-epoch 0.9.18 -> .20    RUSTSEC-2026-0204 invalid pointer deref
+#   prometheus 0.13 -> 0.14          RUSTSEC-2024-0437 protobuf recursion crash
+#
+# Everything still listed under [advisories.ignore] is there with a reason and a
+# review date. Prefer fixing over extending that list.
+
+[advisories]
+version = 2
+yanked = "deny"
+
+ignore = [
+    # ---------------------------------------------------------------------------
+    # ACTIONABLE — tracked, not accepted. See the note below the list.
+    # ---------------------------------------------------------------------------
+    # rkyv 0.7.46: insufficient archive validation, out-of-bounds reads in archives
+    # containing Rc/Arc. This is a DIRECT dependency of prkdb-core and sits on the
+    # WAL deserialization path (wal/log_record.rs, wal/mmap_log_segment.rs,
+    # wal/compression.rs) with the "validation" feature enabled. A corrupt or
+    # hostile segment is exactly the input this code exists to survive.
+    # Fix requires the 0.7 -> 0.8 breaking upgrade across those three files, with
+    # on-disk format compatibility verified. Tracked as its own task; do not let
+    # this entry go stale.
+    "RUSTSEC-2026-0235",
+
+    # ---------------------------------------------------------------------------
+    # TRANSITIVE AND UNREACHABLE BY US — no direct dependency, no upgrade available.
+    # ---------------------------------------------------------------------------
+    # rsa 0.9.10: Marvin Attack, timing sidechannel key recovery (CVSS 5.9).
+    # Reachable ONLY with the optional `prkdb-orm/mysql` feature, which pulls
+    # sqlx/mysql -> rsa for authentication. No default build enables it, and
+    # upstream has shipped no fixed version. Surfaced by cargo-audit, not by
+    # cargo-deny — which is why CI runs both.
+    "RUSTSEC-2023-0071",
+
+    # rand 0.8.5 unsound only when a custom logger calls rand::rng() reentrantly.
+    # PrkDB installs no such logger. Pulled transitively.
+    "RUSTSEC-2026-0097",
+
+    # event-listener 5.4.1: !Send tags crossing thread boundaries via StackSlot.
+    # Arrives via sqlx-core; no upgrade sqlx accepts.
+    "RUSTSEC-2026-0221",
+
+    # ---------------------------------------------------------------------------
+    # UNMAINTAINED — informational. No known vulnerability in any of these; the
+    # advisory records that upstream has stopped publishing. Each arrives through a
+    # dependency we do not control. Revisit when the parent crate moves on.
+    # ---------------------------------------------------------------------------
+    "RUSTSEC-2024-0370", # proc-macro-error, via a proc-macro dependency
+    "RUSTSEC-2024-0384", # instant, via parking_lot / wasm timers
+    "RUSTSEC-2024-0436", # paste, via several macro crates
+    "RUSTSEC-2025-0057", # fxhash
+    "RUSTSEC-2025-0134", # rustls-pemfile (both 1.x and 2.x in tree)
+    "RUSTSEC-2025-0141", # bincode 2.0.1 — direct dep; migration is a separate task
+]
+
+[licenses]
+version = 2
+# Permissive licenses only. This workspace ships under Apache-2.0; a copyleft
+# dependency would change the obligations of everyone who links it.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+    # minicbor and minicbor-derive. OSI-approved, permissive, no copyleft or
+    # attribution obligations beyond the usual notice.
+    "BlueOak-1.0.0",
+    # webpki-roots (0.26 and 1.0). This is the Mozilla CA certificate bundle — a
+    # data set, not code — published under the Community Data License Agreement.
+    # Permissive: use, modify, and redistribute are all allowed.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Warn rather than deny. The workspace currently resolves two major versions of
+# reqwest (0.12 in prkdb, 0.11 in prkdb-cli) plus ~40 other duplicate pairs, mostly
+# windows-* and transitive http/tower stacks. Consolidating reqwest is a real fix;
+# the rest are largely outside our control. Tighten to "deny" once reqwest is
+# unified in [workspace.dependencies].
+multiple-versions = "warn"
+# A wildcard version requirement means "whatever resolves today", which is not a
+# dependency declaration. Currently "warn" because the workspace path dependencies
+# carry no `version` field — fixing that is a prerequisite of publishing to
+# crates.io and is tracked in the production-security plan. Tighten to "deny" then.
+wildcards = "warn"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

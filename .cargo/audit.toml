@@ -1,0 +1,44 @@
+# cargo-audit policy.
+#
+# Kept deliberately in step with the [advisories.ignore] list in deny.toml. The two
+# tools refresh the RustSec database on different cadences and do not always agree —
+# cargo-audit surfaced RUSTSEC-2023-0071 and RUSTSEC-2026-0221 when cargo-deny did
+# not — so both run in CI rather than picking one.
+#
+# Every entry below is an accepted risk with a stated reason. Prefer fixing over
+# adding. If an entry becomes fixable, remove it rather than letting it age.
+
+[advisories]
+ignore = [
+    # --- ACTIONABLE, tracked -----------------------------------------------------
+    # rkyv 0.7.46 — insufficient archive validation, OOB reads on archives with
+    # Rc/Arc. DIRECT dependency of prkdb-core, on the WAL deserialization path
+    # (wal/log_record.rs, wal/mmap_log_segment.rs, wal/compression.rs) with the
+    # "validation" feature on. Corrupt segments are precisely this code's input
+    # domain. Needs the breaking 0.7 -> 0.8 upgrade with on-disk compatibility
+    # verified. Tracked as its own task.
+    "RUSTSEC-2026-0235",
+
+    # rsa 0.9.10 — Marvin Attack, timing sidechannel key recovery (CVSS 5.9).
+    # Reachable ONLY with the optional `prkdb-orm/mysql` feature, which pulls
+    # sqlx/mysql -> rsa for auth. Not enabled by any default build. Upstream has
+    # shipped no fixed version. Anyone enabling that feature inherits the risk and
+    # should be told so in the ORM documentation.
+    "RUSTSEC-2023-0071",
+
+    # --- TRANSITIVE, not reachable by our usage -----------------------------------
+    # rand 0.8.5 — unsound only when a custom logger reentrantly calls rand::rng().
+    # PrkDB installs no such logger.
+    "RUSTSEC-2026-0097",
+    # event-listener 5.4.1 — !Send tags crossing threads via StackSlot. Arrives via
+    # sqlx-core; no upgrade available that sqlx accepts.
+    "RUSTSEC-2026-0221",
+
+    # --- UNMAINTAINED — informational, no known vulnerability ----------------------
+    "RUSTSEC-2024-0370", # proc-macro-error
+    "RUSTSEC-2024-0384", # instant
+    "RUSTSEC-2024-0436", # paste
+    "RUSTSEC-2025-0057", # fxhash
+    "RUSTSEC-2025-0134", # rustls-pemfile (1.x and 2.x both in tree)
+    "RUSTSEC-2025-0141", # bincode 2.0.1 — direct dep; migration is a separate task
+]

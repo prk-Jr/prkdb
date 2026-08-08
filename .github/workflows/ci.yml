@@ -37,6 +37,26 @@ jobs:
           cat target/repo-status/repo-status.snapshot.json >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # --locked is required: newer cargo-audit/cargo-deny releases pull crates that
+      # need a rustc above the version pinned in rust-toolchain.toml.
+      - name: Install scanners
+        run: cargo install --locked cargo-audit cargo-deny
+      # Both run because their advisory databases refresh independently and do not
+      # always agree; cargo-audit caught two advisories cargo-deny did not.
+      # Accepted risks live in deny.toml and .cargo/audit.toml, each with a reason.
+      - name: cargo deny (advisories, licenses, bans, sources)
+        run: cargo deny check
+      - name: cargo audit
+        run: cargo audit
+
   nightly-check:
     name: Nightly (advisory)
     runs-on: ubuntu-latest

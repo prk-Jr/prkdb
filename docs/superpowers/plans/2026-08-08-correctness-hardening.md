@@ -1220,7 +1220,7 @@ git commit -m "ci: measure line coverage with a ratcheting floor"
 - Create: `.github/dependabot.yml`
 - Modify: `.github/workflows/ci.yml`
 
-- [ ] **Step 1: Confirm nothing scans today**
+- [x] **Step 1: Confirm nothing scans today**
 
 ```bash
 cargo audit 2>&1 | tail -3
@@ -1228,7 +1228,7 @@ cargo audit 2>&1 | tail -3
 Expected: an error — the installed `cargo-audit` cannot parse CVSS 4.0 advisories, so it has
 never completed a scan. 481 crates in `Cargo.lock` are unchecked.
 
-- [ ] **Step 2: Reinstall the tools**
+- [x] **Step 2: Reinstall the tools**
 
 ```bash
 cargo install --force cargo-audit cargo-deny
@@ -1236,7 +1236,7 @@ cargo audit
 ```
 Expected: a completed scan. Triage anything it reports.
 
-- [ ] **Step 3: Create `deny.toml`**
+- [x] **Step 3: Create `deny.toml`**
 
 ```toml
 [advisories]
@@ -1256,14 +1256,14 @@ unknown-registry = "deny"
 unknown-git = "deny"
 ```
 
-- [ ] **Step 4: Run it and resolve**
+- [x] **Step 4: Run it and resolve**
 
 ```bash
 cargo deny check
 ```
 Add explicit exceptions with a comment explaining each, rather than widening `allow`.
 
-- [ ] **Step 5: Add Dependabot**
+- [x] **Step 5: Add Dependabot**
 
 ```yaml
 version: 2
@@ -1279,11 +1279,11 @@ updates:
       interval: monthly
 ```
 
-- [ ] **Step 6: Add the CI job**
+- [x] **Step 6: Add the CI job**
 
 A `security-audit` job with `timeout-minutes: 15` running `cargo deny check` and `cargo audit`.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add deny.toml .github/

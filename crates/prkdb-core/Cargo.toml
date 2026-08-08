@@ -2,6 +2,7 @@
 name = "prkdb-core"
 version = "0.6.0"
 edition = "2021"
+license.workspace = true
 
 [dependencies]
 # Foundation types - re-exported for backward compatibility
