@@ -854,7 +854,7 @@ git commit -m "ci: enforce chaos test results and replace hardcoded badges"
 > Task 11's deadlines and this task's ephemeral ports are what stop that from poisoning the
 > next run.
 
-- [ ] **Step 1: Find them**
+- [x] **Step 1: Find them**
 
 ```bash
 grep -rnoE '127\.0\.0\.1:[0-9]{4,5}' crates/prkdb/tests/ | awk -F: '{print $NF}' | sort | uniq -c | sort -rn
@@ -862,14 +862,14 @@ grep -rnoE '127\.0\.0\.1:[0-9]{4,5}' crates/prkdb/tests/ | awk -F: '{print $NF}'
 Expected: ports 9010, 8084, 8081, and 50001 each appear 3 times — those collide when cargo runs
 test binaries concurrently, which is the default.
 
-- [ ] **Step 2: Read the correct pattern**
+- [x] **Step 2: Read the correct pattern**
 
 ```bash
 sed -n '20,35p' crates/prkdb/tests/admin_rpc_tests.rs
 ```
 This file already binds `127.0.0.1:0` and reads the assigned port back. Copy it.
 
-- [ ] **Step 3: Add a shared helper**
+- [x] **Step 3: Add a shared helper**
 
 In `crates/prkdb/tests/helpers/mod.rs`:
 
@@ -887,19 +887,19 @@ pub async fn free_port() -> u16 {
 }
 ```
 
-- [ ] **Step 4: Convert every hardcoded port**
+- [x] **Step 4: Convert every hardcoded port**
 
 Work file by file. `distributed_writes.rs` (50071-50073, 50081-50083) first, since it is the one
 observed to hang.
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 ```bash
 grep -rcE '127\.0\.0\.1:[0-9]{4,5}' crates/prkdb/tests/ | grep -v ':0$' || echo "none remaining"
 ```
 Expected: `none remaining`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/prkdb/tests/

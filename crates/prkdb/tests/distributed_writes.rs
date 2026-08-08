@@ -3,6 +3,50 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tempfile::TempDir;
 
+/// Allocate `n` distinct ephemeral ports, holding every listener until all are
+/// chosen so the OS cannot hand out the same one twice within a call.
+///
+/// These ports were hardcoded (50071-50073, 50081-50083). On 2026-08-08 a copy of
+/// this very binary, orphaned by a run that was killed while hung, kept those
+/// listeners open and made every later run report "No leader elected" — a failure
+/// that points squarely at Raft and not at a stale process.
+async fn free_ports(n: usize) -> Vec<u16> {
+    let mut listeners = Vec::with_capacity(n);
+    for _ in 0..n {
+        listeners.push(
+            tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("binding an ephemeral port on loopback cannot fail"),
+        );
+    }
+    listeners
+        .iter()
+        .map(|l| {
+            l.local_addr()
+                .expect("a bound listener always has a local address")
+                .port()
+        })
+        .collect()
+}
+
+/// Build a 3-node peer list on OS-assigned ports.
+async fn three_node_peers() -> (Vec<u16>, Vec<(u64, SocketAddr)>) {
+    let ports = free_ports(3).await;
+    let peers = ports
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            (
+                i as u64 + 1,
+                format!("127.0.0.1:{p}")
+                    .parse()
+                    .expect("loopback address with a valid port"),
+            )
+        })
+        .collect();
+    (ports, peers)
+}
+
 /// Helper to create a Raft node (wrapped in PartitionManager)
 async fn create_raft_node(
     id: u64,
@@ -50,15 +94,11 @@ async fn create_raft_node(
 #[tokio::test(flavor = "multi_thread")]
 async fn test_raft_leader_election() {
     // Setup 3 nodes
-    let peers = vec![
-        (1, "127.0.0.1:50071".parse().unwrap()),
-        (2, "127.0.0.1:50072".parse().unwrap()),
-        (3, "127.0.0.1:50073".parse().unwrap()),
-    ];
+    let (ports, peers) = three_node_peers().await;
 
-    let (node1, _dir1) = create_raft_node(1, 50071, peers.clone()).await;
-    let (node2, _dir2) = create_raft_node(2, 50072, peers.clone()).await;
-    let (node3, _dir3) = create_raft_node(3, 50073, peers.clone()).await;
+    let (node1, _dir1) = create_raft_node(1, ports[0], peers.clone()).await;
+    let (node2, _dir2) = create_raft_node(2, ports[1], peers.clone()).await;
+    let (node3, _dir3) = create_raft_node(3, ports[2], peers.clone()).await;
 
     // Wait for leader election
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -81,15 +121,11 @@ async fn test_raft_leader_election() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_raft_propose() {
     // Setup 3 nodes
-    let peers = vec![
-        (1, "127.0.0.1:50081".parse().unwrap()),
-        (2, "127.0.0.1:50082".parse().unwrap()),
-        (3, "127.0.0.1:50083".parse().unwrap()),
-    ];
+    let (ports, peers) = three_node_peers().await;
 
-    let (node1, _dir1) = create_raft_node(1, 50081, peers.clone()).await;
-    let (node2, _dir2) = create_raft_node(2, 50082, peers.clone()).await;
-    let (node3, _dir3) = create_raft_node(3, 50083, peers.clone()).await;
+    let (node1, _dir1) = create_raft_node(1, ports[0], peers.clone()).await;
+    let (node2, _dir2) = create_raft_node(2, ports[1], peers.clone()).await;
+    let (node3, _dir3) = create_raft_node(3, ports[2], peers.clone()).await;
 
     // Wait for leader election
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
