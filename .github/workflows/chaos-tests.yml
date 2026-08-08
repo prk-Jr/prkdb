@@ -42,12 +42,12 @@ jobs:
       # never built it, which is the likeliest reason the step below was marked
       # continue-on-error: the failure was structural, not a real chaos finding.
       - name: Build server binary (required by TestCluster)
-        run: cargo build --bin prkdb-server
+        run: cargo build --bin prkdb-server --features chaos
 
       - name: Run Chaos Monkey Test
         run: |
           echo "🐵 Starting Chaos Monkey Test..."
-          cargo test --test raft_chaos_tests test_chaos_monkey_continuous_load -- --ignored --nocapture
+          cargo test --features chaos --test raft_chaos_tests test_chaos_monkey_continuous_load -- --ignored --nocapture
         env:
           RUST_LOG: info
           RUST_BACKTRACE: 1
@@ -58,7 +58,7 @@ jobs:
       # failure. If these are too unstable to gate, mark the specific test
       # #[ignore = "reason"] so the discipline check keeps it visible.
       - name: Run All Raft Chaos Tests
-        run: cargo test --test raft_chaos_tests -- --ignored --nocapture
+        run: cargo test --features chaos --test raft_chaos_tests -- --ignored --nocapture
         timeout-minutes: 20
 
       - name: Upload logs on failure

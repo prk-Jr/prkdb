@@ -62,6 +62,10 @@ clap = { workspace = true, features = ["derive"] }
 [features]
 default = ["metrics"]
 metrics = []
+# Fault injection for chaos tests. MUST NOT be enabled in production builds: it lets
+# anyone who can set CHAOS_CONFIG_PATH, or write the file it names, partition a live
+# cluster. Enabled by the chaos-tests workflow only.
+chaos = []
 
 [dev-dependencies]
 prkdb-orm-macros = { workspace = true }

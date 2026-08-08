@@ -710,7 +710,7 @@ git commit -m "test: assert Raft election safety instead of leader-known"
 - Modify: `crates/prkdb/src/raft/rpc_client.rs:22-89`
 - Modify: `.github/workflows/chaos-tests.yml`
 
-- [ ] **Step 1: Confirm it ships today**
+- [x] **Step 1: Confirm it ships today**
 
 ```bash
 grep -A4 '^\[features\]' crates/prkdb/Cargo.toml
@@ -719,7 +719,7 @@ Expected: only `default = ["metrics"]` and `metrics = []`. There is no gate, so
 `check_chaos` — an env-var read plus a file read plus a JSON parse — runs on every
 `get_client()` call in release builds.
 
-- [ ] **Step 2: Add the feature**
+- [x] **Step 2: Add the feature**
 
 ```toml
 [features]
@@ -730,18 +730,18 @@ metrics = []
 chaos = []
 ```
 
-- [ ] **Step 3: Gate the code**
+- [x] **Step 3: Gate the code**
 
 Annotate `ChaosRule` (line 22), `check_chaos` (line 44), and its call site (line 89) with
 `#[cfg(feature = "chaos")]`. Provide a no-op `#[cfg(not(feature = "chaos"))]` shim so
 `get_client` compiles unchanged, or gate the call site itself.
 
-- [ ] **Step 4: Move the call past the cache lookup**
+- [x] **Step 4: Move the call past the cache lookup**
 
 `check_chaos` currently runs *before* the connection-cache read (`rpc_client.rs:89`), so even
 when disabled it sits ahead of the hot path. Move it after the cache hit returns.
 
-- [ ] **Step 5: Verify it is gone from release builds**
+- [x] **Step 5: Verify it is gone from release builds**
 
 ```bash
 cargo build -p prkdb --release
@@ -749,18 +749,18 @@ strings target/release/libprkdb.rlib 2>/dev/null | grep -c CHAOS_CONFIG_PATH
 ```
 Expected: `0`.
 
-- [ ] **Step 6: Verify it still works when enabled**
+- [x] **Step 6: Verify it still works when enabled**
 
 ```bash
 cargo test -p prkdb --features chaos --test raft_chaos_tests -- --ignored --nocapture --test-threads=1
 ```
 Expected: chaos rules take effect.
 
-- [ ] **Step 7: Update the chaos workflow**
+- [x] **Step 7: Update the chaos workflow**
 
 Add `--features chaos` to every `cargo test` invocation in `chaos-tests.yml`.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/prkdb/Cargo.toml crates/prkdb/src/raft/rpc_client.rs .github/workflows/chaos-tests.yml

@@ -19,6 +19,13 @@ pub enum RpcError {
     InvalidUri(String),
 }
 
+/// Fault-injection rules, read from the file named by `CHAOS_CONFIG_PATH`.
+///
+/// Compiled only under the `chaos` feature. Before that gate existed this shipped in
+/// release builds, where the check read an environment variable, then read and JSON-parsed
+/// a file, on every `get_client` call — and gave anyone who could write that file the
+/// ability to partition a live cluster.
+#[cfg(feature = "chaos")]
 #[derive(Debug, serde::Deserialize)]
 pub enum ChaosRule {
     Partition { node1: u64, node2: u64 },
@@ -28,6 +35,10 @@ pub enum ChaosRule {
 
 /// Manages gRPC connections to peer Raft nodes
 pub struct RpcClientPool {
+    /// This pool's own node id. Currently read only by the chaos fault injector, so it
+    /// is dead code without that feature — kept because it identifies the pool and the
+    /// peer-authentication work in the production-security plan will need it.
+    #[cfg_attr(not(feature = "chaos"), allow(dead_code))]
     local_node_id: NodeId,
     clients: Arc<RwLock<HashMap<NodeId, RaftServiceClient<Channel>>>>,
 }
@@ -41,6 +52,7 @@ impl RpcClientPool {
     }
 
     /// Check if we should block or delay traffic to the target node based on chaos rules
+    #[cfg(feature = "chaos")]
     async fn check_chaos(&self, target_node: NodeId) -> Result<(), RpcError> {
         if let Ok(config_path) = std::env::var("CHAOS_CONFIG_PATH") {
             if let Ok(content) = tokio::fs::read_to_string(config_path).await {
@@ -85,16 +97,19 @@ impl RpcClientPool {
         node_id: NodeId,
         addr: &str,
     ) -> Result<RaftServiceClient<Channel>, RpcError> {
-        // Check chaos rules first
-        self.check_chaos(node_id).await?;
-
-        // Check if client exists
+        // Cache hit first. The chaos check below used to run ahead of this, putting a
+        // file read and a JSON parse in front of every cached connection.
         {
             let clients = self.clients.read().await;
             if let Some(client) = clients.get(&node_id) {
+                #[cfg(feature = "chaos")]
+                self.check_chaos(node_id).await?;
                 return Ok(client.clone());
             }
         }
+
+        #[cfg(feature = "chaos")]
+        self.check_chaos(node_id).await?;
 
         // Create new client
         let endpoint = format!("http://{}", addr);
