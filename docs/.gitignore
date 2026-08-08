@@ -1,4 +1,8 @@
 node_modules
 .vitepress/dist
 .vitepress/cache
-superpowers
+
+# NOTE: docs/superpowers/ is intentionally NOT ignored. Those specs and plans are
+# engineering artifacts that must be versioned with the code they describe. They are
+# kept out of the published site by `srcExclude` in .vitepress/config.mts, not by
+# hiding them from git.

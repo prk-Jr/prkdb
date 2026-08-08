@@ -4,7 +4,7 @@
 
 [![Benchmarks](https://img.shields.io/badge/Benchmarks-Raw%20artifacts-blue)]()
 [![Chaos Tests](https://img.shields.io/badge/Chaos%20Tests-19%20passing-blue)]()
-[![Rust](https://img.shields.io/badge/Rust-1.70+-orange)]()
+[![Rust](https://img.shields.io/badge/Rust-1.95+-orange)]()
 
 Docs: https://prk-jr.github.io/prkdb/
 
