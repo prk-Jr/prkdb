@@ -384,7 +384,21 @@ ratcheting upward, never downward. The first report is the deliverable.
 | **Effort** | 0.5 day |
 
 **Acceptance:**
-1. `mod storage_old_inmemory;` (`lib.rs:28`) and the 0-byte orphan `src/security.rs` are deleted.
+1. The 0-byte orphan `src/security.rs` is deleted. It is declared nowhere and referenced by
+   nothing.
+2. `storage_old_inmemory` is **renamed, not deleted** — see the correction below.
+
+> **The audit called `storage_old_inmemory` dead code. It is not.** Verified 2026-08-08:
+> `builder.rs:269` constructs `InMemoryAdapter::new()` as the default storage path,
+> `storage/mod.rs:14` re-exports it, `lib.rs:96` re-exports it again as public API, `lib.rs:87`
+> documents it in the crate-level example, and **10+ integration tests use it**. Deleting the
+> module would fail the build and remove a published type.
+>
+> The real defect is the *name*: "old" plus a comment reading "Renamed from storage.rs to allow
+> storage/ directory" describes a refactoring artifact, not the module's purpose. It is the
+> in-memory storage adapter and should be `storage/in_memory.rs`, with the re-export in
+> `storage/mod.rs` collapsing to a normal `mod` declaration. `prkdb::storage::InMemoryAdapter`
+> and `prkdb::InMemoryAdapter` must keep resolving — the rename is internal only.
 2. `xtask repo-status` gains collectors for version consistency and roadmap-vs-CI drift. Today it
    catches neither that the workspace is `0.6.0` while `docs/guide/roadmap.md` says "v2.0-clean",
    nor that the roadmap lists Go/Python clients as future work while five CI jobs test them.

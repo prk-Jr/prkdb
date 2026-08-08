@@ -79,6 +79,7 @@ use prkdb_types::error::StorageError;
 use prkdb_types::index::Indexed;
 use prkdb_types::storage::StorageAdapter;
 use serde::{de::DeserializeOwned, Serialize};
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -321,7 +322,7 @@ impl MemoryIndex {
         }
 
         let mut results: Vec<_> = scores.into_iter().collect();
-        results.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by score descending
+        results.sort_by_key(|(_, score)| Reverse(*score)); // Sort by score descending
         results
     }
 }
@@ -1885,7 +1886,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
 
         // Sort by score descending
         let mut ranked: Vec<_> = scores.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+        ranked.sort_by_key(|(_, score)| Reverse(*score));
 
         // Fetch records
         let mut results = Vec::new();

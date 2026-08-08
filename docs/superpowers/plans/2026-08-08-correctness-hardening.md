@@ -169,7 +169,7 @@ git commit -m "ci: add job timeouts, pin toolchain, declare MSRV"
 **Files:**
 - Modify: various (mechanical)
 
-- [ ] **Step 1: Confirm the failure**
+- [x] **Step 1: Confirm the failure**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings ; echo "exit=$?"
@@ -177,13 +177,13 @@ cargo clippy --workspace --all-targets -- -D warnings ; echo "exit=$?"
 Expected: `exit=101`, with 22 warnings — 15 `explicit call to .into_iter()`, 5 `this if can be
 collapsed into the outer match`, 2 `consider using sort_by_key`.
 
-- [ ] **Step 2: Apply the mechanical fixes**
+- [x] **Step 2: Apply the mechanical fixes**
 
 ```bash
 cargo clippy --fix --workspace --all-targets --allow-dirty
 ```
 
-- [ ] **Step 3: Re-run and fix the remainder by hand**
+- [x] **Step 3: Re-run and fix the remainder by hand**
 
 ```bash
 cargo clippy --workspace --all-targets -- -D warnings ; echo "exit=$?"
@@ -191,14 +191,14 @@ cargo clippy --workspace --all-targets -- -D warnings ; echo "exit=$?"
 Expected: `exit=0`. Anything `--fix` could not resolve is a collapsible-if or a `sort_by_key`;
 resolve each by reading the suggestion, not by adding `#[allow]`.
 
-- [ ] **Step 4: Confirm nothing broke**
+- [x] **Step 4: Confirm nothing broke**
 
 ```bash
 cargo test --workspace --no-fail-fast -- --test-threads=4
 ```
 Expected: all pass. Use `--test-threads=4` until Task 11 lands — the default hangs.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -1271,25 +1271,60 @@ git commit -m "ci: add cargo-deny, cargo-audit, and Dependabot"
 - Modify: `xtask/src/repo_status/collectors/`
 - Modify: `docs/guide/roadmap.md`
 
-- [ ] **Step 1: Confirm both are dead**
+- [ ] **Step 1: Confirm what is actually dead — one of the two is not**
 
 ```bash
 wc -c crates/prkdb/src/security.rs
-grep -rn 'mod security' crates/prkdb/src/lib.rs || echo "security.rs is not declared anywhere"
-grep -rn 'storage_old_inmemory' crates/ --include='*.rs'
+grep -rn 'mod security' crates/prkdb/src/lib.rs || echo "security.rs declared nowhere"
+grep -rn 'storage_old_inmemory\|InMemoryAdapter' crates/prkdb/src/lib.rs crates/prkdb/src/builder.rs crates/prkdb/src/storage/mod.rs
+grep -rln 'InMemoryAdapter' crates/prkdb/tests/ | wc -l
 ```
-Expected: `security.rs` is 0 bytes and undeclared; `storage_old_inmemory` is declared at
-`lib.rs:28` and compiles into every build.
 
-- [ ] **Step 2: Delete and verify**
+Expected:
+- `security.rs` is **0 bytes and declared nowhere** — genuinely dead, delete it.
+- `storage_old_inmemory` is **live**: `builder.rs:269` constructs it as the default storage,
+  `storage/mod.rs:14` and `lib.rs:96` re-export `InMemoryAdapter` as public API, `lib.rs:87`
+  documents it, and 10+ integration tests use it.
+
+> **The audit was wrong about this one.** It read the name and the comment "Renamed from
+> storage.rs" as a legacy artifact. Deleting the module fails the build and removes a published
+> type. Do not delete it.
+
+- [ ] **Step 2: Delete the genuine orphan**
 
 ```bash
-rm crates/prkdb/src/security.rs crates/prkdb/src/storage_old_inmemory.rs
-# remove `mod storage_old_inmemory;` from lib.rs:28
+rm crates/prkdb/src/security.rs
 cargo check --workspace
 ```
-Expected: clean. If anything references it, that is a separate finding — investigate before
-deleting.
+Expected: clean. Nothing referenced it.
+
+- [ ] **Step 2b: Rename the misleadingly-named module**
+
+The defect is the name, not the code. `git mv` it into the storage module where it belongs:
+
+```bash
+git mv crates/prkdb/src/storage_old_inmemory.rs crates/prkdb/src/storage/in_memory.rs
+```
+
+Then in `crates/prkdb/src/lib.rs` drop `mod storage_old_inmemory;` (line 28), and in
+`crates/prkdb/src/storage/mod.rs` replace the cross-module re-export with a normal declaration:
+
+```rust
+mod in_memory;
+pub use in_memory::InMemoryAdapter;
+```
+
+Update `builder.rs:269` from `crate::storage_old_inmemory::InMemoryAdapter` to
+`crate::storage::InMemoryAdapter`.
+
+**The public paths must not change.** `prkdb::storage::InMemoryAdapter` and
+`prkdb::InMemoryAdapter` both still resolve — this is an internal rename only:
+
+```bash
+cargo check --workspace
+cargo test --workspace --no-fail-fast -- --test-threads=4
+grep -rn 'storage_old_inmemory' crates/ --include='*.rs' || echo "name is gone"
+```
 
 - [ ] **Step 3: Add a version-drift collector to xtask**
 

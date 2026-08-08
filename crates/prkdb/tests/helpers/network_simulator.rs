@@ -126,15 +126,13 @@ impl NetworkSimulator {
         let rules = self.rules.read().await;
         for rule in rules.iter() {
             match rule {
-                NetworkRule::Partition { node1, node2 } => {
-                    if (src == *node1 && dst == *node2) || (src == *node2 && dst == *node1) {
-                        return true;
-                    }
+                NetworkRule::Partition { node1, node2 }
+                    if ((src == *node1 && dst == *node2) || (src == *node2 && dst == *node1)) =>
+                {
+                    return true;
                 }
-                NetworkRule::AsymmetricBlock { from, to } => {
-                    if src == *from && dst == *to {
-                        return true;
-                    }
+                NetworkRule::AsymmetricBlock { from, to } if src == *from && dst == *to => {
+                    return true;
                 }
                 _ => {}
             }
@@ -153,21 +151,17 @@ impl NetworkSimulator {
                     src: rule_src,
                     dst: rule_dst,
                     ms,
-                } => {
-                    if src == *rule_src && dst == *rule_dst {
-                        delay = Some(*ms);
-                    }
+                } if src == *rule_src && dst == *rule_dst => {
+                    delay = Some(*ms);
                 }
                 NetworkRule::Reorder {
                     src: rule_src,
                     dst: rule_dst,
                     variance_ms,
-                } => {
-                    if src == *rule_src && dst == *rule_dst {
-                        // Add random delay for reordering effect
-                        let random_delay = (rand::random::<u64>() % (variance_ms + 1)) as u64;
-                        delay = Some(delay.unwrap_or(0) + random_delay);
-                    }
+                } if src == *rule_src && dst == *rule_dst => {
+                    // Add random delay for reordering effect
+                    let random_delay = (rand::random::<u64>() % (variance_ms + 1)) as u64;
+                    delay = Some(delay.unwrap_or(0) + random_delay);
                 }
                 _ => {}
             }
