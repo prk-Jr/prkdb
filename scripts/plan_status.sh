@@ -62,6 +62,13 @@ atleast() { [[ $(grep -c "$1" "$2" 2>/dev/null || echo 0) -ge $3 ]]; }
 # Zero occurrences of a pattern across a path.
 none() { ! grep -rq "$1" "$2" 2>/dev/null; }
 
+# Hardcoded loopback ports in test code, ignoring comment lines. A port named in a
+# comment is documentation, not a defect.
+no_hardcoded_ports() {
+  ! grep -rn '127\.0\.0\.1:[0-9]\{4,5\}' crates/*/tests/ 2>/dev/null \
+    | grep -qv ':[0-9]*: *//'
+}
+
 # Production (non-test) unwrap count in a directory, below a threshold.
 prod_unwraps_below() {
   local dir="$1" limit="$2"
@@ -113,7 +120,7 @@ group "Plan A · Tasks 7-11 — Raft and flakiness"
 check "election safety (<=1 leader/term) asserted"    "R4" grep -rq 'election_safety' crates/prkdb/tests/
 check "chaos injection behind a feature flag"         "R6" grep -q 'cfg(feature = "chaos")' crates/prkdb/src/raft/rpc_client.rs
 check "chaos workflow has no continue-on-error"       "R7" none 'continue-on-error' .github/workflows/chaos-tests.yml
-check "no hardcoded ports in tests"                   "R3" none '127\.0\.0\.1:[0-9]\{4,5\}' crates/prkdb/tests/
+check "no hardcoded ports in tests"                   "R3" no_hardcoded_ports
 
 group "Plan A · Tasks 12-16 — Hygiene"
 check 'doctests compile (no bare fenced-ignore)'      "R5" none '^///.*```ignore' crates/prkdb/src/

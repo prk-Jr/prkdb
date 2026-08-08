@@ -1,12 +1,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::time::{sleep, Duration};
-
-static CLUSTER_OFFSET: AtomicU16 = AtomicU16::new(0);
 
 use super::NetworkSimulator;
 
@@ -41,13 +38,16 @@ impl TestCluster {
         let network = Arc::new(NetworkSimulator::new(Some(config_path)));
         let mut nodes = HashMap::new();
 
-        // Reserve ports for each node
-        // Use atomic offset to avoid port conflicts in parallel tests
-        let offset = CLUSTER_OFFSET.fetch_add(10, Ordering::Relaxed);
-        let base_data_port = 19000 + offset; // Start from 19000 block
-        for i in 0..num_nodes {
+        // Reserve ports for each node.
+        //
+        // This previously used `19000 + atomic_offset`, which avoids collisions between
+        // clusters inside a single test binary but not between binaries — cargo runs
+        // those concurrently, and every one of them started counting at 19000. It also
+        // gave no protection against a process orphaned by a killed run still holding
+        // the port. Let the OS assign instead.
+        let ports = super::free_ports(num_nodes).await;
+        for (i, &data_port) in ports.iter().enumerate() {
             let node_id = (i + 1) as u64;
-            let data_port = base_data_port + i as u16;
             // With multiplexing, Raft traffic uses the same port as data traffic
             let raft_port = data_port;
             let data_dir = base_dir.path().join(format!("node{}", node_id));
@@ -78,7 +78,7 @@ impl TestCluster {
 
     /// Start all nodes in the cluster
     pub async fn start_all(&mut self) -> anyhow::Result<()> {
-        // Build cluster_nodes string: "1@127.0.0.1:60011,2@127.0.0.1:60012,..."
+        // Build cluster_nodes string: "1@127.0.0.1:<port>,2@127.0.0.1:<port>,..."
         let cluster_nodes: Vec<String> = self
             .nodes
             .values()
