@@ -216,7 +216,7 @@ git commit -m "fix: resolve 22 clippy warnings on rustc 1.95"
 **Files:**
 - Test: `crates/prkdb/tests/helpers/jepsen_checker.rs` (append to `mod tests`)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to the `#[cfg(test)] mod tests` block at the bottom of `jepsen_checker.rs`:
 
@@ -280,7 +280,7 @@ fn detects_stale_read_after_completed_write() {
 }
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 ```bash
 cargo test -p prkdb --test jepsen_consistency_tests detects_stale_read -- --nocapture
@@ -288,7 +288,7 @@ cargo test -p prkdb --test jepsen_consistency_tests detects_stale_read -- --noca
 Expected: FAIL — `checker reported a stale read as linearizable`. The existing checker only
 requires `w.start_time < read.end_time`, which `W1` satisfies.
 
-- [ ] **Step 3: Commit the failing test**
+- [x] **Step 3: Commit the failing test**
 
 ```bash
 git add crates/prkdb/tests/helpers/jepsen_checker.rs
@@ -317,7 +317,7 @@ git commit -m "test: add failing meta-test proving the checker cannot detect sta
 > (Step 2), and **its own correctness tested** (Task 3's meta-test). Do not trust a single
 > result from this checker before that meta-test passes.
 
-- [ ] **Step 1: Add the bounded-history guard**
+- [x] **Step 1: Add the bounded-history guard**
 
 WGL's search is exponential in the worst case. Add to `OperationHistory`:
 
@@ -327,7 +327,7 @@ WGL's search is exponential in the worst case. Add to `OperationHistory`:
 pub const MAX_CHECKABLE_OPS: usize = 200;
 ```
 
-- [ ] **Step 2: Implement the checker**
+- [x] **Step 2: Implement the checker**
 
 Create `crates/prkdb/tests/helpers/wgl.rs` implementing Wing & Gong linear search over a
 single-register model:
@@ -345,19 +345,19 @@ Model errored operations as *indeterminate*: a `Timeout` write may or may not ha
 effect, so the search must try both branches. This is what the old checker got wrong by
 skipping them.
 
-- [ ] **Step 3: Route `is_linearizable` through it**
+- [x] **Step 3: Route `is_linearizable` through it**
 
 Replace the body of `is_linearizable()` with a call into `wgl::check`, keeping the existing
 `LinearizabilityResult` return type so callers do not change.
 
-- [ ] **Step 4: Run the meta-test**
+- [x] **Step 4: Run the meta-test**
 
 ```bash
 cargo test -p prkdb --test jepsen_consistency_tests detects_stale_read -- --nocapture
 ```
 Expected: PASS.
 
-- [ ] **Step 5: Confirm valid histories still pass**
+- [x] **Step 5: Confirm valid histories still pass**
 
 ```bash
 cargo test -p prkdb --test jepsen_consistency_tests test_linearizability_simple -- --nocapture
@@ -365,12 +365,12 @@ cargo test -p prkdb --test jepsen_consistency_tests test_linearizability_simple 
 Expected: PASS. A checker that rejects everything is as useless as one that accepts everything —
 both tests must hold.
 
-- [ ] **Step 6: Add a concurrent-is-fine case**
+- [x] **Step 6: Add a concurrent-is-fine case**
 
 Add a test where a read overlaps an in-flight write and returns either the old or new value.
 Both must be reported `Linearizable` — concurrency is not a violation.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/prkdb/tests/helpers/
@@ -563,7 +563,7 @@ git commit -m "test: run linearizable register against a 3-node cluster under pa
 - Modify: `crates/prkdb/tests/helpers/jepsen_checker.rs:224-268` (`BankAccounts`)
 - Modify: `crates/prkdb/tests/jepsen_consistency_tests.rs:171-236`
 
-- [ ] **Step 1: Confirm the current test proves nothing**
+- [x] **Step 1: Confirm the current test proves nothing**
 
 ```bash
 grep -n 'accounts.lock().unwrap()' crates/prkdb/tests/helpers/jepsen_checker.rs
@@ -571,7 +571,7 @@ grep -n 'accounts.lock().unwrap()' crates/prkdb/tests/helpers/jepsen_checker.rs
 Expected: hits inside `transfer` and `check_total_invariant` — the invariant is computed over an
 in-process `HashMap`, never over stored state.
 
-- [ ] **Step 2: Back `BankAccounts` with a storage adapter**
+- [x] **Step 2: Back `BankAccounts` with a storage adapter**
 
 Change `BankAccounts` to hold `Arc<dyn StorageAdapter>` instead of
 `Arc<Mutex<HashMap<String, i64>>>`. `transfer` becomes a real transaction:
@@ -594,11 +594,11 @@ pub async fn transfer(&self, from: &str, to: &str, amount: i64) -> Result<(), St
 Use `TransactionConfig` with `IsolationLevel::Serializable` — the repo already supports this
 (`crates/prkdb/src/transaction.rs`) and it is the isolation level the invariant needs.
 
-- [ ] **Step 3: Compute the invariant from storage**
+- [x] **Step 3: Compute the invariant from storage**
 
 `check_total_invariant` reads every account balance back out of the adapter and sums those.
 
-- [ ] **Step 4: Run it**
+- [x] **Step 4: Run it**
 
 ```bash
 cargo test -p prkdb --test jepsen_consistency_tests test_bank_transfer_invariant -- --nocapture --test-threads=1
@@ -606,7 +606,7 @@ cargo test -p prkdb --test jepsen_consistency_tests test_bank_transfer_invariant
 Expected: PASS. Conflict-induced transaction aborts are expected and fine — the invariant is
 about the total, not about every transfer succeeding.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/prkdb/tests/

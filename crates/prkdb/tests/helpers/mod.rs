@@ -8,6 +8,7 @@ pub mod jepsen_checker;
 pub mod leader_redirect;
 pub mod network_simulator;
 pub mod test_cluster;
+pub mod wgl;
 
 /// Bind an ephemeral port and return it.
 ///

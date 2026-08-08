@@ -3,6 +3,9 @@
 //! Provides operation history recording and linearizability verification
 //! for distributed consistency testing. Inspired by the Jepsen framework.
 
+use prkdb::storage::WalStorageAdapter;
+use prkdb::transaction::{IsolationLevel, Transaction, TransactionConfig, TransactionExt};
+use prkdb_types::storage::StorageAdapter;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -74,58 +77,35 @@ impl OperationHistory {
     /// A simple linearizability check: for each read, verify that the value
     /// read could have been written by a preceding write that completed
     /// before the read started, or by a concurrent write.
+    /// Check whether the recorded history is linearizable.
+    ///
+    /// Delegates to the Wing & Gong search in [`super::wgl`]. The previous
+    /// implementation asked only whether *some* write of the same value to the same key
+    /// had started before the read ended — a condition any earlier write satisfies — so
+    /// it could not fail on a stale read. See the meta-tests at the bottom of this file.
     pub fn is_linearizable(&self) -> LinearizabilityResult {
-        let ops = self.ops.lock().unwrap();
+        let ops = self
+            .ops
+            .lock()
+            .expect("history mutex is only poisoned if a recording thread panicked");
 
-        // Extract writes and reads
-        let writes: Vec<_> = ops.iter().filter(|op| op.kind == OpKind::Write).collect();
-
-        let reads: Vec<_> = ops.iter().filter(|op| op.kind == OpKind::Read).collect();
-
-        // For each read, check if the read value is valid
-        for read in &reads {
-            let read_val = match &read.result {
-                OpResult::Ok(Some(v)) => v.clone(),
-                OpResult::Ok(None) => continue, // nil read is valid if no writes
-                _ => continue,                  // Errors don't violate linearizability
-            };
-
-            // Find writes that could have produced this value
-            let valid_write = writes.iter().any(|w| {
-                // Write must have the same key
-                if w.key != read.key {
-                    return false;
-                }
-
-                // Write value must match read value
-                let write_val = match &w.write_value {
-                    Some(v) => v,
-                    None => return false,
-                };
-
-                if write_val != &read_val {
-                    return false;
-                }
-
-                // Write must have started before read ended (could be concurrent)
-                // and either:
-                // 1. Write completed before read started (definitely before)
-                // 2. Write overlaps with read (concurrent, linearization possible)
-                w.start_time < read.end_time
-            });
-
-            if !valid_write && !read_val.is_empty() {
-                return LinearizabilityResult::NotLinearizable {
+        match super::wgl::check(&ops) {
+            super::wgl::Verdict::Linearizable => LinearizabilityResult::Linearizable,
+            super::wgl::Verdict::NotLinearizable { reason } => {
+                LinearizabilityResult::NotLinearizable { reason }
+            }
+            // Not answering is not the same as passing.
+            super::wgl::Verdict::TooLarge { key, ops } => {
+                LinearizabilityResult::NotLinearizable {
                     reason: format!(
-                        "Read of key {:?} returned {:?} but no valid write found",
-                        String::from_utf8_lossy(&read.key),
-                        String::from_utf8_lossy(&read_val)
+                        "key {:?} has {} operations, above the {} the search can decide;                          shorten the history rather than trusting this result",
+                        String::from_utf8_lossy(&key),
+                        ops,
+                        super::wgl::MAX_CHECKABLE_OPS
                     ),
-                };
+                }
             }
         }
-
-        LinearizabilityResult::Linearizable
     }
 
     /// Check a custom invariant across all operations
@@ -218,57 +198,109 @@ fn parse_u64_from_bytes(bytes: &[u8]) -> Result<u64, ()> {
     }
 }
 
-/// Bank account for transfer invariant tests
+/// Bank accounts backed by real storage, for transfer-invariant tests.
+///
+/// An earlier version held `Arc<Mutex<HashMap<String, i64>>>` and did all its work in
+/// process memory. `transfer` mutated that map and `check_total_invariant` summed it, so
+/// the test asserted that a mutex-guarded HashMap conserves a total — a property of
+/// `std::sync::Mutex`, not of PrkDB. It exercised no storage, no transaction, and no
+/// isolation level while being filed as a consistency test.
+///
+/// Every balance now lives in the storage adapter, transfers run inside a `Serializable`
+/// transaction, and the invariant is computed by reading balances back out.
 #[derive(Clone)]
 pub struct BankAccounts {
-    accounts: Arc<Mutex<HashMap<String, i64>>>,
+    storage: Arc<WalStorageAdapter>,
+    names: Vec<String>,
     initial_total: i64,
 }
 
 impl BankAccounts {
-    pub fn new(num_accounts: usize, initial_balance: i64) -> Self {
-        let mut accounts = HashMap::new();
-        for i in 0..num_accounts {
-            accounts.insert(format!("account_{}", i), initial_balance);
+    /// Create `num_accounts` accounts, each holding `initial_balance`, persisted.
+    pub async fn new(
+        storage: Arc<WalStorageAdapter>,
+        num_accounts: usize,
+        initial_balance: i64,
+    ) -> Self {
+        let names: Vec<String> = (0..num_accounts).map(|i| format!("account_{i}")).collect();
+
+        for name in &names {
+            storage
+                .put(name.as_bytes(), &initial_balance.to_le_bytes())
+                .await
+                .expect("seeding an account into fresh storage cannot fail");
         }
-        let initial_total = initial_balance * num_accounts as i64;
+
         Self {
-            accounts: Arc::new(Mutex::new(accounts)),
-            initial_total,
+            storage,
+            names,
+            initial_total: initial_balance * num_accounts as i64,
         }
     }
 
-    pub fn transfer(&self, from: &str, to: &str, amount: i64) -> Result<(), String> {
-        let mut accounts = self.accounts.lock().unwrap();
+    /// Move `amount` between two accounts inside one serializable transaction.
+    ///
+    /// Returns `Err` on insufficient funds or on a write conflict. Both are expected
+    /// under contention and neither breaks the invariant — a rejected transfer must
+    /// leave both balances untouched, which is exactly what the test checks.
+    pub async fn transfer(&self, from: &str, to: &str, amount: i64) -> Result<(), String> {
+        let config = TransactionConfig {
+            isolation_level: IsolationLevel::Serializable,
+            ..Default::default()
+        };
+        let mut tx = self.storage.begin_transaction_with_config(config);
 
-        let from_balance = accounts
-            .get(from)
-            .copied()
-            .ok_or("From account not found")?;
+        let from_balance = read_balance(&mut tx, from).await?;
         if from_balance < amount {
+            tx.rollback();
             return Err("Insufficient funds".to_string());
         }
+        let to_balance = read_balance(&mut tx, to).await?;
 
-        *accounts.get_mut(from).unwrap() -= amount;
-        *accounts.get_mut(to).unwrap() += amount;
+        tx.put(
+            from.as_bytes().to_vec(),
+            (from_balance - amount).to_le_bytes(),
+        )
+        .map_err(|e| e.to_string())?;
+        tx.put(to.as_bytes().to_vec(), (to_balance + amount).to_le_bytes())
+            .map_err(|e| e.to_string())?;
 
-        Ok(())
+        tx.commit().await.map_err(|e| e.to_string()).map(|_| ())
     }
 
-    pub fn get_balance(&self, account: &str) -> Option<i64> {
-        self.accounts.lock().unwrap().get(account).copied()
+    /// Read a balance straight from storage, outside any transaction.
+    pub async fn get_balance(&self, account: &str) -> Option<i64> {
+        self.storage
+            .get(account.as_bytes())
+            .await
+            .ok()
+            .flatten()
+            .and_then(|b| b.try_into().ok())
+            .map(i64::from_le_bytes)
     }
 
-    pub fn check_total_invariant(&self) -> InvariantResult {
-        let accounts = self.accounts.lock().unwrap();
-        let total: i64 = accounts.values().sum();
+    /// Sum every balance **as stored** and compare against the seeded total.
+    ///
+    /// Money is neither created nor destroyed by any interleaving of transfers.
+    pub async fn check_total_invariant(&self) -> InvariantResult {
+        let mut total = 0i64;
+        for name in &self.names {
+            match self.get_balance(name).await {
+                Some(v) => total += v,
+                None => {
+                    return InvariantResult::Failed {
+                        reason: format!("account {name} vanished from storage"),
+                    }
+                }
+            }
+        }
 
         if total == self.initial_total {
             InvariantResult::Passed
         } else {
             InvariantResult::Failed {
                 reason: format!(
-                    "Total balance mismatch: expected {}, got {}",
+                    "total balance mismatch: expected {}, storage holds {}",
                     self.initial_total, total
                 ),
             }
@@ -276,13 +308,27 @@ impl BankAccounts {
     }
 
     pub fn account_names(&self) -> Vec<String> {
-        self.accounts.lock().unwrap().keys().cloned().collect()
+        self.names.clone()
     }
+}
+
+/// Read an account balance inside a transaction, treating "absent" as zero.
+async fn read_balance(tx: &mut Transaction, account: &str) -> Result<i64, String> {
+    let raw = tx
+        .get(account.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|| 0i64.to_le_bytes().to_vec());
+
+    raw.try_into()
+        .map(i64::from_le_bytes)
+        .map_err(|_| format!("balance for {account} is not an 8-byte integer"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn test_linearizability_simple() {
@@ -321,14 +367,172 @@ mod tests {
         );
     }
 
+    /// The invariant holds across real transactions against real storage. Before
+    /// Task 6 this asserted the same thing about an in-process HashMap, which told us
+    /// nothing about the database.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bank_invariant_holds_over_stored_balances() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            prkdb::storage::WalStorageAdapter::new(prkdb_core::wal::WalConfig {
+                log_dir: dir.path().to_path_buf(),
+                ..prkdb_core::wal::WalConfig::test_config()
+            })
+            .unwrap(),
+        );
+        let bank = BankAccounts::new(storage, 5, 100).await;
+
+        bank.transfer("account_0", "account_1", 50).await.unwrap();
+        bank.transfer("account_1", "account_2", 25).await.unwrap();
+
+        assert_eq!(bank.check_total_invariant().await, InvariantResult::Passed);
+        assert_eq!(bank.get_balance("account_0").await, Some(50));
+        assert_eq!(bank.get_balance("account_1").await, Some(125));
+        assert_eq!(bank.get_balance("account_2").await, Some(125));
+    }
+
+    /// A transfer that cannot be funded must leave both balances untouched.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rejected_transfer_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            prkdb::storage::WalStorageAdapter::new(prkdb_core::wal::WalConfig {
+                log_dir: dir.path().to_path_buf(),
+                ..prkdb_core::wal::WalConfig::test_config()
+            })
+            .unwrap(),
+        );
+        let bank = BankAccounts::new(storage, 2, 100).await;
+
+        bank.transfer("account_0", "account_1", 500)
+            .await
+            .expect_err("500 is more than the 100 seeded");
+
+        assert_eq!(bank.get_balance("account_0").await, Some(100));
+        assert_eq!(bank.get_balance("account_1").await, Some(100));
+        assert_eq!(bank.check_total_invariant().await, InvariantResult::Passed);
+    }
+
+    // ── Meta-tests: these test the checker, not the database ──────────────────
+    //
+    // Every consistency result this module produces is worth exactly as much as the
+    // checker's ability to return NotLinearizable. Before trusting a single green run,
+    // prove it can go red.
+
+    /// Build an operation with an explicit real-time interval.
+    fn op(
+        kind: OpKind,
+        key: &[u8],
+        write_value: Option<&[u8]>,
+        read_value: Option<&[u8]>,
+        start: Instant,
+        end: Instant,
+        client_id: u64,
+    ) -> Operation {
+        let kind_for_result = kind.clone();
+        Operation {
+            kind,
+            key: key.to_vec(),
+            write_value: write_value.map(|v| v.to_vec()),
+            read_value: read_value.map(|v| v.to_vec()),
+            start_time: start,
+            end_time: end,
+            result: match (&kind_for_result, read_value) {
+                (OpKind::Read, Some(v)) => OpResult::Ok(Some(v.to_vec())),
+                (OpKind::Read, None) => OpResult::Ok(None),
+                _ => OpResult::Ok(None),
+            },
+            client_id,
+        }
+    }
+
+    /// A stale read is THE canonical linearizability violation: a read that returns an
+    /// old value after a newer write has already completed in real time.
+    ///
+    /// W1 writes "v1" and completes at t1.
+    /// W2 writes "v2", starting at t2 and completing at t3 — strictly after W1.
+    /// R1 runs entirely at t4..t5, after W2 completed, and returns "v1".
+    ///
+    /// There is no total order consistent with real time that explains this: W2 must
+    /// precede R1, so R1 must observe "v2". A checker that calls this linearizable
+    /// cannot detect the violation it exists to detect.
     #[test]
-    fn test_bank_invariant() {
-        let bank = BankAccounts::new(5, 100);
+    fn detects_stale_read_after_completed_write() {
+        let history = OperationHistory::new();
+        let t = |ms: u64| Instant::now() + Duration::from_millis(ms);
+        let (t0, t1, t2, t3, t4, t5) = (t(0), t(10), t(20), t(30), t(40), t(50));
 
-        // Transfer between accounts
-        bank.transfer("account_0", "account_1", 50).unwrap();
-        bank.transfer("account_1", "account_2", 25).unwrap();
+        history.record(op(OpKind::Write, b"k", Some(b"v1"), None, t0, t1, 1));
+        history.record(op(OpKind::Write, b"k", Some(b"v2"), None, t2, t3, 1));
+        history.record(op(OpKind::Read, b"k", None, Some(b"v1"), t4, t5, 2));
 
-        assert_eq!(bank.check_total_invariant(), InvariantResult::Passed);
+        match history.is_linearizable() {
+            LinearizabilityResult::NotLinearizable { .. } => {}
+            LinearizabilityResult::Linearizable => panic!(
+                "checker reported a stale read as linearizable.\n\
+                 W1=v1 completed at t1, W2=v2 completed at t3, R1 ran at t4..t5 and \
+                 returned v1.\n\
+                 No real-time-consistent order explains that, so the checker cannot \
+                 detect violations."
+            ),
+        }
+    }
+
+    /// The opposite failure: a checker that rejects everything is as useless as one that
+    /// accepts everything. A read overlapping an in-flight write may legitimately return
+    /// either value — concurrency is not a violation.
+    #[test]
+    fn accepts_concurrent_read_returning_either_value() {
+        let t = |ms: u64| Instant::now() + Duration::from_millis(ms);
+
+        for observed in [b"v1".as_slice(), b"v2".as_slice()] {
+            let history = OperationHistory::new();
+            // W1 completes at t1. W2 runs t2..t5, overlapping R1 at t3..t4.
+            history.record(op(OpKind::Write, b"k", Some(b"v1"), None, t(0), t(10), 1));
+            history.record(op(OpKind::Write, b"k", Some(b"v2"), None, t(20), t(50), 1));
+            history.record(op(
+                OpKind::Read,
+                b"k",
+                None,
+                Some(observed),
+                t(30),
+                t(40),
+                2,
+            ));
+
+            assert_eq!(
+                history.is_linearizable(),
+                LinearizabilityResult::Linearizable,
+                "a read overlapping an in-flight write may return {:?}; \
+                 rejecting it makes the checker useless in the other direction",
+                String::from_utf8_lossy(observed),
+            );
+        }
+    }
+
+    /// A read of a value nothing ever wrote is a violation regardless of timing.
+    #[test]
+    fn detects_read_of_never_written_value() {
+        let history = OperationHistory::new();
+        let t = |ms: u64| Instant::now() + Duration::from_millis(ms);
+
+        history.record(op(OpKind::Write, b"k", Some(b"v1"), None, t(0), t(10), 1));
+        history.record(op(
+            OpKind::Read,
+            b"k",
+            None,
+            Some(b"ghost"),
+            t(20),
+            t(30),
+            2,
+        ));
+
+        assert!(
+            matches!(
+                history.is_linearizable(),
+                LinearizabilityResult::NotLinearizable { .. }
+            ),
+            "reading a value no write ever produced must be rejected"
+        );
     }
 }

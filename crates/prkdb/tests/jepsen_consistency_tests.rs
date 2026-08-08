@@ -43,9 +43,13 @@ async fn test_linearizable_register() {
     let counter = Arc::new(AtomicU64::new(0));
 
     let key = b"register".to_vec();
+    // 4 writers + 4 readers x 20 ops = 160 operations, inside the 200-op ceiling the
+    // Wing & Gong search can decide. The previous 50 ops/client produced a 401-op
+    // history that the checker correctly refused to rule on — an undecidable history is
+    // not a stronger test, it is an unanswered question.
     let num_writers = 4;
     let num_readers = 4;
-    let ops_per_client = 50;
+    let ops_per_client = 20;
 
     // Initialize key and record in history
     let initial_value = 0u64.to_le_bytes().to_vec();
@@ -172,9 +176,20 @@ async fn test_linearizable_register() {
 async fn test_bank_transfer_invariant() {
     let num_accounts = 10;
     let initial_balance = 1000i64;
-    let bank = BankAccounts::new(num_accounts, initial_balance);
+
+    // Balances live in real storage now, not a HashMap. Transfers run as serializable
+    // transactions and the invariant is computed by reading them back.
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(
+        WalStorageAdapter::new(WalConfig {
+            log_dir: dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        })
+        .unwrap(),
+    );
+    let bank = BankAccounts::new(storage, num_accounts, initial_balance).await;
     let num_workers = 8;
-    let transfers_per_worker = 100;
+    let transfers_per_worker = 25;
 
     let accounts = bank.account_names();
 
@@ -198,12 +213,17 @@ async fn test_bank_transfer_invariant() {
 
                 let amount = ((rng_state % 50) + 1) as i64;
 
-                let _ = bank.transfer(&accounts[from_idx], &accounts[to_idx], amount);
+                // Insufficient funds and write conflicts are both expected under contention.
+                // Neither may break the invariant: a rejected transfer must leave both
+                // balances untouched.
+                let _ = bank
+                    .transfer(&accounts[from_idx], &accounts[to_idx], amount)
+                    .await;
 
                 // Periodically check invariant during execution
                 if i % 20 == 0 {
                     assert_eq!(
-                        bank.check_total_invariant(),
+                        bank.check_total_invariant().await,
                         InvariantResult::Passed,
                         "Invariant violated during worker {} iteration {}",
                         worker_id,
@@ -222,7 +242,7 @@ async fn test_bank_transfer_invariant() {
     }
 
     // Final invariant check
-    match bank.check_total_invariant() {
+    match bank.check_total_invariant().await {
         InvariantResult::Passed => {
             println!(
                 "✅ Bank Transfer Invariant Test: Total balance preserved ({} accounts, {} transfers)",
