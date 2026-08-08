@@ -25,7 +25,6 @@ pub mod rate_limit; // Rate limiting for operations
 pub mod replication;
 pub mod scheduler;
 pub mod storage;
-mod storage_old_inmemory; // Renamed from storage.rs to allow storage/ directory
 pub mod streaming;
 pub mod transaction;
 pub mod ttl;

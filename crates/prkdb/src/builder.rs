@@ -265,10 +265,7 @@ impl Builder {
             return Ok(Arc::new(adapter) as Arc<dyn StorageAdapter>);
         }
 
-        Ok(
-            Arc::new(crate::storage_old_inmemory::InMemoryAdapter::new())
-                as Arc<dyn StorageAdapter>,
-        )
+        Ok(Arc::new(crate::storage::InMemoryAdapter::new()) as Arc<dyn StorageAdapter>)
     }
 
     fn default_wal_config(path: std::path::PathBuf) -> prkdb_core::wal::WalConfig {

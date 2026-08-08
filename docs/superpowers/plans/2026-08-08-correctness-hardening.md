@@ -825,6 +825,35 @@ git commit -m "ci: enforce chaos test results and replace hardcoded badges"
 **Files:**
 - Modify: all files under `crates/prkdb/tests/` that hardcode a port
 
+> **Observed in practice on 2026-08-08 — this is not theoretical.** During execution of Task 16,
+> `test_raft_propose` began failing with "No leader elected" and kept failing 3/3, including at
+> the pre-session baseline commit. The cause was not any code change:
+>
+> ```
+> $ lsof -nP -iTCP -sTCP:LISTEN | grep -E ':(5008[0-9])'
+> distribut 80307 prk-jr TCP 127.0.0.1:50081 (LISTEN)
+> distribut 80307 prk-jr TCP 127.0.0.1:50082 (LISTEN)
+> distribut 80307 prk-jr TCP 127.0.0.1:50083 (LISTEN)
+> ```
+>
+> PID 80307 was a `distributed_writes` binary orphaned by an **earlier run that was killed**
+> while hung. SIGTERM reached the `cargo test` parent; the test binary survived and kept its
+> listeners. Because the ports are hardcoded, every later run of that test bound nothing, elected
+> no leader, and failed — permanently red until someone thinks to look for a stray PID.
+>
+> Two things this proves, both of which justify the work below:
+>
+> 1. **Hardcoded ports turn a transient hang into a persistent failure.** With `:0` the orphan
+>    would have been harmless.
+> 2. **The failure is maximally misleading.** "No leader elected" points at Raft. Roughly twenty
+>    minutes were spent bisecting three commits before checking `lsof`. A CI agent would have
+>    reverted good work.
+>
+> Normal completion does *not* leak — back-to-back runs are clean. It is specifically the
+> killed-while-hung path, which is exactly what the Task 1 CI timeouts now cause on a hang.
+> Task 11's deadlines and this task's ephemeral ports are what stop that from poisoning the
+> next run.
+
 - [ ] **Step 1: Find them**
 
 ```bash
@@ -1271,7 +1300,7 @@ git commit -m "ci: add cargo-deny, cargo-audit, and Dependabot"
 - Modify: `xtask/src/repo_status/collectors/`
 - Modify: `docs/guide/roadmap.md`
 
-- [ ] **Step 1: Confirm what is actually dead — one of the two is not**
+- [x] **Step 1: Confirm what is actually dead — one of the two is not**
 
 ```bash
 wc -c crates/prkdb/src/security.rs
@@ -1290,7 +1319,7 @@ Expected:
 > storage.rs" as a legacy artifact. Deleting the module fails the build and removes a published
 > type. Do not delete it.
 
-- [ ] **Step 2: Delete the genuine orphan**
+- [x] **Step 2: Delete the genuine orphan**
 
 ```bash
 rm crates/prkdb/src/security.rs
@@ -1298,7 +1327,7 @@ cargo check --workspace
 ```
 Expected: clean. Nothing referenced it.
 
-- [ ] **Step 2b: Rename the misleadingly-named module**
+- [x] **Step 2b: Rename the misleadingly-named module**
 
 The defect is the name, not the code. `git mv` it into the storage module where it belongs:
 

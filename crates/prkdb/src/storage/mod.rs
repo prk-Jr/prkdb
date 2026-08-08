@@ -10,8 +10,8 @@ pub mod streaming_adapter; // Phase 24: High-throughput streaming (2x+ Kafka per
 pub mod wal_adapter;
 pub mod write_queue; // Phase 2: Dedicated sync writer
 
-// Re-export the old InMemoryAdapter from storage_old_inmemory
-pub use crate::storage_old_inmemory::InMemoryAdapter;
+mod in_memory;
+pub use in_memory::InMemoryAdapter;
 
 // Export WAL adapters
 pub use collection_partitioned_adapter::CollectionPartitionedAdapter;
