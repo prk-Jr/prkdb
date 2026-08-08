@@ -62,11 +62,23 @@ atleast() { [[ $(grep -c "$1" "$2" 2>/dev/null || echo 0) -ge $3 ]]; }
 # Zero occurrences of a pattern across a path.
 none() { ! grep -rq "$1" "$2" 2>/dev/null; }
 
-# Hardcoded loopback ports in test code, ignoring comment lines. A port named in a
-# comment is documentation, not a defect.
+# Zero occurrences of a pattern outside comment lines. A thing named in a comment is
+# documentation, not a defect — explaining why `continue-on-error` was removed should
+# not read as still having it. `#` covers YAML, `//` covers Rust.
+none_in_code() {
+  ! grep -rn "$1" "$2" 2>/dev/null | grep -qv ':[0-9]*: *\(#\|//\)'
+}
+
+# Hardcoded loopback ports in test code, ignoring comment lines.
 no_hardcoded_ports() {
-  ! grep -rn '127\.0\.0\.1:[0-9]\{4,5\}' crates/*/tests/ 2>/dev/null \
-    | grep -qv ':[0-9]*: *//'
+  none_in_code '127\.0\.0\.1:[0-9]\{4,5\}' 'crates/prkdb/tests/'
+}
+
+# Doc examples fenced with ```ignore never compile, so they cannot catch API drift.
+# The pattern must allow leading whitespace: anchoring at ^/// matched 2 of 61 real
+# occurrences and would have reported this green while 59 remained.
+no_ignored_doctests() {
+  ! grep -rqE '^[[:space:]]*///.*```(rust,)?ignore' crates/prkdb/src/ 2>/dev/null
 }
 
 # Production (non-test) unwrap count in a directory, below a threshold.
@@ -119,11 +131,11 @@ check "bank invariant reads back from storage"        "R1" grep -rq 'begin_trans
 group "Plan A · Tasks 7-11 — Raft and flakiness"
 check "election safety (<=1 leader/term) asserted"    "R4" grep -rq 'election_safety' crates/prkdb/tests/
 check "chaos injection behind a feature flag"         "R6" grep -q 'cfg(feature = "chaos")' crates/prkdb/src/raft/rpc_client.rs
-check "chaos workflow has no continue-on-error"       "R7" none 'continue-on-error' .github/workflows/chaos-tests.yml
+check "chaos workflow has no continue-on-error"       "R7" none_in_code 'continue-on-error' .github/workflows/chaos-tests.yml
 check "no hardcoded ports in tests"                   "R3" no_hardcoded_ports
 
 group "Plan A · Tasks 12-16 — Hygiene"
-check 'doctests compile (no bare fenced-ignore)'      "R5" none '^///.*```ignore' crates/prkdb/src/
+check 'doctests compile (no ignored doc fences)'      "R5" no_ignored_doctests
 check "WAL free of production unwraps"                "R8" prod_unwraps_below crates/prkdb-core/src/wal 1
 check "storage adapters free of production unwraps"   "R8" prod_unwraps_below crates/prkdb-storage-segmented/src 1
 check "coverage job in CI"                            "R9" grep -q 'llvm-cov' .github/workflows/ci.yml
