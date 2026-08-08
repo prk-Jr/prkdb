@@ -966,6 +966,33 @@ description is what turns a mystery hang into a diagnosable failure.
 Any test that starts a cluster gets an outer `tokio::time::timeout(Duration::from_secs(60), ...)`
 so it fails rather than hangs.
 
+> **Known flake to fix here, found during execution on 2026-08-08.**
+>
+> `xtask/tests/render_fixtures.rs::snapshot_json_is_machine_readable_and_written_to_deterministic_target_path`
+> passes 3/3 in isolation and fails intermittently under `cargo test --workspace`.
+> Observed failing during Task 16 verification and again during Task 19, and passing
+> in the Task 10 run — so it is independent of all three.
+>
+> The assertion is that two consecutive `repo-status snapshot` runs produce identical
+> stdout. When it fails, the first run reports `stale_repo_status_summary` and the
+> second does not, meaning **the first run changed the state its own audit reads**.
+> The test uses `temp_fixture_copy`, so it looks hermetic; the fixture nonetheless
+> ships a committed `target/repo-status/repo-status.snapshot.json`, and the test
+> shells out to `cargo run -p xtask` while an outer `cargo test` already holds the
+> workspace build lock.
+>
+> Two candidate root causes, in order of likelihood:
+> 1. `repo-status snapshot` is not idempotent — it writes an artifact that its next
+>    invocation treats as input. If so, snapshot should be read-only and only
+>    `render` should write.
+> 2. The nested `cargo run` contends with the outer `cargo test` for the target
+>    directory, so the fixture's `target/` is not the isolated state the test assumes.
+>
+> Fix the tool if (1); give the test its own `CARGO_TARGET_DIR` if (2). Do not paper
+> over it by relaxing the determinism assertion — a snapshot tool whose output depends
+> on how many times it has run is a real defect in the drift detector, which is one of
+> the better things in this repository.
+
 - [ ] **Step 5: Verify determinism**
 
 ```bash
@@ -1633,7 +1660,7 @@ git commit -m "docs: attach reproducible methodology to every performance claim"
 - Modify: all files containing `#[ignore]`
 - Modify: `.github/workflows/ci.yml`
 
-- [ ] **Step 1: Inventory**
+- [x] **Step 1: Inventory**
 
 ```bash
 grep -rn '#\[ignore' crates/ --include='*.rs'
@@ -1641,7 +1668,7 @@ grep -rn '#\[ignore' crates/ --include='*.rs'
 Expected: 14 — 7 in `raft_chaos_tests.rs`, 3 in `corruption_tests.rs`, 2 in `load_tests.rs`,
 2 in `chaos_tests.rs`. Most are bare `#[ignore]` with no reason.
 
-- [ ] **Step 2: Classify each**
+- [x] **Step 2: Classify each**
 
 Three buckets, and each has a different fix:
 
@@ -1651,7 +1678,7 @@ Three buckets, and each has a different fix:
 | **Needs a running binary/cluster** (`raft_chaos_tests.rs:256`) | Wire the harness so it can run, or move to the chaos workflow with `--ignored`. |
 | **Known-broken** (`chaos_tests.rs:117` — "integration harness still diverges from WAL recovery unit tests") | This one already has a reason, which is the standard. File an issue, reference it in the string. |
 
-- [ ] **Step 3: Give every ignore a reason**
+- [x] **Step 3: Give every ignore a reason**
 
 ```rust
 // Before
@@ -1661,7 +1688,7 @@ Three buckets, and each has a different fix:
 #[ignore = "requires a running prkdb-server binary; runs in the chaos workflow — see #NN"]
 ```
 
-- [ ] **Step 4: Add the CI guard**
+- [x] **Step 4: Add the CI guard**
 
 ```yaml
       - name: Reject bare #[ignore]
@@ -1674,13 +1701,13 @@ Three buckets, and each has a different fix:
 
 Note the pattern matches `#[ignore]` exactly, so `#[ignore = "..."]` passes.
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 ```bash
 grep -rn '#\[ignore\]' crates/ --include='*.rs' || echo "all ignores carry a reason"
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/ .github/workflows/ci.yml

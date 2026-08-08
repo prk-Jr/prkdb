@@ -187,7 +187,7 @@ async fn chaos_test_operation_timeouts() {
 
 /// Chaos testing: Memory pressure under high load
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore] // Run with --ignored flag
+#[ignore = "slow: ~24s under simulated memory pressure — runs in the nightly-slow-tests CI job via --ignored"]
 async fn chaos_test_memory_pressure() {
     let dir = tempfile::tempdir().unwrap();
     let config = WalConfig {

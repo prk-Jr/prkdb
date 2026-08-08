@@ -18,7 +18,6 @@ use tempfile::tempdir;
 /// 3. Corrupt a random byte in the WAL file
 /// 4. Reopen and verify corruption is detected
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore] // Requires careful handling of WAL internals
 async fn test_single_byte_corruption_detected() {
     let dir = tempdir().unwrap();
     let config = WalConfig {
@@ -132,7 +131,6 @@ async fn test_single_byte_corruption_detected() {
 /// 3. Truncate WAL file mid-record
 /// 4. Verify recovery handles truncation gracefully
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
 async fn test_truncated_wal_recovery() {
     let dir = tempdir().unwrap();
     let config = WalConfig {
@@ -199,7 +197,6 @@ async fn test_truncated_wal_recovery() {
 ///
 /// Corrupts WAL header to verify it's detected
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
 async fn test_header_corruption_detected() {
     let dir = tempdir().unwrap();
     let config = WalConfig {

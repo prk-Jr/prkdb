@@ -5,6 +5,10 @@ on:
     branches: [ main, master ]
   pull_request:
   workflow_dispatch:
+  # Drives nightly-slow-tests. Tests marked #[ignore = "slow: ..."] are excluded from
+  # every PR run, so without a schedule they would never execute at all.
+  schedule:
+    - cron: "0 4 * * *"
 
 env:
   CARGO_TERM_COLOR: always
@@ -36,6 +40,42 @@ jobs:
           echo '```json' >> $GITHUB_STEP_SUMMARY
           cat target/repo-status/repo-status.snapshot.json >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
+
+  ignore-discipline:
+    name: Ignore Discipline
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # A bare #[ignore] is a test that will never run again and nobody will remember
+      # why. Three of the corruption tests were disabled this way and turned out to
+      # pass in 0.7s. Requiring a reason makes the cost of switching a test off
+      # visible at review time. The pattern matches `#[ignore]` exactly, so
+      # `#[ignore = "..."]` passes.
+      - name: Reject bare #[ignore]
+        run: |
+          if grep -rn '#\[ignore\]' crates/ --include='*.rs'; then
+            echo "::error::bare #[ignore] found — use #[ignore = \"reason\"]"
+            exit 1
+          fi
+          echo "every #[ignore] carries a reason"
+
+  nightly-slow-tests:
+    name: Nightly Slow Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # An #[ignore] that means "slow" is a test you have silently deleted unless
+    # something runs it. These take ~2 minutes combined, which is too slow for every
+    # PR but trivial nightly.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p prkdb --test load_tests -- --ignored --test-threads=1
+      - run: cargo test -p prkdb --test chaos_tests chaos_test_memory_pressure -- --ignored --test-threads=1
 
   security-audit:
     name: Security Audit
