@@ -300,7 +300,10 @@ jobs:
   # ═══════════════════════════════════════════════════════════════════════════
   chaos-tests:
     name: "🐵 Chaos Tests"
-    if: github.event_name == 'pull_request'
+    # Runs on pushes to main as well as PRs. Gating only on PRs meant main could sit
+    # broken indefinitely, and the badge advertised results nothing enforced.
+    # Excluded from the nightly schedule, which has its own slow-test job.
+    if: github.event_name != 'schedule'
     needs: [check, test]
     uses: ./.github/workflows/chaos-tests.yml
 

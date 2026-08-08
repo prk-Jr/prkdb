@@ -37,6 +37,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # Every test in raft_chaos_tests builds a TestCluster, which spawns this binary
+      # as a child process and panics with "Binary not found" without it. The workflow
+      # never built it, which is the likeliest reason the step below was marked
+      # continue-on-error: the failure was structural, not a real chaos finding.
+      - name: Build server binary (required by TestCluster)
+        run: cargo build --bin prkdb-server
+
       - name: Run Chaos Monkey Test
         run: |
           echo "🐵 Starting Chaos Monkey Test..."
@@ -46,10 +53,13 @@ jobs:
           RUST_BACKTRACE: 1
         timeout-minutes: 20
 
+      # No continue-on-error. A chaos suite whose result is discarded is not a chaos
+      # suite; the README badge claimed "19 passing" while this step swallowed every
+      # failure. If these are too unstable to gate, mark the specific test
+      # #[ignore = "reason"] so the discipline check keeps it visible.
       - name: Run All Raft Chaos Tests
         run: cargo test --test raft_chaos_tests -- --ignored --nocapture
         timeout-minutes: 20
-        continue-on-error: true
 
       - name: Upload logs on failure
         if: failure()
@@ -118,8 +128,10 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Test Suite | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|------------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Raft Chaos (7 tests) | ${{ needs.raft-chaos-tests.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Jepsen Consistency (6 tests) | ${{ needs.consistency-tests.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Extended Chaos (6 tests) | ${{ needs.consistency-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Raft Chaos | ${{ needs.raft-chaos-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Consistency + Extended Chaos | ${{ needs.consistency-tests.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Total: 19 chaos tests**" >> $GITHUB_STEP_SUMMARY
+          echo "Counts are deliberately not stated here. The previous version claimed" >> $GITHUB_STEP_SUMMARY
+          echo "\"7 / 6 / 6, total 19\" against actual suites of 14 / 13 / 13 — the same" >> $GITHUB_STEP_SUMMARY
+          echo "drift as the README badge that advertised \"19 passing\" while the step" >> $GITHUB_STEP_SUMMARY
+          echo "producing it discarded failures. Read the job logs for real numbers." >> $GITHUB_STEP_SUMMARY

@@ -776,7 +776,7 @@ git commit -m "fix: gate chaos fault injection behind a feature flag"
 - Modify: `.github/workflows/ci.yml:213-217`
 - Modify: `README.md:6`
 
-- [ ] **Step 1: Confirm the tests do not gate today**
+- [x] **Step 1: Confirm the tests do not gate today**
 
 ```bash
 grep -n 'continue-on-error' .github/workflows/chaos-tests.yml
@@ -785,22 +785,22 @@ grep -n "if: github.event_name == 'pull_request'" .github/workflows/ci.yml
 Expected: the "Run All Raft Chaos Tests" step swallows failures, and the whole suite is skipped
 on pushes to `main`.
 
-- [ ] **Step 2: Remove `continue-on-error`**
+- [x] **Step 2: Remove `continue-on-error`**
 
 Delete line 52 of `chaos-tests.yml`.
 
-- [ ] **Step 3: Run chaos on `main` too**
+- [x] **Step 3: Run chaos on `main` too**
 
 Change the `chaos-tests` job condition in `ci.yml` so it runs on `push` to `main` as well as on
 PRs.
 
-- [ ] **Step 4: Fix or quarantine what now fails**
+- [x] **Step 4: Fix or quarantine what now fails**
 
 Removing the swallow will surface real failures. For each: fix it, or mark it
 `#[ignore = "<specific reason and tracking issue>"]`. A bare `#[ignore]` is not acceptable —
 the repo already has 14 of those and they are why the suite proves nothing.
 
-- [ ] **Step 5: Replace the fake badge**
+- [x] **Step 5: Replace the fake badge**
 
 `README.md:6` is `[![Chaos Tests](https://img.shields.io/badge/Chaos%20Tests-19%20passing-blue)]()`
 — a hardcoded string pointing nowhere. Replace with a real workflow-status badge:
@@ -811,7 +811,7 @@ the repo already has 14 of those and they are why the suite proves nothing.
 
 Do the same for the Benchmarks badge on line 5.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add .github/workflows/ README.md

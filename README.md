@@ -2,9 +2,9 @@
 
 **A high-performance, Rust-native event streaming database**
 
-[![Benchmarks](https://img.shields.io/badge/Benchmarks-Raw%20artifacts-blue)]()
-[![Chaos Tests](https://img.shields.io/badge/Chaos%20Tests-19%20passing-blue)]()
-[![Rust](https://img.shields.io/badge/Rust-1.95+-orange)]()
+[![CI](https://github.com/prk-Jr/prkdb/actions/workflows/ci.yml/badge.svg)](https://github.com/prk-Jr/prkdb/actions/workflows/ci.yml)
+[![Chaos Tests](https://github.com/prk-Jr/prkdb/actions/workflows/chaos-tests.yml/badge.svg)](https://github.com/prk-Jr/prkdb/actions/workflows/chaos-tests.yml)
+[![Rust](https://img.shields.io/badge/Rust-1.95+-orange)](https://blog.rust-lang.org/)
 
 Docs: https://prk-jr.github.io/prkdb/
 
