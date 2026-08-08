@@ -140,7 +140,7 @@ fn write_batch(wal: &Arc<MmapParallelWal>, batch: &mut Vec<WriteRequest>) {
         .unwrap_or_else(|_| {
             // No runtime available, create temporary one
             tokio::runtime::Runtime::new()
-                .unwrap()
+                .expect("building a tokio runtime fails only if the OS refuses a thread")
                 .block_on(wal.append_batch(batch.iter().map(|req| req.record.clone()).collect()))
         });
 

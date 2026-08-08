@@ -316,37 +316,55 @@ means they get looked at less.
 |---|---|
 | **Closes** | F-10 |
 | **Effort** | 1 day |
-| **Problem** | 201 `.unwrap()` calls **outside** `#[cfg(test)]` (572 inside, which is fine). Most of the 201 are metrics registration — startup-only and defensible. But 11 are in `prkdb-core/src/wal/write_ahead_log.rs`, 6 in `wal/log_segment.rs`, 7 in `prkdb/src/storage/wal_adapter.rs`, and 3 in `prkdb-storage-segmented/src/lib.rs`. A panic there is a durability event. |
+| **Problem** | 201 `.unwrap()` calls outside `#[cfg(test)]`. Most are metrics registration — startup-only and defensible. 25 sit on durability paths, of which 17 are lock acquisition and the rest are logic invariants. See the correction below: this is smaller and less alarming than an earlier revision claimed. |
 
-> **The three in `prkdb-storage-segmented/src/lib.rs:210-221` are the worst of them**, and were
-> outside this requirement's scope until an independent review looked at the adapter crates:
+> **CORRECTION — an earlier revision of this spec was wrong about these.** It claimed
+> the three `try_into().unwrap()` calls at `prkdb-storage-segmented/src/lib.rs:210-221`
+> were a corrupt-data-to-panic path on WAL recovery, and said the same of
+> `storage/streaming_adapter.rs:152,160`. Read in context on 2026-08-08, all five are
+> **guarded and cannot panic**:
 >
 > ```rust
-> let key_len = u32::from_le_bytes(cursor[1..5].try_into().unwrap()) as usize;
-> let val_len = u32::from_le_bytes(cursor[5..9].try_into().unwrap()) as usize;
-> let crc     = u32::from_le_bytes(cursor[crc_start..crc_start + 4].try_into().unwrap());
+> // segmented/src/lib.rs
+> if cursor.len() < 13 { break; }                       // guards [1..5] and [5..9]
+> if cursor.len() < 13 + key_len + val_len { break; }   // guards the CRC slice
+>
+> // streaming_adapter.rs
+> if data.len() < 8 { return Err(...); }                // guards [0..4]
+> if data.len() < key_end + 4 { return Err(...); }      // guards [key_end..key_end+4]
 > ```
 >
-> These parse length prefixes and a CRC out of bytes read from disk during recovery. On a
-> truncated segment — precisely the condition this code exists to survive — the slice index
-> panics before `try_into` is even reached. It is a corrupt-data-to-panic path in a storage
-> adapter, and it is the exact scenario the three `#[ignore]`d tests in `corruption_tests.rs`
-> were written for. Fix alongside Plan B Task 4 (format versioning), which adds the header these
-> reads should be validating against.
+> Each `unwrap` is on `TryInto<[u8; 4]>` for a slice whose length the preceding check
+> has already established. The conversion is infallible at that point; `.expect()` with
+> a stated invariant would document it better, but there is no bug.
+>
+> **The wider claim was overstated too.** Recounting on 2026-08-08 with doc-comment
+> lines excluded (the earlier count wrongly treated `/// ... .unwrap()` inside doctests
+> as production code), the durability paths hold **25** real production unwraps, and
+> **17 of them are lock acquisition** — `self.active_segment.read().unwrap()`,
+> `self.log_file.lock().unwrap()`. Those only fail if another thread panicked while
+> holding the lock, which is a different failure class from "a panic here loses data".
+>
+> What this means for the requirement: the WAL recovery path is **more defensive than
+> the audit assumed** — bounds-checked, CRC-verified, and returning typed errors. R8 is
+> therefore a hygiene and documentation task, not the durability emergency an earlier
+> revision described. Scope it accordingly.
 
 **Acceptance:**
-1. Zero `.unwrap()` **outside `#[cfg(test)]` modules** in `crates/prkdb-core/src/wal/`,
-   `crates/prkdb/src/storage/`, and `crates/prkdb-storage-{sled,sql,segmented}/src/`. (Raw
-   directory totals are misleading — 82 and 176 for the first two — because the great majority
-   are test-module unwraps and are explicitly out of scope. Production-only totals are ~24 and
-   3 respectively.)
-1b. Recovery paths that read length or checksum fields from disk return a typed error on a short
-   or malformed buffer, and a test feeds them a deliberately truncated segment. `prkdb-core/src/io/`
-   was checked and has zero production unwraps — no work needed there.
-2. `#![deny(clippy::unwrap_used, clippy::expect_used)]` in `prkdb-core/src/lib.rs`, with
-   `#![cfg_attr(test, allow(...))]` for test modules.
-3. Metrics-registration unwraps become `.expect("<invariant>")` stating why they cannot fail. A
-   panic message that explains itself beats a silent conversion.
+1. Lock acquisitions use `.expect("<why this cannot be poisoned>")` rather than bare
+   `.unwrap()`. A panic message that names the invariant is worth more than a silent
+   conversion, and converting `LockResult` to a typed error throughout would be a large
+   refactor for little benefit — a poisoned lock means another thread already panicked.
+2. Infallible conversions guarded by a preceding length check use `.expect()` naming the
+   guard, so a future edit that removes the guard is visibly wrong.
+3. Genuine logic invariants — `segments.keys().last().unwrap()` in
+   `write_ahead_log.rs:87-88`, which assumes at least one segment exists — either return
+   a typed error or `.expect()` the invariant explicitly.
+4. `#![deny(clippy::unwrap_used)]` in `prkdb-core/src/lib.rs`, with
+   `#![cfg_attr(test, allow(...))]` for test modules, so the durability crate cannot
+   regress.
+5. Any counting done for this requirement excludes doc-comment lines. The original count
+   treated `/// ... .unwrap()` inside doctests as production code.
 
 ### R9 — Coverage must be measured before it is claimed
 

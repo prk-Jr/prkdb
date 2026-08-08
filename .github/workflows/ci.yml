@@ -41,6 +41,37 @@ jobs:
           cat target/repo-status/repo-status.snapshot.json >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+      # Floor is the measured baseline (54.34% lines on 2026-08-08), rounded down.
+      # Ratchet it up as coverage improves; never lower it to make a PR pass.
+      #
+      # xtask is excluded because its snapshot determinism test fails under a
+      # concurrent workspace run and takes the whole coverage build down with it.
+      # That is Plan A Task 16b — remove this exclusion once it lands.
+      - name: Measure coverage
+        run: cargo llvm-cov --workspace --exclude xtask --fail-under-lines 54
+      - name: Upload lcov
+        if: always()
+        run: cargo llvm-cov report --lcov --output-path lcov.info
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-lcov-${{ github.run_number }}
+          path: lcov.info
+          if-no-files-found: warn
+
   ignore-discipline:
     name: Ignore Discipline
     runs-on: ubuntu-latest

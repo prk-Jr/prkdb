@@ -88,7 +88,10 @@ impl OffsetIndex {
             position: position as u32,
         };
 
-        let mut file = self.file.lock().unwrap();
+        let mut file = self
+            .file
+            .lock()
+            .expect("RwLock/Mutex is only poisoned if another thread panicked while holding it");
         file.write_all(&entry.to_bytes())?;
         file.sync_all()?;
 

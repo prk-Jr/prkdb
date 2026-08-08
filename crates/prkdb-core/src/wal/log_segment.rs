@@ -108,7 +108,9 @@ impl LogSegment {
 
         // Write to file
         {
-            let mut file = self.log_file.lock().unwrap();
+            let mut file = self.log_file.lock().expect(
+                "RwLock/Mutex is only poisoned if another thread panicked while holding it",
+            );
             file.seek(SeekFrom::Start(position))?;
             file.write_all(&serialized)?;
             file.sync_all()?;
@@ -122,7 +124,9 @@ impl LogSegment {
             .bytes_since_last_index
             .fetch_add(record_size, Ordering::SeqCst);
         if bytes_since + record_size >= self.index_interval_bytes {
-            let mut index = self.index.lock().unwrap();
+            let mut index = self.index.lock().expect(
+                "RwLock/Mutex is only poisoned if another thread panicked while holding it",
+            );
             index.append(offset, position)?;
             self.bytes_since_last_index.store(0, Ordering::SeqCst);
         }
@@ -136,7 +140,10 @@ impl LogSegment {
             return Ok(self.current_offset.load(Ordering::SeqCst) - 1);
         }
 
-        let mut file = self.log_file.lock().unwrap();
+        let mut file = self
+            .log_file
+            .lock()
+            .expect("RwLock/Mutex is only poisoned if another thread panicked while holding it");
         let mut last_offset = 0;
         let mut total_bytes = 0;
 
@@ -166,7 +173,9 @@ impl LogSegment {
             // Check index interval
             let bytes_since = self.bytes_since_last_index.load(Ordering::SeqCst) + total_bytes;
             if bytes_since + record_size >= self.index_interval_bytes {
-                let mut index = self.index.lock().unwrap();
+                let mut index = self.index.lock().expect(
+                    "RwLock/Mutex is only poisoned if another thread panicked while holding it",
+                );
                 // We need to handle the fact that we might be writing multiple index entries
                 // But index.append might fail if we don't handle it right.
                 // For simplicity, let's just update index here.
@@ -208,12 +217,17 @@ impl LogSegment {
 
         // Use index to find position
         let position = {
-            let index = self.index.lock().unwrap();
+            let index = self.index.lock().expect(
+                "RwLock/Mutex is only poisoned if another thread panicked while holding it",
+            );
             index.lookup(offset).unwrap_or(0)
         };
 
         // Read from file
-        let mut file = self.log_file.lock().unwrap();
+        let mut file = self
+            .log_file
+            .lock()
+            .expect("RwLock/Mutex is only poisoned if another thread panicked while holding it");
         file.seek(SeekFrom::Start(position))?;
 
         // Scan forward to find exact offset

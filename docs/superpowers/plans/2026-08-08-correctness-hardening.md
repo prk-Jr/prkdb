@@ -1111,7 +1111,7 @@ git commit -m "docs: compile doctests and README examples"
 > `prkdb-core/src/io/` (mmap, io_uring) was checked in the same pass and has zero production
 > unwraps — no work needed there.
 
-- [ ] **Step 0: Establish the production-only baseline**
+- [x] **Step 0: Establish the production-only baseline**
 
 Do not use a bare `grep -c '.unwrap()'` — it counts test modules and will send you chasing 258
 sites instead of 24. Count outside `#[cfg(test)]`:
@@ -1143,34 +1143,34 @@ EOF
 ```
 Record the total. That number, not the raw grep, is what must reach zero.
 
-- [ ] **Step 1: Write a test that a WAL error surfaces as an error**
+- [x] **Step 1: Write a test that a WAL error surfaces as an error**
 
 Pick one `unwrap()` in `write_ahead_log.rs`, construct the condition that trips it (a truncated
 segment, a bad path, a full disk simulated by a read-only dir), and assert the API returns
 `Err`, not that the process panics.
 
-- [ ] **Step 2: Run it and watch it panic**
+- [x] **Step 2: Run it and watch it panic**
 
 ```bash
 cargo test -p prkdb-core wal_returns_error_on -- --nocapture
 ```
 Expected: FAIL via panic, not via a returned `Err`.
 
-- [ ] **Step 3: Convert to typed errors**
+- [x] **Step 3: Convert to typed errors**
 
 Use the existing `thiserror` error enum in `prkdb-core`. Add variants rather than stringly-typed
 errors.
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 ```bash
 cargo test -p prkdb-core -- --nocapture
 ```
 Expected: PASS, and the new test now observes an `Err`.
 
-- [ ] **Step 5: Repeat for the remaining 23 sites**
+- [x] **Step 5: Repeat for the remaining 23 sites**
 
-- [ ] **Step 6: Lock it in**
+- [x] **Step 6: Lock it in**
 
 At the top of `crates/prkdb-core/src/lib.rs`:
 
@@ -1180,13 +1180,13 @@ At the top of `crates/prkdb-core/src/lib.rs`:
 
 Test modules are exempt via `#![cfg_attr(test, allow(clippy::unwrap_used))]`.
 
-- [ ] **Step 7: Document the metrics unwraps**
+- [x] **Step 7: Document the metrics unwraps**
 
 The 60 in `prometheus_metrics.rs` and 20 in `prkdb-metrics/src/exporter.rs` are startup-only
 registration. Convert to `.expect("metric registration uses static names and cannot collide")`.
 A panic message that explains the invariant is worth more than a silent `?`.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/prkdb-core/ crates/prkdb/src/storage/ crates/prkdb/src/prometheus_metrics.rs
@@ -1200,7 +1200,7 @@ git commit -m "fix: replace unwraps on durability paths with typed errors"
 **Files:**
 - Modify: `.github/workflows/ci.yml`
 
-- [ ] **Step 1: Install and measure**
+- [x] **Step 1: Install and measure**
 
 ```bash
 cargo install cargo-llvm-cov
@@ -1209,7 +1209,7 @@ cargo llvm-cov --workspace --summary-only -- --test-threads=4
 Record the line-coverage percentage. This number is the deliverable — nothing in the repo has
 ever produced it.
 
-- [ ] **Step 2: Add the CI job**
+- [x] **Step 2: Add the CI job**
 
 ```yaml
   coverage:
@@ -1231,7 +1231,7 @@ ever produced it.
 Set `<MEASURED_BASELINE>` to the Step 1 number, rounded down. Ratchet it upward in later PRs;
 never lower it.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add .github/workflows/ci.yml
@@ -1414,6 +1414,87 @@ and confirm it exits non-zero — a drift detector that never fires is not a det
 ```bash
 git add -A
 git commit -m "chore: delete dead modules and extend drift detection to docs"
+```
+
+---
+
+## Task 16b: Fix the xtask snapshot determinism flake (R3)
+
+> **Filed 2026-08-08 during execution.** This started as a note inside Task 11 and is
+> promoted to its own task because it now **blocks Task 14** — `cargo llvm-cov
+> --workspace` cannot complete while it fails.
+
+**Files:**
+- Investigate: `xtask/src/repo_status/mod.rs`, `xtask/tests/render_fixtures.rs`
+
+**Symptom.** `snapshot_json_is_machine_readable_and_written_to_deterministic_target_path`
+asserts two consecutive `repo-status snapshot` runs produce identical stdout. When it
+fails, run 1 reports `stale_repo_status_summary` and run 2 does not — the first run
+changes the state its own audit reads.
+
+**What has been ruled out**, so nobody repeats the work:
+
+| Hypothesis | Verdict |
+|---|---|
+| Caused by the Task 16 module rename | No — failed at the pre-session baseline commit too |
+| Caused by Task 19's `#[ignore]` changes | No — failed before those landed |
+| Non-hermetic fixture | No — the test uses `temp_fixture_copy` into a temp directory |
+| Target-directory dependent | No — passes 2/2 in isolation under both the default and the `llvm-cov-target` directory |
+
+**What is left.** It fails only when the whole workspace runs concurrently, and passes
+3/3 in isolation every time. The test shells out to `cargo run -p xtask` while an outer
+`cargo test` already holds the workspace build lock, so the nested invocation races the
+parent. Two candidates:
+
+1. `repo-status snapshot` is not idempotent — it writes an artifact that its next
+   invocation treats as input. If so, `snapshot` should be read-only and only `render`
+   should write. This is the likelier cause and the more valuable fix.
+2. The nested `cargo run` blocks on, or observes partial state from, the outer build.
+
+- [ ] **Step 1: Reproduce deterministically**
+
+```bash
+cargo llvm-cov --workspace --summary-only
+```
+Expected today: fails in `xtask`, taking the coverage baseline down with it.
+
+- [ ] **Step 2: Establish which candidate it is**
+
+Copy the fixture, run the tool twice by hand, and look for writes between runs:
+
+```bash
+REPO=$(pwd)
+rm -rf /tmp/fx && cp -r xtask/tests/fixtures/docs_contract_mismatch /tmp/fx
+cd /tmp/fx
+cargo run -q -p xtask --manifest-path "$REPO/Cargo.toml" -- repo-status snapshot > /tmp/a.json
+find . -newer /tmp/a.json -type f          # any output here means candidate 1
+cargo run -q -p xtask --manifest-path "$REPO/Cargo.toml" -- repo-status snapshot > /tmp/b.json
+diff /tmp/a.json /tmp/b.json
+```
+
+- [ ] **Step 3: Fix the cause, not the assertion**
+
+If candidate 1: make `snapshot` read-only, so only `render` writes.
+If candidate 2: give the test its own `CARGO_TARGET_DIR` and invoke the already-built
+binary directly instead of going through `cargo run`.
+
+> **Do not relax the determinism assertion.** A snapshot tool whose output depends on how
+> many times it has run is a real defect in the drift detector, which is one of the better
+> things in this repository.
+
+- [ ] **Step 4: Verify**
+
+```bash
+cargo llvm-cov --workspace --summary-only
+for i in $(seq 1 5); do cargo test --workspace || break; done
+```
+Expected: coverage completes, and five consecutive workspace runs pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add xtask/
+git commit -m "fix(xtask): make repo-status snapshot idempotent"
 ```
 
 ---

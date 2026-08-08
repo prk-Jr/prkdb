@@ -61,7 +61,7 @@ impl BatchHeader {
             base_offset,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("system clock is before the Unix epoch")
                 .as_millis() as u64,
         }
     }
@@ -149,7 +149,11 @@ impl StreamingRecord {
             ));
         }
 
-        let key_len = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+        let key_len = u32::from_le_bytes(
+            data[0..4]
+                .try_into()
+                .expect("the `data.len() < 8` guard above makes this 4 bytes"),
+        ) as usize;
         let key_end = 4 + key_len;
 
         if data.len() < key_end + 4 {
@@ -157,7 +161,11 @@ impl StreamingRecord {
         }
 
         let key = data[4..key_end].to_vec();
-        let value_len = u32::from_le_bytes(data[key_end..key_end + 4].try_into().unwrap()) as usize;
+        let value_len = u32::from_le_bytes(
+            data[key_end..key_end + 4]
+                .try_into()
+                .expect("the `data.len() < key_end + 4` guard above makes this 4 bytes"),
+        ) as usize;
         let value_end = key_end + 4 + value_len;
 
         if data.len() < value_end {

@@ -84,8 +84,15 @@ impl WriteAheadLog {
         }
 
         // Last segment is active
-        let active_offset = *segments.keys().last().unwrap();
-        let active_segment = Arc::clone(segments.get(&active_offset).unwrap());
+        let active_offset = *segments
+            .keys()
+            .last()
+            .expect("recovery always leaves at least one segment in the map");
+        let active_segment = Arc::clone(
+            segments
+                .get(&active_offset)
+                .expect("active_offset was just read from this same map"),
+        );
 
         Ok(Self {
             config,
@@ -99,7 +106,10 @@ impl WriteAheadLog {
         // Note: Compression should be applied when creating the record
         // via LogRecord::new_with_compression() before calling append()
 
-        let active = self.active_segment.read().unwrap();
+        let active = self
+            .active_segment
+            .read()
+            .expect("RwLock/Mutex is only poisoned if another thread panicked while holding it");
 
         // Check if need to roll segment
         if active.size() >= self.config.segment_bytes {
@@ -107,7 +117,9 @@ impl WriteAheadLog {
             self.roll_segment()?;
 
             // Get new active segment
-            let active = self.active_segment.read().unwrap();
+            let active = self.active_segment.read().expect(
+                "RwLock/Mutex is only poisoned if another thread panicked while holding it",
+            );
             active.append(record)
         } else {
             active.append(record)
@@ -130,7 +142,10 @@ impl WriteAheadLog {
             ));
         }
 
-        let active = self.active_segment.read().unwrap();
+        let active = self
+            .active_segment
+            .read()
+            .expect("RwLock/Mutex is only poisoned if another thread panicked while holding it");
 
         // Check if need to roll segment (simplified check based on first record)
         // In a real implementation, we might need to split the batch across segments
@@ -139,7 +154,9 @@ impl WriteAheadLog {
             self.roll_segment()?;
 
             // Get new active segment
-            let active = self.active_segment.read().unwrap();
+            let active = self.active_segment.read().expect(
+                "RwLock/Mutex is only poisoned if another thread panicked while holding it",
+            );
             active.append_batch(records)
         } else {
             active.append_batch(records)
@@ -148,7 +165,10 @@ impl WriteAheadLog {
 
     /// Read a record by offset
     pub fn read(&self, offset: u64) -> io::Result<LogRecord> {
-        let segments = self.segments.read().unwrap();
+        let segments = self
+            .segments
+            .read()
+            .expect("RwLock/Mutex is only poisoned if another thread panicked while holding it");
 
         // Find segment containing this offset
         let mut segment_offset = 0;
@@ -169,8 +189,14 @@ impl WriteAheadLog {
 
     /// Roll to a new active segment
     fn roll_segment(&self) -> io::Result<()> {
-        let mut active_lock = self.active_segment.write().unwrap();
-        let mut segments_lock = self.segments.write().unwrap();
+        let mut active_lock = self
+            .active_segment
+            .write()
+            .expect("RwLock/Mutex is only poisoned if another thread panicked while holding it");
+        let mut segments_lock = self
+            .segments
+            .write()
+            .expect("RwLock/Mutex is only poisoned if another thread panicked while holding it");
 
         let next_offset = active_lock.next_offset();
 
@@ -193,12 +219,18 @@ impl WriteAheadLog {
 
     /// Get the next offset that will be assigned
     pub fn next_offset(&self) -> u64 {
-        self.active_segment.read().unwrap().next_offset()
+        self.active_segment
+            .read()
+            .expect("RwLock/Mutex is only poisoned if another thread panicked while holding it")
+            .next_offset()
     }
 
     /// Get number of segments
     pub fn segment_count(&self) -> usize {
-        self.segments.read().unwrap().len()
+        self.segments
+            .read()
+            .expect("RwLock/Mutex is only poisoned if another thread panicked while holding it")
+            .len()
     }
 
     /// Get compression config (useful for creating records)
