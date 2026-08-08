@@ -1078,6 +1078,146 @@ git commit -m "docs: compile doctests and README examples"
 
 ---
 
+## Task 12b: Convert the remaining 63 ignored doc fences (R5)
+
+> **Filed 2026-08-08 during execution of Task 12.** Task 12 established and verified the
+> conversion templates on four representative examples; this task applies them to the
+> rest. Split out because it is bulk mechanical work — 56 of the 63 sit in a single file
+> — and because a half-finished conversion leaves docs worse than either end state.
+
+**Starting point:** `cargo test --doc -p prkdb` reports **7 passed, 63 ignored**
+(was 3 passed, 67 ignored before Task 12).
+
+| File | Remaining |
+|---|---|
+| `indexed_storage.rs` | 56 |
+| `cache.rs`, `transaction.rs`, `ttl.rs`, `collection_handle.rs` | 1 each |
+| `storage/{collection_partitioned_adapter,partitioned_streaming_adapter,streaming_adapter}.rs` | 1 each |
+
+### Three templates, each verified against the compiler
+
+**A — no setup needed** (`rate_limit.rs`, verified passing):
+
+```rust
+/// ```rust
+/// use prkdb::rate_limit::RateLimiter;
+///
+/// let limiter = RateLimiter::per_second(100); // 100 ops/sec
+/// ```
+```
+
+**B — needs a `PrkDb` and a `Collection`** (`collection_handle.rs`, verified passing):
+
+```rust
+/// ```rust
+/// use prkdb::prelude::*;
+/// use serde::{Deserialize, Serialize};
+///
+/// #[derive(Collection, Serialize, Deserialize, Clone, Debug)]
+/// struct MyItem {
+///     #[id]
+///     id: u64,
+/// }
+///
+/// let db = PrkDb::builder()
+///     .with_storage(prkdb::storage::InMemoryAdapter::new())
+///     .register_collection::<MyItem>()
+///     .build()
+///     .unwrap();
+/// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+/// // ... the example ...
+/// # });
+/// ```
+```
+
+**C — needs an `IndexedStorage`** (`indexed_storage.rs`, verified passing). This is the
+one that unlocks the other 55:
+
+```rust
+/// ```rust
+/// use prkdb::indexed_storage::IndexedStorage;
+/// use prkdb::prelude::*;
+/// use prkdb::storage::InMemoryAdapter;
+/// use serde::{Deserialize, Serialize};
+/// use std::sync::Arc;
+///
+/// #[derive(Collection, Serialize, Deserialize, Clone, Debug)]
+/// struct User {
+///     #[id]
+///     id: String,
+///     #[index]
+///     age: u32,
+///     created_at: u64,
+/// }
+///
+/// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+/// let db = IndexedStorage::new(Arc::new(InMemoryAdapter::new()));
+/// // ... the example ...
+/// # });
+/// ```
+```
+
+### Three traps the compiler found, so nobody rediscovers them
+
+1. **`Collection` requires `Debug`.** `#[derive(Collection, Serialize, Deserialize, Clone)]`
+   compiles on its own but fails inside the machinery. Always add `Debug`.
+2. **`with_batching` panics without a Tokio reactor** — "there is no reactor running". The
+   documented example would have panicked for anyone who copied it outside async. Wrap
+   anything that spawns in `block_on`.
+3. **`?` does not work in a doctest body** unless the block returns a `Result`. Use
+   `.unwrap()`; these are examples, not production code.
+
+- [ ] **Step 1: Confirm the baseline**
+
+```bash
+cargo test --doc -p prkdb 2>&1 | grep 'test result:'
+```
+Expected: `7 passed; 63 ignored`.
+
+- [ ] **Step 2: Convert the seven scattered fences first**
+
+One each in `cache.rs`, `transaction.rs`, `ttl.rs`, `collection_handle.rs`, and the three
+`storage/*` adapters. They exercise all three templates and are a cheap confidence check
+before the bulk.
+
+- [ ] **Step 3: Convert `indexed_storage.rs` in batches**
+
+Fifty-six fences, nearly all template C with a per-method body. Work in batches of ten and
+run `cargo test --doc -p prkdb indexed_storage` after each — a batch that compiles as a
+whole but fails as a unit is much harder to bisect.
+
+> Where an example genuinely cannot compile — pseudo-code, shell, output samples — retag it
+> ```` ```text ````, never ```` ```ignore ````. `text` says "this is not Rust"; `ignore`
+> says "nobody will ever check this", which is how all 67 got here.
+
+- [ ] **Step 4: Compile the README too**
+
+Add to `crates/prkdb/src/lib.rs`:
+
+```rust
+#![doc = include_str!("../../../README.md")]
+```
+
+The README holds 38 Rust fences that nothing has ever compiled. Expect fallout; retag the
+shell and output blocks as `text`.
+
+- [ ] **Step 5: Verify**
+
+```bash
+cargo test --doc -p prkdb 2>&1 | grep 'test result:'
+./scripts/plan_status.sh | grep doctests
+```
+Expected: ≥60 passing, 0 failed, and the tracker's doctest check green.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add crates/prkdb/src README.md
+git commit -m "docs: compile the remaining doc examples"
+```
+
+---
+
 ## Task 13: Remove unwraps from durability paths (R8)
 
 > **Scope is production code only.** Raw directory totals are misleading: `prkdb-core/src/wal/`

@@ -1547,12 +1547,34 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Start building a query
     ///
     /// # Example
-    /// ```ignore
-    /// let users = db.query::<User>()
+    /// ```rust
+    /// use prkdb::indexed_storage::IndexedStorage;
+    /// use prkdb::prelude::*;
+    /// use prkdb::storage::InMemoryAdapter;
+    /// use serde::{Deserialize, Serialize};
+    /// use std::sync::Arc;
+    ///
+    /// #[derive(Collection, Serialize, Deserialize, Clone, Debug)]
+    /// struct User {
+    ///     #[id]
+    ///     id: String,
+    ///     #[index]
+    ///     age: u32,
+    ///     created_at: u64,
+    /// }
+    ///
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// let db = IndexedStorage::new(Arc::new(InMemoryAdapter::new()));
+    ///
+    /// let users = db
+    ///     .query::<User>()
     ///     .filter(|u| u.age > 18)
     ///     .order_by(|u| u.created_at)
     ///     .take(10)
-    ///     .collect().await?;
+    ///     .collect()
+    ///     .await
+    ///     .unwrap();
+    /// # });
     /// ```
     pub fn query<T>(&self) -> QueryBuilder<'_, S, T>
     where

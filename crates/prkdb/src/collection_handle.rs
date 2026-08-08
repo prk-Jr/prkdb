@@ -127,11 +127,31 @@ where
     /// when `config.max_batch_size` is reached.
     ///
     /// # Example
-    /// ```ignore
+    /// ```rust
+    /// use prkdb::prelude::*;
     /// use prkdb_core::batch_config::BatchConfig;
+    /// use serde::{Deserialize, Serialize};
     ///
-    /// let handle = db.collection::<MyItem>()
+    /// #[derive(Collection, Serialize, Deserialize, Clone, Debug)]
+    /// struct MyItem {
+    ///     #[id]
+    ///     id: u64,
+    /// }
+    ///
+    /// let db = PrkDb::builder()
+    ///     .with_storage(prkdb::storage::InMemoryAdapter::new())
+    ///     .register_collection::<MyItem>()
+    ///     .build()
+    ///     .unwrap();
+    ///
+    /// // `with_batching` spawns a background flush task, so it must be called from
+    /// // inside a Tokio runtime — calling it outside one panics with
+    /// // "there is no reactor running".
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// let handle = db
+    ///     .collection::<MyItem>()
     ///     .with_batching(BatchConfig::throughput_optimized());
+    /// # });
     /// ```
     pub fn with_batching(mut self, config: prkdb_core::batch_config::BatchConfig) -> Self {
         // Create executor that calls put_batch
