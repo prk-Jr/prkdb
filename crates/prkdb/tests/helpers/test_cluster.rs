@@ -184,6 +184,9 @@ impl TestCluster {
             // than relying on a default. A test cluster that silently served without
             // authorization is what let S-01 live as long as it did.
             .env("PRKDB_ALLOW_ANONYMOUS", "1")
+            // Likewise explicit: these nodes are a real multi-node cluster, so
+            // prkdb-server refuses to start without peer authentication unless told.
+            .env("PRKDB_ALLOW_UNAUTHENTICATED_PEERS", "1")
             .env("RUST_LOG", "prkdb::raft=debug,info")
             .env("CHAOS_CONFIG_PATH", chaos_config_path)
             .stdout(Stdio::from(log_file.try_clone()?))

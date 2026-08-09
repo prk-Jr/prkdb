@@ -96,6 +96,12 @@ pub enum Commands {
         /// readable and writable by anyone who can reach the port.
         #[arg(long)]
         allow_anonymous: bool,
+        /// Serve a multi-node cluster without authenticating Raft peers.
+        ///
+        /// Development only. Raft RPCs can rewrite the log, so a node with peers refuses
+        /// to start without --tls-client-ca or PRKDB_CLUSTER_SECRET unless this is passed.
+        #[arg(long)]
+        allow_unauthenticated_peers: bool,
         /// Shed requests above this rate, per second. Probe endpoints are exempt.
         #[arg(long)]
         rate_limit: Option<u64>,
@@ -201,6 +207,7 @@ async fn main() -> anyhow::Result<()> {
             host,
             prometheus,
             allow_anonymous,
+            allow_unauthenticated_peers,
             rate_limit,
             tls_cert,
             tls_key,
@@ -256,6 +263,7 @@ async fn main() -> anyhow::Result<()> {
                 host: host.clone(),
                 prometheus: *prometheus,
                 allow_anonymous: *allow_anonymous,
+                allow_unauthenticated_peers: *allow_unauthenticated_peers,
                 rate_limit: *rate_limit,
                 tls_cert: tls_cert.clone(),
                 tls_key: tls_key.clone(),

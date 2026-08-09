@@ -169,6 +169,12 @@ check "gRPC authz interceptor exists"                "R12" test -f crates/prkdb/
 check "gRPC authz layer registered on the server"    "R12" grep -q 'AuthzGrpcLayer' crates/prkdb-cli/src/commands/serve.rs
 check "gRPC authz enforced end to end"               "R12" test -f crates/prkdb/tests/grpc_authz.rs
 check "Raft peer authentication exists"              "R12" test -f crates/prkdb/src/raft/peer_auth.rs
+# Same trap as the client-API layer: the policy existed and was unit-tested for a while
+# with nothing installing it. Check both binaries register it, and that something drives
+# it over a socket.
+check "peer auth registered in prkdb-cli serve"      "R12" grep -q 'with_interceptor' crates/prkdb-cli/src/commands/serve.rs
+check "peer auth registered in prkdb-server"         "R12" grep -q 'with_interceptor' crates/prkdb/src/bin/prkdb-server.rs
+check "peer auth enforced end to end"                "R12" test -f crates/prkdb/tests/peer_authz.rs
 check "credential compares are constant-time"        "R12" grep -rq 'ConstantTimeEq\|ct_eq' crates/prkdb/src crates/prkdb-cli/src
 
 group "Plan B · Tasks 3-7 — Production primitives"

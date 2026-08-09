@@ -55,6 +55,14 @@ pub struct ServeArgs {
     #[arg(long)]
     pub allow_anonymous: bool,
 
+    /// Serve a multi-node cluster without authenticating Raft peers. Development only.
+    ///
+    /// Without this, a node with peers refuses to start unless --tls-client-ca or
+    /// PRKDB_CLUSTER_SECRET is set. Raft RPCs can rewrite the log, so leaving them open
+    /// is a decision that should be stated rather than defaulted into.
+    #[arg(long)]
+    pub allow_unauthenticated_peers: bool,
+
     /// Shed requests above this rate, per second. Probe endpoints are exempt.
     #[arg(long)]
     pub rate_limit: Option<u64>,
@@ -232,6 +240,36 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     } else {
         crate::authz_layer::Authz::enabled(store.clone())
     };
+
+    // Raft peer authentication. `RaftService` carries AppendEntries, RequestVote and
+    // ReadIndex; a caller who can reach the port and is not challenged can rewrite the
+    // log or forge the ReadIndex round-trip that linearizable follower reads depend on.
+    //
+    // Refusing to start applies only to a node that actually has peers. A single-node
+    // instance has no cluster to protect, and making certificates a prerequisite for
+    // `prkdb-cli serve` on a laptop would push people toward the opt-out by default.
+    let peer_identity = prkdb::raft::peer_auth::PeerIdentity::from_config(
+        args.tls_client_ca.is_some(),
+        std::env::var("PRKDB_CLUSTER_SECRET").ok(),
+    );
+    if peer_identity.is_disabled() && !args.peers.is_empty() && !args.allow_unauthenticated_peers {
+        anyhow::bail!(
+            "This node has {} configured peer(s) but no Raft peer authentication. Pass \
+             --tls-client-ca to require client certificates, set PRKDB_CLUSTER_SECRET, or \
+             pass --allow-unauthenticated-peers to serve a cluster whose Raft RPCs anyone \
+             who can reach the port may call.",
+            args.peers.len()
+        );
+    }
+    if peer_identity.is_disabled() {
+        eprintln!(
+            "⚠️  Raft peer authentication is disabled; any caller reaching this port can \
+             issue AppendEntries."
+        );
+    } else {
+        println!("🔒 Raft peer authentication: {}", peer_identity.describe());
+    }
+    let peer_auth = prkdb::raft::peer_auth::PeerAuthInterceptor::new(peer_identity);
 
     // The gRPC surface takes the same principals. `None` means anonymous, matching the
     // HTTP layer, so the two cannot disagree about whether the node is open.
@@ -474,10 +512,19 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
             let mut router = builder.add_service(PrkDbServiceServer::new(service));
 
             // Register Raft service for all partitions (multiplexed on same port)
+            //
+            // Peer authentication is applied here rather than in AuthzGrpcLayer, which
+            // deliberately passes RaftService through: peers present client certificates,
+            // not bearer credentials. A tonic Interceptor is sufficient here — unlike the
+            // client API, the policy is the same for all five RPCs, so it does not need
+            // the method name the interceptor cannot see.
             if let Some(pm) = &db.partition_manager {
                 println!("✨ Multiplexing Raft Service (All Partitions) on main port");
                 let raft_service = RaftServiceImpl::new(pm.clone());
-                router = router.add_service(RaftServiceServer::new(raft_service));
+                router = router.add_service(RaftServiceServer::with_interceptor(
+                    raft_service,
+                    peer_auth.clone(),
+                ));
             }
 
             if let Err(e) = router.serve(grpc_addr).await {

@@ -57,9 +57,11 @@ Both are more severe than anything the audit found. **S-01 was understated in re
 
 ### S-01 — Both data planes are unauthenticated
 
-> **Status: fixed 2026-08-09.** HTTP was closed by `prkdb-cli`'s `authz_layer`; gRPC by
-> `AuthzGrpcLayer`, registered in `serve.rs` and proven end to end by
-> `crates/prkdb/tests/grpc_authz.rs`.
+> **Status: fixed 2026-08-09.** HTTP was closed by `prkdb-cli`'s `authz_layer`; the gRPC
+> client API by `AuthzGrpcLayer`, registered in both binaries and proven end to end by
+> `crates/prkdb/tests/grpc_authz.rs`; and `RaftService` by `PeerAuthInterceptor`, likewise
+> registered in both binaries and proven by `crates/prkdb/tests/peer_authz.rs`. All three
+> surfaces are now closed.
 >
 > The gRPC half spent a while in the most dangerous state available to a security
 > control: **implemented, unit-tested, and not installed on anything.** The policy object

@@ -88,6 +88,14 @@ not enforced by anything, and several tests reported green while testing nothing
   merging its per-collection WALs into one archive keyed `collection:id` so the existing
   restore routes each entry back without needing to know about collections. The
   round-trip test is no longer `#[ignore]`d.
+- **Raft peer RPCs are now authenticated** (S-01, final part). `RaftService` carries
+  `AppendEntries`, `RequestVote` and `ReadIndex` and is exempt from the client-API layer by
+  design, because peers present certificates rather than bearer credentials — which meant
+  nothing checked it at all. `PeerAuthInterceptor` is registered on both binaries: mTLS
+  when a cluster CA is configured, a shared secret otherwise. A node **with peers refuses
+  to start** unauthenticated unless `--allow-unauthenticated-peers` is passed; a
+  single-node instance does not, since requiring certificates to run `serve` locally would
+  make the opt-out the default habit.
 - **The gRPC data plane is now authorized** (S-01). The policy was implemented and
   unit-tested but *never registered on the server*, so `fetch_segment` continued to stream
   raw WAL segments to any caller. `AuthzGrpcLayer` is a tower layer — a tonic `Interceptor`
@@ -134,9 +142,6 @@ not enforced by anything, and several tests reported green while testing nothing
 
 ### Known issues
 
-- **`RaftService` is unauthenticated.** Peers are exempt from the client-API layer by
-  design and `PeerAuthInterceptor` is written but not installed, so a caller who can reach
-  the port can still forge `AppendEntries`. Tracked as Task 2b Step 4.
 - The README's 37 Rust examples are still compiled by nothing. Including it as crate docs
   was attempted and reverted: most are two-line fragments needing hidden `# ` setup, which
   renders literally on GitHub where the README is actually read. Closing this properly

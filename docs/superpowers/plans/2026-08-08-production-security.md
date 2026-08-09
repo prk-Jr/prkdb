@@ -741,14 +741,16 @@ git commit -m "feat: authorize the gRPC data plane and authenticate Raft peers b
 
 ## Task 2b: Register the gRPC authorization layer on the server (R12)
 
-> **Filed 2026-08-09 during execution of Task 2. Client-API authorization landed
-> 2026-08-09; peer authentication (Step 4) has not.**
+> **Filed 2026-08-09 during execution of Task 2. Complete 2026-08-09.**
 >
 > `AuthzGrpcLayer` is registered on both binaries and `crates/prkdb/tests/grpc_authz.rs`
-> drives a real tonic server to prove `fetch_segment` now refuses uncredentialed callers.
-> **`RaftService` is still unauthenticated** — peers are exempted from the client-API
-> layer by design, and `PeerAuthInterceptor` is written but not installed, so anyone who
-> can reach the port can still forge `AppendEntries`. That is Step 4 and it remains open.
+> proves `fetch_segment` refuses uncredentialed callers. `PeerAuthInterceptor` is now
+> registered on `RaftService` in both binaries too, with `crates/prkdb/tests/peer_authz.rs`
+> proving a forged `AppendEntries` is rejected.
+>
+> Both halves spent time in the same dangerous state — implemented, unit-tested, installed
+> nowhere. `scripts/plan_status.sh` therefore checks registration in each binary as a
+> separate item from the module's existence.
 
 **Files:**
 - Create: `crates/prkdb/src/raft/authz_layer.rs` (tower `Layer` + `Service`)
@@ -808,8 +810,20 @@ vehicle; until it lands, use `TestCluster` and build the binary first.
 A `Layer<S>` producing a `Service` whose `call` runs `check_http` and short-circuits with
 `Status::into_http()` on rejection. Apply to `PrkDbServiceServer` only.
 
-- [ ] **Step 4: Apply peer auth to `RaftService`** — NOT DONE. `peer_auth.rs` exists
-      and is unit-tested; nothing installs it, so `RaftService` accepts any caller.
+- [x] **Step 4: Apply peer auth to `RaftService`** — registered on both binaries via
+      `RaftServiceServer::with_interceptor`. A tonic `Interceptor` suffices here: the
+      policy is uniform across all five RPCs, so it does not need the method name an
+      interceptor cannot see.
+
+      `PeerIdentity::from_config` picks mTLS when a cluster CA is configured, the shared
+      secret otherwise, and `Disabled` only when neither is. **A node with peers refuses
+      to start while disabled** unless `--allow-unauthenticated-peers` (or
+      `PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1`) is passed; a single node does not, because
+      making certificates a prerequisite for `serve` on a laptop pushes people toward the
+      opt-out by default.
+
+      `raft::server::start_raft_server` is deliberately left unguarded and now says so: it
+      is a test/example listener, and no shipped binary uses it.
 
 Separate policy, same shape: `PeerAuthInterceptor` reading `peer_certs()`. Requires
 `--tls-client-ca`, so it depends on Task 3, which has landed.

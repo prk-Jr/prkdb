@@ -154,12 +154,42 @@ async fn main() -> Result<()> {
     // Create Raft service for multiplexed Raft traffic
     // We must register this service on the SAME server/port as the client API
     // because we are using port multiplexing (one port for everything)
+    // Raft peer authentication. RaftService carries AppendEntries, RequestVote and
+    // ReadIndex: an unchallenged caller who can reach this port can rewrite the log.
+    //
+    // A node is only forced to configure it when it actually has peers — `nodes` holds
+    // every member of the cluster including this one, so more than one means a cluster.
+    let peer_identity = prkdb::raft::peer_auth::PeerIdentity::from_config(
+        env::var("PRKDB_TLS_CLIENT_CA").is_ok(),
+        env::var("PRKDB_CLUSTER_SECRET").ok(),
+    );
+    if peer_identity.is_disabled() && nodes.len() > 1 {
+        let allowed = env::var("PRKDB_ALLOW_UNAUTHENTICATED_PEERS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if !allowed {
+            anyhow::bail!(
+                "CLUSTER_NODES lists {} nodes but no Raft peer authentication is                  configured. Set PRKDB_TLS_CLIENT_CA or PRKDB_CLUSTER_SECRET, or set                  PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1 to serve a cluster whose Raft RPCs                  anyone who can reach the port may call.",
+                nodes.len()
+            );
+        }
+        tracing::warn!(
+            "Raft peer authentication is disabled; any caller reaching this port can issue              AppendEntries."
+        );
+    } else if !peer_identity.is_disabled() {
+        info!("Raft peer authentication: {}", peer_identity.describe());
+    }
+    let peer_auth = prkdb::raft::peer_auth::PeerAuthInterceptor::new(peer_identity);
+
     let raft_service_opt = if let Some(pm) = &db_arc.partition_manager {
         use prkdb::raft::rpc::raft_service_server::RaftServiceServer;
         use prkdb::raft::service::RaftServiceImpl;
 
         info!("Registering multiplexed Raft service");
-        Some(RaftServiceServer::new(RaftServiceImpl::new(pm.clone())))
+        Some(RaftServiceServer::with_interceptor(
+            RaftServiceImpl::new(pm.clone()),
+            peer_auth,
+        ))
     } else {
         None
     };

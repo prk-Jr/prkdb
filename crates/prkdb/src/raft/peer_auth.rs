@@ -36,6 +36,39 @@ pub enum PeerIdentity {
     Disabled,
 }
 
+impl PeerIdentity {
+    /// Pick the strongest policy the node is configured for.
+    ///
+    /// mTLS wins when a cluster CA is configured, because it is the only option that also
+    /// authenticates the *server* to the peer and needs no shared material on disk. The
+    /// cluster secret is the fallback for deployments that cannot issue certificates.
+    ///
+    /// Returning `Disabled` is not a decision this function is entitled to make quietly —
+    /// callers are expected to refuse to serve a multi-node cluster in that state, and
+    /// [`Self::is_disabled`] exists so they can check without matching.
+    pub fn from_config(client_ca_configured: bool, cluster_secret: Option<String>) -> Self {
+        match (client_ca_configured, cluster_secret) {
+            (true, _) => PeerIdentity::MutualTls,
+            (false, Some(secret)) if !secret.is_empty() => PeerIdentity::ClusterSecret(secret),
+            _ => PeerIdentity::Disabled,
+        }
+    }
+
+    pub fn is_disabled(&self) -> bool {
+        matches!(self, PeerIdentity::Disabled)
+    }
+
+    /// Short description for startup logs, so an operator can see which policy is active
+    /// without inferring it from which flags they passed.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            PeerIdentity::MutualTls => "mutual TLS (client certificate signed by the cluster CA)",
+            PeerIdentity::ClusterSecret(_) => "shared cluster secret",
+            PeerIdentity::Disabled => "disabled",
+        }
+    }
+}
+
 /// Authenticates the five `RaftService` RPCs.
 #[derive(Clone)]
 pub struct PeerAuthInterceptor {
