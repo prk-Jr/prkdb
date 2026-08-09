@@ -1,7 +1,7 @@
 # Correctness & Production Readiness — Design Spec
 
 **Date:** 2026-08-08
-**Revision:** 6 (four review passes, decisions applied; see §0 and §9)
+**Revision:** 7 (four review passes, decisions applied, execution findings; see §0 and §9)
 **Baseline commit:** c839ef2 (main)
 **Toolchain:** rustc 1.95.0
 **Extends:** `2026-03-27-production-hardening-round-2.md`
@@ -147,6 +147,85 @@ binary a user would run.
 > `.gitignore:12` all along. The keys are local dev fixtures that were never tracked. No
 > remediation and no history rewrite is required — this was a phantom finding, and the claim is
 > corrected here rather than quietly deleted.
+
+### S-03 — Serializable transactions lose writes under contention
+
+**Found 2026-08-09, during Task 4 verification. Severity: high. Not yet diagnosed.**
+
+`test_bank_transfer_invariant` — the test Task 6 rewired to use real storage and real
+`Serializable` transactions — failed once during a full workspace run:
+
+```
+assertion `left == right` failed: Invariant violated during worker 4 iteration 20
+  left: Failed { reason: "total balance mismatch: expected 10000, storage holds 9983" }
+ right: Passed
+```
+
+**17 units of money vanished.** Ten accounts seeded with 1000 each; eight workers moving
+amounts between them inside `Serializable` transactions; the total read back from storage
+was 9983.
+
+#### Why this is a real finding and not a flaky test
+
+The invariant is not timing-dependent. Every transfer either commits both legs or commits
+neither, so the total is conserved under *any* interleaving. A rejected transfer — for
+insufficient funds or a write conflict — leaves both balances untouched, and the test
+ignores those results deliberately. There is no schedule of correct transactions that
+produces 9983.
+
+This is what the bank test exists to detect. Before Task 6 it operated on an in-process
+`HashMap` and could only ever have caught a bug in `std::sync::Mutex`.
+
+#### What is known
+
+| | |
+|---|---|
+| Reproduces in isolation | **No** — 3/3 pass, and 5/5 under artificial CPU load |
+| Reproduces under `cargo test --workspace` | **Once in two runs.** The second full run was 586 passed / 0 failed |
+| Caused by the WAL header change (Task 4)? | **No.** That change was uncommitted at the time and does not touch the transaction path; the failure is in conflict detection or commit, above the segment layer |
+| Present before Task 6? | **Unknowable.** The test did not touch storage until Task 6, so this could have existed since the transaction code was written |
+
+#### Two candidate causes
+
+1. **A gap in `Serializable` conflict detection.** Two transfers touching the same account
+   both pass validation, both commit, and the second overwrites the first's balance with a
+   value computed from a stale read. The classic lost update, and the amount lost (17)
+   being smaller than any single transfer amount (1-50) is consistent with a partial
+   overwrite rather than a dropped transaction.
+2. **`commit()` returning `Ok` without durably applying both writes.** The transfer writes
+   both legs before committing, so a commit that persists one and not the other would lose
+   exactly the difference.
+
+Candidate 1 is likelier and the more serious of the two.
+
+#### Reproducing it
+
+Rare under normal load. To force it:
+
+```bash
+# Raise contention: fewer accounts, more workers, more transfers per worker.
+# jepsen_consistency_tests.rs test_bank_transfer_invariant currently uses
+# 10 accounts / 8 workers / 25 transfers.
+for i in $(seq 1 50); do
+  cargo test -p prkdb --test jepsen_consistency_tests test_bank_transfer_invariant \
+    || { echo "reproduced on run $i"; break; }
+done
+```
+
+Then instrument `transfer` to log `(from, to, amount, commit result)` and replay the log
+against the final balances to find which transfer's effect went missing.
+
+#### What must not happen
+
+Do not relax the invariant, widen the tolerance, or mark the test `#[ignore]`. A database
+that loses committed writes under contention has a defect in the one property it exists to
+provide. If it turns out the test is wrong, the fix is to prove that — not to stop asking.
+
+#### Relationship to the rest of the plan
+
+This is the first genuine correctness bug the hardening work has surfaced, as opposed to a
+gap in evidence. Spec §6 anticipated the case for R1.2 (the linearizable register) and the
+same rule applies here: stop, capture, do not weaken.
 
 ---
 
