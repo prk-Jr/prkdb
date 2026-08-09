@@ -3,10 +3,20 @@
 //! Written to diagnose S-03, where `test_bank_transfer_invariant` reported 17 units of
 //! money missing from a total that every individual transaction preserves.
 //!
-//! `WalStorageAdapter::put_batch_impl` appends both records to the WAL, then inserts them
-//! into the in-memory index **one key at a time**, then updates the cache. `get()` takes
-//! no transaction barrier. So between the first and second index insert, a concurrent
-//! reader can observe one half of a two-key write.
+//! `WalStorageAdapter::put_batch_impl` appended both records to the WAL as a unit, then
+//! inserted them into the in-memory index **one key at a time**. Between the first and
+//! second insert, a concurrent reader observed one half of a two-key write.
+//!
+//! # What was fixed, and what was not
+//!
+//! Publication is now atomic: the index and cache updates for a batch happen under
+//! `publish_barrier`, and `snapshot_get_many` takes that barrier for the duration of a
+//! multi-key read. A reader using it can no longer see half a commit.
+//!
+//! Two separate `get()` calls are still not a snapshot, and cannot be made into one —
+//! there is no barrier spanning two independent calls. That is a property of the API the
+//! caller chose, not a defect, and the second test below pins it down so nobody mistakes
+//! it for one later.
 
 use prkdb::storage::WalStorageAdapter;
 use prkdb::transaction::{IsolationLevel, TransactionConfig, TransactionExt};
@@ -51,7 +61,12 @@ async fn a_concurrent_reader_never_sees_half_a_batch() {
 
     let stop = Arc::new(AtomicBool::new(false));
     let torn = Arc::new(AtomicU64::new(0));
+    let torn_snapshot = Arc::new(AtomicU64::new(0));
+    let snapshot_reads = Arc::new(AtomicU64::new(0));
 
+    // Two observers race the same writer: one reads with two independent `get`s, the
+    // other with the snapshot primitive. Running them against one workload is what makes
+    // the comparison meaningful — a difference cannot be blamed on differing timing.
     let observer = tokio::spawn({
         let storage = storage.clone();
         let stop = stop.clone();
@@ -62,6 +77,27 @@ async fn a_concurrent_reader_never_sees_half_a_batch() {
                 let b = balance(storage.get(b"b").await.unwrap());
                 if a + b != 200 {
                     torn.fetch_add(1, Ordering::Relaxed);
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+    });
+
+    let snapshot_observer = tokio::spawn({
+        let storage = storage.clone();
+        let stop = stop.clone();
+        let torn_snapshot = torn_snapshot.clone();
+        let snapshot_reads = snapshot_reads.clone();
+        async move {
+            while !stop.load(Ordering::Relaxed) {
+                let values = storage
+                    .snapshot_get_many(vec![b"a".to_vec(), b"b".to_vec()])
+                    .await
+                    .unwrap();
+                let total = balance(values[0].clone()) + balance(values[1].clone());
+                snapshot_reads.fetch_add(1, Ordering::Relaxed);
+                if total != 200 {
+                    torn_snapshot.fetch_add(1, Ordering::Relaxed);
                 }
                 tokio::task::yield_now().await;
             }
@@ -96,6 +132,7 @@ async fn a_concurrent_reader_never_sees_half_a_batch() {
 
     stop.store(true, Ordering::Relaxed);
     observer.await.unwrap();
+    snapshot_observer.await.unwrap();
 
     let torn_reads = torn.load(Ordering::Relaxed);
     let final_sum =
@@ -108,23 +145,33 @@ async fn a_concurrent_reader_never_sees_half_a_batch() {
          not a torn read"
     );
 
-    // Documented behaviour, not an aspiration. put_batch_impl applies keys to the index
-    // one at a time and get() takes no transaction barrier, so a two-key commit is
-    // visible in halves to anyone reading outside a transaction. Measured at roughly half
-    // of all observations under this workload.
-    //
-    // If this ever reaches zero, snapshot reads have been added and the assertion below
-    // should become `assert_eq!(torn_reads, 0)` — a strictly better guarantee.
+    // The guarantee this test now exists to defend: a multi-key snapshot read never
+    // observes a commit in halves.
+    let reads = snapshot_reads.load(Ordering::Relaxed);
     assert!(
-        torn_reads > 0,
-        "expected a non-transactional reader to observe torn state; seeing none means \
-         either the workload stopped exercising concurrency or snapshot reads were added. \
-         Check which before deleting this test."
+        reads > 0,
+        "the snapshot observer never ran; the assertion below would be vacuous"
+    );
+    assert_eq!(
+        torn_snapshot.load(Ordering::Relaxed),
+        0,
+        "snapshot_get_many observed a torn batch across {reads} reads; batch publication \
+         is supposed to be atomic under publish_barrier"
     );
 
-    // The point of S-03, settled: a reader outside a transaction sees torn state, but a
-    // reader inside a Serializable transaction does not, because a clean commit certifies
-    // that nothing it read changed while it was reading.
+    // And the limitation that remains, asserted so it stays honest rather than drifting
+    // into an unstated assumption: two independent `get` calls are not a snapshot. No
+    // barrier spans them, so a batch committing between the two is visible to the second
+    // and not the first. Callers who need atomicity must ask for it.
+    assert!(
+        torn_reads > 0,
+        "two independent get() calls observed no torn state across this workload. That is \
+         not a guarantee this design provides — if it has become one, something now spans \
+         separate calls and this test should be rewritten to assert it deliberately."
+    );
+
+    // A Serializable transaction remains the stronger tool: it certifies that nothing it
+    // read changed while it was reading, which a snapshot read does not attempt.
     let config = TransactionConfig {
         isolation_level: IsolationLevel::Serializable,
         ..Default::default()

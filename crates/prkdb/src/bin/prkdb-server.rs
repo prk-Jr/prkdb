@@ -181,8 +181,47 @@ async fn main() -> Result<()> {
     let data_addr = resolve_grpc_bind_address(listen_addr, grpc_port);
     info!("Starting gRPC data service on {}", data_addr);
 
+    // Authorization for the client-facing service. PRKDB_BOOTSTRAP_TOKEN mints the first
+    // admin principal, matching `prkdb-cli serve`; PRKDB_ALLOW_ANONYMOUS is the explicit
+    // opt-out. Leaving this binary unguarded while `prkdb-cli` enforced would reopen S-01
+    // for anyone deploying prkdb-server, which is the image the compose files run.
+    let authz_store = {
+        let store = prkdb::authz::PrincipalStore::new();
+        if let Ok(token) = env::var("PRKDB_BOOTSTRAP_TOKEN") {
+            if !token.is_empty() {
+                store
+                    .bootstrap_admin(&token)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                info!("Bootstrapped admin principal from PRKDB_BOOTSTRAP_TOKEN");
+            }
+        }
+        if store.is_empty() {
+            let allowed = env::var("PRKDB_ALLOW_ANONYMOUS")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if !allowed {
+                anyhow::bail!(
+                    "No principals are configured. Set PRKDB_BOOTSTRAP_TOKEN to create an \
+                     admin principal, or set PRKDB_ALLOW_ANONYMOUS=1 to serve without \
+                     authorization (development only)."
+                );
+            }
+            tracing::warn!(
+                "serving with PRKDB_ALLOW_ANONYMOUS. Every collection is readable and \
+                 writable by anyone who can reach this port."
+            );
+            None
+        } else {
+            Some(store)
+        }
+    };
+
     //  Run gRPC server until shutdown
-    let mut router = Server::builder().add_service(grpc_service);
+    let mut router = Server::builder()
+        .layer(prkdb::raft::authz_interceptor::AuthzGrpcLayer::new(
+            authz_store,
+        ))
+        .add_service(grpc_service);
 
     if let Some(raft_service) = raft_service_opt {
         router = router.add_service(raft_service);

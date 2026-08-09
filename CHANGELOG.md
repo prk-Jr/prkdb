@@ -50,6 +50,39 @@ not enforced by anything, and several tests reported green while testing nothing
 
 ### Fixed
 
+- **The database lost every write when it was reopened.** Three independent defects, each
+  sufficient on its own, and each masking the others:
+  - `MmapLogSegment::create` opens with `truncate(true)`, and the path
+    `PrkDb::builder().with_data_dir()` reaches called `create` unconditionally — so
+    opening a data directory zeroed its write-ahead log. A correct `open` existed and was
+    never called. Replaced with `open_or_create` on every database-open path.
+  - `WalStorageAdapter::new_with_config` never rebuilt the in-memory index. `open` and
+    `open_async` both did; the constructor a user actually reaches did not, so even a
+    recovered log stayed invisible.
+  - `CollectionPartitionedAdapter` never discovered collections already on disk, because
+    collections open lazily. A freshly opened database reported an empty collection set.
+
+  No test had ever reopened a data directory and read from it. `crates/prkdb/tests/durability.rs`
+  now does, including that a write after a reopen appends rather than overwriting.
+- **`prkdb backup` silently backed up nothing** (S-04). It failed outright with
+  "take_snapshot not supported" on any database opened with `--database`, and once that
+  was fixed it produced a valid archive containing zero entries because of the collection
+  discovery bug above. `CollectionPartitionedAdapter` now implements `take_snapshot`,
+  merging its per-collection WALs into one archive keyed `collection:id` so the existing
+  restore routes each entry back without needing to know about collections. The
+  round-trip test is no longer `#[ignore]`d.
+- **The gRPC data plane is now authorized** (S-01). The policy was implemented and
+  unit-tested but *never registered on the server*, so `fetch_segment` continued to stream
+  raw WAL segments to any caller. `AuthzGrpcLayer` is a tower layer — a tonic `Interceptor`
+  receives `Request<()>` and cannot see the method name, so it could not distinguish
+  `Health` from `FetchSegment`. Peer `RaftService` traffic is excluded and still
+  authenticates by mTLS. `scripts/plan_status.sh` checks the registration separately from
+  the file's existence, since "exists but unregistered" is exactly the state this sat in.
+- **Batched writes are now published atomically** (S-03). A batch was appended to the WAL
+  as a unit but inserted into the index one key at a time, so a concurrent reader could
+  observe half a commit. Publication now happens under a dedicated barrier, and
+  `snapshot_get_many` holds it for the duration of a multi-key read. Nothing was ever lost;
+  this was always a read-visibility property, not a durability one.
 - **The linearizability checker could not fail.** It asked only whether *some* write of the
   same value had started before the read ended — a condition any earlier write satisfies.
   Replaced with Wing & Gong linear search, guarded by a meta-test that injects the
@@ -73,17 +106,15 @@ not enforced by anything, and several tests reported green while testing nothing
 - Toolchain pinned via `rust-toolchain.toml`; MSRV declared as 1.95. The README previously
   claimed 1.70+, which nothing verified.
 - README badges point at real workflow status rather than hardcoded strings.
+- `Cargo.lock` is now tracked. The workspace ships binaries, and both CI and the release
+  workflow pass `--locked`, which cannot succeed without a committed lockfile.
 
 ### Known issues
 
-- **S-01 (partial)** — the gRPC data plane is still unauthenticated. `fetch_segment`
-  streams raw WAL segments to any caller. The authorization policy is implemented and
-  tested; registering it on the running server is tracked as Task 2b.
-- **S-03** — no snapshot read outside a transaction. A client reading several keys with
-  `get()` can observe a multi-key commit half-applied. Committed state is always correct.
-- **S-04** — `prkdb backup` fails on any database opened with `--database`.
-  `CollectionPartitionedAdapter` does not implement `take_snapshot`.
 - 63 documentation examples are still `#[ignore]`d and do not compile.
+- Two keys read with two separate `get()` calls are still not a snapshot; use
+  `snapshot_get_many` or a transaction. This is a property of the API the caller picks,
+  not a defect, and `batch_atomicity.rs` asserts it so it stays explicit.
 
 ## [0.6.0]
 

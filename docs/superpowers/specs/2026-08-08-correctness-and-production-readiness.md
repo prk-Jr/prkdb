@@ -57,6 +57,18 @@ Both are more severe than anything the audit found. **S-01 was understated in re
 
 ### S-01 — Both data planes are unauthenticated
 
+> **Status: fixed 2026-08-09.** HTTP was closed by `prkdb-cli`'s `authz_layer`; gRPC by
+> `AuthzGrpcLayer`, registered in `serve.rs` and proven end to end by
+> `crates/prkdb/tests/grpc_authz.rs`.
+>
+> The gRPC half spent a while in the most dangerous state available to a security
+> control: **implemented, unit-tested, and not installed on anything.** The policy object
+> was correct and its tests passed; `fetch_segment` went on streaming raw WAL to
+> uncredentialed callers the entire time. Nothing that tested the policy could detect
+> this. `scripts/plan_status.sh` therefore checks the registration in `serve.rs`
+> separately from the module's existence, and the new tests drive a real tonic server
+> over a real socket rather than calling the policy directly.
+
 PrkDB exposes its data through two transports. Neither authenticates.
 
 **gRPC** (`crates/prkdb/src/raft/grpc_service.rs`). `PrkDbService` declares 25 RPCs. Fifteen
@@ -153,6 +165,17 @@ binary a user would run.
 **Found 2026-08-09. Diagnosed and resolved the same day. Severity: medium — a read
 property, not a durability one.**
 
+> **Status: fixed 2026-08-09.** A batch is now published into the index and cache under
+> `publish_barrier`, so it becomes visible as a unit, and `snapshot_get_many` holds that
+> barrier for a whole multi-key read. `batch_atomicity.rs` asserts zero torn reads through
+> that path; removing the barrier reproduces roughly 7,000 torn reads over the same
+> workload, so the assertion is load-bearing rather than decorative.
+>
+> **What was deliberately not fixed:** two separate `get()` calls are still not a
+> snapshot. No barrier can span two independent calls without MVCC, and pretending
+> otherwise would be worse than stating it. The test asserts that this is still true, so
+> the limitation cannot quietly become an assumption.
+
 > **This entry originally claimed "Serializable transactions lose writes under
 > contention" and called it the most serious finding of the hardening work. That was
 > wrong, and the correction matters more than the original claim.** No writes are lost.
@@ -233,6 +256,19 @@ pointed at real storage it surfaced a genuine, documented limitation.
 **Found 2026-08-09 by the first backup round-trip test ever run. Severity: high — the
 backup command does not work in its normal configuration.**
 
+> **Status: fixed 2026-08-09, and it was concealing something much worse.**
+> `CollectionPartitionedAdapter` now implements `take_snapshot`, merging its
+> per-collection WALs into a single archive keyed `collection:id` — option 1 below, as
+> recommended. Restore needed no change: it re-`put`s each entry and the storage layer
+> routes by key prefix.
+>
+> Fixing the missing `take_snapshot` made backup *succeed* while producing an archive of
+> **zero entries**. Chasing that produced [S-05](#s-05--the-database-lost-every-write-when-it-was-reopened),
+> which is the real headline: reopening a data directory destroyed it. S-04 was a symptom.
+> The lesson is the one this whole document keeps repeating — the round-trip test found in
+> one run what code review had missed for the life of the repository, because it was the
+> first thing to ever *use* the output.
+
 ```
 $ prkdb-cli --database ./data backup --output snapshot.bin
 Error: Snapshot failed: Storage error: Failed to access underlying store:
@@ -286,6 +322,79 @@ passes today and is not ignored.
 Do not close this by making `backup` require a single-collection database, or by having the
 wrapper snapshot only its first adapter. A backup that silently captures part of the
 database is worse than one that refuses.
+
+---
+
+### S-05 — The database lost every write when it was reopened
+
+**Found 2026-08-09 while fixing S-04. Fixed the same day. Severity: critical — PrkDB did
+not persist data across a restart, which is the one property a database cannot be without.**
+
+```
+$ # write, close, reopen, read
+DIAG same-handle read: Some("one")
+DIAG reopen read:      None
+```
+
+Verified present at `c839ef2`, the commit this hardening work branched from, so it is
+long-standing and not a regression introduced by it.
+
+#### Three independent causes, each sufficient alone
+
+1. **Opening the database truncated its log.** `MmapLogSegment::create` opens with
+   `.truncate(true)`. `WalStorageAdapter::new_with_config` called
+   `MmapParallelWal::create` unconditionally, and that is the constructor
+   `PrkDb::builder().with_data_dir()` reaches. A correct non-destructive `open` existed
+   alongside it and was reachable only from `WalStorageAdapter::open`/`open_async`, which
+   nothing on the user-facing path calls.
+2. **The index was never rebuilt.** `open` and `open_async` both call
+   `rebuild_index_async`; `new_with_config` did not. So even after (1) was fixed and the
+   log survived, every key in it remained invisible — `get_all_keys()` returned 0 against
+   a segment that had just recovered 96 bytes of valid records.
+3. **Collections on disk were never discovered.** `CollectionPartitionedAdapter` creates
+   collections lazily on first key access and never enumerated `collections/`, so a
+   freshly opened database reported an empty collection set. This is what made `backup`
+   produce a valid, well-formed, empty archive.
+
+They masked each other. Fixing the truncation changed no observable behaviour until the
+index rebuild landed, and neither was visible through `backup` until collection discovery
+was added. A partial fix would have looked like no fix at all — which is the most likely
+reason this survived so long.
+
+#### Why nothing caught it
+
+Every test in the suite built a database in a fresh `tempdir`, used it through a single
+handle, and dropped it. **No test had ever reopened a data directory and read from it.**
+The property was not so much untested as unconsidered: with a fresh directory every time,
+case (1) is unreachable, (2) has nothing to rebuild, and (3) has nothing to discover. The
+suite was large and green and could not have failed.
+
+#### Fix
+
+`open_or_create` at both the segment and parallel-WAL levels, used by every path that
+means "open a database" — including `sharded_wal_adapter` and `streaming_adapter`, which
+had the same defect. `new_with_config` and `new_with_replication` now rebuild the index as
+the other constructors always did, and recovered records restore `max_offset` so a
+snapshot taken straight after a reopen does not claim offset 0.
+`CollectionPartitionedAdapter::load_all_collections` reads the directory.
+
+`create` keeps its truncating semantics: benchmarks legitimately want a fresh segment.
+The bug was never that `create` truncates — it is that opening a database called it.
+
+#### Regression tests
+
+`crates/prkdb/tests/durability.rs` covers values surviving a reopen across several
+collections, repeated reopens not discarding data, deletes staying deleted, writes after a
+reopen appending rather than overwriting, and snapshotting a reopened database without
+touching a key first. `scripts/plan_status.sh` additionally asserts that no
+database-open path calls `MmapParallelWal::create`.
+
+#### What must not happen
+
+Do not "fix" a future recurrence by having the open path recreate missing segments and
+call it recovery. The distinction that matters is between a segment that is absent and one
+that is present but unread; conflating them is how a truncating `create` came to be the
+default open in the first place.
 
 ---
 

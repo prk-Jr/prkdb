@@ -239,9 +239,10 @@ impl StreamingStorageAdapter {
             ..WalConfig::default()
         };
 
-        let wal = MmapParallelWal::create(wal_config, config.segment_count)
+        // open_or_create: `create` truncates, which would discard the stream on open.
+        let wal = MmapParallelWal::open_or_create(wal_config, config.segment_count)
             .await
-            .map_err(|e| StorageError::Internal(format!("Failed to create WAL: {}", e)))?;
+            .map_err(|e| StorageError::Internal(format!("Failed to open WAL: {}", e)))?;
 
         let metrics = Arc::new(StorageMetrics::new());
 

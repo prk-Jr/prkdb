@@ -1,5 +1,11 @@
 #!/bin/bash
 
+
+# Local development cluster: serve without authorization, stated explicitly.
+# prkdb-server refuses to start unconfigured so that a production deployment
+# cannot end up anonymous by accident (spec S-01).
+export PRKDB_ALLOW_ANONYMOUS=1
+
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color

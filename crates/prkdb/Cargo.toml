@@ -45,6 +45,10 @@ lz4 = { workspace = true }                                             # Compres
 axum = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
 pin-project = "1.1"
+# Layer/Service traits for the gRPC authorization layer. These are the same crates
+# tonic itself builds on, so the traits unify with tonic's tower stack.
+tower-layer = "0.3"
+tower-service = "0.3"
 minicbor = { version = "0.20", features = ["derive", "std"] }
 tonic = { workspace = true, features = ["tls", "tls-roots"] }
 prost = { workspace = true }

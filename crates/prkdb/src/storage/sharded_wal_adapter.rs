@@ -27,9 +27,11 @@ impl WalShard {
                 // CRITICAL FIX: Use 1 segment per shard (not config.segment_count=4)
                 // This prevents 16 shards × 4 segments = 64 total segments overhead
                 // Now: 16 shards × 1 segment = 16 total segments (manageable!)
-                MmapParallelWal::create(config.clone(), 1)
+                // open_or_create: `create` truncates, which would wipe each shard's log
+                // every time the adapter is opened.
+                MmapParallelWal::open_or_create(config.clone(), 1)
                     .await
-                    .map_err(|e| StorageError::Internal(format!("WAL creation failed: {}", e)))
+                    .map_err(|e| StorageError::Internal(format!("WAL open failed: {}", e)))
             })
         })?;
 

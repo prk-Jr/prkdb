@@ -9,12 +9,15 @@
 //! - `get_schema` and `check_compatibility`, whose siblings `register_schema` and
 //!   `list_schemas` *are* gated, which is what marks this as oversight rather than design.
 //!
-//! # Status: decision logic complete, server wiring outstanding
+//! # Status: closed
 //!
-//! `check` and `check_http` are implemented and tested. Registering the layer on the
-//! running server is the remaining step, tracked as Task 2b in the production-security
-//! plan. Until that lands the gRPC surface is still open — the HTTP surface is already
-//! closed by `prkdb-cli`'s `authz_layer`.
+//! [`AuthzGrpcLayer`] is registered on the server in `prkdb-cli`'s `serve` command, and
+//! `crates/prkdb/tests/grpc_authz.rs` drives a real tonic server to prove it.
+//!
+//! This was worth stating explicitly because for a while the policy below was implemented
+//! and unit-tested while **nothing installed it** — a state indistinguishable from working
+//! if you only read the tests for this file. `scripts/plan_status.sh` now checks the
+//! registration separately from the file's existence.
 //!
 //! # Why metadata rather than a message field
 //!
@@ -128,6 +131,84 @@ impl ApiAuthzInterceptor {
             .map(|s| s.to_string());
 
         self.check(&method, credential.as_deref())
+    }
+}
+
+/// Path prefix of the client-facing service.
+///
+/// Both services share the `raft` proto package, so the service name is what separates
+/// them: `/raft.PrkDbService/Put` versus `/raft.RaftService/AppendEntries`.
+const CLIENT_SERVICE_PREFIX: &str = "/raft.PrkDbService/";
+
+/// Registers [`ApiAuthzInterceptor`] on a tonic server.
+///
+/// # Why this only guards `PrkDbService`
+///
+/// `RaftService` is multiplexed onto the same port, and peers authenticate with mTLS
+/// client certificates rather than bearer credentials (see `peer_auth`). Applying the
+/// credential check to peer traffic would send every `AppendEntries` through the
+/// `_ => Admin` fallback with no credential attached, and the cluster would stop electing
+/// leaders. Requests outside the client service pass through untouched.
+#[derive(Clone)]
+pub struct AuthzGrpcLayer {
+    interceptor: ApiAuthzInterceptor,
+}
+
+impl AuthzGrpcLayer {
+    pub fn new(store: Option<PrincipalStore>) -> Self {
+        Self {
+            interceptor: ApiAuthzInterceptor::new(store),
+        }
+    }
+}
+
+impl<S> tower_layer::Layer<S> for AuthzGrpcLayer {
+    type Service = AuthzGrpcService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        AuthzGrpcService {
+            inner,
+            interceptor: self.interceptor.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct AuthzGrpcService<S> {
+    inner: S,
+    interceptor: ApiAuthzInterceptor,
+}
+
+impl<S, B> tower_service::Service<http::Request<B>> for AuthzGrpcService<S>
+where
+    S: tower_service::Service<http::Request<B>, Response = http::Response<tonic::body::BoxBody>>,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future =
+        futures::future::Either<S::Future, std::future::Ready<Result<S::Response, S::Error>>>;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: http::Request<B>) -> Self::Future {
+        if !req.uri().path().starts_with(CLIENT_SERVICE_PREFIX) {
+            return futures::future::Either::Left(self.inner.call(req));
+        }
+
+        match self.interceptor.check_http(&req) {
+            Ok(()) => futures::future::Either::Left(self.inner.call(req)),
+            // Rejection is returned as a gRPC status response rather than a transport
+            // error, so clients see `unauthenticated`/`permission_denied` instead of a
+            // dropped connection.
+            Err(status) => {
+                futures::future::Either::Right(std::future::ready(Ok(status.into_http())))
+            }
+        }
     }
 }
 

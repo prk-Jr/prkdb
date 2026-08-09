@@ -233,6 +233,14 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         crate::authz_layer::Authz::enabled(store.clone())
     };
 
+    // The gRPC surface takes the same principals. `None` means anonymous, matching the
+    // HTTP layer, so the two cannot disagree about whether the node is open.
+    let grpc_authz_store = if store.is_empty() {
+        None
+    } else {
+        Some(store.clone())
+    };
+
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
     let node_id_label = args.id.to_string();
 
@@ -439,7 +447,13 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
             .with_public_address(advertised_grpc_address)
             .with_advertised_node_addresses(advertised_node_addresses);
 
-            let mut builder = Server::builder();
+            // Authorization runs as a tower layer rather than a tonic interceptor: an
+            // interceptor sees Request<()> and cannot read the method name, so it could
+            // not tell `Health` from `FetchSegment`. This closes spec S-01 on the gRPC
+            // side — `fetch_segment` streams raw WAL segments and required no credential.
+            let mut builder = Server::builder().layer(
+                prkdb::raft::authz_interceptor::AuthzGrpcLayer::new(grpc_authz_store),
+            );
             if let Some(t) = &grpc_tls {
                 match t.tonic_config() {
                     Ok(cfg) => match builder.tls_config(cfg) {

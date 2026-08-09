@@ -74,6 +74,13 @@ no_hardcoded_ports() {
   none_in_code '127\.0\.0\.1:[0-9]\{4,5\}' 'crates/prkdb/tests/'
 }
 
+# The backup round-trip was #[ignore]d against S-04 for as long as backup was broken.
+# Match the attribute only: the module doc explains the history and says "#[ignore]d",
+# which must not read as the tests still being disabled.
+no_ignored_backup_tests() {
+  ! grep -q '^[[:space:]]*#\[ignore' crates/prkdb-cli/tests/backup_restore.rs 2>/dev/null
+}
+
 # Doc examples fenced with ```ignore never compile, so they cannot catch API drift.
 # The pattern must allow leading whitespace: anchoring at ^/// matched 2 of 61 real
 # occurrences and would have reported this green while 59 remained.
@@ -154,6 +161,11 @@ group "Plan B · Tasks 0-2 — Authorization"
 check "authz model module exists"                    "R12" test -d crates/prkdb/src/authz
 check "HTTP authorization layer wired"               "R12" grep -q 'authorize' crates/prkdb-cli/src/commands/serve.rs
 check "gRPC authz interceptor exists"                "R12" test -f crates/prkdb/src/raft/authz_interceptor.rs
+# Existing-but-unregistered is exactly the state S-01 sat in: the policy was implemented
+# and unit-tested while the server it was meant to guard never installed it. The file
+# existing proves nothing, so check the wiring separately.
+check "gRPC authz layer registered on the server"    "R12" grep -q 'AuthzGrpcLayer' crates/prkdb-cli/src/commands/serve.rs
+check "gRPC authz enforced end to end"               "R12" test -f crates/prkdb/tests/grpc_authz.rs
 check "Raft peer authentication exists"              "R12" test -f crates/prkdb/src/raft/peer_auth.rs
 check "credential compares are constant-time"        "R12" grep -rq 'ConstantTimeEq\|ct_eq' crates/prkdb/src crates/prkdb-cli/src
 
@@ -162,6 +174,9 @@ check "TLS reachable from a shipped binary"          "R13" grep -rq 'tls_cert\|t
 check "WAL segments carry a format version"            "—" grep -rq 'FORMAT_VERSION\|PRKDB_WAL_MAGIC' crates/prkdb-core/src/wal/
 check "backup archive carries a checksum manifest"     "—" grep -q 'checksum\|manifest' crates/prkdb-cli/src/commands/backup.rs
 check "backup/restore round-trip test"                 "—" test -f crates/prkdb-cli/tests/backup_restore.rs
+check "backup round-trip is not ignored"               "—" no_ignored_backup_tests
+check "reopen-durability regression test"              "—" test -f crates/prkdb/tests/durability.rs
+check "database open never truncates the WAL"          "—" none_in_code 'MmapParallelWal::create' crates/prkdb/src/storage/
 check "readiness endpoint distinct from liveness"      "—" grep -q 'readyz' crates/prkdb-cli/src/commands/serve.rs
 check "rate limiter wired into the server"             "—" grep -rq 'RateLimiter' crates/prkdb-cli/src
 check "CHANGELOG present"                              "—" test -f CHANGELOG.md

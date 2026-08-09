@@ -3,7 +3,10 @@ use dashmap::DashMap;
 use prkdb_core::wal::WalConfig;
 use prkdb_metrics::storage::StorageMetrics;
 use prkdb_types::error::StorageError;
+use prkdb_types::snapshot::{CompressionType, SnapshotHeader};
 use prkdb_types::storage::StorageAdapter;
+
+use super::snapshot::SnapshotWriter;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -180,6 +183,47 @@ impl CollectionPartitionedAdapter {
             .insert(collection_name.to_string(), Arc::new(StorageMetrics::new()));
 
         adapter
+    }
+
+    /// Names of every collection that exists on disk, whether or not it has been opened
+    /// in this process.
+    ///
+    /// Collections are created lazily on first access, so after a restart the in-memory
+    /// map is empty even though `collections/` is full. Anything that operates on the
+    /// whole database — a backup, most obviously — has to consult the directory rather
+    /// than the map, or it silently sees nothing.
+    fn collection_names_on_disk(&self) -> Vec<String> {
+        let dir = self.base_dir.join("collections");
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+
+        // A collection created in this process may not have been flushed to a directory
+        // yet, so union rather than replace.
+        for entry in self.collections.iter() {
+            if !names.contains(entry.key()) {
+                names.push(entry.key().clone());
+            }
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Materialise an adapter for every collection on disk.
+    ///
+    /// Returns the full set, so callers that need to touch all data can work from it.
+    pub async fn load_all_collections(&self) -> Vec<(String, Arc<WalStorageAdapter>)> {
+        let mut loaded = Vec::new();
+        for name in self.collection_names_on_disk() {
+            let adapter = self.get_or_create_collection_async(&name).await;
+            loaded.push((name, adapter));
+        }
+        loaded
     }
 
     /// Parse a key into (collection_name, actual_key)
@@ -450,6 +494,98 @@ impl StorageAdapter for CollectionPartitionedAdapter {
         // Just do the delete, ignore outbox for now
         let (collection, actual_key) = self.parse_collection_key(key)?;
         self.delete_from_collection(&collection, &actual_key).await
+    }
+
+    /// Snapshot every collection into a single archive.
+    ///
+    /// Without this the trait default refuses with "take_snapshot not supported", which is
+    /// what `prkdb backup` did for every database opened with `--database` — this adapter
+    /// is what `PrkDb::builder().with_data_dir()` constructs. See S-04.
+    ///
+    /// # One archive, not one per collection
+    ///
+    /// Data is spread across one `WalStorageAdapter` per collection, so a snapshot has to
+    /// merge N sources. Entries are written under their **full `collection:key` form**,
+    /// which is what `get`/`put` take at this layer. Restore therefore needs no knowledge
+    /// of collections at all: it replays each entry through the public `put`, and the
+    /// normal routing in `parse_collection_key` puts it back where it came from.
+    ///
+    /// The alternative — an archive per collection — was rejected because it makes a
+    /// partial restore silently possible.
+    ///
+    /// # Consistency
+    ///
+    /// The read is not atomic across collections: a write landing mid-snapshot may or may
+    /// not be captured, and `max_offset` is the maximum over adapters rather than a single
+    /// consistent cut. The single-adapter implementation has the same property. It is
+    /// sound for `prkdb backup`, which opens the data directory offline with no other
+    /// writer. Do not treat the result as a consistent cut of a live cluster.
+    async fn take_snapshot(
+        &self,
+        path: PathBuf,
+        compression: CompressionType,
+    ) -> Result<u64, StorageError> {
+        // Read from disk, not from the in-memory map: collections open lazily, so on a
+        // freshly opened database the map is empty and a snapshot built from it would
+        // succeed while containing nothing.
+        let collections = self.load_all_collections().await;
+
+        let mut max_offset = 0u64;
+        let mut planned: Vec<(String, Arc<WalStorageAdapter>, Vec<Vec<u8>>)> =
+            Vec::with_capacity(collections.len());
+        let mut count = 0u64;
+        for (name, adapter) in collections {
+            max_offset = max_offset.max(adapter.max_offset());
+            let keys = adapter.get_all_keys();
+            count += keys.len() as u64;
+            planned.push((name, adapter, keys));
+        }
+
+        info!(
+            "Starting merged snapshot: {} collections, {} keys, max_offset={}",
+            planned.len(),
+            count,
+            max_offset
+        );
+
+        // Same producer/consumer split as the single-adapter path: file I/O runs on a
+        // blocking thread so compression does not stall the runtime.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<(Vec<u8>, Vec<u8>)>(1024);
+        let write_task = tokio::task::spawn_blocking(move || -> Result<(), StorageError> {
+            let header = SnapshotHeader::new(max_offset, count, compression);
+            let mut writer = SnapshotWriter::new(&path, header)?;
+            while let Some((key, val)) = rx.blocking_recv() {
+                writer.write_entry(&key, &val)?;
+            }
+            writer.finish()?;
+            Ok(())
+        });
+
+        for (name, adapter, keys) in planned {
+            for key in keys {
+                // A key deleted between planning and reading simply drops out; the header
+                // count is then an upper bound, which the reader tolerates.
+                if let Some(val) = adapter.get(&key).await? {
+                    let mut full_key = Vec::with_capacity(name.len() + 1 + key.len());
+                    full_key.extend_from_slice(name.as_bytes());
+                    full_key.push(b':');
+                    full_key.extend_from_slice(&key);
+
+                    if tx.send((full_key, val)).await.is_err() {
+                        return Err(StorageError::Internal(
+                            "Snapshot writer task failed".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+        drop(tx);
+
+        write_task
+            .await
+            .map_err(|e| StorageError::Internal(format!("Snapshot writer panicked: {}", e)))??;
+
+        Ok(max_offset)
     }
 }
 

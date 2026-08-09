@@ -180,6 +180,10 @@ impl TestCluster {
             .env("STORAGE_PATH", node.data_dir.to_str().unwrap())
             .env("GRPC_PORT", node.data_port.to_string())
             .env("PRKDB_DISABLE_METRICS", "1")
+            // prkdb-server refuses to start unconfigured, so say so explicitly rather
+            // than relying on a default. A test cluster that silently served without
+            // authorization is what let S-01 live as long as it did.
+            .env("PRKDB_ALLOW_ANONYMOUS", "1")
             .env("RUST_LOG", "prkdb::raft=debug,info")
             .env("CHAOS_CONFIG_PATH", chaos_config_path)
             .stdout(Stdio::from(log_file.try_clone()?))

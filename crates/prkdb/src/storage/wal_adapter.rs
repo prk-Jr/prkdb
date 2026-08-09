@@ -226,6 +226,17 @@ struct WalStorageInner {
     accumulator: Mutex<AdaptiveBatchAccumulator<PendingWrite>>,
     flush_notify: Arc<Notify>,
     transaction_barrier: Arc<RwLock<()>>,
+    /// Guards the moment a batch becomes *visible*, as opposed to the moment it is durable.
+    ///
+    /// A batch is appended to the WAL as a unit but published into the index one key at a
+    /// time, so without this a reader could observe half of a multi-key commit (spec
+    /// S-03). Writers take it exclusively while publishing; `snapshot_get_many` takes it
+    /// shared for the whole read.
+    ///
+    /// Deliberately separate from `transaction_barrier`: writers already hold that lock
+    /// for reading when they publish, and re-entering it for writing would deadlock.
+    /// Nothing acquires this lock and then `transaction_barrier`, so the order is acyclic.
+    publish_barrier: Arc<RwLock<()>>,
     // Phase 8: Track max offset for compaction and change detection
     max_offset: AtomicU64,
     // Phase 9: Checkpoint path for fast recovery
@@ -303,6 +314,11 @@ impl WalStorageAdapter {
             self.inner.max_offset.fetch_max(*max_off, Ordering::Relaxed);
         }
 
+        // Publish the whole batch as one visible step. The WAL append above already made
+        // it durable as a unit; this makes it *observable* as a unit, so a concurrent
+        // reader cannot see one key of a two-key commit (S-03).
+        let publish = self.inner.publish_barrier.write().await;
+
         let cache_entries: Vec<_> = entries
             .into_iter()
             .enumerate()
@@ -314,6 +330,7 @@ impl WalStorageAdapter {
             .collect();
 
         self.inner.cache.put_batch(cache_entries).await;
+        drop(publish);
 
         Ok(())
     }
@@ -346,6 +363,9 @@ impl WalStorageAdapter {
             .await
             .map_err(|e| StorageError::Internal(format!("WAL batch delete failed: {}", e)))?;
 
+        // Same publication barrier as put_batch_impl: a batched delete must not be
+        // observable half-applied either.
+        let publish = self.inner.publish_barrier.write().await;
         {
             let index_pin = self.inner.index.pin();
             for key in &keys {
@@ -354,6 +374,7 @@ impl WalStorageAdapter {
         }
 
         self.inner.cache.remove_batch(keys).await;
+        drop(publish);
 
         Ok(())
     }
@@ -387,12 +408,15 @@ impl WalStorageAdapter {
     pub fn new_with_config(config: StorageConfig) -> Result<Self, StorageError> {
         info!("Initializing WalStorageAdapter");
         // Create Mmap parallel WAL with 4 segments
+        // open_or_create, never create: `create` truncates every segment, so opening an
+        // existing data directory with it destroys the database. This is the constructor
+        // `PrkDb::builder().with_data_dir()` reaches.
         let wal = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                MmapParallelWal::create(config.wal.clone(), config.wal.segment_count).await
+                MmapParallelWal::open_or_create(config.wal.clone(), config.wal.segment_count).await
             })
         })
-        .map_err(|e| StorageError::Internal(format!("Failed to create Mmap WAL: {}", e)))?;
+        .map_err(|e| StorageError::Internal(format!("Failed to open Mmap WAL: {}", e)))?;
 
         let wal = Arc::new(wal);
 
@@ -433,10 +457,27 @@ impl WalStorageAdapter {
             accumulator: Mutex::new(AdaptiveBatchAccumulator::new(config.batching.clone())),
             flush_notify: Arc::new(Notify::new()),
             transaction_barrier: Arc::new(RwLock::new(())),
+            publish_barrier: Arc::new(RwLock::new(())),
             max_offset: AtomicU64::new(0),
             checkpoint_path: config.wal.log_dir.join("checkpoint.json"),
             _writer_handle: Some(writer_handle),
         });
+
+        let adapter = Self {
+            inner: inner.clone(),
+            _write_tx: Some(write_tx), // Phase 2: Writer queue (disabled for now)
+        };
+
+        // Rebuild the index from the WAL. Without this the log is recovered but every key
+        // in it stays invisible, so reopening a populated data directory reported an empty
+        // database. `open`/`open_async` always did this; this constructor did not, and this
+        // is the one `PrkDb::builder().with_data_dir()` reaches.
+        info!("Rebuilding index from WAL...");
+        let start = std::time::Instant::now();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(adapter.rebuild_index_async())
+        })?;
+        info!("Index rebuild complete in {:?}", start.elapsed());
 
         // Spawn background flush task
         let weak_inner = Arc::downgrade(&inner);
@@ -445,10 +486,7 @@ impl WalStorageAdapter {
         });
 
         info!("WalStorageAdapter initialized successfully");
-        Ok(Self {
-            inner,
-            _write_tx: Some(write_tx), // Phase 2: Writer queue (disabled for now)
-        })
+        Ok(adapter)
     }
 
     /// Create a new WAL storage adapter with replication and Mmap parallel writes
@@ -463,7 +501,7 @@ impl WalStorageAdapter {
             ..StorageConfig::default()
         };
 
-        let wal = MmapParallelWal::create(storage_config.wal.clone(), 4)
+        let wal = MmapParallelWal::open_or_create(storage_config.wal.clone(), 4)
             .await
             .map_err(|e| StorageError::Internal(format!("Failed to create Mmap WAL: {}", e)))?;
 
@@ -509,10 +547,20 @@ impl WalStorageAdapter {
             )),
             flush_notify: Arc::new(Notify::new()),
             transaction_barrier: Arc::new(RwLock::new(())),
+            publish_barrier: Arc::new(RwLock::new(())),
             max_offset: AtomicU64::new(0),
             checkpoint_path: storage_config.wal.log_dir.join("checkpoint.json"),
             _writer_handle: Some(writer_handle),
         });
+
+        let adapter = Self {
+            inner: inner.clone(),
+            _write_tx: Some(write_tx),
+        };
+
+        // Same index rebuild as every other open path.
+        info!("Rebuilding index from WAL...");
+        adapter.rebuild_index_async().await?;
 
         // Spawn background flush task
         let weak_inner = Arc::downgrade(&inner);
@@ -521,10 +569,7 @@ impl WalStorageAdapter {
         });
 
         info!("WalStorageAdapter with replication initialized successfully");
-        Ok(Self {
-            inner,
-            _write_tx: Some(write_tx),
-        })
+        Ok(adapter)
     }
 
     /// Open an existing WAL storage adapter and rebuild index
@@ -587,6 +632,7 @@ impl WalStorageAdapter {
             )),
             flush_notify: Arc::new(Notify::new()),
             transaction_barrier: Arc::new(RwLock::new(())),
+            publish_barrier: Arc::new(RwLock::new(())),
             max_offset: AtomicU64::new(0),
             checkpoint_path: storage_config.wal.log_dir.join("checkpoint.json"),
             _writer_handle: Some(writer_handle),
@@ -671,6 +717,7 @@ impl WalStorageAdapter {
             )),
             flush_notify: Arc::new(Notify::new()),
             transaction_barrier: Arc::new(RwLock::new(())),
+            publish_barrier: Arc::new(RwLock::new(())),
             max_offset: AtomicU64::new(0),
             checkpoint_path: storage_config.wal.log_dir.join("checkpoint.json"),
             _writer_handle: Some(writer_handle),
@@ -877,6 +924,12 @@ impl WalStorageAdapter {
         let pinned = self.inner.index.pin();
 
         for (_segment_id, record) in records {
+            // Recovered records advance the high-water mark; without this a snapshot taken
+            // after a reopen would claim max_offset=0.
+            self.inner
+                .max_offset
+                .fetch_max(record.offset, Ordering::SeqCst);
+
             // record.offset is already the global offset (including segment_id)
             match record.operation {
                 LogOperation::Put { id, .. } => {
@@ -947,6 +1000,41 @@ impl WalStorageAdapter {
         let pinned = self.inner.index.pin();
         // Optimization: Collect keys without unnecessary intermediate clones
         pinned.iter().map(|(key, _)| key.to_vec()).collect()
+    }
+
+    /// Read several keys as of a single instant.
+    ///
+    /// # Why `get_many` is not this
+    ///
+    /// `get_many` is a throughput optimisation: it batches cache and WAL lookups but takes
+    /// no barrier, so a batch write landing midway through is visible to some of its keys
+    /// and not others. Calling `get` twice has the same problem. Reading `a` and `b` while
+    /// another task commits `{a, b}` as one batch could therefore observe the old `a` with
+    /// the new `b` — the money-disappears symptom that spec S-03 was filed for.
+    ///
+    /// This holds the publication barrier for the whole read, so every key is observed on
+    /// the same side of every batch commit.
+    ///
+    /// # What this is not
+    ///
+    /// Not a transaction and not MVCC. It excludes *publication*, not writing: a batch may
+    /// be appended to the WAL during the read and become visible immediately after. It
+    /// gives an atomic read, not a repeatable one. For read-modify-write, use a
+    /// `Serializable` transaction.
+    pub async fn snapshot_get_many(
+        &self,
+        keys: Vec<Vec<u8>>,
+    ) -> Result<Vec<Option<Vec<u8>>>, StorageError> {
+        let _publish = self.inner.publish_barrier.read().await;
+        self.get_many(keys).await
+    }
+
+    /// Highest WAL offset written by this adapter.
+    ///
+    /// Exposed so a wrapper holding several adapters can record the maximum across all of
+    /// them in a merged snapshot header.
+    pub fn max_offset(&self) -> u64 {
+        self.inner.max_offset.load(Ordering::SeqCst)
     }
 
     /// Get the log directory path

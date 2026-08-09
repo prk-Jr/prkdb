@@ -741,14 +741,14 @@ git commit -m "feat: authorize the gRPC data plane and authenticate Raft peers b
 
 ## Task 2b: Register the gRPC authorization layer on the server (R12)
 
-> **Filed 2026-08-09 during execution of Task 2.** The decision logic is complete and
-> tested — `ApiAuthzInterceptor::check_http` and `PeerAuthInterceptor::check`, 12 unit
-> tests between them. **Nothing calls either yet, so the gRPC surface is still open.**
-> `fetch_segment` still streams raw WAL to any caller who can reach the port.
+> **Filed 2026-08-09 during execution of Task 2. Client-API authorization landed
+> 2026-08-09; peer authentication (Step 4) has not.**
 >
-> Split out because it is the one part that cannot be verified without a running server,
-> and shipping it half-wired while claiming S-01 closed would be worse than saying plainly
-> that it is not.
+> `AuthzGrpcLayer` is registered on both binaries and `crates/prkdb/tests/grpc_authz.rs`
+> drives a real tonic server to prove `fetch_segment` now refuses uncredentialed callers.
+> **`RaftService` is still unauthenticated** — peers are exempted from the client-API
+> layer by design, and `PeerAuthInterceptor` is written but not installed, so anyone who
+> can reach the port can still forge `AppendEntries`. That is Step 4 and it remains open.
 
 **Files:**
 - Create: `crates/prkdb/src/raft/authz_layer.rs` (tower `Layer` + `Service`)
@@ -769,14 +769,16 @@ The method is visible one layer down as the request path (`/prkdb.PrkDbService/P
 `check_http` already takes an `http::Request<B>` and does the right thing; it needs a
 `tower::Service` wrapper to be called.
 
-- [ ] **Step 1: Confirm the surface is still open**
+- [x] **Step 1: Confirm the surface is still open**
 
 ```bash
 grep -rn 'check_http\|PeerAuthInterceptor' crates/prkdb/src/bin crates/prkdb-cli/src \
   || echo "confirmed: neither is called from a binary"
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test** — `crates/prkdb/tests/grpc_authz.rs`, 6 tests.
+      The cluster test below is **not** among them: it needs Plan A Task 4b's
+      in-process harness, which has not landed.
 
 `crates/prkdb/tests/grpc_authz.rs`, against a server started with a bootstrap credential:
 
@@ -801,12 +803,13 @@ async fn a_cluster_still_elects_and_replicates_with_the_layer_active() { /* ... 
 The last one needs a multi-node cluster. Plan A Task 4b's in-process harness is the right
 vehicle; until it lands, use `TestCluster` and build the binary first.
 
-- [ ] **Step 3: Implement the tower layer**
+- [x] **Step 3: Implement the tower layer**
 
 A `Layer<S>` producing a `Service` whose `call` runs `check_http` and short-circuits with
 `Status::into_http()` on rejection. Apply to `PrkDbServiceServer` only.
 
-- [ ] **Step 4: Apply peer auth to `RaftService`**
+- [ ] **Step 4: Apply peer auth to `RaftService`** — NOT DONE. `peer_auth.rs` exists
+      and is unit-tested; nothing installs it, so `RaftService` accepts any caller.
 
 Separate policy, same shape: `PeerAuthInterceptor` reading `peer_certs()`. Requires
 `--tls-client-ca`, so it depends on Task 3, which has landed.
@@ -814,12 +817,14 @@ Separate policy, same shape: `PeerAuthInterceptor` reading `peer_certs()`. Requi
 **Do not exempt `RaftService` from authentication** to make replication work. That is the
 tempting shortcut and it lets any client forge `AppendEntries`.
 
-- [ ] **Step 5: Wire both binaries**
+- [x] **Step 5: Wire both binaries** — `prkdb-cli serve` and `prkdb-server`. The
+      latter now refuses to start without `PRKDB_BOOTSTRAP_TOKEN` unless
+      `PRKDB_ALLOW_ANONYMOUS=1`; the test cluster and dev scripts set it explicitly.
 
 `prkdb-cli serve` and `prkdb-server` both construct the tonic `Server`. Both need the
 layer, the store, and `--allow-anonymous` honoured consistently with the HTTP side.
 
-- [ ] **Step 6: Verify the arithmetic still balances**
+- [x] **Step 6: Verify the arithmetic still balances**
 
 ```bash
 awk '/^service /{s=$2} /^[[:space:]]*rpc /{gsub(/\(.*/,"",$2); print s"\t"$2}' \
@@ -829,7 +834,7 @@ Expected: 5 `RaftService`, 25 `PrkDbService`. Every one of the 25 must be Admin 
 Write (3), Read (5) or public (1). `every_rpc_from_the_finding_is_classified` in
 `authz_interceptor.rs` already guards the eight from S-01.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/prkdb/src/raft crates/prkdb/src/bin crates/prkdb-cli/src

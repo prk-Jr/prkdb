@@ -58,7 +58,6 @@ async fn read_back(dir: &Path, key: &str) -> Option<Vec<u8>> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "blocked by S-04: CollectionPartitionedAdapter does not implement take_snapshot, so `prkdb backup` fails on any database built with --database. Un-ignore when S-04 is fixed."]
 async fn backup_then_restore_preserves_every_value() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source");
@@ -115,7 +114,6 @@ async fn backup_then_restore_preserves_every_value() {
 /// Restoring over a populated directory without `--force` must refuse rather than
 /// silently merging two databases.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "blocked by S-04: CollectionPartitionedAdapter does not implement take_snapshot, so `prkdb backup` fails on any database built with --database. Un-ignore when S-04 is fixed."]
 async fn restore_refuses_a_non_empty_target_without_force() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source");
