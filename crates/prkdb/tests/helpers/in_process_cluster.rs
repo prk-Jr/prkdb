@@ -97,6 +97,62 @@ impl ChaosControl {
     }
 }
 
+/// A CA and one certificate, written to disk because `start_raft_server_tls` takes paths.
+///
+/// Generated per cluster rather than shared: two clusters signed by the same CA could
+/// authenticate to each other, which would make a test that thinks it is isolated pass
+/// for the wrong reason.
+pub struct ClusterPki {
+    _dir: TempDir,
+    pub ca_path: String,
+    pub cert_path: String,
+    pub key_path: String,
+    pub ca_pem: Vec<u8>,
+    pub cert_pem: Vec<u8>,
+    pub key_pem: Vec<u8>,
+}
+
+impl ClusterPki {
+    /// One CA, one certificate valid for `localhost`, shared by every node.
+    ///
+    /// A per-node certificate would be more faithful to a real deployment, but the
+    /// property under test is that peers authenticate *at all* — the interceptor checks
+    /// that a verified certificate exists, not which node it names.
+    fn generate() -> anyhow::Result<Self> {
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+
+        let mut ca_params = CertificateParams::new(vec![])?;
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca_key = KeyPair::generate()?;
+        let ca = ca_params.self_signed(&ca_key)?;
+
+        let params = CertificateParams::new(vec!["localhost".to_string()])?;
+        let key = KeyPair::generate()?;
+        let cert = params.signed_by(&key, &ca, &ca_key)?;
+
+        let dir = TempDir::new()?;
+        let write = |name: &str, contents: &str| -> anyhow::Result<String> {
+            let path = dir.path().join(name);
+            std::fs::write(&path, contents)?;
+            Ok(path.to_string_lossy().into_owned())
+        };
+
+        let ca_pem = ca.pem();
+        let cert_pem = cert.pem();
+        let key_pem = key.serialize_pem();
+
+        Ok(Self {
+            ca_path: write("ca.pem", &ca_pem)?,
+            cert_path: write("cert.pem", &cert_pem)?,
+            key_path: write("key.pem", &key_pem)?,
+            ca_pem: ca_pem.into_bytes(),
+            cert_pem: cert_pem.into_bytes(),
+            key_pem: key_pem.into_bytes(),
+            _dir: dir,
+        })
+    }
+}
+
 // ── The harness ──────────────────────────────────────────────────────────────
 
 struct Node {
@@ -113,6 +169,9 @@ struct Node {
 
 pub struct InProcessCluster {
     cluster_id: u64,
+    /// `Some` when peers authenticate by mTLS. Held for the lifetime of the cluster
+    /// because the certificate files must outlive the servers reading them.
+    pki: Option<Arc<ClusterPki>>,
     nodes: Mutex<HashMap<u64, Node>>,
     /// Every id in the cluster, including stopped ones, in ascending order.
     ids: Vec<u64>,
@@ -122,6 +181,20 @@ pub struct InProcessCluster {
 impl InProcessCluster {
     /// Start an `n`-node cluster. Ports are OS-assigned; ids come from a private block.
     pub async fn new(n: usize) -> anyhow::Result<Self> {
+        Self::build(n, None).await
+    }
+
+    /// Start an `n`-node cluster whose peers authenticate by mTLS.
+    ///
+    /// Servers require a client certificate and peers present one, which is the
+    /// configuration `--tls-client-ca` produces. Before S-10 this could not work at all:
+    /// `RpcClientPool` dialled `http://` unconditionally, so the handshake failed and no
+    /// cluster using it could elect a leader.
+    pub async fn new_with_mtls(n: usize) -> anyhow::Result<Self> {
+        Self::build(n, Some(Arc::new(ClusterPki::generate()?))).await
+    }
+
+    async fn build(n: usize, pki: Option<Arc<ClusterPki>>) -> anyhow::Result<Self> {
         assert!(n > 0, "a cluster needs at least one node");
 
         let cluster_id = NEXT_ID_BLOCK.fetch_add(1, Ordering::SeqCst);
@@ -144,11 +217,15 @@ impl InProcessCluster {
 
         let mut nodes = HashMap::new();
         for (id, addr) in &peers {
-            nodes.insert(*id, Self::spawn_node(*id, *addr, peers.clone())?);
+            nodes.insert(
+                *id,
+                Self::spawn_node(*id, *addr, peers.clone(), pki.clone())?,
+            );
         }
 
         Ok(Self {
             cluster_id,
+            pki,
             nodes: Mutex::new(nodes),
             ids,
             peers,
@@ -159,6 +236,7 @@ impl InProcessCluster {
         id: u64,
         addr: SocketAddr,
         peers: Vec<(u64, SocketAddr)>,
+        pki: Option<Arc<ClusterPki>>,
     ) -> anyhow::Result<Node> {
         let dir = TempDir::new()?;
         let config = ClusterConfig {
@@ -180,12 +258,38 @@ impl InProcessCluster {
             .map_err(|e| anyhow::anyhow!("building partition manager for node {id}: {e}"))?,
         );
 
-        manager.start_all(Arc::new(RpcClientPool::new(id)), &[]);
+        // The pool must dial the way the servers listen. Giving one TLS and not the
+        // other is the S-10 failure: the node starts and the cluster never forms.
+        let pool = match &pki {
+            None => RpcClientPool::new(id),
+            Some(pki) => RpcClientPool::new(id).with_tls(prkdb::raft::rpc_client::PeerTls {
+                cert_pem: pki.cert_pem.clone(),
+                key_pem: pki.key_pem.clone(),
+                ca_pem: pki.ca_pem.clone(),
+                domain: "localhost".to_string(),
+            }),
+        };
+        manager.start_all(Arc::new(pool), &[]);
 
         let serving = manager.clone();
-        let server = tokio::spawn(async move {
-            let _ = prkdb::raft::server::start_raft_server(serving, addr).await;
-        });
+        let server = match &pki {
+            None => tokio::spawn(async move {
+                let _ = prkdb::raft::server::start_raft_server(serving, addr).await;
+            }),
+            Some(pki) => {
+                let tls = prkdb::raft::server::TlsConfig {
+                    cert_path: pki.cert_path.clone(),
+                    key_path: pki.key_path.clone(),
+                    // Requiring a client CA is what makes this mutual rather than
+                    // one-way TLS; without it the interceptor sees no certificate and
+                    // refuses every peer.
+                    ca_path: Some(pki.ca_path.clone()),
+                };
+                tokio::spawn(async move {
+                    let _ = prkdb::raft::server::start_raft_server_tls(serving, addr, tls).await;
+                })
+            }
+        };
 
         let raft = manager
             .get_partition(0)
@@ -352,7 +456,7 @@ impl InProcessCluster {
             .map(|(_, addr)| *addr)
             .ok_or_else(|| anyhow::anyhow!("node {id} is not part of this cluster"))?;
 
-        let node = Self::spawn_node(id, addr, self.peers.clone())?;
+        let node = Self::spawn_node(id, addr, self.peers.clone(), self.pki.clone())?;
         self.nodes.lock().expect("nodes mutex").insert(id, node);
         Ok(())
     }

@@ -22,6 +22,8 @@
 //! never reaches the interceptor. Both are asserted below, because "the caller was
 //! refused" is not by itself evidence that the check works.
 
+mod helpers;
+
 use prkdb::raft::peer_auth::{PeerAuthInterceptor, PeerIdentity};
 use prkdb::raft::rpc::raft_service_client::RaftServiceClient;
 use prkdb::raft::rpc::raft_service_server::RaftServiceServer;
@@ -388,4 +390,50 @@ async fn peers_dial_each_other_over_mtls() {
          the service; got: {:?}",
         outcome.err()
     );
+}
+
+/// A three-node cluster elects a leader and replicates with mTLS active end to end.
+///
+/// # Why this is the test the others could not be
+///
+/// Everything above drives a single connection: a client against a TLS server, or a pool
+/// against one peer. None of them forms a cluster, and forming one is where mTLS actually
+/// has to work — every node must simultaneously *serve* TLS to its peers and *dial* TLS to
+/// them, using material each side accepts.
+///
+/// Before S-10 this was impossible: `RpcClientPool` built `http://` unconditionally, so
+/// servers requiring a client certificate were unreachable by the very peers meant to
+/// reach them. The cluster would start and never elect.
+///
+/// The CHANGELOG carried this as a known gap — "a cluster with mTLS active end to end is
+/// not exercised" — which is now closed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_cluster_elects_and_replicates_over_mtls() {
+    install_crypto_provider();
+
+    let cluster = helpers::in_process_cluster::InProcessCluster::new_with_mtls(3)
+        .await
+        .expect("an mTLS cluster starts");
+
+    let leader = cluster
+        .await_leader(Duration::from_secs(20))
+        .await
+        .expect("peers must be able to reach each other to elect a leader");
+    assert!(cluster.node_ids().contains(&leader));
+
+    // Election alone only proves RequestVote crossed the connection. A committed write
+    // proves AppendEntries does too, which is the traffic replication actually depends on.
+    cluster
+        .put(b"users:mtls", b"replicated")
+        .await
+        .expect("the cluster must commit a write over mTLS");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while tokio::time::Instant::now() < deadline {
+        if cluster.all_nodes_have(b"users:mtls", b"replicated").await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("a committed write did not replicate to every node over mTLS");
 }

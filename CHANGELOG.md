@@ -184,6 +184,12 @@ not enforced by anything, and several tests reported green while testing nothing
   no longer needs it: the layer has already required `Admin` to reach the handler. The
   relaxation is gated on authorization actually being enforced, so a server with neither
   the layer nor a token still denies.
+- **A three-node cluster now elects and replicates with mTLS active end to end**, via
+  `InProcessCluster::new_with_mtls`. Every node serves TLS to its peers and dials TLS to
+  them simultaneously, which is where mTLS actually has to work and what none of the
+  single-connection tests could establish. Verified load-bearing: removing the pool's TLS
+  while the servers still require it reproduces the S-10 failure, "no leader elected
+  within 20s".
 - **mTLS peer authentication could be selected but never worked** (S-10, introduced by
   this work). `RpcClientPool` built `http://{addr}` unconditionally — the module contained
   no TLS of any kind — so a cluster configured with `--tls-client-ca` had servers demanding
@@ -255,11 +261,6 @@ not enforced by anything, and several tests reported green while testing nothing
   on `IndexedStorage`; and the `where_<field>_eq` examples need the generated
   `{Struct}QueryExt` trait in scope, which the README never mentions.
 
-- The mTLS peer path is proven against a real handshake in `peer_mtls.rs`, including the
-  peer client dialling over TLS (S-10). What is still not exercised is a **multi-node
-  cluster** electing and replicating with mTLS active end to end: the in-process harness
-  runs peers over plaintext loopback. `peer_authz.rs` covers a cluster with the policy
-  configured; the transport is covered separately.
 - Two keys read with two separate `get()` calls are still not a snapshot; use
   `snapshot_get_many` or a transaction. This is a property of the API the caller picks,
   not a defect, and `batch_atomicity.rs` asserts it so it stays explicit.

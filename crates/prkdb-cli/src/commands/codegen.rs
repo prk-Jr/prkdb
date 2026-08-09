@@ -565,7 +565,7 @@ export class PrkDbPermissionError extends Error {}
  * They call for opposite responses — re-authenticate versus stop and request a grant — so
  * a client that cannot tell them apart will retry a permission failure forever.
  */
-function raiseForAuth(response: Response, action: string): void {
+function raiseForAuth(response: { status: number }, action: string): void {
     if (response.status === 401) {
         throw new PrkDbAuthError(`${action}: not authenticated. Pass a credential to PrkDbClient.`);
     }
