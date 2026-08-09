@@ -234,6 +234,11 @@ jobs:
       # user's backup.
       - name: Storage wrapper completeness
         run: bash scripts/check_wrapper_completeness.sh
+      # The generated README test must match README.md. Without this the examples drift
+      # from the file they were extracted from, and the test goes on passing against a
+      # stale copy — which is the failure it exists to prevent, one level up.
+      - name: README examples are up to date
+        run: cargo run -p xtask -- readme-tests --check
       # A skipped test must be skipped for a reason that still runs it somewhere, never
       # because it failed. See scripts/check_ignore_reasons.sh for the case that prompted it.
       - name: Ignore reasons

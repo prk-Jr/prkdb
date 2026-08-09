@@ -277,6 +277,26 @@ async fn scan_range_works_on_a_data_dir_database() {
     );
 }
 
+/// A single-collection database can be replicated: the cursor is unambiguous (S-09).
+#[tokio::test(flavor = "multi_thread")]
+async fn get_changes_since_works_for_a_single_collection() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(dir.path());
+    db.storage().put(b"users:a", b"1").await.unwrap();
+    db.storage().put(b"users:b", b"2").await.unwrap();
+
+    let changes = db
+        .storage()
+        .get_changes_since(0)
+        .await
+        .expect("one collection means one WAL, so the offset is unambiguous");
+    assert!(
+        changes.len() >= 2,
+        "expected both writes in the change stream, got {}",
+        changes.len()
+    );
+}
+
 /// `fetch_segment` must not report success while streaming nothing (S-09).
 ///
 /// `CollectionPartitionedAdapter` does not implement `get_changes_since` — merging N
@@ -296,14 +316,19 @@ async fn get_changes_since_is_unsupported_and_says_so() {
     let db = open(dir.path());
     db.storage().put(b"users:a", b"1").await.unwrap();
 
+    // A second collection makes the cursor ambiguous.
+    db.storage().put(b"orders:x", b"1").await.unwrap();
+
     let err = db
         .storage()
         .get_changes_since(0)
         .await
         .expect_err("the partitioned adapter cannot merge per-collection change streams");
 
+    let text = err.to_string();
     assert!(
-        err.to_string().contains("not supported"),
-        "the limitation must be reported, not silently returned as an empty stream: {err}"
+        text.contains("independent WAL") && text.contains("orders") && text.contains("users"),
+        "the refusal must name the collections and the reason, not just say \"not \
+         supported\": {text}"
     );
 }

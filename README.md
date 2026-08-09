@@ -298,7 +298,7 @@ prkdb status
 
 ```rust
 // Create compound index at runtime
-db.create_compound_index::<User>("role_age", |u| {
+db.create_compound_index("role_age", |u: &User| {
     vec![u.role.clone(), u.age.to_string()]
 }).await?;
 
@@ -458,13 +458,13 @@ db.insert_validated(&user).await?;
 ```rust
 // First page
 let (users, next_cursor) = db.query::<User>()
-    .order_by(|u| u.id)
+    .order_by(|u| u.id.clone())
     .paginate(10, None).await?;
 
 // Next page
 if let Some(cursor) = next_cursor {
     let (more, _) = db.query::<User>()
-        .order_by(|u| u.id)
+        .order_by(|u| u.id.clone())
         .paginate(10, Some(cursor)).await?;
 }
 
@@ -497,13 +497,13 @@ println!("{:.1}% utilized", stats.utilization());
 // User has many Orders (eager load, avoids N+1)
 let users_with_orders = db.query::<User>()
     .collect_with::<Order, _, _>(
-        |user| user.id,          // parent key
-        |order| order.user_id    // foreign key
+        |user| user.id.clone(),          // parent key
+        |order| order.user_id.clone()    // foreign key
     ).await?;  // Vec<(User, Vec<Order>)>
 
 // Order belongs to User
 let orders_with_user = db.query::<Order>()
-    .collect_with_one::<User, _>(|order| order.user_id)
+    .collect_with_one::<User, _>(|order| order.user_id.clone())
     .await?;  // Vec<(Order, Option<User>)>
 ```
 
@@ -627,10 +627,10 @@ db.clone_to::<User>(&backup_db).await?;
 
 ```rust
 // Find first matching record
-let admin = db.find_one::<User, _>(|u| u.role == "admin").await?;
+let admin = db.find_one::<User, _>(|u| u.role.clone() == "admin").await?;
 
 // Find all matching records
-let admins = db.find_all::<User, _>(|u| u.role == "admin").await?;
+let admins = db.find_all::<User, _>(|u| u.role.clone() == "admin").await?;
 ```
 
 ### Bulk Conditional Operations
@@ -657,7 +657,7 @@ let oldest = db.query::<User>().max_by(|u| u.age).await?;
 let avg_age = db.query::<User>().avg_by(|u| u.age as f64).await?;
 
 // Boolean checks
-let has_admin = db.query::<User>().any(|u| u.role == "admin").await?;
+let has_admin = db.query::<User>().any(|u| u.role.clone() == "admin").await?;
 let all_active = db.query::<User>().all(|u| u.active).await?;
 ```
 
@@ -680,7 +680,7 @@ let sample = db.query::<User>().sample(5).await?;  // 5 random users
 let last = db.query::<User>().last().await?;
 
 // Take/skip while condition
-let early = db.query::<User>().take_while(|u| u.id < 100).await?;
+let early = db.query::<User>().take_while(|u| u.id.clone() < 100).await?;
 ```
 
 ### Advanced Query Helpers
@@ -699,7 +699,7 @@ let deduped = db.query::<User>()
 
 // Join with another collection
 let joined = db.query::<Order>()
-    .join_with(&users, |o| o.user_id, |u| u.id)
+    .join_with(&users, |o| o.user_id.clone(), |u| u.id.clone())
     .await?;  // Vec<(Order, Option<User>)>
 ```
 

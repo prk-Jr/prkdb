@@ -238,6 +238,14 @@ not enforced by anything, and several tests reported green while testing nothing
 
 ### Known issues
 
+- **Only 4 of the README's 37 Rust examples are compile-checked.** The other 33 are listed
+  in `xtask/src/readme_tests.rs` with a specific defect each — not "does not compile",
+  which is the finding rather than the excuse. Building the extractor found twelve real
+  bugs (fixed) and two documentation errors that remain: the query and aggregate examples
+  call `query`/`count`/`sum` on a `db` a reader will take to be a `PrkDb`, but those live
+  on `IndexedStorage`; and the `where_<field>_eq` examples need the generated
+  `{Struct}QueryExt` trait in scope, which the README never mentions.
+
 - The mTLS peer path is proven against a real handshake in `peer_mtls.rs`, but the
   in-process cluster harness runs peers over plaintext loopback, so a *cluster* with mTLS
   active end to end is not exercised. `peer_authz.rs` covers the cluster with the policy

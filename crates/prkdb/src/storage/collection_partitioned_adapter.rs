@@ -614,6 +614,61 @@ impl StorageAdapter for CollectionPartitionedAdapter {
         Ok(out)
     }
 
+    /// Changes after `offset`, for replication.
+    ///
+    /// # Why this is not simply a merge (S-09)
+    ///
+    /// The cursor is a `u64` WAL offset, and this adapter holds one independent WAL per
+    /// collection. Two collections both number their first record 1, so an offset does not
+    /// identify a position across them — and no ordering recovers one:
+    ///
+    /// - **By offset**: collides. Collection `a` offset 5 and collection `b` offset 5 are
+    ///   unrelated events.
+    /// - **By (collection, offset), cursor as an index**: a collection created later
+    ///   receives low offsets and inserts into the middle of the sequence, shifting every
+    ///   position after it. An outstanding cursor then skips or repeats changes — silent
+    ///   data loss during replication, which is the class of bug this work exists to
+    ///   remove.
+    /// - **By `LogRecord::timestamp`**: wall clock, not monotonic, and collides at
+    ///   millisecond granularity.
+    ///
+    /// A general solution needs a monotonic sequence assigned by *this* adapter at write
+    /// time and persisted with each record. That is a WAL format change and would not
+    /// recover history written before it, so it is not attempted here.
+    ///
+    /// # What is implemented
+    ///
+    /// A single-collection database has exactly one WAL, so the cursor is unambiguous and
+    /// the call delegates. That is the common shape for a replicated collection, and it is
+    /// the case `fetch_segment` is usually asked about.
+    ///
+    /// More than one collection is refused, naming the collections and the reason. It used
+    /// to return "not supported" via the trait default, and `fetch_segment` swallowed that
+    /// and streamed an empty successful response — so a follower concluded there was
+    /// nothing to replicate.
+    async fn get_changes_since(
+        &self,
+        offset: u64,
+    ) -> Result<Vec<prkdb_types::replication::Change>, StorageError> {
+        let collections = self.load_all_collections().await;
+
+        match collections.len() {
+            0 => Ok(Vec::new()),
+            1 => collections[0].1.get_changes_since(offset).await,
+            n => {
+                let mut names: Vec<&str> = collections.iter().map(|(k, _)| k.as_str()).collect();
+                names.sort();
+                Err(StorageError::BackendError(format!(
+                    "get_changes_since is not defined across {n} collections ({}): each has \
+                     an independent WAL whose offsets start at 1, so a single u64 cursor \
+                     cannot address a position across them. Replicate a single-collection \
+                     database, or see spec S-09 for what a general cursor would require.",
+                    names.join(", ")
+                )))
+            }
+        }
+    }
+
     /// Snapshot every collection into a single archive.
     ///
     /// Without this the trait default refuses with "take_snapshot not supported", which is
