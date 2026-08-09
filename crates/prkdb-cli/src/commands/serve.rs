@@ -55,6 +55,10 @@ pub struct ServeArgs {
     #[arg(long)]
     pub allow_anonymous: bool,
 
+    /// Shed requests above this rate, per second. Probe endpoints are exempt.
+    #[arg(long)]
+    pub rate_limit: Option<u64>,
+
     /// PEM server certificate. Enables TLS on both the HTTP and gRPC surfaces.
     ///
     /// Before this flag existed, `start_raft_server_tls` was implemented but reachable
@@ -302,6 +306,10 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     let mut app = Router::new()
         .route("/", get(root_handler))
         .route("/health", get(health_handler))
+        // Liveness and readiness answer different questions and must not be conflated:
+        // /livez touches nothing, /readyz reports whether this node can serve.
+        .route("/livez", get(crate::probes::livez_handler))
+        .route("/readyz", get(crate::probes::readyz_handler))
         .route("/collections", get(list_collections_handler))
         .route("/collections/:name", get(get_collection_handler))
         .route(
@@ -333,6 +341,20 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
 
     // Add state
     let app = app.with_state(state);
+
+    // Rate limiting sits outside authorization: shedding load must not require first
+    // resolving a credential, or the limiter cannot protect the thing it guards.
+    let rate_limit = match args.rate_limit {
+        Some(n) => {
+            println!("🚦 Rate limit: {n} requests/sec (probe endpoints exempt)");
+            crate::probes::RateLimit::per_second(n)
+        }
+        None => crate::probes::RateLimit::disabled(),
+    };
+    let app = app.layer(axum::middleware::from_fn_with_state(
+        rate_limit,
+        crate::probes::limit,
+    ));
 
     // Authorization runs before CORS so a rejected request never reaches a handler.
     let app = app.layer(axum::middleware::from_fn_with_state(

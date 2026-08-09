@@ -81,9 +81,12 @@ jobs:
       # pass in 0.7s. Requiring a reason makes the cost of switching a test off
       # visible at review time. The pattern matches `#[ignore]` exactly, so
       # `#[ignore = "..."]` passes.
+      # Comment lines are excluded: prose explaining why something is ignored is
+      # documentation, not a bare attribute. Without this, writing about the rule
+      # violates the rule.
       - name: Reject bare #[ignore]
         run: |
-          if grep -rn '#\[ignore\]' crates/ --include='*.rs'; then
+          if grep -rn '#\[ignore\]' crates/ --include='*.rs' | grep -v ':[0-9]*: *\(//\|///\|//!\)'; then
             echo "::error::bare #[ignore] found — use #[ignore = \"reason\"]"
             exit 1
           fi

@@ -228,6 +228,65 @@ The bank test earned its keep either way. Before Task 6 it operated on an in-pro
 `HashMap` and could only ever have caught a bug in `std::sync::Mutex`. Two days after being
 pointed at real storage it surfaced a genuine, documented limitation.
 
+### S-04 — `prkdb backup` fails on any database opened with `--database`
+
+**Found 2026-08-09 by the first backup round-trip test ever run. Severity: high — the
+backup command does not work in its normal configuration.**
+
+```
+$ prkdb-cli --database ./data backup --output snapshot.bin
+Error: Snapshot failed: Storage error: Failed to access underlying store:
+       take_snapshot not supported
+```
+
+#### Cause
+
+`PrkDb::builder().with_data_dir()` produces a `CollectionPartitionedAdapter`
+(`builder.rs:258`), which holds **one `WalStorageAdapter` per collection** in a
+`DashMap<String, Arc<WalStorageAdapter>>`. It does not implement `take_snapshot`, so the
+call falls through to the `StorageAdapter` trait default at `prkdb-types/src/storage.rs:177`,
+which returns `"take_snapshot not supported"`.
+
+`WalStorageAdapter` *does* implement it (`wal_adapter.rs:1967`). Only the wrapper is
+missing, and the wrapper is what the default builder path constructs.
+
+#### Why it went unnoticed
+
+The commands existed and were wired into the CLI, so nothing looked absent. The production
+gap analysis recorded backup as "⚠️ more exists than an earlier revision claimed —
+`prkdb backup` and `prkdb restore` are implemented", which was true of the code and false
+of the behaviour. **No test had ever run a backup.** That is the entire argument for the
+round-trip test: a backup nobody has restored is not a backup.
+
+#### Not a one-line fix
+
+Forwarding is not enough. The adapter partitions data across N independent WALs, so a
+single snapshot has to merge N sources into one archive and the restore has to redistribute
+them. Decisions needed:
+
+1. **One archive containing per-collection sections**, with the collection name in the
+   entry key. Restore replays into whichever collection each key names — which the existing
+   `handle_restore` already does, since it re-`put`s through the public API and the storage
+   layer routes by the `collection:id` key prefix. This is the smaller change.
+2. **One archive per collection.** Simpler to write, worse to operate: a restore becomes N
+   invocations, and a partial restore is silently possible.
+
+Option 1 is preferable, and the fact that restore already routes by key prefix means most
+of the work is on the write side.
+
+#### Regression test already exists
+
+`crates/prkdb-cli/tests/backup_restore.rs` has the round-trip and the
+refuses-without-`--force` cases, both `#[ignore]`d against this finding with the reason
+stated inline. They pass the moment the fix lands. `restore_rejects_a_corrupt_archive`
+passes today and is not ignored.
+
+#### What must not happen
+
+Do not close this by making `backup` require a single-collection database, or by having the
+wrapper snapshot only its first adapter. A backup that silently captures part of the
+database is worse than one that refuses.
+
 ---
 
 ## 3. Requirements

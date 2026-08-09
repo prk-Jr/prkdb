@@ -7,6 +7,7 @@ mod collection_metadata;
 mod commands;
 mod database_manager;
 mod output;
+mod probes;
 mod storage_keys;
 mod tls;
 mod uptime_tracker;
@@ -95,6 +96,9 @@ pub enum Commands {
         /// readable and writable by anyone who can reach the port.
         #[arg(long)]
         allow_anonymous: bool,
+        /// Shed requests above this rate, per second. Probe endpoints are exempt.
+        #[arg(long)]
+        rate_limit: Option<u64>,
         /// PEM server certificate. Enables TLS on both the HTTP and gRPC surfaces.
         #[arg(long, requires = "tls_key")]
         tls_cert: Option<std::path::PathBuf>,
@@ -197,6 +201,7 @@ async fn main() -> anyhow::Result<()> {
             host,
             prometheus,
             allow_anonymous,
+            rate_limit,
             tls_cert,
             tls_key,
             tls_client_ca,
@@ -251,6 +256,7 @@ async fn main() -> anyhow::Result<()> {
                 host: host.clone(),
                 prometheus: *prometheus,
                 allow_anonymous: *allow_anonymous,
+                rate_limit: *rate_limit,
                 tls_cert: tls_cert.clone(),
                 tls_key: tls_key.clone(),
                 tls_client_ca: tls_client_ca.clone(),

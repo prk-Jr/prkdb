@@ -1076,7 +1076,7 @@ git commit -m "feat: add magic number and format version to WAL segments"
 - Modify: `crates/prkdb-cli/src/commands/backup.rs`
 - Test: `crates/prkdb-cli/tests/backup_restore.rs` *(new — this is the real gap)*
 
-- [ ] **Step 1: Read what already exists**
+- [x] **Step 1: Read what already exists**
 
 ```bash
 sed -n '1,113p' crates/prkdb-cli/src/commands/backup.rs
@@ -1086,7 +1086,7 @@ grep -n 'Backup\|Restore' crates/prkdb-cli/src/main.rs
 Note the design: `handle_backup` calls `db.take_snapshot(...)`; `handle_restore` iterates the
 snapshot and re-`put`s each entry. That is a **logical** restore, not a byte-level one.
 
-- [ ] **Step 2: Write the failing round-trip test**
+- [x] **Step 2: Write the failing round-trip test**
 
 Write records, `backup` to a temp path, wipe the data dir, `restore`, and assert every key reads
 back with its original value.
@@ -1097,13 +1097,13 @@ back with its original value.
 > round-trip, which this design can never satisfy. The property that matters is that every key
 > reads back with the value it had.
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 3: Run it and watch it fail**
 
 ```bash
 cargo test -p prkdb-cli --test backup_restore -- --nocapture
 ```
 
-- [ ] **Step 3: Implement `prkdb backup`**
+- [x] **Step 4: Implement `prkdb backup`**
 
 ```
 prkdb backup --data-dir <DIR> --out <PATH> [--compress]
@@ -1112,7 +1112,7 @@ prkdb backup --data-dir <DIR> --out <PATH> [--compress]
 Reuse `storage/snapshot.rs` for the consistent point-in-time read. `flate2` and `tar` are already
 workspace dependencies — use them rather than adding an archive crate.
 
-- [ ] **Step 4: Implement `prkdb restore`**
+- [x] **Step 5: Implement `prkdb restore`**
 
 ```
 prkdb restore --archive <PATH> --data-dir <DIR>
@@ -1121,21 +1121,21 @@ prkdb restore --archive <PATH> --data-dir <DIR>
 Refuse to overwrite a non-empty data dir without `--force`. Validate the format version from
 Task 3 before writing anything.
 
-- [ ] **Step 5: Run the round-trip test**
+- [ ] **Step 6: Run the round-trip test**
 
 Expected: PASS.
 
-- [ ] **Step 6: Add a checksum manifest**
+- [ ] **Step 7: Add a checksum manifest**
 
 The archive carries a manifest of per-file checksums and the format version. `restore` verifies
 before extracting. A silently corrupt backup is worse than no backup.
 
-- [ ] **Step 7: Document scheduling**
+- [ ] **Step 8: Document scheduling**
 
 Add a `docs/guide/deployment.md` section showing a cron/systemd-timer example. Do **not** build a
 scheduler into the database — that is the operator's layer.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add crates/prkdb-cli/ docs/guide/deployment.md
@@ -1161,11 +1161,18 @@ the node is still replaying its WAL or has no leader, then 200 once it can serve
 
 - [ ] **Step 2: Run it and watch it fail**
 
+> Steps 1-2 were not followed. The endpoints and limiter were implemented first, then
+> covered by unit tests in `probes.rs` — the limiter's shed behaviour and that `/livez`
+> answers with no database initialised. What is still missing is the test these steps
+> actually asked for: an integration test asserting `/readyz` returns 503 while a node
+> has no leader and 200 once it does. That needs a cluster, so it belongs with Plan A
+> Task 4b's in-process harness.
+
 ```bash
 cargo test -p prkdb-cli --test readiness -- --nocapture
 ```
 
-- [ ] **Step 3: Implement the endpoints**
+- [x] **Step 3: Implement the endpoints**
 
 - `/livez` — 200 whenever the process is listening. Never touches storage; a liveness probe that
   can hang causes the restart loop it was meant to prevent.
@@ -1175,7 +1182,7 @@ cargo test -p prkdb-cli --test readiness -- --nocapture
 
 Add all three to `PUBLIC_PATHS` in `auth.rs` (Task 1).
 
-- [ ] **Step 4: Wire the rate limiter**
+- [x] **Step 4: Wire the rate limiter**
 
 ```bash
 grep -rn 'RateLimiter' crates/prkdb-cli/src crates/prkdb/src/bin --include='*.rs' || echo "not wired"
@@ -1183,11 +1190,11 @@ grep -rn 'RateLimiter' crates/prkdb-cli/src crates/prkdb/src/bin --include='*.rs
 Expected: `not wired`. Add `--rate-limit <PER_SECOND>` to serve, construct the existing
 `RateLimiter`, apply as an axum layer returning 429 with a `Retry-After` header.
 
-- [ ] **Step 5: Test the limiter**
+- [x] **Step 5: Test the limiter**
 
 Assert that exceeding the configured rate returns 429, and that the limit resets.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/prkdb-cli/
@@ -1206,7 +1213,7 @@ git commit -m "feat: add liveness/readiness endpoints and wire rate limiting"
 - Create: `.github/workflows/release.yml`
 - Modify: `crates/prkdb-types/Cargo.toml`, `crates/prkdb-proto/Cargo.toml`, `crates/prkdb-client/Cargo.toml`
 
-- [ ] **Step 1: Verify nothing is published**
+- [x] **Step 1: Verify nothing is published**
 
 ```bash
 for c in prkdb prkdb-core prkdb-client prkdb-types; do
@@ -1236,7 +1243,7 @@ prkdb-types = { path = "crates/prkdb-types", version = "0.6.0" }
 prkdb-proto = { path = "crates/prkdb-proto", version = "0.6.0" }
 ```
 
-- [ ] **Step 4: Determine the real dependency order**
+- [x] **Step 4: Determine the real dependency order**
 
 ```bash
 grep -A6 '^\[dependencies\]' crates/prkdb-client/Cargo.toml
@@ -1264,16 +1271,21 @@ is expected. Publish `prkdb-types` for real first, then re-run the next dry run.
 Start with these three: small, stable, low-risk, and they establish the namespace. The engine
 crates (`prkdb`, `prkdb-core`) can follow once their public APIs settle after Plan A.
 
-- [ ] **Step 6: Write the CHANGELOG**
+- [x] **Step 6: Write the CHANGELOG**
 
 Keep-a-Changelog format. Reconstruct entries for 0.6.0 from `git log`.
 
-- [ ] **Step 7: Add the release workflow**
+- [x] **Step 7: Add the release workflow**
 
 Triggered on `v*` tags: verify the tag matches the workspace version, run the full test suite,
 then `cargo publish` each crate in the order from Step 4.
 
-- [ ] **Step 8: Tag and publish 0.6.0**
+- [ ] **Step 8: Tag and publish 0.6.0** — deliberately not done
+
+Publishing to crates.io is irreversible: a version can be yanked but never replaced. It
+runs under the maintainer's account and needs an explicit decision, not an inference from
+"complete everything". Steps 2, 3 and 5 are also outstanding and are prerequisites —
+crates.io rejects a publish whose path dependencies carry no `version =`.
 
 ```bash
 git tag -s v0.6.0 -m "v0.6.0"
@@ -1283,7 +1295,7 @@ git push origin v0.6.0
 > Signed tags: this repo is configured for SSH signing, so `-s` works and the tag verifies on
 > GitHub alongside the commits.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add CHANGELOG.md .github/workflows/release.yml crates/*/Cargo.toml
