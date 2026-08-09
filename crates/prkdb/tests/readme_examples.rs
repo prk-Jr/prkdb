@@ -17,10 +17,10 @@
 
 use prkdb::prelude::*;
 use prkdb::PrkDb;
+pub use prkdb_client::ClientConfig;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-pub use prkdb_client::ClientConfig;
 
 /// The type nearly every example names.
 #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -47,15 +47,29 @@ struct User {
 }
 
 impl SoftDeletable for User {
-    fn is_deleted(&self) -> bool { self.deleted }
-    fn mark_deleted(&mut self) { self.deleted = true; }
-    fn restore(&mut self) { self.deleted = false; }
+    fn is_deleted(&self) -> bool {
+        self.deleted
+    }
+    fn mark_deleted(&mut self) {
+        self.deleted = true;
+    }
+    fn restore(&mut self) {
+        self.deleted = false;
+    }
 }
 impl Timestamped for User {
-    fn created_at(&self) -> u64 { self.created_at }
-    fn updated_at(&self) -> u64 { self.updated_at }
-    fn set_created_at(&mut self, t: u64) { self.created_at = t; }
-    fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    fn created_at(&self) -> u64 {
+        self.created_at
+    }
+    fn updated_at(&self) -> u64 {
+        self.updated_at
+    }
+    fn set_created_at(&mut self, t: u64) {
+        self.created_at = t;
+    }
+    fn set_updated_at(&mut self, t: u64) {
+        self.updated_at = t;
+    }
 }
 
 #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -104,7 +118,7 @@ pub use prkdb_types::collection::{
 /// tests bind `db` to the one that makes the majority compile and expose the other as
 /// `prkdb`. That ambiguity is itself a finding; see the report in docs/.
 #[allow(unused_imports)]
-use {UserQueryExt as _, OrderQueryExt as _, UserV1QueryExt as _, UserV2QueryExt as _};
+use {OrderQueryExt as _, UserQueryExt as _, UserV1QueryExt as _, UserV2QueryExt as _};
 
 fn a_db() -> prkdb::indexed_storage::IndexedStorage<prkdb::storage::InMemoryAdapter> {
     unimplemented!("examples are compiled, never run")
@@ -133,7 +147,7 @@ mod log {
 
 /// README.md line 98
 async fn readme_line_98() -> Result<(), Box<dyn std::error::Error>> {
-let mut db = a_db();
+    let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
     let any_storage_adapter = any_storage();
@@ -156,19 +170,19 @@ let mut db = a_db();
     let mut tx = storage.begin_transaction();
     tx.put(b"key1", b"value1")?;
     tx.put(b"key2", b"value2")?;
-    tx.commit().await?;  // Atomic commit
+    tx.commit().await?; // Atomic commit
 
     // Rollback
     let mut tx = storage.begin_transaction();
     tx.put(b"key1", b"bad_value")?;
-    tx.rollback();  // Discard all changes
+    tx.rollback(); // Discard all changes
 
     // Savepoints (nested transactions)
     let mut tx = storage.begin_transaction();
     tx.put(b"order", b"pending")?;
     tx.savepoint("sp1")?;
     tx.put(b"payment", b"charged")?;
-    tx.rollback_to_savepoint("sp1")?;  // Undo payment, keep order
+    tx.rollback_to_savepoint("sp1")?; // Undo payment, keep order
 
     // Conflict detection (Serializable isolation)
     let config = TransactionConfig {
@@ -176,14 +190,14 @@ let mut db = a_db();
         ..Default::default()
     };
     let mut tx = storage.begin_transaction_with_config(config);
-    let _ = tx.get(b"key1").await?;  // Tracked for conflicts
-    // If another transaction modifies key1, commit() returns ConflictDetected
+    let _ = tx.get(b"key1").await?; // Tracked for conflicts
+                                    // If another transaction modifies key1, commit() returns ConflictDetected
     Ok(())
 }
 
 /// README.md line 133
 async fn readme_line_133() -> Result<(), Box<dyn std::error::Error>> {
-let mut db = a_db();
+    let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
     let any_storage_adapter = any_storage();
@@ -207,7 +221,9 @@ let mut db = a_db();
     let ttl_storage = TtlStorage::new(storage);
 
     // Put with 1 hour TTL
-    ttl_storage.put_with_ttl(b"session:123", b"data", Duration::from_secs(3600)).await?;
+    ttl_storage
+        .put_with_ttl(b"session:123", b"data", Duration::from_secs(3600))
+        .await?;
 
     // Get returns None if expired
     let value = ttl_storage.get(b"session:123").await?;
@@ -225,7 +241,7 @@ let mut db = a_db();
 
 /// README.md line 160
 async fn readme_line_160() -> Result<(), Box<dyn std::error::Error>> {
-let mut db = a_db();
+    let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
     let any_storage_adapter = any_storage();
@@ -260,7 +276,7 @@ let mut db = a_db();
 
 /// README.md line 185
 async fn readme_line_185() -> Result<(), Box<dyn std::error::Error>> {
-let mut db = a_db();
+    let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
     let any_storage_adapter = any_storage();

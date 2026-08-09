@@ -597,6 +597,66 @@ removing a `pub use` is a breaking change for a type someone may have named.
 
 ---
 
+### S-10 — mTLS peer authentication could be selected but never worked
+
+**Found 2026-08-09 while trying to demonstrate mTLS at cluster scale. Fixed the same day.
+Severity: high — the recommended secure configuration silently prevented a cluster from
+forming. Introduced by this work.**
+
+#### Cause
+
+`RpcClientPool::get_client` built the peer endpoint as:
+
+```rust
+let endpoint = format!("http://{}", addr);
+```
+
+unconditionally. There was no TLS on the peer *client* at all — the module contained no
+reference to TLS of any kind.
+
+So a cluster configured with `--tls-client-ca` had servers demanding a client certificate
+and peers dialling plaintext at them. The handshake failed, no `AppendEntries` ever landed,
+and no leader could be elected.
+
+`PeerIdentity::from_config` preferred `MutualTls` whenever a CA was configured, so this was
+the configuration an operator following the security guidance would reach. **The node
+started cleanly and reported nothing wrong**; only replication was broken. That is the
+worst shape a fault can take.
+
+#### This is the S-02 pattern, repeated
+
+S-02 was "TLS is implemented and no shipped binary can turn it on". This is "peer mTLS is
+implemented on the server and the client cannot speak it". Both are a capability that
+exists on one side of a connection only, and both survived because the tests exercised the
+side that worked.
+
+Every test in `peer_mtls.rs` before this drove a *client* against a TLS server. None used
+`RpcClientPool`, which is the thing a real cluster uses.
+
+#### Fix
+
+`PeerTls` on the pool: certificate, key, CA and expected domain. `get_client` dials
+`https://` with a `ClientTlsConfig` when it is set, `http://` when it is not — matching how
+the peer listens, which is the property that was missing.
+
+`serve` now refuses `--tls-client-ca` without `--tls-cert`/`--tls-key`, because mTLS needs
+this node to present a certificate too, and `PeerIdentity::from_config` only selects
+`MutualTls` when that material is actually available. A policy that cannot be honoured is
+not offered.
+
+#### Regression test
+
+`peer_mtls::peers_dial_each_other_over_mtls` drives the pool itself. It asserts a plaintext
+pool **fails** against the TLS listener — otherwise the server is not really requiring TLS
+and the rest proves nothing — and that a TLS pool succeeds.
+
+The first version of that test asserted only that the error text lacked certain words, and
+**passed with the fix reverted**. It was tightened to require success and re-checked in
+both directions. A regression test that does not fail without the fix is not a regression
+test, which is the lesson S-07 taught and this nearly repeated.
+
+---
+
 ## 3. Requirements
 
 Each has an ID, the finding it closes, and a **falsifiable acceptance test** — what CI runs to

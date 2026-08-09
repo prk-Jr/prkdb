@@ -334,3 +334,58 @@ async fn without_a_client_ca_mtls_admits_nobody() {
         .expect_err("with no client CA the server sees no certificate and must refuse");
     assert_eq!(status.code(), Code::Unauthenticated);
 }
+
+/// Two nodes form a cluster over mTLS: they dial each other, present certificates, and
+/// replicate.
+///
+/// # The bug this closes (S-10)
+///
+/// `RpcClientPool::get_client` built `http://{addr}` unconditionally. There was no TLS on
+/// the peer *client* at all. So configuring `--tls-client-ca` produced servers that
+/// demanded a client certificate and peers that dialled plaintext at them — the handshake
+/// failed, no AppendEntries ever landed, and the cluster could not elect.
+///
+/// `PeerIdentity::from_config` preferred mTLS whenever a CA was present, so that was the
+/// configuration an operator following the documentation would reach. The node started
+/// cleanly and only replication was broken, which is the worst shape for a fault.
+///
+/// Every other test in this file drives a *client* against a TLS server. Only this one
+/// exercises the pool, which is where the gap was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn peers_dial_each_other_over_mtls() {
+    use prkdb::raft::rpc_client::PeerTls;
+
+    let pki = pki();
+    let (url, _shutdown, _dir) = start(&pki, true).await;
+    let addr = url.trim_start_matches("https://").to_string();
+
+    let pool = RpcClientPool::new(2).with_tls(PeerTls {
+        cert_pem: pki.peer_cert_pem.clone().into_bytes(),
+        key_pem: pki.peer_key_pem.clone().into_bytes(),
+        ca_pem: pki.ca_pem.clone().into_bytes(),
+        domain: "localhost".to_string(),
+    });
+
+    // A plaintext pool cannot reach this server at all — that is the state before the fix.
+    let plain = RpcClientPool::new(3);
+    assert!(
+        plain
+            .send_append_entries(1, &addr, append_entries(), 0)
+            .await
+            .is_err(),
+        "a plaintext dial must fail against a TLS listener; if this succeeds the server \
+         is not actually requiring TLS and the rest of this test proves nothing"
+    );
+
+    // The TLS pool gets through. It may still be refused on Raft grounds; what matters is
+    // that it is not refused for authentication, which is what the interceptor decides.
+    let outcome = pool
+        .send_append_entries(1, &addr, append_entries(), 0)
+        .await;
+    assert!(
+        outcome.is_ok(),
+        "a peer presenting a cluster certificate must complete the handshake and reach \
+         the service; got: {:?}",
+        outcome.err()
+    );
+}

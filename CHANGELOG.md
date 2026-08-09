@@ -184,6 +184,15 @@ not enforced by anything, and several tests reported green while testing nothing
   no longer needs it: the layer has already required `Admin` to reach the handler. The
   relaxation is gated on authorization actually being enforced, so a server with neither
   the layer nor a token still denies.
+- **mTLS peer authentication could be selected but never worked** (S-10, introduced by
+  this work). `RpcClientPool` built `http://{addr}` unconditionally — the module contained
+  no TLS of any kind — so a cluster configured with `--tls-client-ca` had servers demanding
+  a client certificate and peers dialling plaintext at them. No `AppendEntries` landed and
+  no leader could be elected, while the node started cleanly and reported nothing wrong.
+  `PeerIdentity::from_config` preferred mTLS whenever a CA was present, so this was the
+  configuration the security guidance led to. The pool now dials `https://` with a client
+  identity when configured, `serve` refuses `--tls-client-ca` without a certificate and
+  key, and the policy is only selected when the material to honour it exists.
 - **Raft peer RPCs are now authenticated** (S-01, final part). `RaftService` carries
   `AppendEntries`, `RequestVote` and `ReadIndex` and is exempt from the client-API layer by
   design, because peers present certificates rather than bearer credentials — which meant

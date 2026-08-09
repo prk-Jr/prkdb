@@ -54,6 +54,15 @@ impl PeerIdentity {
         }
     }
 
+    /// Whether this policy needs TLS on both ends to work at all.
+    ///
+    /// mTLS is not merely "TLS available": peers must present certificates *to each
+    /// other*, so the dialling side needs its own cert and key. A node that enables the
+    /// policy without them starts and then cannot form a cluster.
+    pub fn requires_tls(&self) -> bool {
+        matches!(self, PeerIdentity::MutualTls)
+    }
+
     pub fn is_disabled(&self) -> bool {
         matches!(self, PeerIdentity::Disabled)
     }

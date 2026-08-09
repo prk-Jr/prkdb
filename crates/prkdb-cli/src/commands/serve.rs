@@ -278,10 +278,20 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     // Refusing to start applies only to a node that actually has peers. A single-node
     // instance has no cluster to protect, and making certificates a prerequisite for
     // `prkdb-cli serve` on a laptop would push people toward the opt-out by default.
+    // mTLS requires the peer *client* to present a certificate too, so it is only
+    // selectable when this node has its own cert and key to present. Choosing it from the
+    // CA alone produced a node that started happily and could never form a cluster: its
+    // peers dial TLS, get asked for a certificate, and have none (spec S-10).
     let peer_identity = prkdb::raft::peer_auth::PeerIdentity::from_config(
-        args.tls_client_ca.is_some(),
+        args.tls_client_ca.is_some() && tls.is_some(),
         std::env::var("PRKDB_CLUSTER_SECRET").ok(),
     );
+    if args.tls_client_ca.is_some() && tls.is_none() {
+        anyhow::bail!(
+            "--tls-client-ca requires --tls-cert and --tls-key: peers must present a \
+             certificate to each other, and this node has none to present."
+        );
+    }
     if peer_identity.is_disabled() && !args.peers.is_empty() && !args.allow_unauthenticated_peers {
         anyhow::bail!(
             "This node has {} configured peer(s) but no Raft peer authentication. Pass \
@@ -299,6 +309,7 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     } else {
         println!("🔒 Raft peer authentication: {}", peer_identity.describe());
     }
+    let peer_identity_requires_tls = peer_identity.requires_tls();
     let peer_auth = prkdb::raft::peer_auth::PeerAuthInterceptor::new(peer_identity);
 
     // The gRPC surface takes the same principals. `None` means anonymous, matching the
@@ -537,7 +548,20 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         // Start Multi-Raft partitions (background tasks)
         // Skip serving Partition 0's Raft server here, as we'll multiplex it on the main gRPC server below
         // This avoids port collision on 50051
-        let rpc_pool = std::sync::Arc::new(prkdb::raft::RpcClientPool::new(args.id));
+        let rpc_pool = std::sync::Arc::new({
+            let pool = prkdb::raft::RpcClientPool::new(args.id);
+            // Dial peers the same way they listen. Without this the pool builds
+            // `http://` and the handshake fails against a TLS peer.
+            match (&tls, peer_identity_requires_tls) {
+                (Some(t), true) => pool.with_tls(prkdb::raft::rpc_client::PeerTls {
+                    cert_pem: t.read_cert()?,
+                    key_pem: t.read_key()?,
+                    ca_pem: t.read_client_ca()?.unwrap_or_default(),
+                    domain: args.host.clone(),
+                }),
+                _ => pool,
+            }
+        });
         db.start_multi_raft(rpc_pool, &[0]);
 
         let grpc_tls = tls.clone();

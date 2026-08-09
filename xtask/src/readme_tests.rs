@@ -341,6 +341,13 @@ pub fn generate(check_only: bool) -> Result<()> {
         writeln!(out, "// skipped README.md line {line}: {reason}")?;
     }
 
+    // Format the generated source before comparing or writing.
+    //
+    // Without this, `cargo fmt --all` reformats the file and `--check` then reports it as
+    // out of date on the next run — a CI failure with no cause a reader could act on, and
+    // one that recurs every time anyone formats the tree.
+    let out = rustfmt(&out).unwrap_or(out);
+
     let target = root.join(GENERATED);
     let current = std::fs::read_to_string(&target).unwrap_or_default();
 
@@ -415,4 +422,30 @@ mod tests {
         assert!(is_complete_program("#[tokio::main]\nasync fn main() {}"));
         assert!(!is_complete_program("let x = db.get(b\"k\").await?;"));
     }
+}
+
+/// Run the generated source through rustfmt.
+///
+/// Returns `None` if rustfmt is unavailable or rejects the input, in which case the
+/// unformatted source is used — a missing formatter should not stop the generator, and a
+/// rustfmt failure means the generated code does not parse, which the compiler will say
+/// far more clearly than a formatter can.
+fn rustfmt(source: &str) -> Option<String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("rustfmt")
+        .args(["--edition", "2021", "--emit", "stdout", "--quiet"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    child.stdin.as_mut()?.write_all(source.as_bytes()).ok()?;
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
 }
