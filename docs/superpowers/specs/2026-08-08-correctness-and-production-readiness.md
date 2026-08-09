@@ -148,84 +148,85 @@ binary a user would run.
 > remediation and no history rewrite is required — this was a phantom finding, and the claim is
 > corrected here rather than quietly deleted.
 
-### S-03 — Serializable transactions lose writes under contention
+### S-03 — No snapshot reads outside a transaction
 
-**Found 2026-08-09, during Task 4 verification. Severity: high. Not yet diagnosed.**
+**Found 2026-08-09. Diagnosed and resolved the same day. Severity: medium — a read
+property, not a durability one.**
 
-`test_bank_transfer_invariant` — the test Task 6 rewired to use real storage and real
-`Serializable` transactions — failed once during a full workspace run:
+> **This entry originally claimed "Serializable transactions lose writes under
+> contention" and called it the most serious finding of the hardening work. That was
+> wrong, and the correction matters more than the original claim.** No writes are lost.
+> Committed state is correct at all times. What happens is that a reader *outside* a
+> transaction can observe a multi-key commit half-applied.
+
+#### What was actually seen
+
+`test_bank_transfer_invariant` failed once during a full workspace run:
 
 ```
-assertion `left == right` failed: Invariant violated during worker 4 iteration 20
+Invariant violated during worker 4 iteration 20
   left: Failed { reason: "total balance mismatch: expected 10000, storage holds 9983" }
- right: Passed
 ```
 
-**17 units of money vanished.** Ten accounts seeded with 1000 each; eight workers moving
-amounts between them inside `Serializable` transactions; the total read back from storage
-was 9983.
+It looked exactly like seventeen units of money vanishing.
 
-#### Why this is a real finding and not a flaky test
+#### What it really was
 
-The invariant is not timing-dependent. Every transfer either commits both legs or commits
-neither, so the total is conserved under *any* interleaving. A rejected transfer — for
-insufficient funds or a write conflict — leaves both balances untouched, and the test
-ignores those results deliberately. There is no schedule of correct transactions that
-produces 9983.
+`WalStorageAdapter::put_batch_impl` appends every record to the WAL as a batch, then
+inserts them into the in-memory index **one key at a time**, then updates the cache.
+`StorageAdapter::get` takes no transaction barrier. So between the first and second index
+insert, a concurrent reader sees one leg of a two-key transfer and not the other.
 
-This is what the bank test exists to detect. Before Task 6 it operated on an in-process
-`HashMap` and could only ever have caught a bug in `std::sync::Mutex`.
+The invariant check was reading each balance with a plain `storage.get()`, so it caught a
+commit in flight and compared halves of two different states.
 
-#### What is known
+`crates/prkdb/tests/batch_atomicity.rs` demonstrates the mechanism directly and pins both
+facts down:
 
-| | |
-|---|---|
-| Reproduces in isolation | **No** — 3/3 pass, and 5/5 under artificial CPU load |
-| Reproduces under `cargo test --workspace` | **Once in two runs.** The second full run was 586 passed / 0 failed |
-| Caused by the WAL header change (Task 4)? | **No.** That change was uncommitted at the time and does not touch the transaction path; the failure is in conflict detection or commit, above the segment layer |
-| Present before Task 6? | **Unknowable.** The test did not touch storage until Task 6, so this could have existed since the transaction code was written |
-
-#### Two candidate causes
-
-1. **A gap in `Serializable` conflict detection.** Two transfers touching the same account
-   both pass validation, both commit, and the second overwrites the first's balance with a
-   value computed from a stale read. The classic lost update, and the amount lost (17)
-   being smaller than any single transfer amount (1-50) is consistent with a partial
-   overwrite rather than a dropped transaction.
-2. **`commit()` returning `Ok` without durably applying both writes.** The transfer writes
-   both legs before committing, so a commit that persists one and not the other would lose
-   exactly the difference.
-
-Candidate 1 is likelier and the more serious of the two.
-
-#### Reproducing it
-
-Rare under normal load. To force it:
-
-```bash
-# Raise contention: fewer accounts, more workers, more transfers per worker.
-# jepsen_consistency_tests.rs test_bank_transfer_invariant currently uses
-# 10 accounts / 8 workers / 25 transfers.
-for i in $(seq 1 50); do
-  cargo test -p prkdb --test jepsen_consistency_tests test_bank_transfer_invariant \
-    || { echo "reproduced on run $i"; break; }
-done
+```
+final_sum == 200          durable state is always correct — nothing is lost
+torn_reads == 194         out of ~400 transfers, a non-transactional reader saw
+                          inconsistent state roughly half the time
 ```
 
-Then instrument `transfer` to log `(from, to, amount, commit result)` and replay the log
-against the final balances to find which transfer's effect went missing.
+#### The fix
 
-#### What must not happen
+`BankAccounts::check_total_invariant` now reads inside a `Serializable` transaction and
+only trusts the sum when that transaction commits cleanly. Conflict detection runs *before*
+the empty-write-set early return in `Transaction::commit`, so a read-only Serializable
+transaction that commits successfully has certified that nothing it read changed while it
+was reading. That is the snapshot.
 
-Do not relax the invariant, widen the tolerance, or mark the test `#[ignore]`. A database
-that loses committed writes under contention has a defect in the one property it exists to
-provide. If it turns out the test is wrong, the fix is to prove that — not to stop asking.
+Retries on conflict, up to 50 attempts, then fails loudly rather than quietly reporting
+`Passed` — an invariant checker that gives up and says "fine" is worse than one that
+errors.
 
-#### Relationship to the rest of the plan
+#### The real limitation this exposed
 
-This is the first genuine correctness bug the hardening work has surfaced, as opposed to a
-gap in evidence. Spec §6 anticipated the case for R1.2 (the linearizable register) and the
-same rule applies here: stop, capture, do not weaken.
+**PrkDB has no snapshot read for callers outside a transaction.** Any client reading
+several keys with `get()` and expecting them to agree can observe a torn state. That is
+worth knowing and worth documenting for users; it is not a bug in the sense the original
+entry implied.
+
+Two ways to close it properly, neither required to fix the test:
+
+1. Apply the whole batch to the index atomically — swap in a prepared map rather than
+   inserting key by key.
+2. Give `get` a read guard on the transaction barrier, so reads and commits interleave
+   cleanly. Costs contention on every read.
+
+Option 1 is narrower and does not slow the read path.
+
+#### Why this is recorded rather than deleted
+
+The mistaken diagnosis was reasonable from the symptom and wrong on the evidence. A
+missing-money report is the right thing to escalate on sight — and the right thing to
+verify before believing. Writing "17 units vanished" into a spec and then proving it did
+not is the more useful artifact of the two.
+
+The bank test earned its keep either way. Before Task 6 it operated on an in-process
+`HashMap` and could only ever have caught a bug in `std::sync::Mutex`. Two days after being
+pointed at real storage it surfaced a genuine, documented limitation.
 
 ---
 

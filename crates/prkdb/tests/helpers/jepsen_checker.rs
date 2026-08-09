@@ -279,31 +279,72 @@ impl BankAccounts {
             .map(i64::from_le_bytes)
     }
 
-    /// Sum every balance **as stored** and compare against the seeded total.
+    /// Sum every balance and compare against the seeded total.
     ///
-    /// Money is neither created nor destroyed by any interleaving of transfers.
+    /// Reads run inside a `Serializable` transaction and the sum is only trusted when
+    /// that transaction commits cleanly. That is not ceremony — it is required for the
+    /// answer to mean anything.
+    ///
+    /// An earlier version read each balance with a plain `storage.get()`. Those reads take
+    /// no transaction barrier, and a commit applies its keys to the index one at a time,
+    /// so a reader can observe one leg of a two-key transfer and not the other. It
+    /// reported "expected 10000, storage holds 9983" and looked exactly like lost money.
+    /// It was not: the durable state was correct throughout, and only the observation was
+    /// torn. See S-03 in the spec and `tests/batch_atomicity.rs`.
+    ///
+    /// A read-only `Serializable` transaction gives the snapshot: conflict detection runs
+    /// before the empty-write-set early return, so a successful commit proves nothing the
+    /// transaction read changed while it was reading.
     pub async fn check_total_invariant(&self) -> InvariantResult {
-        let mut total = 0i64;
-        for name in &self.names {
-            match self.get_balance(name).await {
-                Some(v) => total += v,
-                None => {
-                    return InvariantResult::Failed {
-                        reason: format!("account {name} vanished from storage"),
+        const MAX_ATTEMPTS: usize = 50;
+
+        for _ in 0..MAX_ATTEMPTS {
+            let config = TransactionConfig {
+                isolation_level: IsolationLevel::Serializable,
+                ..Default::default()
+            };
+            let mut tx = self.storage.begin_transaction_with_config(config);
+
+            let mut total = 0i64;
+            let mut read_failed = None;
+            for name in &self.names {
+                match read_balance(&mut tx, name).await {
+                    Ok(v) => total += v,
+                    Err(e) => {
+                        read_failed = Some(format!("reading {name}: {e}"));
+                        break;
                     }
                 }
             }
+            if let Some(reason) = read_failed {
+                return InvariantResult::Failed { reason };
+            }
+
+            // A clean commit certifies the snapshot; a conflict means something changed
+            // mid-read, so the sum was never a real state and must not be judged.
+            match tx.commit().await {
+                Ok(_) => {
+                    return if total == self.initial_total {
+                        InvariantResult::Passed
+                    } else {
+                        InvariantResult::Failed {
+                            reason: format!(
+                                "total balance mismatch: expected {}, storage holds {}",
+                                self.initial_total, total
+                            ),
+                        }
+                    };
+                }
+                Err(_) => continue,
+            }
         }
 
-        if total == self.initial_total {
-            InvariantResult::Passed
-        } else {
-            InvariantResult::Failed {
-                reason: format!(
-                    "total balance mismatch: expected {}, storage holds {}",
-                    self.initial_total, total
-                ),
-            }
+        // Never seen in practice; failing loudly beats silently reporting Passed.
+        InvariantResult::Failed {
+            reason: format!(
+                "could not obtain a consistent snapshot in {MAX_ATTEMPTS} attempts under \
+                 contention"
+            ),
         }
     }
 
