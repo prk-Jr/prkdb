@@ -119,6 +119,7 @@ async fn fetch_segment_refuses_an_uncredentialed_caller() {
             segment_id: 0,
             start_offset: 0,
             max_bytes: 1,
+            collection: String::new(),
         }))
         .await
         .expect_err("streaming raw WAL segments must require a credential");
@@ -143,6 +144,7 @@ async fn fetch_segment_refuses_a_reader() {
                 segment_id: 0,
                 start_offset: 0,
                 max_bytes: 1,
+                collection: String::new(),
             },
             READER_CREDENTIAL,
         ))
