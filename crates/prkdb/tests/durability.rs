@@ -174,3 +174,71 @@ async fn a_reopened_database_can_be_snapshotted_without_touching_a_key_first() {
         reader.header.index_entries
     );
 }
+
+// ── Whole-database operations on the default adapter ─────────────────────────
+//
+// `CollectionPartitionedAdapter` is what `with_data_dir` builds, and it has now been
+// missing three `StorageAdapter` methods that its inner adapters implement: `take_snapshot`
+// (S-04), collection discovery (S-05), and `scan_prefix` (S-07). Each compiled cleanly and
+// failed at runtime in whichever feature happened to call it.
+//
+// These tests exercise the wrapper directly, because a test that reaches for
+// `WalStorageAdapter` or `SledAdapter` passes whether or not the wrapper forwards anything
+// — which is exactly why S-07 shipped with no regression coverage until this was written.
+
+/// `scan_prefix` works on the adapter the default builder produces (S-07).
+#[tokio::test(flavor = "multi_thread")]
+async fn scan_prefix_works_on_a_data_dir_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(dir.path());
+
+    db.storage().put(b"users:alice", b"1").await.unwrap();
+    db.storage().put(b"users:bob", b"2").await.unwrap();
+    db.storage().put(b"orders:x", b"3").await.unwrap();
+
+    let users = db
+        .storage()
+        .scan_prefix(b"users:")
+        .await
+        .expect("scan_prefix must be supported on the default adapter");
+    assert_eq!(
+        users.len(),
+        2,
+        "expected both users keys, got {:?}",
+        users
+            .iter()
+            .map(|(k, _)| String::from_utf8_lossy(k))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        users.iter().all(|(k, _)| k.starts_with(b"users:")),
+        "scan_prefix returned keys outside the prefix"
+    );
+
+    // Keys come back in their full `collection:id` form, which is what get/put accept.
+    let (key, _) = &users[0];
+    assert!(
+        db.storage().get(key).await.unwrap().is_some(),
+        "a key returned by scan_prefix must be readable with get"
+    );
+
+    // A prefix naming no collection must not leak other collections' keys.
+    let orders = db.storage().scan_prefix(b"orders:").await.unwrap();
+    assert_eq!(orders.len(), 1);
+}
+
+/// The prefix scan `list_collections` depends on works on a `--database` database.
+///
+/// This is the user-visible symptom of S-07: the call returned an error rather than a
+/// list, on the adapter every `--database` deployment uses.
+#[tokio::test(flavor = "multi_thread")]
+async fn list_collections_works_on_a_data_dir_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(dir.path());
+
+    db.put(b"users:alice", b"1").await.unwrap();
+
+    db.list_collections()
+        .await
+        .expect("list_collections scans a prefix and must not fail on the default adapter");
+}

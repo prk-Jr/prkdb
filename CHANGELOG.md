@@ -107,7 +107,11 @@ not enforced by anything, and several tests reported green while testing nothing
   majority to acknowledge a heartbeat in the current term before returning an index, per
   Raft §6.4. Found by the register test's first partitioned run, reproducing about two
   runs in five.
-- **`scan_prefix` was unsupported on the default storage adapter** (S-07), so
+- **`scan_prefix` was unsupported on the default storage adapter** (S-07), with no
+  regression test until a verification pass removed the fix and found the suite still
+  green. `durability.rs` now covers it directly against the wrapper — a test reaching for
+  `WalStorageAdapter` or `SledAdapter` passes whether or not the wrapper forwards anything,
+  which is why the gap existed. Originally: so
   `list_collections` and principal loading failed on any database opened with
   `--database`. The third method missing from `CollectionPartitionedAdapter` after
   `take_snapshot` and collection discovery — a trait default that returns "not supported"
