@@ -94,6 +94,13 @@ jobs:
   # cancel is a job that tests nothing.
   mutants:
     name: "🧬 Mutation Testing (targeted)"
+    # Nightly, not per-PR. It takes tens of minutes and explores rather than gates, and a
+    # slow job on every push gets cancelled — at which point it tests nothing.
+    #
+    # Deliberately *not* `continue-on-error` on the PR path instead: a check whose result
+    # is discarded is not a check, which is why that flag was removed from the chaos
+    # workflow. Nightly runs produce a real pass or fail that someone can act on.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -133,21 +140,18 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      # A bare #[ignore] is a test that will never run again and nobody will remember
-      # why. Three of the corruption tests were disabled this way and turned out to
-      # pass in 0.7s. Requiring a reason makes the cost of switching a test off
-      # visible at review time. The pattern matches `#[ignore]` exactly, so
-      # `#[ignore = "..."]` passes.
-      # Comment lines are excluded: prose explaining why something is ignored is
-      # documentation, not a bare attribute. Without this, writing about the rule
-      # violates the rule.
-      - name: Reject bare #[ignore]
-        run: |
-          if grep -rn '#\[ignore\]' crates/ --include='*.rs' | grep -v ':[0-9]*: *\(//\|///\|//!\)'; then
-            echo "::error::bare #[ignore] found — use #[ignore = \"reason\"]"
-            exit 1
-          fi
-          echo "every #[ignore] carries a reason"
+      # A switched-off test is one nobody will remember why they switched off. Three
+      # corruption tests were disabled this way and turned out to pass in 0.7s.
+      #
+      # This job originally required only that an #[ignore] carry a reason. That is not
+      # sufficient: `chaos_test_rapid_recovery` had one — "Manual investigation:
+      # integration harness still diverges from WAL recovery unit tests" — and was a
+      # correct test switched off for reporting real data loss (spec S-05).
+      #
+      # The script closes the category list, so a reason must also be a legitimate one,
+      # and keeps a single implementation of the rule.
+      - name: Ignore reasons
+        run: bash scripts/check_ignore_reasons.sh
 
   nightly-slow-tests:
     name: Nightly Slow Tests
