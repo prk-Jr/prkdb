@@ -7,7 +7,19 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-fn create_test_node() -> (Arc<RaftNode>, TempDir) {
+/// Bind an ephemeral port and return it, so concurrently-running test binaries
+/// cannot collide on a fixed number. This file and compaction_test.rs both used
+/// 50001 before.
+async fn free_port() -> u16 {
+    tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("binding an ephemeral port on loopback cannot fail")
+        .local_addr()
+        .expect("a bound listener always has a local address")
+        .port()
+}
+
+async fn create_test_node() -> (Arc<RaftNode>, TempDir) {
     // Create storage
     let temp_dir = TempDir::new().unwrap();
     let storage = Arc::new(
@@ -20,7 +32,7 @@ fn create_test_node() -> (Arc<RaftNode>, TempDir) {
     let state_machine = Arc::new(PrkDbStateMachine::new(storage.clone()));
 
     // Create cluster config
-    let listen_addr: SocketAddr = "127.0.0.1:50001".parse().unwrap();
+    let listen_addr: SocketAddr = format!("127.0.0.1:{}", free_port().await).parse().unwrap();
     let config = ClusterConfig {
         local_node_id: 1,
         listen_addr,
@@ -38,7 +50,7 @@ fn create_test_node() -> (Arc<RaftNode>, TempDir) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_read_index_basic() {
-    let (node, _temp) = create_test_node();
+    let (node, _temp) = create_test_node().await;
 
     // Test ReadIndex - should fail since node is not leader
     let result = node.handle_read_index(1).await;
@@ -50,7 +62,7 @@ async fn test_read_index_basic() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_wait_for_apply_immediate() {
-    let (node, _temp) = create_test_node();
+    let (node, _temp) = create_test_node().await;
 
     // wait_for_apply(0) should succeed immediately since last_applied starts at 0
     let result = node.wait_for_apply(0).await;

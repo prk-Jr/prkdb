@@ -2,9 +2,10 @@
 
 ## Status Check
 
-- **Current Version**: v2.0-clean
-- **Build Status**: Passing ✅
-- **Test Coverage**: Core modules covered (Raft, Sharding, Storage)
+- **Current Version**: 0.6.0
+  <br>Must match `workspace.package.version`; `xtask repo-status` fails if they drift.
+- **Build Status**: see the CI badge in the README rather than a hardcoded claim here
+- **Test Coverage**: measured in CI with a ratcheting floor — see the coverage job
 
 ---
 
@@ -22,9 +23,17 @@
 
 - [x] **Consistent Hashing**: `ConsistentHashRing` with virtual nodes for minimal rebalancing.
 - [x] **Range Partitioning**: `RangePartitioner` for ordered key access patterns.
-- [x] **Performance**: ~1.56B routing ops/sec (641ps latency).
+- [x] **Performance**: routing is a pure hash lookup with no I/O. The "1.56B ops/sec"
+      figure previously quoted here is unverified — see
+      [benchmark methodology](../benchmarks/methodology.md).
 
-### 3. Infrastructure
+### 3. Client SDKs
+
+- [x] **Generated clients**: TypeScript, Python, and Go, produced by `prkdb-cli codegen`
+      and exercised by dedicated CI jobs on every push. These were listed as future work
+      long after they shipped, which is the drift `xtask repo-status` now catches.
+
+### 4. Infrastructure
 
 - [x] **Cleanup**: Removed ~70 redundant files; repo size optimized.
 - [x] **Testing**: Fast unit tests (<1s for core); comprehensive chaos suite.
@@ -49,18 +58,18 @@
 
 - [ ] **Web Dashboard**: React/Next.js admin UI for cluster management.
 - [ ] **SQL Layer**: Expand `prkdb-orm` with more SQL dialect support.
-- [ ] **Native Clients**: Go and Python clients.
 
 ---
 
 ## Performance Baselines
 
-| Metric                | Value       | Note               |
-| --------------------- | ----------- | ------------------ |
-| **Write Throughput**  | 199K ops/s  | Batch writes       |
-| **Read Throughput**   | 8.5M ops/s  | Single key lookup  |
-| **Partition Routing** | 1.56B ops/s | Consistent hashing |
-| **Cache Hits**        | 10.4M ops/s | LRU Cache          |
+Numbers live in one place — [benchmark methodology](../benchmarks/methodology.md) — with
+the command and hardware that produced them.
+
+They used to be duplicated here and in the README, in different units, for different
+operations, with nothing saying so: this page claimed 199K writes/sec while the README
+claimed 894K queries/sec, and a reader had no way to know those measure different things
+on different hardware. Keeping one table means the two cannot disagree.
 
 ---
 

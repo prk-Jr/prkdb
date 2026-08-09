@@ -52,8 +52,8 @@ fn bench_inner_join_throughput(c: &mut Criterion) {
                         let left_events = create_left_events(left_count);
                         let right_events = create_right_events(left_count, overlap_factor);
 
-                        let left_stream = stream::iter(left_events.into_iter());
-                        let right_stream = stream::iter(right_events.into_iter());
+                        let left_stream = stream::iter(left_events);
+                        let right_stream = stream::iter(right_events);
 
                         let config = JoinConfig {
                             join_type: JoinType::Inner,
@@ -108,8 +108,8 @@ fn bench_left_join_performance(c: &mut Criterion) {
                         let left_events = create_left_events(left_count);
                         let right_events = create_right_events(left_count, overlap_factor);
 
-                        let left_stream = stream::iter(left_events.into_iter());
-                        let right_stream = stream::iter(right_events.into_iter());
+                        let left_stream = stream::iter(left_events);
+                        let right_stream = stream::iter(right_events);
 
                         let config = JoinConfig {
                             join_type: JoinType::Left,
@@ -302,8 +302,8 @@ fn bench_concurrent_joins(c: &mut Criterion) {
                             let left_events = create_left_events(500);
                             let right_events = create_right_events(500, 1.0);
 
-                            let left_stream = stream::iter(left_events.into_iter());
-                            let right_stream = stream::iter(right_events.into_iter());
+                            let left_stream = stream::iter(left_events);
+                            let right_stream = stream::iter(right_events);
 
                             let config = JoinConfig {
                                 join_type: JoinType::Inner,
@@ -364,8 +364,8 @@ fn bench_join_window_sizes(c: &mut Criterion) {
                     let left_events = create_left_events(1_000);
                     let right_events = create_right_events(1_000, 1.0);
 
-                    let left_stream = stream::iter(left_events.into_iter());
-                    let right_stream = stream::iter(right_events.into_iter());
+                    let left_stream = stream::iter(left_events);
+                    let right_stream = stream::iter(right_events);
 
                     let config = JoinConfig {
                         join_type: JoinType::Inner,

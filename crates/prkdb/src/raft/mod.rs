@@ -1,3 +1,4 @@
+pub mod authz_interceptor;
 pub mod batch_config;
 pub mod command;
 pub mod config;
@@ -5,6 +6,7 @@ pub mod grpc_service; // NEW: gRPC service for client data operations
 pub mod node;
 pub mod partition_manager;
 pub mod partitioner;
+pub mod peer_auth;
 pub mod range_partitioner;
 pub mod router;
 pub mod rpc_client;

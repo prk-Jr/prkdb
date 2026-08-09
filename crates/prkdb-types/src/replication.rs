@@ -87,13 +87,11 @@ impl ReplicationConfig {
 
         // For Quorum/All, need at least one replica
         match self.ack_level {
-            AckLevel::Quorum | AckLevel::All => {
-                if self.replica_addresses.is_empty() {
-                    return Err(format!(
-                        "ack_level {:?} requires at least one replica",
-                        self.ack_level
-                    ));
-                }
+            AckLevel::Quorum | AckLevel::All if self.replica_addresses.is_empty() => {
+                return Err(format!(
+                    "ack_level {:?} requires at least one replica",
+                    self.ack_level
+                ));
             }
             _ => {}
         }

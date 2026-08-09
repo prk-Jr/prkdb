@@ -4,17 +4,22 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```no_run
 //! use prkdb::cache::LruCache;
-//!
-//! let cache = LruCache::<u64, User>::new(1000);  // Max 1000 entries
+//! # use prkdb::storage::InMemoryAdapter;
+//! # use prkdb_types::storage::StorageAdapter;
+//! # async fn demo(db: &InMemoryAdapter) -> Result<(), Box<dyn std::error::Error>> {
+//! # let user_id: u64 = 1;
+//! let cache = LruCache::<u64, Vec<u8>>::new(1000);  // Max 1000 entries
 //!
 //! // Cache hit/miss
 //! if let Some(user) = cache.get(&user_id) {
-//!     return Ok(user);
+//!     return Ok(());
 //! }
-//! let user = db.get(&user_id).await?;
+//! let user = db.get(b"users:1").await?.unwrap_or_default();
 //! cache.put(user_id, user.clone());
+//! # Ok(())
+//! # }
 //! ```
 
 use std::collections::{HashMap, VecDeque};

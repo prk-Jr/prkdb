@@ -10,14 +10,21 @@
 //! - **Zero-copy reads**: Direct mmap access for consumers
 //!
 //! # Example
-//! ```ignore
-//! let adapter = StreamingStorageAdapter::new(config)?;
+//! ```no_run
+//! # use prkdb::storage::streaming_adapter::{
+//! #     StreamingConfig, StreamingRecord, StreamingStorageAdapter,
+//! # };
+//! # async fn demo(config: StreamingConfig, records: Vec<StreamingRecord>)
+//! #     -> Result<(), Box<dyn std::error::Error>> {
+//! let adapter = StreamingStorageAdapter::new(config).await?;
 //!
 //! // Append records (returns starting offset)
 //! let offset = adapter.append_batch(records).await?;
 //!
 //! // Read from offset
 //! let records = adapter.read_from(offset, 1000).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use prkdb_core::wal::mmap_parallel_wal::MmapParallelWal;
@@ -61,7 +68,7 @@ impl BatchHeader {
             base_offset,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("system clock is before the Unix epoch")
                 .as_millis() as u64,
         }
     }
@@ -149,7 +156,11 @@ impl StreamingRecord {
             ));
         }
 
-        let key_len = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+        let key_len = u32::from_le_bytes(
+            data[0..4]
+                .try_into()
+                .expect("the `data.len() < 8` guard above makes this 4 bytes"),
+        ) as usize;
         let key_end = 4 + key_len;
 
         if data.len() < key_end + 4 {
@@ -157,7 +168,11 @@ impl StreamingRecord {
         }
 
         let key = data[4..key_end].to_vec();
-        let value_len = u32::from_le_bytes(data[key_end..key_end + 4].try_into().unwrap()) as usize;
+        let value_len = u32::from_le_bytes(
+            data[key_end..key_end + 4]
+                .try_into()
+                .expect("the `data.len() < key_end + 4` guard above makes this 4 bytes"),
+        ) as usize;
         let value_end = key_end + 4 + value_len;
 
         if data.len() < value_end {
@@ -231,9 +246,10 @@ impl StreamingStorageAdapter {
             ..WalConfig::default()
         };
 
-        let wal = MmapParallelWal::create(wal_config, config.segment_count)
+        // open_or_create: `create` truncates, which would discard the stream on open.
+        let wal = MmapParallelWal::open_or_create(wal_config, config.segment_count)
             .await
-            .map_err(|e| StorageError::Internal(format!("Failed to create WAL: {}", e)))?;
+            .map_err(|e| StorageError::Internal(format!("Failed to open WAL: {}", e)))?;
 
         let metrics = Arc::new(StorageMetrics::new());
 

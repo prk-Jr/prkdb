@@ -4,14 +4,16 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```rust
 //! use prkdb::rate_limit::RateLimiter;
+//! use std::time::Duration;
 //!
-//! let limiter = RateLimiter::new(100, Duration::from_secs(1));  // 100 ops/sec
+//! # tokio::runtime::Runtime::new().unwrap().block_on(async {
+//! let limiter = RateLimiter::new(100, Duration::from_secs(1)); // 100 ops/sec
 //!
-//! // Wait for permission before operation
+//! // Wait for permission before performing the rate-limited operation.
 //! limiter.acquire().await;
-//! db.insert(&record).await?;
+//! # });
 //! ```
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,8 +41,10 @@ impl RateLimiter {
     /// * `ops_per_second` - Maximum operations per second
     ///
     /// # Example
-    /// ```rust,ignore
-    /// let limiter = RateLimiter::per_second(100);  // 100 ops/sec
+    /// ```rust
+    /// use prkdb::rate_limit::RateLimiter;
+    ///
+    /// let limiter = RateLimiter::per_second(100); // 100 ops/sec
     /// ```
     pub fn per_second(ops_per_second: u64) -> Self {
         Self {

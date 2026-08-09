@@ -27,9 +27,11 @@ impl WalShard {
                 // CRITICAL FIX: Use 1 segment per shard (not config.segment_count=4)
                 // This prevents 16 shards × 4 segments = 64 total segments overhead
                 // Now: 16 shards × 1 segment = 16 total segments (manageable!)
-                MmapParallelWal::create(config.clone(), 1)
+                // open_or_create: `create` truncates, which would wipe each shard's log
+                // every time the adapter is opened.
+                MmapParallelWal::open_or_create(config.clone(), 1)
                     .await
-                    .map_err(|e| StorageError::Internal(format!("WAL creation failed: {}", e)))
+                    .map_err(|e| StorageError::Internal(format!("WAL open failed: {}", e)))
             })
         })?;
 
@@ -48,9 +50,25 @@ impl WalShard {
 /// writes across them using hash-based routing. This eliminates write contention
 /// and enables true parallel write throughput.
 ///
+/// # Status: incomplete, and not used by anything
+///
+/// This adapter implements only the three required `StorageAdapter` methods. Every
+/// optional one — `scan_prefix`, `scan_range`, `take_snapshot`, the outbox family,
+/// `get_changes_since` — falls through to the trait default that returns "not supported".
+/// Anything built on it therefore fails at runtime: no prefix queries, no range scans, no
+/// backup, no outbox, no replication stream.
+///
+/// It is constructed nowhere outside its own tests, and `PrkDb::builder()` cannot produce
+/// one. It is re-exported from `storage::mod`, which is the only reason a user could
+/// select it — and doing so would be a mistake.
+///
+/// Use `WalStorageAdapter` (single WAL) or `CollectionPartitionedAdapter` (per-collection
+/// WALs, what `with_data_dir` builds). Both implement the optional surface.
+///
 /// # Performance
-/// - Single WAL: ~60K sustained writes/sec
-/// - 16 WAL shards: ~300K-600K sustained writes/sec (5-10x improvement)
+///
+/// The throughput figures previously quoted here were unverified — no benchmark in the
+/// repository measures this adapter. See `docs/benchmarks/methodology.md`.
 ///
 /// # Configuration
 /// Set `shard_count` in `WalConfig`:
@@ -162,7 +180,8 @@ impl ShardedWalAdapter {
             })
             .collect();
 
-        // Single WAL append (FAST! 214K ops/sec proven!)
+        // Single WAL append. The "214K ops/sec proven" this used to claim was not
+        // proven by anything in the repository — see docs/benchmarks/methodology.md.
         let offsets = shard
             .wal
             .append_batch(records)

@@ -24,6 +24,7 @@ tokio = { workspace = true }
 
 # HTTP server (for serve command)
 axum = { workspace = true, features = ["ws", "json"] }
+axum-server = { workspace = true }
 tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["cors", "fs"] }
 futures-util = "0.3"
@@ -40,12 +41,17 @@ bincode = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 humantime = "2.1"
+# Backup archive manifests. Already in the tree transitively; declared directly so the
+# verification path does not depend on another crate keeping it.
+sha2 = "0.10"
+# Constant-time credential comparison.
+subtle = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 prost.workspace = true
 prost-types.workspace = true
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.11", features = ["json", "blocking"] }
 
 [dev-dependencies]
 prkdb-proto = { path = "../prkdb-proto" }

@@ -21,7 +21,7 @@ fn bench_tumbling_windows(c: &mut Criterion) {
                 |b, &(window_size_ms, item_count)| {
                     b.to_async(&rt).iter(|| async {
                         let items: Vec<i32> = (0..item_count).collect();
-                        let stream = stream::iter(items.into_iter());
+                        let stream = stream::iter(items);
 
                         let config = WindowConfig::tumbling(Duration::from_millis(window_size_ms));
                         let mut windowed_stream = WindowedStream::new(stream, config);
@@ -66,7 +66,7 @@ fn bench_sliding_windows(c: &mut Criterion) {
                     |b, &(window_size_ms, slide_ms, item_count)| {
                         b.to_async(&rt).iter(|| async {
                             let items: Vec<i32> = (0..item_count).collect();
-                            let stream = stream::iter(items.into_iter());
+                            let stream = stream::iter(items);
 
                             let config = WindowConfig::sliding(
                                 Duration::from_millis(window_size_ms),
@@ -110,7 +110,7 @@ fn bench_window_aggregations(c: &mut Criterion) {
             |b, &item_count| {
                 b.to_async(&rt).iter(|| async {
                     let items: Vec<f64> = (0..item_count).map(|i| i as f64).collect();
-                    let stream = stream::iter(items.into_iter());
+                    let stream = stream::iter(items);
 
                     let config = WindowConfig::tumbling(Duration::from_millis(100));
                     let mut windowed_stream = WindowedStream::new(stream, config);
@@ -143,7 +143,7 @@ fn bench_window_aggregations(c: &mut Criterion) {
             |b, &item_count| {
                 b.to_async(&rt).iter(|| async {
                     let items: Vec<i32> = (0..item_count).map(|i| i % 10).collect(); // Values 0-9
-                    let stream = stream::iter(items.into_iter());
+                    let stream = stream::iter(items);
 
                     let config = WindowConfig::tumbling(Duration::from_millis(100));
                     let mut windowed_stream = WindowedStream::new(stream, config);
@@ -188,7 +188,7 @@ fn bench_window_memory_usage(c: &mut Criterion) {
                         .map(|i| vec![i as u8; 1024]) // 1KB per item
                         .collect();
 
-                    let stream = stream::iter(items.into_iter());
+                    let stream = stream::iter(items);
 
                     let config = WindowConfig::tumbling(Duration::from_millis(50));
                     let mut windowed_stream = WindowedStream::new(stream, config);
@@ -227,7 +227,7 @@ fn bench_window_throughput(c: &mut Criterion) {
             |b, &items_per_second| {
                 b.to_async(&rt).iter(|| async {
                     let items: Vec<i32> = (0..items_per_second).collect();
-                    let stream = stream::iter(items.into_iter());
+                    let stream = stream::iter(items);
 
                     let config = WindowConfig::tumbling(Duration::from_millis(100));
                     let mut windowed_stream = WindowedStream::new(stream, config);
@@ -300,7 +300,7 @@ fn bench_concurrent_windows(c: &mut Criterion) {
                     for i in 0..num_streams {
                         let handle = tokio::spawn(async move {
                             let items: Vec<i32> = (i * 1000..(i + 1) * 1000).collect();
-                            let stream = stream::iter(items.into_iter());
+                            let stream = stream::iter(items);
 
                             let config = WindowConfig::tumbling(Duration::from_millis(50));
                             let mut windowed_stream = WindowedStream::new(stream, config);
