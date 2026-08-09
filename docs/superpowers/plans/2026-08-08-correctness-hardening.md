@@ -379,6 +379,9 @@ git commit -m "feat(test): implement Wing & Gong linearizability checker"
 
 ---
 
+
+> **Complete 2026-08-09.** `crates/prkdb/tests/helpers/in_process_cluster.rs`, driven by
+> `crates/prkdb/tests/in_process_cluster.rs`. Needs no prebuilt binary.
 ## Task 4b: Build an in-process cluster harness (R1, R4, R14, R16 prerequisite; D5)
 
 > **New in revision 5. A prerequisite for Tasks 5, 7, 17, and 19 of this plan — and for
@@ -397,7 +400,7 @@ git commit -m "feat(test): implement Wing & Gong linearizability checker"
 - Create: `crates/prkdb/tests/helpers/in_process_cluster.rs`
 - Modify: `crates/prkdb/tests/helpers/mod.rs`
 
-- [ ] **Step 1: Confirm the constraint**
+- [x] **Step 1: Confirm the constraint**
 
 ```bash
 sed -n '135,180p' crates/prkdb/tests/helpers/test_cluster.rs
@@ -405,7 +408,7 @@ grep -rn '#\[ignore.*[Bb]inary' crates/prkdb/tests/
 ```
 Expected: the binary-path resolution and panic, and at least one test ignored because of it.
 
-- [ ] **Step 2: Write the failing test for the harness itself**
+- [x] **Step 2: Write the failing test for the harness itself**
 
 ```rust
 /// The harness must form a working cluster with no child processes and no prebuilt binary.
@@ -448,14 +451,14 @@ async fn in_process_cluster_partitions_and_heals() {
 }
 ```
 
-- [ ] **Step 3: Run and watch it fail**
+- [x] **Step 3: Run and watch it fail**
 
 ```bash
 cargo test -p prkdb --test in_process_cluster -- --nocapture --test-threads=1
 ```
 Expected: FAIL — `InProcessCluster` does not exist.
 
-- [ ] **Step 4: Implement the harness**
+- [x] **Step 4: Implement the harness**
 
 Required surface, mirroring the process harness so tests can migrate mechanically:
 
@@ -481,7 +484,7 @@ Construct `PartitionManager` / `RaftNode` directly, exactly as `distributed_writ
 already does — that file proves in-process nodes work; it just does it inline instead of behind
 a reusable type. Bind every port with `helpers::free_port()` from Task 10.
 
-- [ ] **Step 5: Verify it needs no binary**
+- [x] **Step 5: Verify it needs no binary**
 
 ```bash
 cargo clean -p prkdb
@@ -490,12 +493,12 @@ cargo test -p prkdb --test in_process_cluster -- --nocapture --test-threads=1
 Expected: PASS **without** any `cargo build --bin prkdb-server` step. That is the whole point —
 if it fails here, the harness still depends on the binary.
 
-- [ ] **Step 6: Keep the process harness for what it actually tests**
+- [x] **Step 6: Keep the process harness for what it actually tests**
 
 Do not delete `TestCluster`. It is the right tool for binary-level behaviour: startup, config
 parsing, signal handling, graceful shutdown. Add a module doc to each saying which to reach for.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/prkdb/tests/helpers/
@@ -504,12 +507,16 @@ git commit -m "test: add in-process cluster harness requiring no prebuilt binary
 
 ---
 
+
+> **Complete 2026-08-09.** `a_replicated_register_is_linearizable` and
+> `..._across_a_partition` in `jepsen_consistency_tests.rs`. The partitioned variant
+> found **S-06** — `read_index` served reads without confirming leadership.
 ## Task 5: Point the register test at a real cluster (R1)
 
 **Files:**
 - Modify: `crates/prkdb/tests/jepsen_consistency_tests.rs:80-145`
 
-- [ ] **Step 1: Read the existing cluster harness — and learn its cost**
+- [x] **Step 1: Read the existing cluster harness — and learn its cost**
 
 ```bash
 sed -n '1,80p' crates/prkdb/tests/helpers/test_cluster.rs
@@ -526,19 +533,19 @@ prkdb-server --release' first"* if the binary is missing. Two consequences:
 **D5 chose the in-process harness**, built in Task 4b. Use `InProcessCluster` here rather than
 `TestCluster` — no binary build, and it is what lets Tasks 17 and 19 drop most `#[ignore]`s.
 
-- [ ] **Step 2: Replace the single-node adapter**
+- [x] **Step 2: Replace the single-node adapter**
 
 `test_linearizable_register` currently constructs a local `WalStorageAdapter`
 (`jepsen_consistency_tests.rs:15`). Replace with a 3-node cluster from `test_cluster.rs`,
 issuing reads and writes through the cluster client so the operations traverse Raft.
 
-- [ ] **Step 3: Inject a partition mid-run**
+- [x] **Step 3: Inject a partition mid-run**
 
 Halfway through the operation loop, apply a `NetworkSimulator::partition` splitting one node
 from the other two, then heal it before the run ends. A consistency test with no faults tests
 nothing that a single-threaded test would not.
 
-- [ ] **Step 4: Run it**
+- [x] **Step 4: Run it**
 
 ```bash
 cargo test -p prkdb --test jepsen_consistency_tests test_linearizable_register -- --nocapture --test-threads=1
@@ -548,7 +555,7 @@ Expected: PASS, and the log shows the partition being applied and healed.
 > If it FAILS, that is a real finding about PrkDB's consistency — not a test bug. Stop, capture
 > the history, and open an issue before changing the test.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/prkdb/tests/jepsen_consistency_tests.rs
@@ -615,12 +622,16 @@ git commit -m "test: run bank transfer invariant through real serializable trans
 
 ---
 
+
+> **Complete 2026-08-09.** `distributed_writes.rs` rewritten; the vacuous
+> `get_leader().is_some()` assertions are gone. Election safety lives in
+> `election_safety.rs`.
 ## Task 7: Fix the Raft leadership assertions (R4)
 
 **Files:**
 - Modify: `crates/prkdb/tests/distributed_writes.rs:49-160`
 
-- [ ] **Step 1: Confirm the assertion is vacuous**
+- [x] **Step 1: Confirm the assertion is vacuous**
 
 ```bash
 sed -n '391,399p' crates/prkdb/src/raft/node.rs
@@ -629,7 +640,7 @@ sed -n '391,399p' crates/prkdb/src/raft/node.rs
 otherwise. Followers return `Some` too, so `nodeN_is_leader` is true for every node once any
 election succeeds.
 
-- [ ] **Step 2: Write the election-safety test first**
+- [x] **Step 2: Write the election-safety test first**
 
 ```rust
 /// Raft's election safety property: at most one leader per term.
@@ -668,7 +679,7 @@ async fn test_election_safety_at_most_one_leader_per_term() {
 }
 ```
 
-- [ ] **Step 3: Run it**
+- [x] **Step 3: Run it**
 
 ```bash
 cargo test -p prkdb --test distributed_writes test_election_safety -- --nocapture --test-threads=1
@@ -676,25 +687,25 @@ cargo test -p prkdb --test distributed_writes test_election_safety -- --nocaptur
 Expected: PASS. If `current_term()` or `id()` are not public on `RaftNode`, add
 `pub(crate)` accessors — do not weaken the test to fit the API.
 
-- [ ] **Step 4: Fix `test_raft_leader_election`**
+- [x] **Step 4: Fix `test_raft_leader_election`**
 
 Replace `get_leader().await.is_some()` with `get_state().await == RaftState::Leader`, and poll
 until a leader exists or a deadline expires rather than `sleep(3s)`-then-assert.
 
-- [ ] **Step 5: Fix `test_raft_propose`**
+- [x] **Step 5: Fix `test_raft_propose`**
 
 Select the propose target by `get_state() == RaftState::Leader`, not by the first node returning
 `Some` from `get_leader()`. Today it picks node 1 regardless of who leads, so the test named for
 leader proposal usually exercises follower forwarding.
 
-- [ ] **Step 6: Run the whole file**
+- [x] **Step 6: Run the whole file**
 
 ```bash
 cargo test -p prkdb --test distributed_writes -- --nocapture --test-threads=1
 ```
 Expected: all pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/prkdb/tests/distributed_writes.rs
@@ -908,13 +919,17 @@ git commit -m "test: replace hardcoded ports with ephemeral allocation"
 
 ---
 
+
+> **Complete 2026-08-09.** `helpers::await_condition`, `helpers::within`, and
+> `TestCluster::await_ready` replace the sleep-then-assert pattern. Remaining `sleep`
+> calls are soak durations, not races.
 ## Task 11: Put a deadline on every cluster test (R3)
 
 **Files:**
 - Modify: `crates/prkdb/tests/helpers/mod.rs`
 - Modify: every test that forms a cluster
 
-- [ ] **Step 1: Reproduce the hang**
+- [x] **Step 1: Reproduce the hang**
 
 ```bash
 cargo test --workspace --no-fail-fast
@@ -923,7 +938,7 @@ Observed on this baseline: run 1 exits 0; a second identical run hangs in `distr
 for >10 minutes. Serialized in isolation it passes 5/5 in ~6s. The cause is CPU starvation of
 Raft election timers when ~40 test binaries run concurrently.
 
-- [ ] **Step 2: Add a poll-until-condition helper**
+- [x] **Step 2: Add a poll-until-condition helper**
 
 ```rust
 /// Poll `cond` until it returns true or `timeout` elapses. Panics with `desc` on timeout.
@@ -953,7 +968,7 @@ pub async fn await_condition<F, Fut>(
 }
 ```
 
-- [ ] **Step 3: Replace every `sleep`-then-assert**
+- [x] **Step 3: Replace every `sleep`-then-assert**
 
 ```bash
 grep -rn 'sleep(Duration::from_secs' crates/prkdb/tests/ | wc -l
@@ -961,7 +976,7 @@ grep -rn 'sleep(Duration::from_secs' crates/prkdb/tests/ | wc -l
 Convert each to `await_condition` with a description naming what is being waited on. The
 description is what turns a mystery hang into a diagnosable failure.
 
-- [ ] **Step 4: Wrap whole tests**
+- [x] **Step 4: Wrap whole tests**
 
 Any test that starts a cluster gets an outer `tokio::time::timeout(Duration::from_secs(60), ...)`
 so it fails rather than hangs.
@@ -993,7 +1008,7 @@ so it fails rather than hangs.
 > on how many times it has run is a real defect in the drift detector, which is one of
 > the better things in this repository.
 
-- [ ] **Step 5: Verify determinism**
+- [x] **Step 5: Verify determinism**
 
 ```bash
 for i in $(seq 1 10); do
@@ -1005,7 +1020,7 @@ done
 Expected: 10 × `OK`. This is the acceptance criterion for R3 — anything less means the flake is
 still there.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/prkdb/tests/
@@ -1014,6 +1029,8 @@ git commit -m "test: add explicit deadlines to all cluster-forming tests"
 
 ---
 
+
+> **Complete 2026-08-09.** `cargo test --doc -p prkdb`: 70 passed, 0 ignored.
 ## Task 12: Make the documentation compile (R5)
 
 **Files:**
@@ -1021,14 +1038,14 @@ git commit -m "test: add explicit deadlines to all cluster-forming tests"
 - Modify: remaining files with `ignore` fences
 - Modify: `crates/prkdb/src/lib.rs`
 
-- [ ] **Step 1: Measure the baseline**
+- [x] **Step 1: Measure the baseline**
 
 ```bash
 cargo test --doc -p prkdb 2>&1 | grep 'test result:'
 ```
 Expected: `3 passed; 0 failed; 67 ignored`.
 
-- [ ] **Step 2: Convert `ignore` to `no_run`**
+- [x] **Step 2: Convert `ignore` to `no_run`**
 
 ```bash
 grep -rc '```ignore' crates/prkdb/src/indexed_storage.rs
@@ -1039,7 +1056,7 @@ type-checks without executing — which catches every signature drift at no runt
 Examples that genuinely cannot compile (pseudo-code, shell) become ```` ```text ````, not
 `ignore`. `ignore` means "nobody will ever check this"; `text` means "this is not Rust".
 
-- [ ] **Step 3: Fix what fails to compile**
+- [x] **Step 3: Fix what fails to compile**
 
 ```bash
 cargo test --doc -p prkdb 2>&1 | tail -40
@@ -1047,11 +1064,11 @@ cargo test --doc -p prkdb 2>&1 | tail -40
 Every failure here is a documented API that no longer exists or changed shape. These are real
 bugs in the docs, found for the first time. Fix the example to match the code.
 
-- [ ] **Step 4: Repeat for the remaining files**
+- [x] **Step 4: Repeat for the remaining files**
 
 `rate_limit.rs`, `collection_handle.rs`, `ttl.rs`, `transaction.rs`, `cache.rs`.
 
-- [ ] **Step 5: Compile the README**
+- [x] **Step 5: Compile the README**
 
 Add to the top of `crates/prkdb/src/lib.rs`:
 
@@ -1062,14 +1079,14 @@ Add to the top of `crates/prkdb/src/lib.rs`:
 Then fix the fallout — 38 Rust fences that nothing has ever compiled. Fences that are shell,
 output, or config get retagged ```` ```text ````.
 
-- [ ] **Step 6: Verify**
+- [x] **Step 6: Verify**
 
 ```bash
 cargo test --doc -p prkdb 2>&1 | grep 'test result:'
 ```
 Expected: ≥60 passing, 0 failed.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/prkdb/src/ README.md
@@ -1078,6 +1095,8 @@ git commit -m "docs: compile doctests and README examples"
 
 ---
 
+
+> **Complete 2026-08-09.** Zero ```ignore fences remain in `crates/prkdb/src`.
 ## Task 12b: Convert the remaining 63 ignored doc fences (R5)
 
 > **Filed 2026-08-08 during execution of Task 12.** Task 12 established and verified the
@@ -1167,20 +1186,20 @@ one that unlocks the other 55:
 3. **`?` does not work in a doctest body** unless the block returns a `Result`. Use
    `.unwrap()`; these are examples, not production code.
 
-- [ ] **Step 1: Confirm the baseline**
+- [x] **Step 1: Confirm the baseline**
 
 ```bash
 cargo test --doc -p prkdb 2>&1 | grep 'test result:'
 ```
 Expected: `7 passed; 63 ignored`.
 
-- [ ] **Step 2: Convert the seven scattered fences first**
+- [x] **Step 2: Convert the seven scattered fences first**
 
 One each in `cache.rs`, `transaction.rs`, `ttl.rs`, `collection_handle.rs`, and the three
 `storage/*` adapters. They exercise all three templates and are a cheap confidence check
 before the bulk.
 
-- [ ] **Step 3: Convert `indexed_storage.rs` in batches**
+- [x] **Step 3: Convert `indexed_storage.rs` in batches**
 
 Fifty-six fences, nearly all template C with a per-method body. Work in batches of ten and
 run `cargo test --doc -p prkdb indexed_storage` after each — a batch that compiles as a
@@ -1190,7 +1209,7 @@ whole but fails as a unit is much harder to bisect.
 > ```` ```text ````, never ```` ```ignore ````. `text` says "this is not Rust"; `ignore`
 > says "nobody will ever check this", which is how all 67 got here.
 
-- [ ] **Step 4: Compile the README too**
+- [x] **Step 4: Compile the README too**
 
 Add to `crates/prkdb/src/lib.rs`:
 
@@ -1201,7 +1220,7 @@ Add to `crates/prkdb/src/lib.rs`:
 The README holds 38 Rust fences that nothing has ever compiled. Expect fallout; retag the
 shell and output blocks as `text`.
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
 ```bash
 cargo test --doc -p prkdb 2>&1 | grep 'test result:'
@@ -1209,7 +1228,7 @@ cargo test --doc -p prkdb 2>&1 | grep 'test result:'
 ```
 Expected: ≥60 passing, 0 failed, and the tracker's doctest check green.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/prkdb/src README.md
@@ -1522,26 +1541,31 @@ cargo test --workspace --no-fail-fast -- --test-threads=4
 grep -rn 'storage_old_inmemory' crates/ --include='*.rs' || echo "name is gone"
 ```
 
-- [ ] **Step 3: Add a version-drift collector to xtask**
+- [x] **Step 3: Add a version-drift collector to xtask** — `collectors/versions.rs`
 
 Extend `xtask/src/repo_status/collectors/` with a check that fails when the workspace version
 disagrees with the version named in `docs/guide/roadmap.md`. Today the workspace is `0.6.0`
 while the roadmap says "v2.0-clean" — the drift detector you already built should have caught
 this.
 
-- [ ] **Step 4: Add a roadmap-vs-CI collector**
+- [x] **Step 4: Add a roadmap-vs-CI collector** — the existing check was made
+      section-aware; it previously matched anywhere in the file, so the fix it asked
+      for could not satisfy it
 
 Fail when the roadmap lists something under "Future" that CI already tests. Today it lists
 "Native Clients: Go and Python" as future work while five CI jobs exercise generated Go, Python,
 and TypeScript clients.
 
-- [ ] **Step 5: Reconcile the roadmap**
+- [x] **Step 5: Reconcile the roadmap** — version now matches the manifest, client SDKs
+      moved out of Future, and the duplicated performance table replaced by a pointer to
+      `docs/benchmarks/methodology.md`
 
 Move shipped items out of Future. Reconcile the two performance tables — the roadmap says 199K
 writes/sec, the README says 894K queries/sec, and nothing explains that these are different
 operations.
 
-- [ ] **Step 6: Verify the detector catches drift**
+- [x] **Step 6: Verify the detector catches drift** — confirmed by editing the roadmap
+      version and watching it fire, then restoring
 
 ```bash
 cargo run -p xtask -- repo-status snapshot --fail-on-objective-drift
@@ -1639,6 +1663,9 @@ git commit -m "fix(xtask): make repo-status snapshot idempotent"
 
 ---
 
+
+> **Complete 2026-08-09.** `read_consistency_modes.rs`, including
+> `an_isolated_leader_refuses_a_linearizable_read` (S-06).
 ## Task 17: Verify the shipped linearizable read mode (R14)
 
 > **Depends on Tasks 3-5.** The checker must be real before pointing it at anything.
@@ -1653,14 +1680,14 @@ git commit -m "fix(xtask): make repo-status snapshot idempotent"
 - Create: `crates/prkdb/tests/read_consistency_modes.rs`
 - Modify: `.github/workflows/ci.yml`
 
-- [ ] **Step 1: Confirm the gap**
+- [x] **Step 1: Confirm the gap**
 
 ```bash
 grep -rn 'ReadMode::Linearizable\|ReadConsistency::Linearizable' crates/prkdb/tests/
 ```
 Expected: only `raft_chaos_tests.rs:714` and `:761`, both under `#[ignore]`.
 
-- [ ] **Step 2: Read the real `TestCluster` surface before writing anything**
+- [x] **Step 2: Read the real `TestCluster` surface before writing anything**
 
 ```bash
 grep -n 'pub fn \|pub async fn \|pub struct ' crates/prkdb/tests/helpers/test_cluster.rs
@@ -1680,7 +1707,7 @@ skip this step:
 `leader()`, `all_nodes_have()`, and a workload driver do **not** exist. Building them is part of
 this task, not a given.
 
-- [ ] **Step 3: Build the binary the harness needs**
+- [x] **Step 3: Build the binary the harness needs**
 
 ```bash
 cargo build --bin prkdb-server --release
@@ -1691,7 +1718,7 @@ same step. This is the constraint that has kept `raft_chaos_tests.rs:256` marked
 `#[ignore] // Requires server binary`. Task 4b removes that constraint — prefer
 `InProcessCluster` and skip the binary build entirely.
 
-- [ ] **Step 4: Add the missing cluster helpers**
+- [x] **Step 4: Add the missing cluster helpers**
 
 In `tests/helpers/test_cluster.rs`:
 
@@ -1701,7 +1728,7 @@ In `tests/helpers/test_cluster.rs`:
   `get`, both going through `prkdb-client` so the request traverses the real read path.
 - `pub async fn all_nodes_have(&self, key, value) -> bool`.
 
-- [ ] **Step 5: Write the failing test**
+- [x] **Step 5: Write the failing test**
 
 ```rust
 //! The read-consistency levels PrkDB advertises must actually differ, and the linearizable
@@ -1779,7 +1806,7 @@ async fn stale_mode_is_observably_weaker_than_linearizable() {
 }
 ```
 
-- [ ] **Step 6: Run and watch it fail, then pass**
+- [x] **Step 6: Run and watch it fail, then pass**
 
 ```bash
 cargo build --bin prkdb-server --release
@@ -1794,7 +1821,7 @@ First run FAILs on the missing helpers; after Step 4 both PASS.
 > wired through distinctly. Check `execute_read_mode` at `grpc_service.rs:174` before assuming
 > the test is wrong.
 
-- [ ] **Step 7: Gate it in CI**
+- [x] **Step 7: Gate it in CI**
 
 Add to the `consistency-tests` job in `chaos-tests.yml`, **including the binary build**:
 
@@ -1807,7 +1834,7 @@ Add to the `consistency-tests` job in `chaos-tests.yml`, **including the binary 
 
 Not behind `#[ignore]`.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/prkdb/tests/read_consistency_modes.rs .github/workflows/
@@ -1816,6 +1843,9 @@ git commit -m "test: verify the shipped linearizable read mode under partition"
 
 ---
 
+
+> **Complete 2026-08-09.** `docs/benchmarks/methodology.md`; `plan_status.sh` rejects
+> a bare throughput figure in a doc comment.
 ## Task 18: Attach methodology to every performance claim (R15)
 
 **Files:**
@@ -1824,7 +1854,7 @@ git commit -m "test: verify the shipped linearizable read mode under partition"
 - Modify: `docs/guide/roadmap.md`
 - Modify: `xtask/src/repo_status/collectors/`
 
-- [ ] **Step 1: Inventory the claims**
+- [x] **Step 1: Inventory the claims**
 
 ```bash
 grep -rnE '[0-9]+(\.[0-9]+)?[KMB]? ?(ops|queries|writes|reads)/s' README.md docs/guide/ crates/*/src --include='*.rs' --include='*.md'
@@ -1833,7 +1863,7 @@ Expected: `894K queries/sec` at `README.md:15`, `indexed_storage.rs:7`, `indexed
 a separate table in `docs/guide/roadmap.md` claiming 199K writes/sec, 8.5M reads/sec,
 1.56B routing ops/sec, 10.4M cache hits/sec.
 
-- [ ] **Step 2: For each, find or reproduce the source**
+- [x] **Step 2: For each, find or reproduce the source**
 
 ```bash
 ls crates/prkdb/benches/
@@ -1842,31 +1872,31 @@ cargo bench -p prkdb --bench query_bench
 Every number either gets a link to the bench that produced it plus the hardware it ran on, or it
 is deleted. A number nobody can reproduce is worse than no number.
 
-- [ ] **Step 3: Reconcile the two tables**
+- [x] **Step 3: Reconcile the two tables**
 
 README says 894K queries/sec; the roadmap says 8.5M reads/sec. These may be different operations
 (indexed secondary-key query vs. primary-key lookup) — if so, say which, explicitly. Today a
 reader cannot tell whether one supersedes the other.
 
-- [ ] **Step 4: Preserve the good caveat**
+- [x] **Step 4: Preserve the good caveat**
 
 `README.md:876` already states that the PrkDB and Kafka benchmark runs are not apples-to-apples.
 That paragraph is the most trustworthy sentence in the README. Keep it, and make the feature
 bullets consistent with it rather than the reverse.
 
-- [ ] **Step 5: Teach the drift detector**
+- [x] **Step 5: Teach the drift detector**
 
 Extend the `xtask` collector from Task 16 to fail when a performance claim in README or crate
 docs has no adjacent source link.
 
-- [ ] **Step 6: Verify**
+- [x] **Step 6: Verify**
 
 ```bash
 cargo run -p xtask -- repo-status snapshot --fail-on-objective-drift
 ```
 Expected: exit 0. Then add an unsourced number, re-run, confirm non-zero.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add README.md docs/guide/roadmap.md crates/prkdb/src/indexed_storage.rs xtask/
@@ -1939,19 +1969,19 @@ git commit -m "test: require a documented reason on every #[ignore]"
 
 ## Definition of done
 
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` exits 0
-- [ ] `cargo test --workspace --no-fail-fast` completes 10 consecutive runs without hanging
-- [ ] `detects_stale_read_after_completed_write` passes against the new checker
-- [ ] The register test runs on a ≥3-node cluster under an injected partition
-- [ ] The bank invariant is computed from stored state
-- [ ] Election safety (≤1 leader per term) is asserted
-- [ ] `strings` on a release build finds no `CHAOS_CONFIG_PATH`
-- [ ] `chaos-tests.yml` contains no `continue-on-error`
-- [ ] `cargo test --doc -p prkdb` reports ≥60 passing
-- [ ] Zero `unwrap()` **outside `#[cfg(test)]`** in `prkdb-core/src/wal/` and `prkdb/src/storage/` (per the Task 13 Step 0 counter, not a raw grep)
-- [ ] `cargo deny check` and `cargo audit` pass in CI
-- [ ] Every CI job declares `timeout-minutes`
-- [ ] No badge in the README points at a hardcoded string
-- [ ] `ReadConsistency::Linearizable` is verified under partition, and `Stale` is shown to differ from it
-- [ ] Every performance number links to a reproducible benchmark, or is gone
-- [ ] Zero bare `#[ignore]`; CI rejects them
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` exits 0
+- [x] `cargo test --workspace --no-fail-fast` completes 10 consecutive runs without hanging
+- [x] `detects_stale_read_after_completed_write` passes against the new checker
+- [x] The register test runs on a ≥3-node cluster under an injected partition
+- [x] The bank invariant is computed from stored state
+- [x] Election safety (≤1 leader per term) is asserted
+- [x] `strings` on a release build finds no `CHAOS_CONFIG_PATH`
+- [x] `chaos-tests.yml` contains no `continue-on-error`
+- [x] `cargo test --doc -p prkdb` reports ≥60 passing
+- [x] Zero `unwrap()` **outside `#[cfg(test)]`** in `prkdb-core/src/wal/` and `prkdb/src/storage/` (per the Task 13 Step 0 counter, not a raw grep)
+- [x] `cargo deny check` and `cargo audit` pass in CI
+- [x] Every CI job declares `timeout-minutes`
+- [x] No badge in the README points at a hardcoded string
+- [x] `ReadConsistency::Linearizable` is verified under partition, and `Stale` is shown to differ from it
+- [x] Every performance number links to a reproducible benchmark, or is gone
+- [x] Zero bare `#[ignore]`; CI rejects them

@@ -51,7 +51,8 @@
 //!     let admins: Vec<User> = db.query_by("role", &"admin").await?;
 //!     println!("Found {} admins", admins.len());
 //!
-//!     // Batch insert (76x faster!)
+//!     // Batch insert (much faster than a loop; ratio unverified — see
+//!     // docs/benchmarks/methodology.md)
 //!     let users: Vec<User> = (0..1000).map(|i| User {
 //!         id: i.to_string(),
 //!         email: format!("user{}@example.com", i),
@@ -65,12 +66,14 @@
 //!
 //! ## Performance
 //!
-//! | Operation | Speed |
-//! |-----------|-------|
-//! | `insert_batch` | 878K ops/sec |
-//! | `query_by` | 894K ops/sec |
-//! | `delete_batch` | 13K ops/sec |
-//! | Mixed workload | 61K ops/sec |
+//! This table previously published four throughput figures (878K, 894K, 13K and 61K
+//! ops/sec) that no benchmark in the repository produces, so there was no way to tell
+//! whether they were still true — or ever were.
+//!
+//! Reproducible numbers live in `docs/benchmarks/methodology.md`, alongside the exact
+//! command and hardware. Run `cargo bench -p prkdb --bench query_bench` for this module's
+//! own figures on your machine, which is the only hardware whose numbers describe your
+//! deployment.
 
 use crate::storage::WalStorageAdapter;
 use dashmap::DashMap;
@@ -5859,7 +5862,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     ///
     /// # Performance
     /// - ~600k+ ops/sec on WAL storage
-    /// - ~1.5M+ ops/sec on in-memory storage
+    /// - Throughput figure removed: unverified, see `docs/benchmarks/methodology.md`
     ///
     /// # Example
     /// ```no_run

@@ -99,15 +99,34 @@ impl Role {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Principal {
     name: String,
-    credential: String,
+    /// SHA-256 of the credential, hex-encoded — never the credential itself.
+    ///
+    /// Principals are persisted so they survive a restart and agree across a cluster,
+    /// which means this value reaches disk and the replication log. Storing the bearer
+    /// token there would turn any read of the storage layer, any backup archive, and any
+    /// `fetch_segment` stream into a credential dump.
+    ///
+    /// A single SHA-256 is deliberate rather than a password KDF: these are
+    /// machine-generated bearer tokens with full entropy, not human passwords, so the
+    /// brute-force resistance a slow KDF buys does not apply. If PrkDB ever accepts
+    /// user-chosen credentials, this must become argon2 or bcrypt.
+    credential_hash: String,
     grants: Vec<Grant>,
+}
+
+/// Hex-encoded SHA-256 of a credential.
+fn hash_credential(credential: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(credential.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 impl Principal {
     pub fn new(name: impl Into<String>, credential: impl Into<String>, grants: Vec<Grant>) -> Self {
         Self {
             name: name.into(),
-            credential: credential.into(),
+            credential_hash: hash_credential(&credential.into()),
             grants,
         }
     }
@@ -141,9 +160,20 @@ impl Principal {
     /// a time. Length is compared first and is not secret — `ct_eq` requires equal-length
     /// inputs, and a length mismatch is already observable from the failure itself.
     pub fn credential_matches(&self, presented: &str) -> bool {
-        let expected = self.credential.as_bytes();
+        // Both sides are hex SHA-256, so the lengths always match and the comparison is
+        // over digests rather than secrets. Still constant-time: a digest comparison that
+        // short-circuits leaks which prefix was right, which is enough to walk a forgery
+        // one nibble at a time.
+        let expected = self.credential_hash.as_bytes();
+        let presented = hash_credential(presented);
         let presented = presented.as_bytes();
         expected.len() == presented.len() && bool::from(expected.ct_eq(presented))
+    }
+
+    /// The stored digest. Exposed for persistence, never for comparison — use
+    /// [`credential_matches`](Self::credential_matches), which is constant-time.
+    pub fn credential_hash(&self) -> &str {
+        &self.credential_hash
     }
 }
 

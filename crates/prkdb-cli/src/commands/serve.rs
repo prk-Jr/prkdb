@@ -216,12 +216,42 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     // deliberate: spec S-01 exists because this surface served every collection to
     // anyone who could reach the port.
     let store = prkdb::authz::PrincipalStore::new();
-    if let Ok(token) = std::env::var("PRKDB_BOOTSTRAP_TOKEN") {
-        if !token.is_empty() {
-            store
-                .bootstrap_admin(&token)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            println!("🔑 Bootstrapped admin principal from PRKDB_BOOTSTRAP_TOKEN");
+
+    // Load first. Principals are persisted through the storage layer, so a restarted node
+    // must recover the ones it already had — otherwise every restart would silently
+    // revoke every credential and PRKDB_BOOTSTRAP_TOKEN would be required forever.
+    {
+        let db = crate::database_manager::get_db_instance()
+            .await
+            .map_err(|e| anyhow::anyhow!("opening storage to load principals: {e}"))?;
+        let loaded = store
+            .load(db.storage().as_ref())
+            .await
+            .map_err(|e| anyhow::anyhow!("loading principals: {e}"))?;
+        if loaded > 0 {
+            println!("🔑 Loaded {loaded} principal(s) from storage");
+        }
+
+        if let Ok(token) = std::env::var("PRKDB_BOOTSTRAP_TOKEN") {
+            if !token.is_empty() {
+                // bootstrap_admin refuses once any principal exists, so a restart with the
+                // variable still set is a no-op rather than a second back door.
+                match store.bootstrap_admin(&token) {
+                    Ok(admin) => {
+                        store
+                            .persist(db.storage().as_ref(), admin)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("persisting bootstrap admin: {e}"))?;
+                        println!("🔑 Bootstrapped admin principal from PRKDB_BOOTSTRAP_TOKEN");
+                    }
+                    Err(prkdb::authz::BootstrapError::AlreadyInitialised { existing }) => {
+                        println!(
+                            "🔑 PRKDB_BOOTSTRAP_TOKEN ignored; {existing} principal(s)                              already exist"
+                        );
+                    }
+                    Err(e) => return Err(anyhow::anyhow!("{e}")),
+                }
+            }
         }
     }
     let authz = if store.is_empty() {

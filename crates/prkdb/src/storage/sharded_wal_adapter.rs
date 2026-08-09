@@ -164,7 +164,8 @@ impl ShardedWalAdapter {
             })
             .collect();
 
-        // Single WAL append (FAST! 214K ops/sec proven!)
+        // Single WAL append. The "214K ops/sec proven" this used to claim was not
+        // proven by anything in the repository — see docs/benchmarks/methodology.md.
         let offsets = shard
             .wal
             .append_batch(records)

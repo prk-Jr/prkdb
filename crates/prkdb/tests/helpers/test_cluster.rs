@@ -251,6 +251,40 @@ impl TestCluster {
     }
 
     /// Get a node by ID
+    /// Block until every running node answers gRPC, or fail saying which did not.
+    ///
+    /// Replaces `sleep(Duration::from_secs(5))` after `start_all`. A fixed sleep is wrong
+    /// in both directions: too short on a loaded CI runner, so the test fails for reasons
+    /// unrelated to what it tests; and pure waste on a fast one. It also reports the
+    /// eventual assertion failure rather than "node 2 never came up", which is the
+    /// sentence someone reading CI output needs.
+    pub async fn await_ready(&self, within: std::time::Duration) -> anyhow::Result<()> {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            let mut pending = Vec::new();
+            for node in self.nodes.values() {
+                if !self.is_node_running(node.node_id) {
+                    continue;
+                }
+                let url = format!("http://127.0.0.1:{}", node.data_port);
+                let reachable = match tonic::transport::Channel::from_shared(url) {
+                    Ok(channel) => channel.connect().await.is_ok(),
+                    Err(_) => false,
+                };
+                if !reachable {
+                    pending.push(node.node_id);
+                }
+            }
+            if pending.is_empty() {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                anyhow::bail!("nodes {pending:?} did not accept connections within {within:?}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
     pub fn get_node(&self, node_id: u64) -> Option<&TestNode> {
         self.nodes.get(&node_id)
     }

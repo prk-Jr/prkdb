@@ -5,6 +5,17 @@
 //! durable copy belongs in the Raft state machine so it survives restart and agrees
 //! across the cluster (spec R12, "Where the model lives").
 //!
+//! # Durability
+//!
+//! [`PrincipalStore::load`] and [`PrincipalStore::persist`] read and write principals
+//! through the storage adapter, under the reserved `__prkdb_metadata:` prefix that the
+//! data plane already treats as internal. Going through the adapter rather than a side
+//! file means principals inherit everything the database already guarantees: they are
+//! written to the WAL, replicated by Raft when the node is clustered, captured by
+//! `take_snapshot`, and restored by `restore`.
+//!
+//! Only the SHA-256 of a credential is stored — see [`Principal`].
+//!
 //! # Bootstrap
 //!
 //! A cold cluster has no principals and can therefore authenticate nobody — including the
@@ -15,7 +26,21 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use prkdb_types::error::StorageError;
+use prkdb_types::storage::StorageAdapter;
+
 use super::model::{Grant, Permission, Principal};
+
+/// Where principals live in the keyspace.
+///
+/// Sits under `__prkdb_metadata:`, which `parse_storage_key` already classifies as
+/// internal and the HTTP collection listing already filters out — so principals do not
+/// appear as user data.
+pub const PRINCIPAL_KEY_PREFIX: &str = "__prkdb_metadata:authz:principal:";
+
+fn principal_key(name: &str) -> Vec<u8> {
+    format!("{PRINCIPAL_KEY_PREFIX}{name}").into_bytes()
+}
 
 /// Why bootstrapping was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -75,6 +100,69 @@ impl PrincipalStore {
     pub fn permits(&self, credential: &str, collection: &str, required: Permission) -> bool {
         self.resolve(credential)
             .is_some_and(|p| p.permits(collection, required))
+    }
+
+    /// Load every persisted principal, replacing whatever is cached.
+    ///
+    /// Called at startup. A store that is not loaded is not empty-but-harmless: it
+    /// authenticates nobody, so an operator who restarted a configured node would find
+    /// their credentials rejected. That was the behaviour before principals were
+    /// persisted at all.
+    pub async fn load<S: StorageAdapter + ?Sized>(
+        &self,
+        storage: &S,
+    ) -> Result<usize, StorageError> {
+        let entries = storage.scan_prefix(PRINCIPAL_KEY_PREFIX.as_bytes()).await?;
+
+        let mut loaded = Vec::with_capacity(entries.len());
+        for (key, value) in entries {
+            match serde_json::from_slice::<Principal>(&value) {
+                Ok(principal) => loaded.push(principal),
+                Err(e) => {
+                    // Refuse rather than silently drop: a principal that fails to
+                    // deserialize is one whose grants are now unknown, and continuing
+                    // would quietly reduce someone's authority — or remove it entirely.
+                    return Err(StorageError::Internal(format!(
+                        "principal at key {} is unreadable ({e}); refusing to start with                          an incomplete authorization store",
+                        String::from_utf8_lossy(&key)
+                    )));
+                }
+            }
+        }
+
+        let count = loaded.len();
+        self.replace_all(loaded);
+        Ok(count)
+    }
+
+    /// Write one principal through the storage layer, then cache it.
+    ///
+    /// Storage first: if the write fails, the cache must not claim a principal exists
+    /// that would vanish on the next restart.
+    pub async fn persist<S: StorageAdapter + ?Sized>(
+        &self,
+        storage: &S,
+        principal: Principal,
+    ) -> Result<(), StorageError> {
+        let encoded = serde_json::to_vec(&principal).map_err(|e| {
+            StorageError::Serialization(format!("encoding principal {}: {e}", principal.name()))
+        })?;
+        storage
+            .put(&principal_key(principal.name()), &encoded)
+            .await?;
+        self.insert(principal);
+        Ok(())
+    }
+
+    /// Remove a principal from storage and cache.
+    pub async fn forget<S: StorageAdapter + ?Sized>(
+        &self,
+        storage: &S,
+        name: &str,
+    ) -> Result<(), StorageError> {
+        storage.delete(&principal_key(name)).await?;
+        self.remove(name);
+        Ok(())
     }
 
     pub fn insert(&self, principal: Principal) {

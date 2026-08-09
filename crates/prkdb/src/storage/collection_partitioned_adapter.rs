@@ -33,10 +33,11 @@ use tracing::{info, instrument};
 /// ```
 ///
 /// # Performance
-/// - Single collection: ~60K ops/sec (same as WalStorageAdapter)
-/// - 3 collections (parallel writes): ~180K ops/sec (3x!)
-/// - 5 collections (parallel writes): ~300K ops/sec (5x!)
-/// - Mixed workload (5 collections): **250K-400K ops/sec** (4-7x!)
+///
+/// Writes to different collections do not contend, so throughput is expected to scale
+/// with collection count. **That expectation is unmeasured** — the per-collection figures
+/// previously given here were unverified, from no benchmark in this repository. See
+/// `docs/benchmarks/methodology.md`.
 ///
 /// # Key Benefits
 /// - ✅ Zero cross-collection coordination overhead
@@ -499,6 +500,60 @@ impl StorageAdapter for CollectionPartitionedAdapter {
         // Just do the delete, ignore outbox for now
         let (collection, actual_key) = self.parse_collection_key(key)?;
         self.delete_from_collection(&collection, &actual_key).await
+    }
+
+    /// Scan every key beginning with `prefix`, across collections.
+    ///
+    /// # Why this needs its own implementation
+    ///
+    /// Without it the trait default refuses with "scan_prefix not supported", and this is
+    /// the adapter `PrkDb::builder().with_data_dir()` constructs. That silently broke
+    /// anything built on prefix scans — `list_collections` returned an error, and
+    /// persisted principals could not be loaded — in exactly the way the missing
+    /// `take_snapshot` broke `prkdb backup` (S-04).
+    ///
+    /// # Routing
+    ///
+    /// Keys are `collection:id`. A prefix containing the delimiter therefore names one
+    /// collection and only that collection is scanned; a prefix without it may match any
+    /// collection name, so every collection is scanned and filtered. Results carry the
+    /// full `collection:id` key, matching what `get` and `put` accept.
+    async fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        let collections = self.load_all_collections().await;
+        let split = prefix.iter().position(|b| *b == b':');
+
+        let mut out = Vec::new();
+        for (name, adapter) in collections {
+            let inner_prefix: Vec<u8> = match split {
+                Some(at) => {
+                    // The prefix names a collection; skip the others entirely.
+                    if prefix[..at] != *name.as_bytes() {
+                        continue;
+                    }
+                    prefix[at + 1..].to_vec()
+                }
+                // A partial collection name matches any collection it prefixes.
+                None => {
+                    if !name.as_bytes().starts_with(prefix) {
+                        continue;
+                    }
+                    Vec::new()
+                }
+            };
+
+            for (key, value) in adapter.scan_prefix(&inner_prefix).await? {
+                let mut full = Vec::with_capacity(name.len() + 1 + key.len());
+                full.extend_from_slice(name.as_bytes());
+                full.push(b':');
+                full.extend_from_slice(&key);
+                out.push((full, value));
+            }
+        }
+
+        // Callers that page or diff results need a stable order; per-collection iteration
+        // order is not one.
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
     }
 
     /// Snapshot every collection into a single archive.

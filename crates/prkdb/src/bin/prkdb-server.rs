@@ -217,12 +217,35 @@ async fn main() -> Result<()> {
     // for anyone deploying prkdb-server, which is the image the compose files run.
     let authz_store = {
         let store = prkdb::authz::PrincipalStore::new();
+
+        // Recover principals persisted by earlier runs before considering bootstrap;
+        // otherwise a restart silently revokes every credential the node had.
+        let loaded = store
+            .load(db_arc.storage().as_ref())
+            .await
+            .map_err(|e| anyhow::anyhow!("loading principals: {e}"))?;
+        if loaded > 0 {
+            info!("Loaded {} principal(s) from storage", loaded);
+        }
+
         if let Ok(token) = env::var("PRKDB_BOOTSTRAP_TOKEN") {
             if !token.is_empty() {
-                store
-                    .bootstrap_admin(&token)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                info!("Bootstrapped admin principal from PRKDB_BOOTSTRAP_TOKEN");
+                match store.bootstrap_admin(&token) {
+                    Ok(admin) => {
+                        store
+                            .persist(db_arc.storage().as_ref(), admin)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("persisting bootstrap admin: {e}"))?;
+                        info!("Bootstrapped admin principal from PRKDB_BOOTSTRAP_TOKEN");
+                    }
+                    Err(prkdb::authz::BootstrapError::AlreadyInitialised { existing }) => {
+                        info!(
+                            "PRKDB_BOOTSTRAP_TOKEN ignored; {} principal(s) already exist",
+                            existing
+                        );
+                    }
+                    Err(e) => return Err(anyhow::anyhow!("{e}")),
+                }
             }
         }
         if store.is_empty() {

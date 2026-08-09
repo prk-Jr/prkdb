@@ -17,11 +17,17 @@ use tokio::sync::broadcast;
 /// Performance optimization level for storage
 #[derive(Debug, Clone, Copy)]
 pub enum OptimizationLevel {
-    /// Balanced performance (200-400K ops/sec)
+    /// Balanced performance
+    ///
+    /// Throughput figures for the presets are **unverified** — no benchmark separates
+    /// them. See `docs/benchmarks/methodology.md`.
     Balanced,
-    /// Maximum throughput (500-800K ops/sec)
+    /// Maximum throughput (figure unverified; see `docs/benchmarks/methodology.md`)
     Throughput,
-    /// LEGENDARY performance (1.2M+ ops/sec) 🏆
+    /// Highest-throughput preset
+    ///
+    /// The throughput this used to claim was unverified — no benchmark in the repository
+    /// produces it. See `docs/benchmarks/methodology.md`.
     Legendary,
 }
 
@@ -130,9 +136,12 @@ impl Builder {
     /// Only use this if you want to customize the optimization level.
     ///
     /// # Optimization Levels
-    /// - `Balanced`: 200-400K ops/sec (lower memory usage)
-    /// - `Throughput`: 500-800K ops/sec (write-heavy workloads)
-    /// - `Legendary`: 1.2M+ ops/sec (maximum performance)
+    /// - `Balanced`: lower memory usage
+    /// - `Throughput`: tuned for write-heavy workloads
+    /// - `Legendary`: maximum throughput
+    ///
+    /// Throughput figures are deliberately absent: the numbers previously given here were
+    /// unverified, with no benchmark behind them. See `docs/benchmarks/methodology.md`.
     pub fn with_optimized_storage(
         mut self,
         data_dir: impl AsRef<std::path::Path>,

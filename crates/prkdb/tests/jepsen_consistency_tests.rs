@@ -7,6 +7,7 @@
 
 mod helpers;
 
+use helpers::in_process_cluster::{InProcessCluster, ReadConsistency};
 use helpers::{
     BankAccounts, InvariantResult, LinearizabilityResult, OpKind, OpResult, Operation,
     OperationHistory,
@@ -20,19 +21,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
-/// Test: Linearizable Register
+/// A single storage adapter serves a linearizable register under concurrency.
 ///
-/// Verifies that concurrent reads and writes to a single key behave as if
-/// they occurred atomically in some total order consistent with real-time.
+/// **This is a storage-layer test, not a consensus test.** It exercises one
+/// `WalStorageAdapter` from many tasks; no Raft, no replication, no partition. It was
+/// named `test_linearizable_register` and stood in for spec R1, which asks for the
+/// register to be checked against a real cluster — see
+/// `a_replicated_register_is_linearizable` below for that.
 ///
-/// Scenario:
-/// 1. Start storage adapter
-/// 2. Spawn concurrent writers incrementing a counter
-/// 3. Spawn concurrent readers
-/// 4. Record all operations with timestamps
-/// 5. Verify history is linearizable
+/// Kept because it still covers something real: the adapter's own read/write concurrency.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn test_linearizable_register() {
+async fn a_single_adapter_serves_a_linearizable_register() {
     let dir = tempfile::tempdir().unwrap();
     let config = WalConfig {
         log_dir: dir.path().to_path_buf(),
@@ -616,5 +615,185 @@ async fn test_dirty_read_prevention() {
         println!("   🎉 No dirty reads - excellent isolation!");
     } else {
         println!("   ⚠️ Dirty reads occurred - consider adding transaction support");
+    }
+}
+
+// ── The register, on a real cluster (spec R1) ────────────────────────────────
+//
+// R1 asks for the linearizable register to be checked against a ≥3-node cluster under an
+// injected partition. Until the in-process harness existed, the only register test ran
+// against a single storage adapter — which cannot observe a consensus bug of any kind,
+// because there is no consensus in it.
+
+/// Records one operation, keeping the start/end pair the checker orders by.
+struct Recorder {
+    history: OperationHistory,
+}
+
+impl Recorder {
+    fn write(&self, key: &[u8], value: &[u8], start: Instant, outcome: Result<(), String>) {
+        self.history.record(Operation {
+            kind: OpKind::Write,
+            key: key.to_vec(),
+            write_value: Some(value.to_vec()),
+            read_value: None,
+            start_time: start,
+            end_time: Instant::now(),
+            // A failed write is *indeterminate*, not absent: the proposal may have
+            // committed before the error surfaced. The checker tries both branches.
+            result: match outcome {
+                Ok(()) => OpResult::Ok(None),
+                Err(e) => OpResult::Err(e),
+            },
+            client_id: 1,
+        });
+    }
+
+    fn read(&self, key: &[u8], start: Instant, value: Option<Vec<u8>>) {
+        self.history.record(Operation {
+            kind: OpKind::Read,
+            key: key.to_vec(),
+            write_value: None,
+            read_value: value.clone(),
+            start_time: start,
+            end_time: Instant::now(),
+            result: OpResult::Ok(value),
+            client_id: 2,
+        });
+    }
+}
+
+/// Drive a register on `cluster`, alternating committed writes and linearizable reads.
+///
+/// Sequential rather than concurrent, deliberately: `InProcessCluster::put` resolves the
+/// leader per call, so concurrent writers race on leadership rather than on the register,
+/// and the resulting history is dominated by leadership churn instead of the property
+/// under test. The partition is what supplies the interesting interleaving.
+async fn drive_register(cluster: &InProcessCluster, rounds: u32, rec: &Recorder) {
+    // Against a partitioned cluster neither operation fails fast: each waits on RPC
+    // timeouts per unreachable peer, which took this test from 3s to 90s. A bound keeps
+    // the workload honest — a write that does not complete in time is exactly the
+    // indeterminate case the checker already models.
+    const OP_LIMIT: Duration = Duration::from_millis(1500);
+
+    let key = b"users:register";
+    for i in 0..rounds {
+        let value = format!("v{i}").into_bytes();
+
+        let start = Instant::now();
+        let outcome = match helpers::within(OP_LIMIT, cluster.put(key, &value)).await {
+            Ok(result) => result.map_err(|e| e.to_string()),
+            Err(timeout) => Err(timeout),
+        };
+        rec.write(key, &value, start, outcome);
+
+        let start = Instant::now();
+        if let Ok(Ok(read)) =
+            helpers::within(OP_LIMIT, cluster.get(key, ReadConsistency::Linearizable)).await
+        {
+            rec.read(key, start, read);
+        }
+    }
+}
+
+/// The register is linearizable when replicated across three nodes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_replicated_register_is_linearizable() {
+    let cluster = InProcessCluster::new(3).await.expect("cluster starts");
+    cluster
+        .await_leader(Duration::from_secs(15))
+        .await
+        .expect("a leader is elected");
+
+    let rec = Recorder {
+        history: OperationHistory::new(),
+    };
+    // Kept well under the 200-op ceiling the Wing & Gong search can decide; an
+    // undecidable history is an unanswered question, not a stronger test.
+    drive_register(&cluster, 25, &rec).await;
+
+    assert!(
+        rec.history.len() >= 25,
+        "the workload recorded only {} operations",
+        rec.history.len()
+    );
+    match rec.history.is_linearizable() {
+        LinearizabilityResult::Linearizable => {}
+        LinearizabilityResult::NotLinearizable { reason } => {
+            panic!("replicated register is not linearizable: {reason}")
+        }
+    }
+}
+
+/// The same register, across a partition that removes the leader mid-run and heals.
+///
+/// This is the shape spec R1 asks for. Writes attempted while the leader is isolated are
+/// recorded as errors, which the checker treats as indeterminate — they may or may not
+/// have committed, and a history is linearizable if *some* choice for each works out.
+#[cfg(feature = "chaos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_replicated_register_is_linearizable_across_a_partition() {
+    let cluster = InProcessCluster::new(3).await.expect("cluster starts");
+    let old_leader = cluster
+        .await_leader(Duration::from_secs(15))
+        .await
+        .expect("initial leader");
+
+    let rec = Recorder {
+        history: OperationHistory::new(),
+    };
+
+    drive_register(&cluster, 8, &rec).await;
+
+    // Isolate the leader, forcing the majority into a new term mid-history.
+    let majority: Vec<u64> = cluster
+        .node_ids()
+        .iter()
+        .copied()
+        .filter(|id| *id != old_leader)
+        .collect();
+    cluster.partition(vec![old_leader], majority.clone()).await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        match cluster.leader_among(&majority).await {
+            Some(id) if id != old_leader => break,
+            _ => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the majority side never elected a new leader, so this test would \
+                     reduce to the un-partitioned case"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+
+    drive_register(&cluster, 8, &rec).await;
+
+    cluster.heal_partitions().await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while cluster.leaders_in_current_term().await.len() != 1 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the cluster did not reconverge on a single leader"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    drive_register(&cluster, 8, &rec).await;
+
+    assert!(
+        rec.history.len() >= 24,
+        "expected operations from all three phases, got {}",
+        rec.history.len()
+    );
+    match rec.history.is_linearizable() {
+        LinearizabilityResult::Linearizable => {}
+        LinearizabilityResult::NotLinearizable { reason } => panic!(
+            "the register was not linearizable across a partition: {reason}\n\
+             This is the failure R1 exists to surface — a real consensus violation, not a \
+             checker artefact. Inspect the history before assuming the test is wrong."
+        ),
     }
 }

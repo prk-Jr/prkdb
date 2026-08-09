@@ -36,6 +36,16 @@ not enforced by anything, and several tests reported green while testing nothing
 
 ### Added
 
+- **Benchmark methodology** (`docs/benchmarks/methodology.md`) with the command, hardware
+  and results, plus a register of the ~40 published performance figures and their status.
+  Several did not survive contact with a benchmark: "800x faster" for batched writes
+  measures **95x** here (822 → 78.4K ops/sec), and the 1.2M ops/sec "Legendary" preset is
+  produced by nothing in the repository. Unverified numbers are now labelled as such, and
+  `plan_status.sh` rejects a bare throughput figure in a doc comment.
+- **Version and roadmap drift detection** in `xtask repo-status`. The roadmap announced
+  "v2.0-clean" while the workspace was `0.6.0`, and listed client SDKs as future work while
+  five CI jobs exercised them. The pre-existing feature-drift check matched anywhere in the
+  file, so the very fix it demanded left it firing; it is now section-aware.
 - **An in-process cluster harness** (`InProcessCluster`). Raft tests no longer need a
   prebuilt `prkdb-server` binary — the dependency that produced
   `#[ignore] // Requires server binary` on the tests of a consensus implementation. It
@@ -88,6 +98,27 @@ not enforced by anything, and several tests reported green while testing nothing
   merging its per-collection WALs into one archive keyed `collection:id` so the existing
   restore routes each entry back without needing to know about collections. The
   round-trip test is no longer `#[ignore]`d.
+- **`ReadIndex` did not confirm leadership, so linearizable reads were not linearizable**
+  (S-06). A leader partitioned away from its cluster keeps believing it leads, and served
+  reads from a commit index the rest of the cluster had moved past — through the API that
+  advertises linearizability. The code carried a comment saying a heartbeat round "should"
+  happen and that trusting local state was "good enough for most cases"; the case it is not
+  good enough for is the only one the guarantee exists for. `read_index` now requires a
+  majority to acknowledge a heartbeat in the current term before returning an index, per
+  Raft §6.4. Found by the register test's first partitioned run, reproducing about two
+  runs in five.
+- **`scan_prefix` was unsupported on the default storage adapter** (S-07), so
+  `list_collections` and principal loading failed on any database opened with
+  `--database`. The third method missing from `CollectionPartitionedAdapter` after
+  `take_snapshot` and collection discovery — a trait default that returns "not supported"
+  lets an incomplete wrapper compile clean and fail at runtime.
+- **Principals are persisted** (R12). `PrincipalStore` was an in-memory map, so every
+  credential vanished on restart, a restarted node authenticated nobody including the
+  operator, and `PRKDB_BOOTSTRAP_TOKEN` had to stay set — turning a one-time bootstrap into
+  a permanent back door. Principals now go through the storage adapter under the reserved
+  `__prkdb_metadata:` prefix, inheriting the WAL, Raft replication, snapshot and restore.
+  **Only a SHA-256 digest of each credential is stored**, so a backup archive or a
+  `fetch_segment` stream is no longer a credential dump.
 - **Raft peer RPCs are now authenticated** (S-01, final part). `RaftService` carries
   `AppendEntries`, `RequestVote` and `ReadIndex` and is exempt from the client-API layer by
   design, because peers present certificates rather than bearer credentials — which meant

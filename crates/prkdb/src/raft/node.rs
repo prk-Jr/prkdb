@@ -150,6 +150,13 @@ pub struct RaftNode {
     /// State machine for applying committed entries
     state_machine: Arc<dyn StateMachine>,
 
+    /// RPC pool, captured when `start` runs.
+    ///
+    /// ReadIndex needs to talk to peers, and previously only the background loops held a
+    /// pool. Without it `read_index` could do nothing but trust local state — which is
+    /// exactly the bug it now exists to prevent.
+    rpc_pool: Arc<RwLock<Option<Arc<super::rpc_client::RpcClientPool>>>>,
+
     /// Current state (Follower, Candidate, Leader)
     state: Arc<RwLock<RaftState>>,
 
@@ -267,6 +274,7 @@ impl RaftNode {
             storage,
             state_machine,
             state: Arc::new(RwLock::new(RaftState::Follower)),
+            rpc_pool: Arc::new(RwLock::new(None)),
             current_term: Arc::new(RwLock::new(0)),
             voted_for: Arc::new(RwLock::new(None)),
             leader_id: Arc::new(RwLock::new(None)),
@@ -462,11 +470,120 @@ impl RaftNode {
         Ok((current_term, commit_idx))
     }
 
-    /// Perform a local ReadIndex operation (for leader)
+    /// ReadIndex: the commit index a linearizable read may be served at.
+    ///
+    /// # Why this contacts a quorum
+    ///
+    /// This used to return the local commit index on the strength of local state alone,
+    /// with a comment saying a heartbeat round "should" happen and that trusting local
+    /// leadership was "good enough for most cases". It is not good enough for the case
+    /// that matters: **a leader partitioned away from its cluster does not know it has
+    /// been deposed.** It keeps `RaftState::Leader` until it hears a higher term, and in
+    /// the meantime it answered ReadIndex from a log the rest of the cluster had moved
+    /// past — serving stale data through the API that advertises linearizability.
+    ///
+    /// `jepsen_consistency_tests::a_replicated_register_is_linearizable_across_a_partition`
+    /// caught this: a read returned a value that no ordering of linearization points could
+    /// explain. It reproduced on roughly two runs in five.
+    ///
+    /// Raft §6.4 requires the leader to confirm it is still leader by exchanging a round
+    /// of heartbeats with a majority before serving a read. That is what happens here: the
+    /// commit index is captured first, then a majority must acknowledge, then the index is
+    /// returned. A leader that cannot reach a majority now fails the read instead of
+    /// answering it wrongly.
+    ///
+    /// # Cost
+    ///
+    /// One round trip per linearizable read. That is the price of the guarantee; callers
+    /// who do not want to pay it have `ReadConsistency::Stale`, which promises nothing and
+    /// is honest about it.
     pub async fn read_index(&self) -> Result<u64, RaftError> {
         let current_term = *self.current_term.read().await;
+
+        // Capture the index *before* confirming leadership. Doing it after would let a
+        // commit that landed during the round leak into a read that is meant to reflect
+        // the state as of the moment the read began.
         let (_, index) = self.handle_read_index(current_term).await?;
+
+        self.confirm_leadership(current_term).await?;
         Ok(index)
+    }
+
+    /// Exchange a heartbeat round with a majority, proving this node still leads in `term`.
+    ///
+    /// A single-node cluster is its own majority and returns immediately; there is no one
+    /// to ask and nothing a partition could hide.
+    async fn confirm_leadership(&self, term: u64) -> Result<(), RaftError> {
+        if *self.state.read().await != RaftState::Leader {
+            return Err(RaftError::NotLeader(*self.leader_id.read().await));
+        }
+
+        let peers: Vec<(NodeId, String)> = self
+            .config
+            .nodes
+            .iter()
+            .filter(|(id, _)| *id != self.config.local_node_id)
+            .map(|(id, addr)| (*id, addr.to_string()))
+            .collect();
+
+        // Majority of the whole cluster, counting this node's own vote for itself.
+        let majority = (self.config.nodes.len() / 2) + 1;
+        if 1 >= majority {
+            return Ok(());
+        }
+
+        let Some(pool) = self.rpc_pool.read().await.clone() else {
+            // start() has not run, so this node is not participating in a cluster and
+            // cannot confirm anything. Refusing is the safe direction.
+            return Err(RaftError::NotLeader(None));
+        };
+
+        let commit_index = *self.commit_index.read().await;
+        let partition_id = self.config.partition_id;
+        let leader_id = self.config.local_node_id;
+
+        let mut round = futures::stream::FuturesUnordered::new();
+        for (peer_id, addr) in peers {
+            let pool = pool.clone();
+            round.push(async move {
+                // An empty AppendEntries is a heartbeat: it proves reachability and
+                // current term without touching the log.
+                let request = super::rpc::AppendEntriesRequest {
+                    term,
+                    leader_id,
+                    prev_log_index: 0,
+                    prev_log_term: 0,
+                    leader_commit: commit_index,
+                    entries: vec![],
+                };
+                pool.send_append_entries(peer_id, &addr, request, partition_id)
+                    .await
+                    .map(|response| response.term)
+            });
+        }
+
+        use futures::StreamExt;
+        let mut acks = 1usize; // this node
+        while let Some(result) = round.next().await {
+            match result {
+                Ok(peer_term) if peer_term > term => {
+                    // Someone has moved on; this node is not the leader any more, whatever
+                    // its local state still says.
+                    return Err(RaftError::NotLeader(None));
+                }
+                Ok(_) => {
+                    acks += 1;
+                    if acks >= majority {
+                        return Ok(());
+                    }
+                }
+                // Unreachable peers are not failures in themselves — only failing to
+                // reach a majority is.
+                Err(_) => {}
+            }
+        }
+
+        Err(RaftError::NotLeader(None))
     }
 
     /// Wait for last_applied to reach the given index
@@ -1236,6 +1353,15 @@ impl RaftNode {
     /// Start the Raft node (election timer + heartbeat loop + apply loop)
     #[tracing::instrument(skip(self, rpc_pool), fields(node_id = %self.config.local_node_id, addr = %self.config.listen_addr))]
     pub fn start(self: Arc<Self>, rpc_pool: Arc<super::rpc_client::RpcClientPool>) {
+        // Keep a handle for ReadIndex, which must reach a quorum before serving a read.
+        {
+            let slot = self.rpc_pool.clone();
+            let pool = rpc_pool.clone();
+            tokio::spawn(async move {
+                *slot.write().await = Some(pool);
+            });
+        }
+
         // Spawn election timer
         let election_node = self.clone();
         let election_pool = rpc_pool.clone();

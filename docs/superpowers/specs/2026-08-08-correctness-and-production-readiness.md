@@ -400,6 +400,124 @@ default open in the first place.
 
 ---
 
+### S-06 — `ReadIndex` served linearizable reads without confirming leadership
+
+**Found 2026-08-09 by the R1 register test on its first partitioned run. Fixed the same
+day. Severity: high — the linearizable read mode was not linearizable.**
+
+```
+key "users:register": stale read returned "v1" after write(s) ["v0"] had already
+completed in real time — no ordering of linearization points explains it
+```
+
+Reproduced on roughly **two runs in five**.
+
+#### Cause
+
+`RaftNode::read_index` returned the local commit index on the strength of local state
+alone. The code said so:
+
+```rust
+// Note: For full linearizability, we should confirm leadership
+// with a heartbeat round to majority. For now, we trust our
+// leadership status which is good enough for most cases.
+```
+
+It is not good enough for the case that matters. A leader partitioned away from its
+cluster **does not know it has been deposed** — it holds `RaftState::Leader` until it hears
+a higher term, and until then it answered ReadIndex from a log the rest of the cluster had
+already moved past. Every read built on that index was stale while being advertised as
+linearizable, through `ReadConsistency::Linearizable` on three public surfaces.
+
+Raft §6.4 requires the leader to exchange a round of heartbeats with a majority before
+serving a read. That step was absent.
+
+#### Why nothing caught it
+
+`read_consistency_modes.rs` existed and passed. It read through the leader in scenarios
+where the leader was on the majority side, which is the case that works. The bug needs a
+leader that is *isolated but still believes it leads*, and nothing constructed that until
+the register test drove a real workload across a partition.
+
+This is the second time in this work that a test which looked like coverage was not: the
+first was the linearizability checker that could not fail. The pattern is the same —
+exercising the happy path of a safety property proves nothing about the property.
+
+#### Fix
+
+`read_index` now captures the commit index, then requires a majority to acknowledge a
+heartbeat in the current term before returning it. A leader that cannot reach a majority
+fails the read instead of answering it wrongly. A peer reporting a higher term ends it
+immediately. Single-node clusters are their own majority and return without a round trip.
+
+The cost is one round trip per linearizable read. That is the price of the guarantee;
+`ReadConsistency::Stale` remains for callers who would rather not pay it, and it promises
+nothing.
+
+#### Regression tests
+
+- `read_consistency_modes::an_isolated_leader_refuses_a_linearizable_read` — pins the
+  mechanism, so a regression names itself instead of appearing as a flaky checker.
+- `jepsen_consistency_tests::a_replicated_register_is_linearizable_across_a_partition` —
+  the workload that found it, now green across repeated runs.
+
+#### What must not happen
+
+Do not "fix" a future recurrence by loosening the checker or by treating an isolated
+leader's read as acceptable because it is *usually* current. The whole value of a
+linearizable mode is that it is never *usually*.
+
+---
+
+### S-07 — `scan_prefix` was unsupported on the default storage adapter
+
+**Found 2026-08-09 while wiring principal persistence. Fixed the same day. Severity:
+medium — every feature built on a prefix scan silently failed.**
+
+```
+DIAG scan_prefix: Err(BackendError("scan_prefix not supported"))
+DIAG scan meta:col: Err(BackendError("scan_prefix not supported"))
+```
+
+#### Cause
+
+Identical in shape to [S-04](#s-04--prkdb-backup-fails-on-any-database-opened-with---database):
+`CollectionPartitionedAdapter` — what `PrkDb::builder().with_data_dir()` constructs — did
+not implement `scan_prefix`, so calls reached the trait default that refuses.
+`WalStorageAdapter` implements it; only the wrapper did not.
+
+The visible consequences were `PrkDb::list_collections`, which scans `meta:col:`, and
+loading persisted principals. Both returned an error rather than data, on the adapter the
+default builder path produces.
+
+#### Why it kept happening
+
+This is the third method missing from the same wrapper, after `take_snapshot` (S-04) and
+the collection discovery that made backup archive nothing. The pattern is a trait with
+`Result`-returning defaults that say "not supported": a wrapper that forgets a method
+compiles cleanly, and the failure appears only at runtime in whichever feature happened to
+call it.
+
+A default that returns an error is a reasonable design for genuinely optional capability.
+It is a poor one for a method the wrapper's own siblings implement, because nothing marks
+the wrapper as incomplete.
+
+#### Fix
+
+`CollectionPartitionedAdapter::scan_prefix` routes by the `collection:id` key layout: a
+prefix containing the delimiter names one collection and only that one is scanned; a
+prefix without it is matched against every collection name. Results carry full
+`collection:id` keys and are sorted, because per-collection iteration order is not stable
+and callers that page or diff need it to be.
+
+#### Worth doing next
+
+Audit `StorageAdapter` for every method with an error-returning default, and check each
+wrapper implements the ones its inner adapters do. Three have been found by accident; the
+fourth should be found on purpose.
+
+---
+
 ## 3. Requirements
 
 Each has an ID, the finding it closes, and a **falsifiable acceptance test** — what CI runs to

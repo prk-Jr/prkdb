@@ -13,6 +13,8 @@ path = "tests/load_tests.rs"
 
 [dependencies]
 subtle = { workspace = true }
+# Credential digests for persisted principals.
+sha2 = "0.10"
 http = "1"
 anyhow = { workspace = true }
 async-trait = { workspace = true }

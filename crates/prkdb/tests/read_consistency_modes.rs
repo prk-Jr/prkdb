@@ -264,3 +264,52 @@ async fn an_isolated_node_catches_up_after_healing() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
+
+/// A deposed leader must refuse a linearizable read rather than answer it from stale state.
+///
+/// # The bug this guards (S-06)
+///
+/// `read_index` used to return the local commit index on the strength of local state
+/// alone. Its own comment said a heartbeat round "should" happen and that trusting local
+/// leadership was "good enough for most cases" — but the case it is not good enough for is
+/// the only one that matters. A leader partitioned away from its cluster keeps
+/// `RaftState::Leader` until it hears a higher term, and in the meantime it answered
+/// ReadIndex from a log the rest of the cluster had moved past.
+///
+/// `a_replicated_register_is_linearizable_across_a_partition` caught it as a genuine
+/// linearizability violation on roughly two runs in five. This test pins the specific
+/// mechanism so a regression names itself instead of showing up as a flaky checker.
+#[cfg(feature = "chaos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn an_isolated_leader_refuses_a_linearizable_read() {
+    let cluster = InProcessCluster::new(3).await.expect("cluster starts");
+    let leader = cluster
+        .await_leader(Duration::from_secs(15))
+        .await
+        .expect("a leader is elected");
+
+    cluster.put(b"users:x", b"v").await.expect("initial write");
+
+    // Cut the leader off from both peers. It does not yet know it has been deposed.
+    let rest: Vec<u64> = cluster
+        .node_ids()
+        .iter()
+        .copied()
+        .filter(|id| *id != leader)
+        .collect();
+    cluster.partition(vec![leader], rest).await;
+
+    // It must fail rather than serve. Bounded because an isolated node's RPCs do not fail
+    // fast, and a hang here is as much a failure as a wrong answer.
+    let outcome = helpers::within(Duration::from_secs(10), cluster.read_index_on(leader))
+        .await
+        .expect("the isolated leader must not hang indefinitely");
+
+    assert!(
+        outcome.is_err(),
+        "an isolated leader served a ReadIndex; it cannot know its commit index is \
+         current, so a linearizable read built on it is stale by construction"
+    );
+
+    cluster.heal_partitions().await;
+}

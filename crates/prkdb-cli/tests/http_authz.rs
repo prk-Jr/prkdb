@@ -34,9 +34,45 @@ fn free_port() -> u16 {
 /// Returns `None` when the process exits during startup, which is how the
 /// refuses-to-start case is asserted.
 fn spawn(bootstrap: Option<&str>, extra: &[&str]) -> Option<Server> {
+    spawn_seeded(bootstrap, extra, &[])
+}
+
+/// As [`spawn`], but writes `seed` principals into the data directory first.
+///
+/// Possible only because principals are now persisted through the storage layer: before
+/// that, the sole way to obtain one was `PRKDB_BOOTSTRAP_TOKEN`, which always mints an
+/// admin — so a principal with *insufficient* authority could not be constructed at all,
+/// and 403 was untestable.
+fn spawn_seeded(
+    bootstrap: Option<&str>,
+    extra: &[&str],
+    seed: &[prkdb::authz::Principal],
+) -> Option<Server> {
     let port = free_port();
     let dir = std::env::temp_dir().join(format!("prkdb-authz-{}-{}", std::process::id(), port));
     let _ = std::fs::create_dir_all(&dir);
+
+    if !seed.is_empty() {
+        // Seed through the same adapter `prkdb-cli serve` opens in single-node mode.
+        // Seeding with `with_data_dir` instead builds a WAL adapter over the same path —
+        // a different store entirely, so the server would find nothing and the test would
+        // fail for a reason that has nothing to do with authorization.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let storage = prkdb_storage_sled::SledAdapter::open(dir.to_str().unwrap())
+                .expect("open the data directory to seed principals");
+            let store = prkdb::authz::PrincipalStore::new();
+            for principal in seed {
+                store
+                    .persist(&storage, principal.clone())
+                    .await
+                    .expect("seed a principal");
+            }
+        });
+    }
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_prkdb-cli"));
     cmd.args(["--database", dir.to_str().unwrap(), "serve", "--port"])
@@ -178,6 +214,81 @@ fn allow_anonymous_serves_without_credentials() {
     assert!(
         resp.status().is_success(),
         "--allow-anonymous must serve without a credential, got {}",
+        resp.status()
+    );
+}
+
+/// A valid credential without the right grant must get **403, not 401**.
+///
+/// The distinction is not cosmetic. 401 tells a client "your credential was not
+/// recognised", which invites it to retry with different credentials or re-authenticate;
+/// 403 tells it "you are who you say, and it is not enough". Collapsing the two makes a
+/// permission bug look like an authentication bug and sends operators looking in the
+/// wrong place.
+#[test]
+fn a_known_credential_without_the_grant_gets_403() {
+    use prkdb::authz::{Grant, Permission, Principal};
+
+    let reader = Principal::new(
+        "reader",
+        "reader-credential",
+        vec![Grant::new("users", Permission::Read)],
+    );
+
+    let Some(srv) = spawn_seeded(Some(BOOTSTRAP), &[], std::slice::from_ref(&reader)) else {
+        panic!("server must start");
+    };
+
+    // A read this principal *is* granted must succeed, or the 403 below could just as
+    // well mean the credential was never loaded.
+    let resp = client()
+        .get(format!("{}/collections/users/data", srv.base))
+        .bearer_auth("reader-credential")
+        .send()
+        .expect("the request must reach the server");
+    assert!(
+        resp.status().is_success(),
+        "the seeded principal must be recognised and permitted to read; got {}",
+        resp.status()
+    );
+
+    // The write it is not granted must be refused as a permission failure.
+    let resp = client()
+        .put(format!("{}/collections/users/data", srv.base))
+        .bearer_auth("reader-credential")
+        .json(&serde_json::json!({"id": "1", "name": "Alice"}))
+        .send()
+        .expect("the request must reach the server");
+    assert_eq!(
+        resp.status(),
+        403,
+        "a recognised principal lacking Write must get 403, not {}",
+        resp.status()
+    );
+}
+
+/// Principals seeded into a data directory are still there when the server opens it.
+///
+/// The end-to-end counterpart of `authz_persistence.rs`: that file proves the store round
+/// trips, this proves the shipped binary actually loads it at startup.
+#[test]
+fn the_server_loads_persisted_principals_at_startup() {
+    use prkdb::authz::Principal;
+
+    let admin = Principal::admin("seeded-admin", "seeded-admin-credential");
+    let Some(srv) = spawn_seeded(Some(BOOTSTRAP), &[], std::slice::from_ref(&admin)) else {
+        panic!("server must start");
+    };
+
+    let resp = client()
+        .put(format!("{}/collections/users/data", srv.base))
+        .bearer_auth("seeded-admin-credential")
+        .json(&serde_json::json!({"id": "1", "name": "Alice"}))
+        .send()
+        .expect("the request must reach the server");
+    assert!(
+        resp.status().is_success(),
+        "a principal persisted before startup must authenticate afterwards; got {}",
         resp.status()
     );
 }

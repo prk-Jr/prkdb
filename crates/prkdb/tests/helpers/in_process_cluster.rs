@@ -444,6 +444,19 @@ impl InProcessCluster {
         }
     }
 
+    /// Ask one specific node for a ReadIndex.
+    ///
+    /// Exists so a test can aim the call at a node it has deliberately isolated, which
+    /// `get(Linearizable)` cannot do — that resolves the leader itself.
+    pub async fn read_index_on(&self, id: u64) -> anyhow::Result<u64> {
+        let raft = self
+            .raft_of(id)
+            .ok_or_else(|| anyhow::anyhow!("node {id} is not running"))?;
+        raft.read_index()
+            .await
+            .map_err(|e| anyhow::anyhow!("read_index on node {id}: {e}"))
+    }
+
     /// Read straight from one node's storage, with no coordination at all.
     pub async fn read_local(&self, id: u64, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
         let storage = {

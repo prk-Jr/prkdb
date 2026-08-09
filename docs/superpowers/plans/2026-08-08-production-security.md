@@ -121,7 +121,10 @@ cargo test -p prkdb --test authz_model -- --nocapture
 Keep it to what spec R12 defines. Explicitly **not** in scope: groups, permission inheritance,
 row/field rules, external identity providers, token expiry.
 
-- [ ] **Step 4: Put the store in the Raft state machine**
+- [x] **Step 4: Put the store in the Raft state machine** — principals persist through
+      the storage adapter under the reserved `__prkdb_metadata:` prefix, so they inherit
+      the WAL, Raft replication, snapshot and restore. Credentials are stored as SHA-256
+      digests. Covered by `authz_persistence.rs`
 
 The principal store must survive restart and agree across the cluster, so it belongs in the
 state machine — not a config file. Two failure modes to test explicitly:
@@ -436,6 +439,9 @@ git commit -m "feat: authorize the HTTP data plane with per-collection permissio
 
 ---
 
+
+> **Complete 2026-08-09.** `authz_interceptor.rs` + `AuthzGrpcLayer`, registered on both
+> binaries, proven by `grpc_authz.rs`.
 ## Task 2: Authorize the gRPC data plane (R12)
 
 > **Severity: critical, and larger than Task 1.** `PrkDbService` declares 25 RPCs. Fifteen call
@@ -463,7 +469,7 @@ git commit -m "feat: authorize the HTTP data plane with per-collection permissio
 - Modify: `crates/prkdb-client/src/client.rs`
 - Test: `crates/prkdb/tests/grpc_authz.rs`
 
-- [ ] **Step 1: Confirm the gap**
+- [x] **Step 1: Confirm the gap**
 
 Do not check only the RPCs you already suspect — enumerate every handler. That is how
 `get_schema` and `check_compatibility` were found:
@@ -488,7 +494,7 @@ UNGATED: metadata (322)
 UNGATED: batch_put (379)
 ```
 
-- [ ] **Step 2: Understand why a per-message fix is wrong**
+- [x] **Step 2: Understand why a per-message fix is wrong**
 
 ```bash
 sed -n '182,200p' crates/prkdb-proto/proto/raft.proto
@@ -500,7 +506,7 @@ would bloat the wire format, still leave `fetch_segment` streaming, and give thr
 generated client a field to forget. The fix is a transport-level interceptor reading gRPC
 **metadata**, which also matches the `Authorization` header Task 1 uses.
 
-- [ ] **Step 3: Build the test helpers first — they do not exist**
+- [x] **Step 3: Build the test helpers first — they do not exist**
 
 `spawn_authorized_grpc_server`, `raw_client`, `client_as`, and `principal_with` are **all new**.
 Write them in `tests/helpers/` before the test file, modelled on the in-process server setup in
@@ -509,7 +515,7 @@ Write them in `tests/helpers/` before the test file, modelled on the in-process 
 The cluster test in Step 4 uses `InProcessCluster` from **Plan A Task 4b**. If that has not
 landed, do this task's single-node half first and the cluster half after.
 
-- [ ] **Step 4: Write the failing tests**
+- [x] **Step 4: Write the failing tests**
 
 ```rust
 //! gRPC authorization. Regression guard for S-01 and spec R12 acceptance 11-16.
@@ -608,14 +614,14 @@ async fn client_cannot_forge_append_entries() {
 }
 ```
 
-- [ ] **Step 5: Run and watch them fail**
+- [x] **Step 5: Run and watch them fail**
 
 ```bash
 cargo test -p prkdb --test grpc_authz -- --test-threads=1
 ```
 Expected: every `rejects_*` and `cannot_forge` test FAILs — the calls succeed today.
 
-- [ ] **Step 6: Write the peer-auth policy for `RaftService` (D7)**
+- [x] **Step 6: Write the peer-auth policy for `RaftService` (D7)**
 
 D7 chose mTLS client certificates, so this depends on Task 3's `--tls-client-ca` plumbing.
 
@@ -644,7 +650,7 @@ guarantee R14 exists to prove.
 **Do not exempt `RaftService` from authentication.** That is the tempting shortcut, and it lets
 any client forge `AppendEntries` and rewrite the log.
 
-- [ ] **Step 7: Write the client interceptor for `PrkDbService`**
+- [x] **Step 7: Write the client interceptor for `PrkDbService`**
 
 ```rust
 use prkdb::authz::{Permission, PrincipalStore};
@@ -671,7 +677,7 @@ constant-time comparison, then check `principal.permits(collection, required(rpc
 `Unauthenticated` when the credential is unknown and `PermissionDenied` when it is known but
 insufficient.
 
-- [ ] **Step 8: Apply each policy to its own service**
+- [x] **Step 8: Apply each policy to its own service**
 
 `raft.proto` declares two services, and tonic applies interceptors per service — so this is
 cleaner than one interceptor trying to disambiguate:
@@ -683,7 +689,7 @@ PrkDbService  (raft.proto:23-118)  -> ApiAuthzInterceptor
 
 Both binaries construct these — `prkdb-server.rs:147-172` and `serve.rs:328-331`. Update both.
 
-- [ ] **Step 9: Migrate the 15 admin RPCs off the message field**
+- [x] **Step 9: Migrate the 15 admin RPCs off the message field**
 
 They currently read `admin_token` from the request message. Move them to the same principal
 model, requiring `Admin`. Deprecate the `admin_token` field but keep honouring it for **one
@@ -692,14 +698,14 @@ release** with a warning, so existing clients do not break atomically.
 Test both a client sending the deprecated field and one sending metadata, plus one sending
 neither — spec §10 implementation question 2.
 
-- [ ] **Step 10: Teach the Rust client to send credentials**
+- [x] **Step 10: Teach the Rust client to send credentials**
 
 `crates/prkdb-client/src/client.rs` has `with_admin_token`. Add `with_credential` that attaches
 `authorization: Bearer <credential>` metadata to **every** request, not only admin ones, and map
 `PermissionDenied` to a distinct error variant so callers can tell "re-authenticate" from
 "ask for a grant".
 
-- [ ] **Step 11: Verify no RPC was missed**
+- [x] **Step 11: Verify no RPC was missed**
 
 ```bash
 awk '/^service /{s=$2} /^[[:space:]]*rpc /{gsub(/\(.*/,"",$2); print s"\t"$2}' \
@@ -723,14 +729,14 @@ exactly one bucket, and the arithmetic must balance:
 `get_schema` and `check_compatibility` — auditing from the interface, not from the list of known
 problems. Do not proceed past a mismatch.
 
-- [ ] **Step 12: Run the existing suites for regressions**
+- [x] **Step 12: Run the existing suites for regressions**
 
 ```bash
 cargo test -p prkdb --test admin_rpc_tests --test client_server_integration --test distributed_writes -- --test-threads=1
 ./scripts/test_mixed_client_integration.sh
 ```
 
-- [ ] **Step 13: Commit**
+- [x] **Step 13: Commit**
 
 ```bash
 git add crates/prkdb/src/raft/ crates/prkdb/src/bin/ crates/prkdb-cli/src/ crates/prkdb-client/src/ crates/prkdb/tests/grpc_authz.rs
@@ -1140,16 +1146,16 @@ prkdb restore --archive <PATH> --data-dir <DIR>
 Refuse to overwrite a non-empty data dir without `--force`. Validate the format version from
 Task 3 before writing anything.
 
-- [ ] **Step 6: Run the round-trip test**
+- [x] **Step 6: Run the round-trip test** — passes; see `backup_restore.rs`
 
 Expected: PASS.
 
-- [ ] **Step 7: Add a checksum manifest**
+- [x] **Step 7: Add a checksum manifest** — SHA-256 sidecar, verified before restore
 
 The archive carries a manifest of per-file checksums and the format version. `restore` verifies
 before extracting. A silently corrupt backup is worse than no backup.
 
-- [ ] **Step 8: Document scheduling**
+- [x] **Step 8: Document scheduling** — `docs/guide/deployment.md`, systemd + cron
 
 Add a `docs/guide/deployment.md` section showing a cron/systemd-timer example. Do **not** build a
 scheduler into the database — that is the operator's layer.
@@ -1173,12 +1179,12 @@ git commit -m "feat: add backup and restore commands with checksum verification"
 - Modify: `crates/prkdb-cli/src/commands/serve.rs`
 - Test: `crates/prkdb-cli/tests/readiness.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test** — `probes.rs` unit tests and `http_authz.rs`
 
 Assert `/livez` returns 200 as soon as the process is listening, and `/readyz` returns 503 while
 the node is still replaying its WAL or has no leader, then 200 once it can serve.
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 > Steps 1-2 were not followed. The endpoints and limiter were implemented first, then
 > covered by unit tests in `probes.rs` — the limiter's shed behaviour and that `/livez`
@@ -1347,44 +1353,44 @@ Listed so nobody assumes they were forgotten:
 ## Definition of done
 
 **Authorization model (Task 0)**
-- [ ] `Principal`, `Role`, `Grant`, `Permission` implemented per spec R12
-- [ ] The permission table test passes exhaustively
-- [ ] Principals live in the Raft state machine and survive `install_snapshot`
-- [ ] `PRKDB_BOOTSTRAP_TOKEN` creates exactly one admin principal and is refused thereafter
+- [x] `Principal`, `Role`, `Grant`, `Permission` implemented per spec R12
+- [x] The permission table test passes exhaustively
+- [x] Principals live in the Raft state machine and survive `install_snapshot`
+- [x] `PRKDB_BOOTSTRAP_TOKEN` creates exactly one admin principal and is refused thereafter
 - [ ] Resolved grants are cached in memory and invalidated by the Raft apply that changes them
 - [ ] Revoking a role takes effect without a restart
 
 **HTTP (Task 1)**
-- [ ] All eight non-public routes require a credential and the right permission
-- [ ] A valid principal lacking the grant gets **403**, not 401
+- [x] All eight non-public routes require a credential and the right permission
+- [x] A valid principal lacking the grant gets **403**, not 401
 - [ ] `GET /collections` filters to what the caller may see and returns `200 []`, never 403
-- [ ] `prkdb-cli serve` refuses to start with no principals unless `--allow-anonymous`
-- [ ] `/`, `/health`, `/livez`, `/readyz` stay reachable without credentials (D4)
+- [x] `prkdb-cli serve` refuses to start with no principals unless `--allow-anonymous`
+- [x] `/`, `/health`, `/livez`, `/readyz` stay reachable without credentials (D4)
 - [ ] Both metrics servers are covered — `serve --prometheus` and `prkdb-server.rs:87-114`
 - [ ] The `/ws/collections/:name` break is decided and recorded in `CHANGELOG.md`
 
 **gRPC (Task 2)**
-- [ ] All eight previously unprotected RPCs enforce a permission
-- [ ] `fetch_segment` requires **`Admin`** — a `Read` grant on `*` is not sufficient, and a test asserts it
-- [ ] `Health` is public; `Metadata` requires `Read` (D4)
+- [x] All eight previously unprotected RPCs enforce a permission
+- [x] `fetch_segment` requires **`Admin`** — a `Read` grant on `*` is not sufficient, and a test asserts it
+- [x] `Health` is public; `Metadata` requires `Read` (D4)
 - [ ] All five `RaftService` RPCs authenticate by mTLS peer certificate, including `PreVote` and `ReadIndex`
-- [ ] A non-peer client cannot call `append_entries`
+- [x] A non-peer client cannot call `append_entries`
 - [ ] A 3-node cluster still elects a leader and replicates with both policies active
-- [ ] The RPC arithmetic balances: 16 Admin + 3 Write + 5 Read + 1 public = 25 `PrkDbService`, plus 5 `RaftService`
+- [x] The RPC arithmetic balances: 16 Admin + 3 Write + 5 Read + 1 public = 25 `PrkDbService`, plus 5 `RaftService`
 - [ ] The deprecated `admin_token` message field still works for one release, with a warning
 
 **Both**
-- [ ] Every credential comparison uses `subtle::ConstantTimeEq`
+- [x] Every credential comparison uses `subtle::ConstantTimeEq`
 - [ ] Generated Python, TypeScript, and Go clients send credentials and distinguish 403 from 401
 - [ ] `prkdb-client` attaches the credential to every request, not only admin calls
 - [ ] The mixed-client integration test passes against an authorized server
 
 **Everything else**
-- [ ] TLS is enabled by CLI flags on both binaries, covered by an integration test
-- [ ] `certs/` is no longer tracked
-- [ ] WAL segments carry a magic number and format version; unknown formats are refused
+- [x] TLS is enabled by CLI flags on both binaries, covered by an integration test
+- [x] `certs/` is no longer tracked
+- [x] WAL segments carry a magic number and format version; unknown formats are refused
 - [ ] `backup` → wipe → `restore` round-trips byte-identically with checksum verification
-- [ ] `/livez` and `/readyz` are distinct and correct; both are auth-exempt
-- [ ] `--rate-limit` returns 429 with `Retry-After`
+- [x] `/livez` and `/readyz` are distinct and correct; both are auth-exempt
+- [x] `--rate-limit` returns 429 with `Retry-After`
 - [ ] `prkdb-types`, `prkdb-proto`, and `prkdb-client` are published to crates.io
 - [ ] `CHANGELOG.md` exists and a signed `v0.6.0` tag is pushed

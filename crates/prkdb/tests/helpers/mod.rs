@@ -56,6 +56,51 @@ pub async fn free_ports(n: usize) -> Vec<u16> {
         .collect()
 }
 
+/// Poll `condition` until it holds, or fail naming what was being waited for.
+///
+/// # Why this exists
+///
+/// The pattern it replaces is `sleep(Duration::from_secs(3))` followed by an assertion.
+/// That is wrong in both directions at once: on a loaded CI runner three seconds is not
+/// enough and the test fails for no reason, while on a fast machine it wastes three
+/// seconds every run. It also reports "assertion failed" rather than "no leader was
+/// elected within 10s", which is the sentence someone reading CI output actually needs.
+///
+/// The failure message names the condition, so a timeout says what did not happen.
+pub async fn await_condition<F, Fut>(what: &str, within: std::time::Duration, mut condition: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        if condition().await {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("timed out after {within:?} waiting for: {what}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+/// Run `op`, giving up after `within`.
+///
+/// Cluster operations against a partitioned node do not fail fast — they wait on RPC
+/// timeouts per unreachable peer, which turned one register test from three seconds into
+/// ninety. A test that means "try this, and treat not finishing as a failure of the
+/// operation" should say so rather than inherit whatever the transport's timeouts add up
+/// to.
+pub async fn within<T, Fut>(limit: std::time::Duration, op: Fut) -> Result<T, String>
+where
+    Fut: std::future::Future<Output = T>,
+{
+    match tokio::time::timeout(limit, op).await {
+        Ok(value) => Ok(value),
+        Err(_) => Err(format!("operation did not complete within {limit:?}")),
+    }
+}
+
 #[allow(unused_imports)]
 pub use jepsen_checker::{
     BankAccounts, InvariantResult, LinearizabilityResult, OpKind, OpResult, Operation,

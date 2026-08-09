@@ -25,7 +25,8 @@
 //! # Performance
 //!
 //! - Regular operations bypass transaction code entirely (zero overhead)
-//! - Transaction commit uses `put_batch` (same 214K ops/sec throughput)
+//! - Transaction commit uses `put_batch`, so it inherits batch throughput rather than
+//!   paying per-key cost (figure unverified; see `docs/benchmarks/methodology.md`)
 //! - Reads within a transaction see uncommitted writes (read-your-writes)
 
 use crate::storage::WalStorageAdapter;

@@ -2336,6 +2336,7 @@ dependencies = [
  "seahash",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "subtle",
  "sysinfo",

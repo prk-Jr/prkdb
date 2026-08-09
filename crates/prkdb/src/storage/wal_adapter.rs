@@ -199,7 +199,8 @@ impl WalStorageAdapterBuilder {
 
 /// Storage adapter backed by Write-Ahead Log (Mmap Parallel)
 ///
-/// Provides high-performance sequential write (123K+ ops/sec) with memory-mapped I/O
+/// Provides high-performance sequential write with memory-mapped I/O
+/// (throughput unverified; see `docs/benchmarks/methodology.md`)
 /// while maintaining an in-memory index for fast reads.
 #[derive(Clone)]
 pub struct WalStorageAdapter {
@@ -1550,7 +1551,7 @@ impl StorageAdapter for WalStorageAdapter {
 
     /// Put multiple key-value pairs in a single batch operation
     ///
-    /// **ULTRA-OPTIMIZED**: Direct WAL batch path - 3M+ ops/sec!
+    /// Direct WAL batch path, bypassing the accumulator.
     ///
     /// This bypasses the accumulator completely:
     /// - Single WAL batch write (not N individual writes)
@@ -1558,9 +1559,9 @@ impl StorageAdapter for WalStorageAdapter {
     /// - Bulk index update (not N sequential)
     /// - Bulk cache update (single lock)
     ///
-    /// Performance:
-    /// - Old (accumulator): 62K ops/sec (bottleneck)
-    /// - New (direct WAL): 3M+ ops/sec! 🚀
+    /// The "62K → 3M+ ops/sec" this used to advertise is unverified: no benchmark in the
+    /// repository measures the two paths against each other. See
+    /// `docs/benchmarks/methodology.md`.
     async fn put_batch(&self, entries: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), StorageError> {
         let _guard = self.inner.transaction_barrier.read().await;
         self.put_batch_impl(entries).await

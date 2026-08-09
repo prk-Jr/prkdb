@@ -188,7 +188,10 @@ async fn test_leader_crash_during_write() {
     let mut cluster = TestCluster::new(3).await.unwrap();
     cluster.start_all().await.unwrap();
 
-    sleep(Duration::from_secs(5)).await;
+    cluster
+        .await_ready(Duration::from_secs(30))
+        .await
+        .expect("the cluster must come up");
 
     // Connect to node 1 (likely leader after election)
     let _client = connect_with_retry(format!(
@@ -230,7 +233,10 @@ async fn test_leader_crash_during_write() {
 
     // Restart node 1
     cluster.restart_node(1).await.unwrap();
-    sleep(Duration::from_secs(5)).await;
+    cluster
+        .await_ready(Duration::from_secs(30))
+        .await
+        .expect("node 1 must come back up");
 
     // Verify data consistency (cluster-wide)
     let value = read_with_redirect(&cluster, b"key_75".to_vec(), 3)
@@ -258,7 +264,10 @@ async fn test_follower_crash_and_recovery() {
     let mut cluster = TestCluster::new(3).await.unwrap();
     cluster.start_all().await.unwrap();
 
-    sleep(Duration::from_secs(5)).await;
+    cluster
+        .await_ready(Duration::from_secs(30))
+        .await
+        .expect("the cluster must come up");
 
     // Write initial data
     for i in 0..1000 {
@@ -290,7 +299,13 @@ async fn test_follower_crash_and_recovery() {
 
     // Restart node 3
     cluster.restart_node(3).await.unwrap();
-    sleep(Duration::from_secs(10)).await; // Give time for catch-up
+    cluster
+        .await_ready(Duration::from_secs(30))
+        .await
+        .expect("node 3 must come back up");
+    // Catch-up is still a duration rather than a condition: the assertions below are what
+    // decide whether it happened, and polling them here would just move the check.
+    sleep(Duration::from_secs(10)).await;
 
     // Verify node 3 has the data (use helper for leader redirect)
     for i in 0..10 {
@@ -333,7 +348,10 @@ async fn test_cascading_failures() {
     let mut cluster = TestCluster::new(5).await.unwrap();
     cluster.start_all().await.unwrap();
 
-    sleep(Duration::from_secs(5)).await;
+    cluster
+        .await_ready(Duration::from_secs(30))
+        .await
+        .expect("the cluster must come up");
 
     // Write initial data
     let mut client = connect_with_retry(format!(

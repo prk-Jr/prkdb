@@ -81,6 +81,16 @@ no_ignored_backup_tests() {
   ! grep -q '^[[:space:]]*#\[ignore' crates/prkdb-cli/tests/backup_restore.rs 2>/dev/null
 }
 
+# A throughput figure in a doc comment must be traceable. Either it names the benchmark
+# or the methodology page, or it says it is unverified — a bare number is a claim nobody
+# can check, which is how "800x faster" survived beside a measured 95x.
+perf_claims_are_sourced() {
+  local bare
+  bare=$(grep -rnE '^[[:space:]]*(///|//!).*[0-9][0-9,.]*[KM]\+? ops/sec' crates/*/src 2>/dev/null \
+    | grep -viE 'methodology|unverified|measured|rate.?limit|per_second' | wc -l | tr -d ' ')
+  [[ "$bare" -eq 0 ]]
+}
+
 # Doc examples fenced with ```ignore never compile, so they cannot catch API drift.
 # The pattern must allow leading whitespace: anchoring at ^/// matched 2 of 61 real
 # occurrences and would have reported this green while 59 remained.
@@ -146,6 +156,8 @@ check 'doctests compile (no ignored doc fences)'      "R5" no_ignored_doctests
 check "WAL free of production unwraps"                "R8" prod_unwraps_below crates/prkdb-core/src/wal 1
 check "storage adapters free of production unwraps"   "R8" prod_unwraps_below crates/prkdb-storage-segmented/src 1
 check "coverage job in CI"                            "R9" grep -q 'llvm-cov' .github/workflows/ci.yml
+check "performance claims cite a source"             "R15" perf_claims_are_sourced
+check "benchmark methodology is published"           "R15" test -f docs/benchmarks/methodology.md
 check "deny.toml present"                            "R10" test -f deny.toml
 check "dependabot configured"                        "R10" test -f .github/dependabot.yml
 check "dead module storage_old_inmemory removed"     "R11" none 'mod storage_old_inmemory' crates/prkdb/src/lib.rs
