@@ -108,6 +108,56 @@ impl MmapParallelWal {
         })
     }
 
+    /// Open the WAL if its segments exist, creating any that do not.
+    ///
+    /// [`create`] truncates every segment it touches, so using it to open an existing data
+    /// directory silently discards the log. [`open`] is the opposite extreme: it fails if
+    /// the segments are absent, and it cannot serve a first-run. This is the variant a
+    /// database open needs, and it also tolerates a segment count that grew between runs.
+    ///
+    /// [`create`]: Self::create
+    /// [`open`]: Self::open
+    pub async fn open_or_create(config: WalConfig, segment_count: usize) -> Result<Self, WalError> {
+        if segment_count == 0 {
+            return Err(WalError::Serialization(
+                "Segment count must be at least 1".to_string(),
+            ));
+        }
+
+        let mut segments = Vec::with_capacity(segment_count);
+
+        for i in 0..segment_count {
+            let mut segment_config = config.clone();
+            segment_config.log_dir = config.log_dir.join(format!("mmap_segment_{}", i));
+
+            tokio::fs::create_dir_all(&segment_config.log_dir)
+                .await
+                .map_err(WalError::Io)?;
+
+            // Segment ID lives in the high 16 bits; 1 avoids an ambiguous zero offset.
+            let base_offset = ((i as u64) << 48) + 1;
+
+            let wal = MmapLogSegment::open_or_create(&segment_config.log_dir, base_offset, 4096)
+                .await
+                .map_err(WalError::Io)?;
+
+            segments.push(Arc::new(Mutex::new(wal)));
+        }
+
+        let metrics = Arc::new(WalMetrics::new());
+        metrics.update_adaptive_state(
+            config.adaptive_config.initial_batch_size,
+            config.adaptive_config.initial_timeout.as_millis() as u64,
+        );
+
+        Ok(Self {
+            segments,
+            segment_count,
+            metrics,
+            config: Mutex::new(config),
+        })
+    }
+
     /// Append single record
     pub async fn append(&self, record: LogRecord) -> Result<(usize, u64), WalError> {
         let start = Instant::now();

@@ -147,7 +147,7 @@ async function loadClientClass(clientDir: string, collection: string) {
 
 async function runWrite(args: RunnerArgs) {
   const PrkDbClient = await loadClientClass(args.clientDir, args.collection);
-  const client = new PrkDbClient(args.server);
+  const client = new PrkDbClient(args.server, process.env.PRKDB_CREDENTIAL || undefined);
 
   for (let index = 0; index < args.records; index += 1) {
     await client.put(args.collection, buildRecord(index, args.idPrefix));
@@ -161,7 +161,7 @@ async function runWrite(args: RunnerArgs) {
 
 async function runRead(args: RunnerArgs) {
   const PrkDbClient = await loadClientClass(args.clientDir, args.collection);
-  const client = new PrkDbClient(args.server);
+  const client = new PrkDbClient(args.server, process.env.PRKDB_CREDENTIAL || undefined);
   const rows = normalizeRows(await client.list(args.collection, { limit: 10000 }));
   const rowsById = new Map<string, Record<string, unknown>>();
 

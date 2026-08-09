@@ -18,6 +18,17 @@ pub struct TlsConfig {
 }
 
 /// Start the Raft gRPC server (plain)
+///
+/// # This does not authenticate peers
+///
+/// `RaftService` is registered with no interceptor, so any caller who can reach the
+/// address may issue `AppendEntries`. That is tolerable here because the shipped binaries
+/// do not use this function: `prkdb-cli serve` and `prkdb-server` both multiplex
+/// `RaftService` onto the main gRPC server and attach `PeerAuthInterceptor` there.
+///
+/// This entry point exists for tests and examples that want a Raft-only listener. Do not
+/// reach for it to serve a real cluster — use the multiplexed path, or wrap the service
+/// with `PeerAuthInterceptor` yourself.
 pub async fn start_raft_server(
     partition_manager: Arc<PartitionManager>,
     listen_addr: SocketAddr,

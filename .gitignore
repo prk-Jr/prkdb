@@ -1,6 +1,9 @@
 
 /target
-/Cargo.lock
+# Cargo.lock is tracked deliberately. This workspace ships binaries (prkdb-cli,
+# prkdb-server), for which the convention is to commit the lockfile so builds are
+# reproducible. It is also required rather than merely advisable here: CI and
+# release.yml both pass --locked, which fails outright when no lockfile is committed.
 **/*.rs.bk
 /output
 **/*.db
@@ -15,3 +18,10 @@
 *.pem
 
 /.agents/
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Local reference docs (not part of the project)
+/rust-guidelines.txt

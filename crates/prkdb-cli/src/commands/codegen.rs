@@ -553,11 +553,36 @@ export class {}QueryBuilder {{
     // Add PrkDbClient class with dynamic collection methods
     code.push_str(
         r#"
+/** The credential was missing, unknown, or rejected (HTTP 401). */
+export class PrkDbAuthError extends Error {}
+
+/** The credential is valid but lacks the required grant (HTTP 403). */
+export class PrkDbPermissionError extends Error {}
+
+/**
+ * Map 401 and 403 onto distinct errors.
+ *
+ * They call for opposite responses — re-authenticate versus stop and request a grant — so
+ * a client that cannot tell them apart will retry a permission failure forever.
+ */
+function raiseForAuth(response: Response, action: string): void {
+    if (response.status === 401) {
+        throw new PrkDbAuthError(`${action}: not authenticated. Pass a credential to PrkDbClient.`);
+    }
+    if (response.status === 403) {
+        throw new PrkDbPermissionError(`${action}: the credential is valid but lacks permission.`);
+    }
+}
+
 export class PrkDbClient {
     private host: string;
+    private headers: Record<string, string>;
 
-    constructor(host: string = "http://127.0.0.1:8080") {
+    constructor(host: string = "http://127.0.0.1:8080", credential?: string) {
         this.host = host.replace(/\/$/, "");
+        // Held on the instance so every request carries it; adding the header per call
+        // site works until someone adds a method and forgets.
+        this.headers = credential ? { Authorization: `Bearer ${credential}` } : {};
     }
 
     async list<T>(collection: string, options: { limit?: number, offset?: number, filter?: string, sort?: string } = {}): Promise<T[]> {
@@ -567,7 +592,10 @@ export class PrkDbClient {
         if (options.filter) params.set("filter", options.filter);
         if (options.sort) params.set("sort", options.sort);
 
-        const response = await fetch(`${this.host}/collections/${collection}/data?${params}`);
+        const response = await fetch(`${this.host}/collections/${collection}/data?${params}`, {
+            headers: { ...this.headers }
+        });
+        raiseForAuth(response, `list ${collection}`);
         if (!response.ok) {
             throw new Error(`Failed to list collection: ${response.status}`);
         }
@@ -582,8 +610,11 @@ export class PrkDbClient {
     }
 
     async get<T>(collection: string, id: string): Promise<T | null> {
-        const response = await fetch(`${this.host}/collections/${collection}/data/${id}`);
+        const response = await fetch(`${this.host}/collections/${collection}/data/${id}`, {
+            headers: { ...this.headers }
+        });
         if (response.status === 404) return null;
+        raiseForAuth(response, `get from ${collection}`);
         if (!response.ok) {
             throw new Error(`Failed to get record: ${response.status}`);
         }
@@ -594,9 +625,10 @@ export class PrkDbClient {
     async put(collection: string, data: any): Promise<void> {
         const response = await fetch(`${this.host}/collections/${collection}/data`, {
             method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', ...this.headers },
             body: JSON.stringify(data)
         });
+        raiseForAuth(response, `put into ${collection}`);
         if (!response.ok) {
             throw new Error(`Failed to put record: ${response.status}`);
         }
@@ -604,8 +636,10 @@ export class PrkDbClient {
 
     async delete(collection: string, id: string): Promise<void> {
         const response = await fetch(`${this.host}/collections/${collection}/data/${id}`, {
-            method: 'DELETE'
+            method: 'DELETE',
+            headers: { ...this.headers }
         });
+        raiseForAuth(response, `delete from ${collection}`);
         if (!response.ok) {
             throw new Error(`Failed to delete record: ${response.status}`);
         }
@@ -689,6 +723,7 @@ package models
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -700,7 +735,19 @@ import (
 type PrkDbClient struct {
 	Host   string
 	Client *http.Client
+	// Credential is sent as an Authorization bearer header on every request.
+	Credential string
 }
+
+// ErrUnauthenticated means the credential was missing, unknown, or rejected (HTTP 401).
+var ErrUnauthenticated = errors.New("prkdb: not authenticated")
+
+// ErrPermissionDenied means the credential is valid but lacks the required grant (403).
+//
+// Kept distinct from ErrUnauthenticated because the two call for opposite responses:
+// re-authenticate versus stop and request a grant. A client that cannot tell them apart
+// retries a permission failure forever.
+var ErrPermissionDenied = errors.New("prkdb: permission denied")
 
 // NewPrkDbClient creates a new PrkDB client.
 func NewPrkDbClient(host string) *PrkDbClient {
@@ -708,6 +755,36 @@ func NewPrkDbClient(host string) *PrkDbClient {
 		Host:   host,
 		Client: &http.Client{},
 	}
+}
+
+// NewPrkDbClientWithCredential creates a client that authenticates every request.
+func NewPrkDbClientWithCredential(host string, credential string) *PrkDbClient {
+	return &PrkDbClient{
+		Host:       host,
+		Client:     &http.Client{},
+		Credential: credential,
+	}
+}
+
+// authorize attaches the credential, if one is configured.
+//
+// Every request is built through this, so a new method cannot silently ship
+// unauthenticated.
+func (c *PrkDbClient) authorize(req *http.Request) {
+	if c.Credential != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Credential)
+	}
+}
+
+// checkAuth maps 401 and 403 onto distinct sentinel errors.
+func checkAuth(resp *http.Response) error {
+	switch resp.StatusCode {
+	case http.StatusUnauthorized:
+		return ErrUnauthenticated
+	case http.StatusForbidden:
+		return ErrPermissionDenied
+	}
+	return nil
 }
 
 // ListOptions configures list queries.
@@ -740,6 +817,9 @@ func (c *PrkDbClient) ListRaw(collection string, opts ListOptions) ([]map[string
 	}
 	defer resp.Body.Close()
 
+	if err := checkAuth(resp); err != nil {
+		return nil, err
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("list failed with status %d", resp.StatusCode)
 	}
@@ -773,6 +853,7 @@ func (c *PrkDbClient) Put(collection string, data interface{}) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	c.authorize(req)
 
 	resp, err := c.Client.Do(req)
 	if err != nil {
@@ -780,6 +861,9 @@ func (c *PrkDbClient) Put(collection string, data interface{}) error {
 	}
 	defer resp.Body.Close()
 
+	if err := checkAuth(resp); err != nil {
+		return err
+	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return fmt.Errorf("put failed with status %d", resp.StatusCode)
 	}
@@ -792,6 +876,7 @@ func (c *PrkDbClient) Delete(collection string, id string) error {
 	if err != nil {
 		return err
 	}
+	c.authorize(req)
 
 	resp, err := c.Client.Do(req)
 	if err != nil {
@@ -799,6 +884,9 @@ func (c *PrkDbClient) Delete(collection string, id string) error {
 	}
 	defer resp.Body.Close()
 
+	if err := checkAuth(resp); err != nil {
+		return err
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("delete failed with status %d", resp.StatusCode)
 	}
@@ -841,10 +929,40 @@ try:
 except ImportError:
     raise ImportError("The 'httpx' library is required. Please install it with: pip install httpx")
 
+class PrkDbAuthError(Exception):
+    """The credential was missing, unknown, or rejected (HTTP 401)."""
+
+
+class PrkDbPermissionError(Exception):
+    """The credential is valid but lacks the required grant (HTTP 403)."""
+
+
+def _raise_for_auth(response, action: str) -> None:
+    """Turn 401 and 403 into distinct exceptions.
+
+    They mean different things and call for different responses: 401 says re-authenticate,
+    403 says stop and ask for a grant. Collapsing both into "request failed" makes a client
+    retry a permission error forever.
+    """
+    if response.status_code == 401:
+        raise PrkDbAuthError(
+            f"{action}: not authenticated. Pass credential=... to PrkDbClient."
+        )
+    if response.status_code == 403:
+        raise PrkDbPermissionError(
+            f"{action}: the credential is valid but lacks permission for this collection."
+        )
+
+
 class PrkDbClient:
-    def __init__(self, host: str = "http://127.0.0.1:8080"):
+    def __init__(self, host: str = "http://127.0.0.1:8080", credential: Optional[str] = None):
         self.host = host.rstrip('/')
-        self.client = httpx.AsyncClient()
+        headers = {}
+        if credential:
+            headers["Authorization"] = f"Bearer {credential}"
+        # Set on the client so every request carries it. Adding the header per call site
+        # works until someone adds a method and forgets.
+        self.client = httpx.AsyncClient(headers=headers)
     
     async def close(self):
         await self.client.aclose()
@@ -864,6 +982,8 @@ class PrkDbClient:
             
         response = await self.client.get(f"{self.host}/collections/{collection}/data", params=params)
         
+        _raise_for_auth(response, f"list {collection}")
+
         if response.status_code == 200:
             data = response.json()
             # Response is wrapped in {"success": true, "data": ...}
@@ -882,12 +1002,14 @@ class PrkDbClient:
             json=data,
             headers={'Content-Type': 'application/json'}
         )
+        _raise_for_auth(response, f"put into {collection}")
         if response.status_code not in (200, 201):
             raise Exception(f"Failed to put record: {response.status_code}")
 
     async def get(self, collection: str, id: str) -> Optional[Dict[str, Any]]:
         """Fetch a single record by ID"""
         response = await self.client.get(f"{self.host}/collections/{collection}/data/{id}")
+        _raise_for_auth(response, f"get from {collection}")
         if response.status_code == 404:
             return None
         if response.status_code != 200:
@@ -899,6 +1021,7 @@ class PrkDbClient:
     async def delete(self, collection: str, id: str) -> None:
         """Delete a record from the collection"""
         response = await self.client.delete(f"{self.host}/collections/{collection}/data/{id}")
+        _raise_for_auth(response, f"delete from {collection}")
         if response.status_code != 200:
             raise Exception(f"Failed to delete record: {response.status_code}")
 
@@ -1057,10 +1180,57 @@ mod tests {
         assert!(ts_code.contains("id: string;"));
         assert!(ts_code.contains("age: number;"));
         assert!(ts_code.contains("export class UserQueryBuilder"));
-        assert!(ts_code.contains(r#"constructor(host: string = "http://127.0.0.1:8080") {"#));
-        assert!(ts_code.contains("headers: { 'Content-Type': 'application/json' },"));
+        assert!(ts_code.contains(
+            r#"constructor(host: string = "http://127.0.0.1:8080", credential?: string) {"#
+        ));
+        assert!(ts_code.contains("'Content-Type': 'application/json', ...this.headers"));
         assert!(!ts_code.contains("export class PrkDbClient {{"));
-        assert!(!ts_code.contains("headers: {{ 'Content-Type': 'application/json' }},"));
+
+        // A generated client that cannot authenticate cannot talk to a server with
+        // authorization enabled, and one that cannot tell 401 from 403 will retry a
+        // permission failure forever.
+        assert!(
+            ts_code.contains("Authorization: `Bearer ${credential}`"),
+            "the generated client must send a bearer credential"
+        );
+        assert!(
+            ts_code.contains("class PrkDbAuthError")
+                && ts_code.contains("class PrkDbPermissionError"),
+            "the generated client must distinguish 401 from 403"
+        );
+    }
+
+    /// Every generated client sends a credential and separates 401 from 403.
+    ///
+    /// Asserted per language rather than once, because they are three independent string
+    /// templates: fixing one says nothing about the others.
+    #[tokio::test]
+    async fn every_generated_client_authenticates() {
+        let dir = tempdir().unwrap();
+
+        generate_python_client_lib(&dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let py = fs::read_to_string(dir.path().join("prkdb_client.py"))
+            .await
+            .unwrap();
+        assert!(py.contains("Authorization"), "python: no credential header");
+        assert!(
+            py.contains("PrkDbAuthError") && py.contains("PrkDbPermissionError"),
+            "python: 401 and 403 are not distinguished"
+        );
+
+        let go_dir = dir.path().join("go");
+        generate_go_client_lib(&go_dir).await.unwrap();
+        let go = fs::read_to_string(go_dir.join("client.go")).await.unwrap();
+        assert!(
+            go.contains(r#"req.Header.Set("Authorization", "Bearer "+c.Credential)"#),
+            "go: no credential header"
+        );
+        assert!(
+            go.contains("ErrUnauthenticated") && go.contains("ErrPermissionDenied"),
+            "go: 401 and 403 are not distinguished"
+        );
     }
 
     #[tokio::test]

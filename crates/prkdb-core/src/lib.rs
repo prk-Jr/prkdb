@@ -12,6 +12,11 @@
 //! New code should prefer importing directly from `prkdb-types` when possible.
 
 // Implementation modules
+// This crate owns the write-ahead log, so a panic here is a durability event. Every
+// remaining fallible call must either return a typed error or say, in an expect message,
+// why it cannot fail. Test modules are exempt — unwrap is the right tool there.
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 pub mod batch_config;
 pub mod batching;
 pub mod buffer_pool; // Phase 5.2: Buffer pooling for serialization

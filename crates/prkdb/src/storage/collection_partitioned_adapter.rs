@@ -3,7 +3,10 @@ use dashmap::DashMap;
 use prkdb_core::wal::WalConfig;
 use prkdb_metrics::storage::StorageMetrics;
 use prkdb_types::error::StorageError;
+use prkdb_types::snapshot::{CompressionType, SnapshotHeader};
 use prkdb_types::storage::StorageAdapter;
+
+use super::snapshot::SnapshotWriter;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -30,10 +33,11 @@ use tracing::{info, instrument};
 /// ```
 ///
 /// # Performance
-/// - Single collection: ~60K ops/sec (same as WalStorageAdapter)
-/// - 3 collections (parallel writes): ~180K ops/sec (3x!)
-/// - 5 collections (parallel writes): ~300K ops/sec (5x!)
-/// - Mixed workload (5 collections): **250K-400K ops/sec** (4-7x!)
+///
+/// Writes to different collections do not contend, so throughput is expected to scale
+/// with collection count. **That expectation is unmeasured** — the per-collection figures
+/// previously given here were unverified, from no benchmark in this repository. See
+/// `docs/benchmarks/methodology.md`.
 ///
 /// # Key Benefits
 /// - ✅ Zero cross-collection coordination overhead
@@ -182,6 +186,47 @@ impl CollectionPartitionedAdapter {
         adapter
     }
 
+    /// Names of every collection that exists on disk, whether or not it has been opened
+    /// in this process.
+    ///
+    /// Collections are created lazily on first access, so after a restart the in-memory
+    /// map is empty even though `collections/` is full. Anything that operates on the
+    /// whole database — a backup, most obviously — has to consult the directory rather
+    /// than the map, or it silently sees nothing.
+    fn collection_names_on_disk(&self) -> Vec<String> {
+        let dir = self.base_dir.join("collections");
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+
+        // A collection created in this process may not have been flushed to a directory
+        // yet, so union rather than replace.
+        for entry in self.collections.iter() {
+            if !names.contains(entry.key()) {
+                names.push(entry.key().clone());
+            }
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Materialise an adapter for every collection on disk.
+    ///
+    /// Returns the full set, so callers that need to touch all data can work from it.
+    pub async fn load_all_collections(&self) -> Vec<(String, Arc<WalStorageAdapter>)> {
+        let mut loaded = Vec::new();
+        for name in self.collection_names_on_disk() {
+            let adapter = self.get_or_create_collection_async(&name).await;
+            loaded.push((name, adapter));
+        }
+        loaded
+    }
+
     /// Parse a key into (collection_name, actual_key)
     ///
     /// Key format: "{collection_name}:{actual_key}" (binary safe)
@@ -262,7 +307,10 @@ impl CollectionPartitionedAdapter {
     /// Reads from multiple collections in parallel for maximum throughput.
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::storage::CollectionPartitionedAdapter;
+    /// # async fn demo(adapter: &CollectionPartitionedAdapter)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
     /// let queries = vec![
     ///     ("users".to_string(), b"john".to_vec()),
     ///     ("orders".to_string(), b"order_123".to_vec()),
@@ -271,6 +319,8 @@ impl CollectionPartitionedAdapter {
     ///
     /// // All 3 reads happen in PARALLEL!
     /// let results = adapter.multi_collection_get(queries).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn multi_collection_get(
         &self,
@@ -450,6 +500,265 @@ impl StorageAdapter for CollectionPartitionedAdapter {
         // Just do the delete, ignore outbox for now
         let (collection, actual_key) = self.parse_collection_key(key)?;
         self.delete_from_collection(&collection, &actual_key).await
+    }
+
+    /// Scan every key beginning with `prefix`, across collections.
+    ///
+    /// # Why this needs its own implementation
+    ///
+    /// Without it the trait default refuses with "scan_prefix not supported", and this is
+    /// the adapter `PrkDb::builder().with_data_dir()` constructs. That silently broke
+    /// anything built on prefix scans — `list_collections` returned an error, and
+    /// persisted principals could not be loaded — in exactly the way the missing
+    /// `take_snapshot` broke `prkdb backup` (S-04).
+    ///
+    /// # Routing
+    ///
+    /// Keys are `collection:id`. A prefix containing the delimiter therefore names one
+    /// collection and only that collection is scanned; a prefix without it may match any
+    /// collection name, so every collection is scanned and filtered. Results carry the
+    /// full `collection:id` key, matching what `get` and `put` accept.
+    async fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        let collections = self.load_all_collections().await;
+        let split = prefix.iter().position(|b| *b == b':');
+
+        let mut out = Vec::new();
+        for (name, adapter) in collections {
+            let inner_prefix: Vec<u8> = match split {
+                Some(at) => {
+                    // The prefix names a collection; skip the others entirely.
+                    if prefix[..at] != *name.as_bytes() {
+                        continue;
+                    }
+                    prefix[at + 1..].to_vec()
+                }
+                // A partial collection name matches any collection it prefixes.
+                None => {
+                    if !name.as_bytes().starts_with(prefix) {
+                        continue;
+                    }
+                    Vec::new()
+                }
+            };
+
+            for (key, value) in adapter.scan_prefix(&inner_prefix).await? {
+                let mut full = Vec::with_capacity(name.len() + 1 + key.len());
+                full.extend_from_slice(name.as_bytes());
+                full.push(b':');
+                full.extend_from_slice(&key);
+                out.push((full, value));
+            }
+        }
+
+        // Callers that page or diff results need a stable order; per-collection iteration
+        // order is not one.
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+
+    /// Scan the half-open key range `[start, end)`, across collections.
+    ///
+    /// The fourth method this wrapper was missing, after `take_snapshot` (S-04),
+    /// collection discovery (S-05) and `scan_prefix` (S-07). `WalStorageAdapter` implements
+    /// it; the wrapper fell through to the trait default that refuses, so
+    /// `CollectionHandle::scan_range_by_id_bytes` — public API — failed on every database
+    /// opened with `--database`.
+    ///
+    /// # Routing
+    ///
+    /// Bounds are full `collection:id` keys. Rather than reason about which collections a
+    /// range spans — `orders:z` to `users:a` covers every collection in between, and
+    /// collection names are arbitrary — each collection is scanned for its own slice of
+    /// the range and the results are filtered against the original bounds. Correct by
+    /// construction, at the cost of touching every collection; ranges that name one
+    /// collection on both sides are the common case and are narrowed first.
+    async fn scan_range(
+        &self,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        let collections = self.load_all_collections().await;
+        let single_collection = match (
+            start.iter().position(|b| *b == b':'),
+            end.iter().position(|b| *b == b':'),
+        ) {
+            (Some(a), Some(b)) if start[..a] == end[..b] => Some(start[..a].to_vec()),
+            _ => None,
+        };
+
+        let mut out = Vec::new();
+        for (name, adapter) in collections {
+            if let Some(only) = &single_collection {
+                if name.as_bytes() != only.as_slice() {
+                    continue;
+                }
+            }
+
+            // Scan the whole collection and filter: the inner adapter's range is over
+            // *its* keys, which have the collection prefix stripped, so translating the
+            // bounds per collection would need a case for every way a bound can fall
+            // inside, outside, or across the prefix.
+            for (key, value) in adapter.scan_prefix(b"").await? {
+                let mut full = Vec::with_capacity(name.len() + 1 + key.len());
+                full.extend_from_slice(name.as_bytes());
+                full.push(b':');
+                full.extend_from_slice(&key);
+
+                if full.as_slice() >= start && full.as_slice() < end {
+                    out.push((full, value));
+                }
+            }
+        }
+
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+
+    /// Changes after `offset`, for replication.
+    ///
+    /// # Why this is not simply a merge (S-09)
+    ///
+    /// The cursor is a `u64` WAL offset, and this adapter holds one independent WAL per
+    /// collection. Two collections both number their first record 1, so an offset does not
+    /// identify a position across them — and no ordering recovers one:
+    ///
+    /// - **By offset**: collides. Collection `a` offset 5 and collection `b` offset 5 are
+    ///   unrelated events.
+    /// - **By (collection, offset), cursor as an index**: a collection created later
+    ///   receives low offsets and inserts into the middle of the sequence, shifting every
+    ///   position after it. An outstanding cursor then skips or repeats changes — silent
+    ///   data loss during replication, which is the class of bug this work exists to
+    ///   remove.
+    /// - **By `LogRecord::timestamp`**: wall clock, not monotonic, and collides at
+    ///   millisecond granularity.
+    ///
+    /// A general solution needs a monotonic sequence assigned by *this* adapter at write
+    /// time and persisted with each record. That is a WAL format change and would not
+    /// recover history written before it, so it is not attempted here.
+    ///
+    /// # What is implemented
+    ///
+    /// A single-collection database has exactly one WAL, so the cursor is unambiguous and
+    /// the call delegates. That is the common shape for a replicated collection, and it is
+    /// the case `fetch_segment` is usually asked about.
+    ///
+    /// More than one collection is refused, naming the collections and the reason. It used
+    /// to return "not supported" via the trait default, and `fetch_segment` swallowed that
+    /// and streamed an empty successful response — so a follower concluded there was
+    /// nothing to replicate.
+    async fn get_changes_since(
+        &self,
+        offset: u64,
+    ) -> Result<Vec<prkdb_types::replication::Change>, StorageError> {
+        let collections = self.load_all_collections().await;
+
+        match collections.len() {
+            0 => Ok(Vec::new()),
+            1 => collections[0].1.get_changes_since(offset).await,
+            n => {
+                let mut names: Vec<&str> = collections.iter().map(|(k, _)| k.as_str()).collect();
+                names.sort();
+                Err(StorageError::BackendError(format!(
+                    "get_changes_since is not defined across {n} collections ({}): each has \
+                     an independent WAL whose offsets start at 1, so a single u64 cursor \
+                     cannot address a position across them. Replicate a single-collection \
+                     database, or see spec S-09 for what a general cursor would require.",
+                    names.join(", ")
+                )))
+            }
+        }
+    }
+
+    /// Snapshot every collection into a single archive.
+    ///
+    /// Without this the trait default refuses with "take_snapshot not supported", which is
+    /// what `prkdb backup` did for every database opened with `--database` — this adapter
+    /// is what `PrkDb::builder().with_data_dir()` constructs. See S-04.
+    ///
+    /// # One archive, not one per collection
+    ///
+    /// Data is spread across one `WalStorageAdapter` per collection, so a snapshot has to
+    /// merge N sources. Entries are written under their **full `collection:key` form**,
+    /// which is what `get`/`put` take at this layer. Restore therefore needs no knowledge
+    /// of collections at all: it replays each entry through the public `put`, and the
+    /// normal routing in `parse_collection_key` puts it back where it came from.
+    ///
+    /// The alternative — an archive per collection — was rejected because it makes a
+    /// partial restore silently possible.
+    ///
+    /// # Consistency
+    ///
+    /// The read is not atomic across collections: a write landing mid-snapshot may or may
+    /// not be captured, and `max_offset` is the maximum over adapters rather than a single
+    /// consistent cut. The single-adapter implementation has the same property. It is
+    /// sound for `prkdb backup`, which opens the data directory offline with no other
+    /// writer. Do not treat the result as a consistent cut of a live cluster.
+    async fn take_snapshot(
+        &self,
+        path: PathBuf,
+        compression: CompressionType,
+    ) -> Result<u64, StorageError> {
+        // Read from disk, not from the in-memory map: collections open lazily, so on a
+        // freshly opened database the map is empty and a snapshot built from it would
+        // succeed while containing nothing.
+        let collections = self.load_all_collections().await;
+
+        let mut max_offset = 0u64;
+        let mut planned: Vec<(String, Arc<WalStorageAdapter>, Vec<Vec<u8>>)> =
+            Vec::with_capacity(collections.len());
+        let mut count = 0u64;
+        for (name, adapter) in collections {
+            max_offset = max_offset.max(adapter.max_offset());
+            let keys = adapter.get_all_keys();
+            count += keys.len() as u64;
+            planned.push((name, adapter, keys));
+        }
+
+        info!(
+            "Starting merged snapshot: {} collections, {} keys, max_offset={}",
+            planned.len(),
+            count,
+            max_offset
+        );
+
+        // Same producer/consumer split as the single-adapter path: file I/O runs on a
+        // blocking thread so compression does not stall the runtime.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<(Vec<u8>, Vec<u8>)>(1024);
+        let write_task = tokio::task::spawn_blocking(move || -> Result<(), StorageError> {
+            let header = SnapshotHeader::new(max_offset, count, compression);
+            let mut writer = SnapshotWriter::new(&path, header)?;
+            while let Some((key, val)) = rx.blocking_recv() {
+                writer.write_entry(&key, &val)?;
+            }
+            writer.finish()?;
+            Ok(())
+        });
+
+        for (name, adapter, keys) in planned {
+            for key in keys {
+                // A key deleted between planning and reading simply drops out; the header
+                // count is then an upper bound, which the reader tolerates.
+                if let Some(val) = adapter.get(&key).await? {
+                    let mut full_key = Vec::with_capacity(name.len() + 1 + key.len());
+                    full_key.extend_from_slice(name.as_bytes());
+                    full_key.push(b':');
+                    full_key.extend_from_slice(&key);
+
+                    if tx.send((full_key, val)).await.is_err() {
+                        return Err(StorageError::Internal(
+                            "Snapshot writer task failed".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+        drop(tx);
+
+        write_task
+            .await
+            .map_err(|e| StorageError::Internal(format!("Snapshot writer panicked: {}", e)))??;
+
+        Ok(max_offset)
     }
 }
 

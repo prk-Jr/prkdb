@@ -2,6 +2,7 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn run_xtask(args: &[&str], cwd: &Path) -> Output {
@@ -19,6 +20,18 @@ fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// Distinguishes fixture copies made within the same process.
+///
+/// Every test in this file copies the *same* fixture, and the directory name was
+/// `{name}-{pid}-{nanos}`. Same name, same pid — only the timestamp separated them, and
+/// two tests running in parallel can land in one nanosecond bucket. When they did, they
+/// shared a directory, and `markdown_summary_lists_dimensions_and_findings` calls
+/// `repo-status render`, which writes `docs/status/repo-status.md` — the very file the
+/// snapshot test's staleness check reads. The snapshot test then saw `<missing>` on its
+/// first run and a real fingerprint on its second, and failed the determinism assertion
+/// while the tool itself was behaving correctly.
+static FIXTURE_SEQ: AtomicU64 = AtomicU64::new(0);
+
 fn temp_fixture_copy(name: &str) -> PathBuf {
     let source = fixture_path(name);
     let stamp = SystemTime::now()
@@ -26,11 +39,14 @@ fn temp_fixture_copy(name: &str) -> PathBuf {
         .expect("current time must be after unix epoch")
         .as_nanos();
     let target = std::env::temp_dir().join(format!(
-        "xtask-render-fixture-{}-{}-{}",
+        "xtask-render-fixture-{}-{}-{}-{}",
         name,
         std::process::id(),
-        stamp
+        stamp,
+        FIXTURE_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
+    // A leftover directory from a previous run must not be treated as fixture state.
+    let _ = fs::remove_dir_all(&target);
     copy_dir_recursively(&source, &target).expect("fixture copy must succeed");
     target
 }

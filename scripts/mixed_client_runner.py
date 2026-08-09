@@ -80,7 +80,7 @@ def build_record(index: int, id_prefix: str) -> Dict[str, Any]:
 
 
 async def run_write(client_class, server: str, collection: str, id_prefix: str, records: int) -> None:
-    async with client_class(host=server) as client:
+    async with client_class(host=server, credential=os.environ.get("PRKDB_CREDENTIAL")) as client:
         for index in range(records):
             record = build_record(index, id_prefix)
             await client.put(collection, record)
@@ -92,7 +92,7 @@ async def run_write(client_class, server: str, collection: str, id_prefix: str, 
 
 async def run_read(client_class, server: str, collection: str, sample_ids: Iterable[str]) -> None:
     sample_ids = list(sample_ids)
-    async with client_class(host=server) as client:
+    async with client_class(host=server, credential=os.environ.get("PRKDB_CREDENTIAL")) as client:
         rows = await client.list(collection, limit=10000)
         rows_by_id = {str(row.get("id")): row for row in rows if isinstance(row, dict)}
 

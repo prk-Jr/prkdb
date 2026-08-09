@@ -5,6 +5,10 @@ on:
     branches: [ main, master ]
   pull_request:
   workflow_dispatch:
+  # Drives nightly-slow-tests. Tests marked #[ignore = "slow: ..."] are excluded from
+  # every PR run, so without a schedule they would never execute at all.
+  schedule:
+    - cron: "0 4 * * *"
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,6 +18,7 @@ jobs:
   repo-status-snapshot:
     name: Repo Status Snapshot
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -36,9 +41,177 @@ jobs:
           cat target/repo-status/repo-status.snapshot.json >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+      # Ratcheted 2026-08-09: 55 -> 58, after measuring 59.03% lines. The margin is
+      # deliberate — coverage moves a little between runners — but the direction is one
+      # way. Never lower it to make a PR pass; if a change drops coverage, that is the
+      # finding.
+      #
+      # Coverage is a floor, not evidence. It says a line ran, not that any assertion
+      # would have noticed the line being wrong. The mutants job below is what checks the
+      # second, and it exists because this repository has repeatedly had high coverage
+      # over tests that could not fail.
+      - name: Measure coverage
+        run: cargo llvm-cov --workspace --fail-under-lines 58
+      - name: Upload lcov
+        if: always()
+        run: cargo llvm-cov report --lcov --output-path lcov.info
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-lcov-${{ github.run_number }}
+          path: lcov.info
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # MUTATION TESTING
+  # ═══════════════════════════════════════════════════════════════════════════
+  #
+  # Coverage says a line ran. It does not say an assertion would have noticed if the line
+  # were wrong — and this repository has repeatedly had the second without the first:
+  #
+  #   - a linearizability checker that could not fail
+  #   - a bank invariant test that asserted a property of std::sync::Mutex
+  #   - `scan_prefix` removed from the storage wrapper with 611 tests still green
+  #
+  # Each was found by hand, by deleting the code and seeing whether anything complained.
+  # cargo-mutants does that systematically: it removes or alters a piece of behaviour and
+  # reports the ones no test caught.
+  #
+  # Scoped to the modules where a silent wrong answer costs the most, because mutating the
+  # whole workspace takes hours. Widen it as it proves itself, not before — a job people
+  # cancel is a job that tests nothing.
+  mutants:
+    name: "🧬 Mutation Testing (targeted)"
+    # Nightly, not per-PR. It takes tens of minutes and explores rather than gates, and a
+    # slow job on every push gets cancelled — at which point it tests nothing.
+    #
+    # Deliberately *not* `continue-on-error` on the PR path instead: a check whose result
+    # is discarded is not a check, which is why that flag was removed from the chaos
+    # workflow. Nightly runs produce a real pass or fail that someone can act on.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Mutate the authorization model
+        run: |
+          cargo mutants --no-shuffle --timeout 300 \
+            --package prkdb \
+            --file 'crates/prkdb/src/authz/*.rs' \
+            --file 'crates/prkdb/src/raft/authz_interceptor.rs' \
+            --file 'crates/prkdb/src/raft/peer_auth.rs'
+
+      - name: Mutate the storage wrapper
+        run: |
+          cargo mutants --no-shuffle --timeout 300 \
+            --package prkdb \
+            --file 'crates/prkdb/src/storage/collection_partitioned_adapter.rs'
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants-${{ github.run_number }}
+          path: mutants.out/
+          if-no-files-found: warn
+
+  ignore-discipline:
+    name: Ignore Discipline
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # A switched-off test is one nobody will remember why they switched off. Three
+      # corruption tests were disabled this way and turned out to pass in 0.7s.
+      #
+      # This job originally required only that an #[ignore] carry a reason. That is not
+      # sufficient: `chaos_test_rapid_recovery` had one — "Manual investigation:
+      # integration harness still diverges from WAL recovery unit tests" — and was a
+      # correct test switched off for reporting real data loss (spec S-05).
+      #
+      # The script closes the category list, so a reason must also be a legitimate one,
+      # and keeps a single implementation of the rule.
+      - name: Ignore reasons
+        run: bash scripts/check_ignore_reasons.sh
+
+  nightly-slow-tests:
+    name: Nightly Slow Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # An #[ignore] that means "slow" is a test you have silently deleted unless
+    # something runs it. These take ~2 minutes combined, which is too slow for every
+    # PR but trivial nightly.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p prkdb --test load_tests -- --ignored --test-threads=1
+      - run: cargo test -p prkdb --test chaos_tests chaos_test_memory_pressure -- --ignored --test-threads=1
+
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # --locked is required: newer cargo-audit/cargo-deny releases pull crates that
+      # need a rustc above the version pinned in rust-toolchain.toml.
+      - name: Install scanners
+        run: cargo install --locked cargo-audit cargo-deny
+      # Both run because their advisory databases refresh independently and do not
+      # always agree; cargo-audit caught two advisories cargo-deny did not.
+      # Accepted risks live in deny.toml and .cargo/audit.toml, each with a reason.
+      - name: cargo deny (advisories, licenses, bans, sources)
+        run: cargo deny check
+      - name: cargo audit
+        run: cargo audit
+
+  nightly-check:
+    name: Nightly (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Advisory only. This is the one legitimate use of continue-on-error in the repo:
+    # it warns that a future stable release will break the clippy gate, without
+    # blocking today's work. The chaos-tests use of it is removed in Plan A Task 9.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
   check:
     name: Check
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Install Protoc
@@ -50,16 +223,32 @@ jobs:
   fmt:
     name: Format
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      # A wrapper that forgets a StorageAdapter method compiles cleanly and fails at
+      # runtime; this has happened four times. Cheap to check, expensive to find in a
+      # user's backup.
+      - name: Storage wrapper completeness
+        run: bash scripts/check_wrapper_completeness.sh
+      # The generated README test must match README.md. Without this the examples drift
+      # from the file they were extracted from, and the test goes on passing against a
+      # stale copy — which is the failure it exists to prevent, one level up.
+      - name: README examples are up to date
+        run: cargo run -p xtask -- readme-tests --check
+      # A skipped test must be skipped for a reason that still runs it somewhere, never
+      # because it failed. See scripts/check_ignore_reasons.sh for the case that prompted it.
+      - name: Ignore reasons
+        run: bash scripts/check_ignore_reasons.sh
       - run: cargo fmt --all -- --check
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Install Protoc
@@ -73,6 +262,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Free disk space
         run: |
@@ -89,6 +279,7 @@ jobs:
   schema-integration:
     name: Schema E2E Integration
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install Protoc
@@ -112,6 +303,7 @@ jobs:
   client-features-integration:
     name: Client Features Integration
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install Protoc
@@ -135,6 +327,7 @@ jobs:
   client-features-integration-ts:
     name: Client Features Integration (TypeScript)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install Protoc
@@ -156,6 +349,7 @@ jobs:
   client-features-integration-go:
     name: Client Features Integration (Go)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install Protoc
@@ -177,6 +371,7 @@ jobs:
   mixed-client-integration:
     name: Mixed Client Integration
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install Protoc
@@ -212,7 +407,10 @@ jobs:
   # ═══════════════════════════════════════════════════════════════════════════
   chaos-tests:
     name: "🐵 Chaos Tests"
-    if: github.event_name == 'pull_request'
+    # Runs on pushes to main as well as PRs. Gating only on PRs meant main could sit
+    # broken indefinitely, and the badge advertised results nothing enforced.
+    # Excluded from the nightly schedule, which has its own slow-test job.
+    if: github.event_name != 'schedule'
     needs: [check, test]
     uses: ./.github/workflows/chaos-tests.yml
 
@@ -227,6 +425,7 @@ jobs:
   benchmark:
     name: "📊 Benchmarks: Local PrkDB + Kafka Reference"
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     
     services:
       zookeeper:
@@ -568,6 +767,7 @@ jobs:
   cross-lang-benchmark:
     name: "🌍 Cross-Language Benchmarks"
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     env:
       PRKDB_ADMIN_TOKEN: benchmark_ci_admin_token
     steps:

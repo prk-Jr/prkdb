@@ -84,31 +84,35 @@ pub fn print_summary() {
     let metrics = prometheus::gather();
 
     for mf in metrics {
-        println!("\n{}: {}", mf.get_name(), mf.get_help());
+        println!("\n{}: {}", mf.name(), mf.help());
         for m in mf.get_metric() {
             // Print labels
             let labels: Vec<String> = m
                 .get_label()
                 .iter()
-                .map(|l| format!("{}={}", l.get_name(), l.get_value()))
+                .map(|l| format!("{}={}", l.name(), l.value()))
                 .collect();
 
             if !labels.is_empty() {
                 println!("  {{{}}}:", labels.join(", "));
             }
 
-            // Print value
-            if m.has_counter() {
-                println!("    Count: {}", m.get_counter().get_value());
-            } else if m.has_histogram() {
-                let h = m.get_histogram();
-                println!("    Count: {}", h.get_sample_count());
-                println!("    Sum: {:.6}s", h.get_sample_sum());
-                if h.get_sample_count() > 0 {
-                    println!(
-                        "    Avg: {:.6}ms",
-                        h.get_sample_sum() / h.get_sample_count() as f64 * 1000.0
-                    );
+            // Print value.
+            //
+            // prometheus 0.14 moved to protobuf 3, where optional message fields are
+            // `MessageField<T>` (an Option-like wrapper with public fields) rather than
+            // has_*/get_* accessor pairs.
+            // The scalar fields are `Option<T>` under proto2 optional semantics; an absent
+            // value reads as zero here, which is what the old accessors returned.
+            if let Some(counter) = m.get_counter().as_ref() {
+                println!("    Count: {}", counter.value.unwrap_or_default());
+            } else if let Some(h) = m.get_histogram().as_ref() {
+                let count = h.sample_count.unwrap_or_default();
+                let sum = h.sample_sum.unwrap_or_default();
+                println!("    Count: {}", count);
+                println!("    Sum: {:.6}s", sum);
+                if count > 0 {
+                    println!("    Avg: {:.6}ms", sum / count as f64 * 1000.0);
                 }
             }
         }

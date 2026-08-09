@@ -2,6 +2,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+pub mod authz; // Principals, roles and grants (spec R12)
 mod batch_accumulator;
 pub mod builder;
 pub mod cache; // LRU cache layer
@@ -25,7 +26,6 @@ pub mod rate_limit; // Rate limiting for operations
 pub mod replication;
 pub mod scheduler;
 pub mod storage;
-mod storage_old_inmemory; // Renamed from storage.rs to allow storage/ directory
 pub mod streaming;
 pub mod transaction;
 pub mod ttl;

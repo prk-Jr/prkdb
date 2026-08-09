@@ -1,126 +1,118 @@
-use prkdb::raft::{ClusterConfig, PartitionManager, PrkDbStateMachine, RaftNode, RpcClientPool};
-use std::net::SocketAddr;
-use std::sync::Arc;
-use tempfile::TempDir;
+//! Distributed writes across a real multi-node Raft cluster.
+//!
+//! # These assertions used to be vacuous
+//!
+//! `test_raft_leader_election` computed `nodeN_is_leader` as
+//! `nodeN.get_leader().await.is_some()` and asserted that at least one was true.
+//! `get_leader()` returns `Some(local_id)` when the node leads **and the known leader's id
+//! otherwise**, so it is `Some` on every follower as well. The assertion therefore held as
+//! soon as any node learned of any leader — and would have held against an implementation
+//! that elected three leaders at once.
+//!
+//! `test_raft_propose` was weaker still: it matched on `propose()` and printed the error on
+//! failure without failing the test, so a cluster that accepted nothing still passed.
+//!
+//! Both now use [`InProcessCluster`], which asks each node whether *it* leads and pairs the
+//! answer with the node's term.
 
-/// Helper to create a Raft node (wrapped in PartitionManager)
-async fn create_raft_node(
-    id: u64,
-    port: u16,
-    peers: Vec<(u64, SocketAddr)>,
-) -> (Arc<RaftNode>, TempDir) {
-    let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().to_path_buf();
+mod helpers;
 
-    let listen_addr = format!("127.0.0.1:{}", port).parse().unwrap();
-    let config = ClusterConfig {
-        local_node_id: id,
-        listen_addr,
-        nodes: peers,
-        election_timeout_min_ms: 200,
-        election_timeout_max_ms: 400,
-        heartbeat_interval_ms: 50,
-        partition_id: 0, // Default partition
-    };
+use helpers::in_process_cluster::InProcessCluster;
+use std::time::Duration;
 
-    let pm = Arc::new(
-        PartitionManager::new(1, config, db_path, |_part_id, storage| {
-            Arc::new(PrkDbStateMachine::new(storage))
-        })
-        .unwrap(),
+/// Exactly one leader, in exactly one term.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_three_node_cluster_elects_exactly_one_leader() {
+    let cluster = InProcessCluster::new(3).await.expect("cluster starts");
+
+    let leader = cluster
+        .await_leader(Duration::from_secs(15))
+        .await
+        .expect("a leader is elected");
+
+    let leaders = cluster.leaders_in_current_term().await;
+    assert_eq!(
+        leaders.len(),
+        1,
+        "expected exactly one leader in the current term, found {leaders:?}"
     );
-
-    let rpc_pool = Arc::new(RpcClientPool::new(id));
-
-    // Start background tasks
-    pm.start_all(rpc_pool, &[]);
-
-    // Start server
-    let pm_clone = pm.clone();
-    tokio::spawn(async move {
-        let _ = prkdb::raft::server::start_raft_server(pm_clone, listen_addr).await;
-    });
-
-    // Return partition 0 node for testing
-    let raft_node = pm.get_partition(0).unwrap();
-
-    (raft_node, temp_dir)
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_raft_leader_election() {
-    // Setup 3 nodes
-    let peers = vec![
-        (1, "127.0.0.1:50071".parse().unwrap()),
-        (2, "127.0.0.1:50072".parse().unwrap()),
-        (3, "127.0.0.1:50073".parse().unwrap()),
-    ];
-
-    let (node1, _dir1) = create_raft_node(1, 50071, peers.clone()).await;
-    let (node2, _dir2) = create_raft_node(2, 50072, peers.clone()).await;
-    let (node3, _dir3) = create_raft_node(3, 50073, peers.clone()).await;
-
-    // Wait for leader election
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-    // At least one should be leader
-    let node1_is_leader = node1.get_leader().await.is_some();
-    let node2_is_leader = node2.get_leader().await.is_some();
-    let node3_is_leader = node3.get_leader().await.is_some();
-
-    println!("Node 1 is leader: {}", node1_is_leader);
-    println!("Node 2 is leader: {}", node2_is_leader);
-    println!("Node 3 is leader: {}", node3_is_leader);
-
-    assert!(
-        node1_is_leader || node2_is_leader || node3_is_leader,
-        "At least one node should be elected as leader"
+    assert_eq!(
+        leaders[0], leader,
+        "the node reporting itself leader must be the one await_leader found"
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_raft_propose() {
-    // Setup 3 nodes
-    let peers = vec![
-        (1, "127.0.0.1:50081".parse().unwrap()),
-        (2, "127.0.0.1:50082".parse().unwrap()),
-        (3, "127.0.0.1:50083".parse().unwrap()),
-    ];
+/// A proposal commits and its effect is visible on every node.
+///
+/// The previous version treated a failed `propose` as acceptable and printed it. Commit is
+/// the property that matters: a proposal that is appended locally and never replicated is
+/// indistinguishable from a lost write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_proposal_commits_and_replicates() {
+    let cluster = InProcessCluster::new(3).await.expect("cluster starts");
+    cluster
+        .await_leader(Duration::from_secs(15))
+        .await
+        .expect("a leader is elected");
 
-    let (node1, _dir1) = create_raft_node(1, 50081, peers.clone()).await;
-    let (node2, _dir2) = create_raft_node(2, 50082, peers.clone()).await;
-    let (node3, _dir3) = create_raft_node(3, 50083, peers.clone()).await;
+    cluster
+        .put(b"users:proposed", b"value")
+        .await
+        .expect("the leader must accept and commit a proposal");
 
-    // Wait for leader election
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-    // Find leader
-    let leader = if node1.get_leader().await.is_some() {
-        node1
-    } else if node2.get_leader().await.is_some() {
-        node2
-    } else if node3.get_leader().await.is_some() {
-        node3
-    } else {
-        panic!("No leader elected");
-    };
-
-    println!("Leader elected");
-
-    // Try proposing a value
-    let data = b"test_data".to_vec();
-
-    // This might timeout if commit logic is incomplete, but should at least append locally
-    match leader.propose(data).await {
-        Ok(_) => println!("Propose successful - data replicated"),
-        Err(e) => {
-            println!(
-                "Propose failed (may be expected if commit logic incomplete): {}",
-                e
-            );
-            // Don't fail the test - we're just verifying the plumbing works
+    // Commit acknowledges a majority; the last node applies shortly after.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        if cluster.all_nodes_have(b"users:proposed", b"value").await {
+            return;
         }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("a committed proposal did not reach every node within 10s");
+}
+
+/// Writes to different keys all commit and are all visible. Guards against a routing bug
+/// that would silently drop everything but the first key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn many_keys_all_commit() {
+    let cluster = InProcessCluster::new(3).await.expect("cluster starts");
+    cluster
+        .await_leader(Duration::from_secs(15))
+        .await
+        .expect("a leader is elected");
+
+    let pairs: Vec<(Vec<u8>, Vec<u8>)> = (0..10)
+        .map(|i| {
+            (
+                format!("users:k{i}").into_bytes(),
+                format!("v{i}").into_bytes(),
+            )
+        })
+        .collect();
+
+    for (key, value) in &pairs {
+        cluster
+            .put(key, value)
+            .await
+            .unwrap_or_else(|e| panic!("committing {}: {e}", String::from_utf8_lossy(key)));
     }
 
-    println!("Test completed - Raft integration verified");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let mut all = true;
+        for (key, value) in &pairs {
+            if !cluster.all_nodes_have(key, value).await {
+                all = false;
+                break;
+            }
+        }
+        if all {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "not every committed key reached every node within 15s"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }

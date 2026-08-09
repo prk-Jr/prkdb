@@ -96,7 +96,13 @@ cleanup() {
 trap cleanup EXIT
 
 echo "🚀 Starting server on HTTP $HTTP_PORT / gRPC $GRPC_PORT..."
+# PRKDB_BOOTSTRAP_TOKEN, not just PRKDB_ADMIN_TOKEN: the latter guards the deprecated
+# admin_token message field and creates no principal, so `serve` refuses to start with it
+# alone. Using the same value for both means the generated clients authenticate with the
+# credential they already pass, and this test runs against an *authorized* server rather
+# than an anonymous one — which is the point of the acceptance item it covers.
 PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" \
+PRKDB_BOOTSTRAP_TOKEN="$ADMIN_TOKEN" \
     "$PRKDB_BIN" --database "$DATABASE_PATH" serve --port "$HTTP_PORT" --grpc-port "$GRPC_PORT" > "$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 
@@ -203,6 +209,7 @@ echo "🐍 Running Python writer..."
 run_runner "$PY_LOG_DIR/write" "$PWD" env \
     PRKDB_MODE=write \
     PRKDB_SERVER="$SERVER_HTTP_URL" \
+    PRKDB_CREDENTIAL="$ADMIN_TOKEN" \
     PRKDB_COLLECTION="$COLLECTION_NAME" \
     NUM_RECORDS="$PY_COUNT" \
     PRKDB_ID_PREFIX=py \
@@ -214,6 +221,7 @@ echo "📘 Running TypeScript writer..."
 run_runner "$TS_LOG_DIR/write" "$PWD" env \
     PRKDB_MODE=write \
     PRKDB_SERVER="$SERVER_HTTP_URL" \
+    PRKDB_CREDENTIAL="$ADMIN_TOKEN" \
     PRKDB_COLLECTION="$COLLECTION_NAME" \
     NUM_RECORDS="$TS_COUNT" \
     PRKDB_ID_PREFIX=ts \
@@ -225,6 +233,7 @@ echo "🐹 Running Go writer..."
 run_runner "$GO_LOG_DIR/write" "$GO_WORK_DIR" env \
     PRKDB_MODE=write \
     PRKDB_SERVER="$SERVER_HTTP_URL" \
+    PRKDB_CREDENTIAL="$ADMIN_TOKEN" \
     PRKDB_COLLECTION="$COLLECTION_NAME" \
     NUM_RECORDS="$GO_COUNT" \
     PRKDB_ID_PREFIX=go \
@@ -246,6 +255,7 @@ echo "🐍 Running Python reader..."
 run_runner "$PY_LOG_DIR/read" "$PWD" env \
     PRKDB_MODE=read \
     PRKDB_SERVER="$SERVER_HTTP_URL" \
+    PRKDB_CREDENTIAL="$ADMIN_TOKEN" \
     PRKDB_COLLECTION="$COLLECTION_NAME" \
     PRKDB_ID_PREFIX=py \
     PRKDB_CLIENT_DIR="$WORK_DIR/client_py" \
@@ -256,6 +266,7 @@ echo "📘 Running TypeScript reader..."
 run_runner "$TS_LOG_DIR/read" "$PWD" env \
     PRKDB_MODE=read \
     PRKDB_SERVER="$SERVER_HTTP_URL" \
+    PRKDB_CREDENTIAL="$ADMIN_TOKEN" \
     PRKDB_COLLECTION="$COLLECTION_NAME" \
     PRKDB_ID_PREFIX=ts \
     PRKDB_CLIENT_DIR="$WORK_DIR/client_ts" \
@@ -266,6 +277,7 @@ echo "🐹 Running Go reader..."
 run_runner "$GO_LOG_DIR/read" "$GO_WORK_DIR" env \
     PRKDB_MODE=read \
     PRKDB_SERVER="$SERVER_HTTP_URL" \
+    PRKDB_CREDENTIAL="$ADMIN_TOKEN" \
     PRKDB_COLLECTION="$COLLECTION_NAME" \
     PRKDB_ID_PREFIX=go \
     PRKDB_CLIENT_DIR="$GO_WORK_DIR/client_go" \
