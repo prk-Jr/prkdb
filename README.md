@@ -200,16 +200,24 @@ Type-safe queries on any field with `#[index]` attribute.
 ```rust
 use prkdb::prelude::*;
 
-#[derive(Collection, Clone, Serialize, Deserialize)]
+#[derive(Collection, Clone, Debug, Serialize, Deserialize)]
 struct User {
     #[key]
     pub id: String,
-    
+
     #[index]
     pub age: u32,
-    
+
     #[index(unique)]
     pub email: String,
+
+    // Indexed because the query examples below filter on them.
+    #[index]
+    pub name: String,
+    #[index]
+    pub role: String,
+
+    pub active: bool,
 }
 
 // Query by indexed field
@@ -227,7 +235,7 @@ let vip: Vec<User> = db.filter(|u: &User| u.age > 18 && u.orders > 100).await?;
 ### Batch Operations
 
 ```rust
-db.insert_batch(&[user1, user2, user3]).await?;  // Returns count
+db.insert_batch(&[user1.clone(), user2.clone(), user3]).await?;  // Returns count
 db.delete_batch(&[user1, user2]).await?;
 ```
 
@@ -587,7 +595,7 @@ impl Hooks for User {
         Ok(())
     }
     fn after_insert(&self) {
-        log::info!("User {} created", self.id);
+        println!("User {} created", self.id);
     }
 }
 

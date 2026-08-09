@@ -253,13 +253,13 @@ not enforced by anything, and several tests reported green while testing nothing
 
 ### Known issues
 
-- **Only 4 of the README's 37 Rust examples are compile-checked.** The other 33 are listed
+- **27 of the README's 37 Rust examples are compile-checked.** The remaining 10 are listed
   in `xtask/src/readme_tests.rs` with a specific defect each — not "does not compile",
-  which is the finding rather than the excuse. Building the extractor found twelve real
-  bugs (fixed) and two documentation errors that remain: the query and aggregate examples
-  call `query`/`count`/`sum` on a `db` a reader will take to be a `PrkDb`, but those live
-  on `IndexedStorage`; and the `where_<field>_eq` examples need the generated
-  `{Struct}QueryExt` trait in scope, which the README never mentions.
+  which is the finding rather than the excuse.
+- The README's query and aggregate examples call `query`/`count`/`sum` on a `db` that a
+  reader following the quick-start will hold as a `PrkDb`. Those methods live on
+  `IndexedStorage`. The examples are correct for the type they mean and never say which
+  type that is.
 
 - Two keys read with two separate `get()` calls are still not a snapshot; use
   `snapshot_get_many` or a transaction. This is a property of the API the caller picks,

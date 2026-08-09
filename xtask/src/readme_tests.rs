@@ -37,67 +37,44 @@ const GENERATED: &str = "crates/prkdb/tests/readme_examples.rs";
 /// These were found by building this generator, which is the point: none of them were
 /// visible before, because nothing had ever compiled the README.
 const SKIP: &[(usize, &str)] = &[
-    // Defines its own `User` without `Debug`, then later fences format it with `{:?}`.
+    // Defines its own `User`, then a later line in the same fence reads `.orders` from it.
+    // The fence is internally inconsistent; fixing it means deciding what the canonical
+    // example struct is, which is a documentation decision rather than a code one.
     (
         200,
-        "its User derives no Debug, but later examples print it",
+        "its own User has no `orders`, which the same fence then reads",
     ),
+    // `db.sum(|u: &User| u.orders)`: the closure's return type is not inferable from the
+    // call, so the example needs an annotation it does not show.
     (
-        229,
-        "uses an `orders` field the User at line 200 does not declare",
-    ),
-    // `db.sum(|u: &User| u.orders)` and friends: the closure's return type is not
-    // inferable from the call, so the example needs an annotation it does not show.
-    (
-        236,
+        244,
         "aggregate closure return type is not inferable as written",
     ),
-    (244, "same"),
-    (255, "same"),
-    (262, "same"),
-    (299, "same"),
-    (313, "same"),
-    // `where_role_eq` comes from the generated `UserQueryExt` trait. The README never
-    // mentions that the trait must be in scope, so the example cannot compile as shown.
+    // `db.start_auto_sync(..)` takes &mut self; the example's `db` is not declared mut.
     (
-        335,
-        "uses generated query methods without importing UserQueryExt",
+        321,
+        "calls a &mut self method on a binding the example declares immutably",
     ),
-    (362, "same"),
-    (377, "same"),
-    (405, "same"),
-    (423, "same"),
-    (437, "same"),
-    (458, "same"),
+    // Two `UserQueryExt` traits are in scope — the harness's and the one fence 200 emits
+    // for its own User — and the impl does not match the QueryBuilder being called.
     (
-        480,
+        343,
+        "generated query methods do not resolve with two UserQueryExt traits in scope",
+    ),
+    (
+        488,
         "annotated result type does not match what the call returns",
     ),
-    (496, "same"),
     (
-        512,
+        520,
         "contains literal `...` placeholders; illustrative, not runnable",
     ),
-    (528, "same type mismatch"),
+    (674, "compares a String id against an integer"),
     (
-        541,
-        "re-implements Timestamped for User, which the preamble already provides",
-    ),
-    (558, "same type mismatch"),
-    (571, "same"),
-    (583, "same"),
-    (601, "same"),
-    (618, "same"),
-    (628, "same"),
-    (638, "same"),
-    (651, "same"),
-    (666, "compares a String id against an integer"),
-    (688, "same"),
-    (
-        764,
+        772,
         "annotated result type does not match what the call returns",
     ),
-    (779, "same"),
+    (787, "same"),
 ];
 
 /// Bindings injected into every generated function.
@@ -217,12 +194,8 @@ impl SoftDeletable for User {
     fn mark_deleted(&mut self) { self.deleted = true; }
     fn restore(&mut self) { self.deleted = false; }
 }
-impl Timestamped for User {
-    fn created_at(&self) -> u64 { self.created_at }
-    fn updated_at(&self) -> u64 { self.updated_at }
-    fn set_created_at(&mut self, t: u64) { self.created_at = t; }
-    fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
-}
+// Timestamped is deliberately not implemented here: the README shows how to implement it,
+// and providing it too makes that example a conflicting-impl error.
 
 #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
 struct Order {
@@ -246,7 +219,6 @@ struct UserV2 {
     #[id]
     id: String,
     name: String,
-    email: String,
     premium: bool,
 }
 
@@ -269,8 +241,11 @@ pub use prkdb_types::collection::{
 /// not on `PrkDb`. The README writes `db` for both without saying which, so the generated
 /// tests bind `db` to the one that makes the majority compile and expose the other as
 /// `prkdb`. That ambiguity is itself a finding; see the report in docs/.
+// The Collection derive emits a per-type `{Struct}QueryExt` trait carrying the generated
+// `where_<field>_eq` methods. In a user's own module it is in scope automatically; here
+// the fences are functions inside a generated file, so it must be imported explicitly.
 #[allow(unused_imports)]
-use {UserQueryExt as _, OrderQueryExt as _, UserV1QueryExt as _, UserV2QueryExt as _};
+use {OrderQueryExt as _, UserQueryExt as _, UserV1QueryExt as _, UserV2QueryExt as _};
 
 fn a_db() -> prkdb::indexed_storage::IndexedStorage<prkdb::storage::InMemoryAdapter> {
     unimplemented!("examples are compiled, never run")

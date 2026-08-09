@@ -57,20 +57,8 @@ impl SoftDeletable for User {
         self.deleted = false;
     }
 }
-impl Timestamped for User {
-    fn created_at(&self) -> u64 {
-        self.created_at
-    }
-    fn updated_at(&self) -> u64 {
-        self.updated_at
-    }
-    fn set_created_at(&mut self, t: u64) {
-        self.created_at = t;
-    }
-    fn set_updated_at(&mut self, t: u64) {
-        self.updated_at = t;
-    }
-}
+// Timestamped is deliberately not implemented here: the README shows how to implement it,
+// and providing it too makes that example a conflicting-impl error.
 
 #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
 struct Order {
@@ -94,7 +82,6 @@ struct UserV2 {
     #[id]
     id: String,
     name: String,
-    email: String,
     premium: bool,
 }
 
@@ -117,6 +104,9 @@ pub use prkdb_types::collection::{
 /// not on `PrkDb`. The README writes `db` for both without saying which, so the generated
 /// tests bind `db` to the one that makes the majority compile and expose the other as
 /// `prkdb`. That ambiguity is itself a finding; see the report in docs/.
+// The Collection derive emits a per-type `{Struct}QueryExt` trait carrying the generated
+// `where_<field>_eq` methods. In a user's own module it is in scope automatically; here
+// the fences are functions inside a generated file, so it must be imported explicitly.
 #[allow(unused_imports)]
 use {OrderQueryExt as _, UserQueryExt as _, UserV1QueryExt as _, UserV2QueryExt as _};
 
@@ -304,37 +294,773 @@ async fn readme_line_185() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// 4 example(s) compiled, 33 skipped.
+/// README.md line 237
+async fn readme_line_237() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    db.insert_batch(&[user1.clone(), user2.clone(), user3])
+        .await?; // Returns count
+    db.delete_batch(&[user1, user2]).await?;
+    Ok(())
+}
+
+/// README.md line 252
+async fn readme_line_252() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    let count = db.count::<User>().await?;
+    let total = db.sum(|u: &User| u.orders).await?;
+    let avg = db.avg(|u: &User| u.age as f64).await?;
+    let min = db.min(|u: &User| u.age).await?;
+    let max = db.max(|u: &User| u.age).await?;
+    let adults = db.count_where(|u: &User| u.age >= 18).await?;
+    Ok(())
+}
+
+/// README.md line 263
+async fn readme_line_263() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    // Works with any StorageAdapter
+    let indexed = IndexedStorage::new(any_storage_adapter);
+    Ok(())
+}
+
+/// README.md line 270
+async fn readme_line_270() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    // Subscribe to changes
+    let mut rx = db.watch();
+    tokio::spawn(async move {
+        while let Ok(event) = rx.recv().await {
+            match event {
+                ChangeEvent::Inserted { collection, id, .. } => println!("New!"),
+                ChangeEvent::Deleted { collection, id } => println!("Gone!"),
+            }
+        }
+    });
+    Ok(())
+}
+
+/// README.md line 307
+async fn readme_line_307() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    // Create compound index at runtime
+    db.create_compound_index("role_age", |u: &User| {
+        vec![u.role.clone(), u.age.to_string()]
+    })
+    .await?;
+
+    // Query by multiple fields
+    let admins_30 = db
+        .query_compound::<User>("role_age", vec!["Admin".into(), "30".into()])
+        .await?;
+    Ok(())
+}
+
+/// README.md line 370
+async fn readme_line_370() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    // Get unique values
+    let roles = db.query::<User>().distinct(|u| u.role.clone()).await?;
+
+    // Group by key
+    let by_role = db.query::<User>().group_by(|u| u.role.clone()).await?;
+
+    // Sum/Count by group
+    let salaries = db
+        .query::<User>()
+        .sum_by(|u| u.dept.clone(), |u| u.salary)
+        .await?;
+    let counts = db.query::<User>().count_by(|u| u.role.clone()).await?;
+    Ok(())
+}
+
+/// README.md line 385
+async fn readme_line_385() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    // Create text index
+    db.create_text_index::<User, _>("bio", |u| &u.bio).await?;
+
+    // Search with ranked results
+    let users = db.search::<User>("bio", "rust async developer").await?;
+    // Results ranked by number of matching tokens
+    Ok(())
+}
+
+/// README.md line 413
+async fn readme_line_413() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    // Start a transaction
+    let mut tx = db.transaction();
+
+    // Buffer operations
+    tx.insert(&user1)?;
+    tx.insert(&user2)?;
+    tx.delete(&old_user)?;
+
+    // Commit all atomically
+    tx.commit().await?;
+
+    // OR: Rollback to discard all
+    // tx.rollback();
+    Ok(())
+}
+
+/// README.md line 431
+async fn readme_line_431() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    // Versioned collections support migration
+    impl Versioned for UserV2 {
+        const VERSION: u32 = 2;
+        type PreviousVersion = UserV1;
+
+        fn migrate(old: UserV1) -> Self {
+            Self {
+                id: old.id,
+                name: old.name,
+                premium: false,
+            }
+        }
+    }
+    Ok(())
+}
+
+/// README.md line 445
+async fn readme_line_445() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    // Define validation rules
+    impl Validatable for User {
+        fn validate(&self) -> Result<(), Vec<ValidationError>> {
+            let mut errors = Vec::new();
+            if self.name.is_empty() {
+                errors.push(ValidationError::new("name", "cannot be empty"));
+            }
+            if !self.email.contains('@') {
+                errors.push(ValidationError::new("email", "invalid format"));
+            }
+            if errors.is_empty() {
+                Ok(())
+            } else {
+                Err(errors)
+            }
+        }
+    }
+
+    // Auto-validate on insert
+    db.insert_validated(&user).await?;
+    Ok(())
+}
+
+/// README.md line 466
+async fn readme_line_466() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    // First page
+    let (users, next_cursor) = db
+        .query::<User>()
+        .order_by(|u| u.id.clone())
+        .paginate(10, None)
+        .await?;
+
+    // Next page
+    if let Some(cursor) = next_cursor {
+        let (more, _) = db
+            .query::<User>()
+            .order_by(|u| u.id.clone())
+            .paginate(10, Some(cursor))
+            .await?;
+    }
+
+    // Or use after() directly
+    let page2 = db
+        .query::<User>()
+        .after(&last_id)
+        .take(10)
+        .collect()
+        .await?;
+    Ok(())
+}
+
+/// README.md line 504
+async fn readme_line_504() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    // User has many Orders (eager load, avoids N+1)
+    let users_with_orders = db
+        .query::<User>()
+        .collect_with::<Order, _, _>(
+            |user| user.id.clone(),        // parent key
+            |order| order.user_id.clone(), // foreign key
+        )
+        .await?; // Vec<(User, Vec<Order>)>
+
+    // Order belongs to User
+    let orders_with_user = db
+        .query::<Order>()
+        .collect_with_one::<User, _>(|order| order.user_id.clone())
+        .await?; // Vec<(Order, Option<User>)>
+    Ok(())
+}
+
+/// README.md line 536
+async fn readme_line_536() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    // Mark as deleted (keeps data)
+    db.soft_delete::<User>(&user_id).await?;
+
+    // Query only active records
+    let active = db.query_active::<User>().await?;
+
+    // Restore a soft-deleted record
+    db.restore::<User>(&user_id).await?;
+    Ok(())
+}
+
+/// README.md line 549
+async fn readme_line_549() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    impl Timestamped for User {
+        fn created_at(&self) -> u64 {
+            self.created_at
+        }
+        fn updated_at(&self) -> u64 {
+            self.updated_at
+        }
+        fn set_created_at(&mut self, ts: u64) {
+            self.created_at = ts;
+        }
+        fn set_updated_at(&mut self, ts: u64) {
+            self.updated_at = ts;
+        }
+    }
+
+    // Auto-set timestamps on insert
+    db.insert_timestamped(&mut user).await?;
+
+    // Auto-update on upsert
+    db.upsert_timestamped(&mut user).await?;
+    Ok(())
+}
+
+/// README.md line 566
+async fn readme_line_566() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    // Add computed fields to query results
+    let users_with_age = db
+        .query::<User>()
+        .with_computed(|user| (now - user.birth_date) / 86400)
+        .await?; // Vec<WithComputed<User, u64>>
+
+    for item in users_with_age {
+        println!("{}: {} days old", item.record.name, item.computed);
+    }
+    Ok(())
+}
+
+/// README.md line 579
+async fn readme_line_579() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    // Get stats for a collection
+    let stats = db.collection_stats::<User>().await;
+    println!("User Index: {}", stats);
+    // "Fields: 3 | Values: 100 | Entries: 150 | Compound: 0 | Text: 1"
+
+    // Get stats for all collections
+    let all_stats = db.all_collection_stats().await;
+    Ok(())
+}
+
+/// README.md line 591
+async fn readme_line_591() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    impl Hooks for User {
+        fn before_insert(&mut self) -> Result<(), String> {
+            self.name = self.name.trim().to_string(); // Normalize
+            Ok(())
+        }
+        fn after_insert(&self) {
+            println!("User {} created", self.id);
+        }
+    }
+
+    // Auto-run hooks on insert/delete
+    db.insert_with_hooks(&mut user).await?;
+    db.delete_with_hooks(&user).await?;
+    Ok(())
+}
+
+/// README.md line 609
+async fn readme_line_609() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    use prkdb::rate_limit::RateLimiter;
+
+    let limiter = RateLimiter::per_second(100); // 100 ops/sec
+
+    // Wait for permission before operation
+    limiter.acquire().await;
+    db.insert(&record).await?;
+
+    // Or try without waiting
+    if limiter.try_acquire().await {
+        db.insert(&record).await?;
+    }
+    Ok(())
+}
+
+/// README.md line 626
+async fn readme_line_626() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    // Create snapshot for backup
+    let snapshot: Vec<User> = db.snapshot::<User>().await?;
+
+    // Clone to another storage
+    db.clone_to::<User>(&backup_db).await?;
+    Ok(())
+}
+
+/// README.md line 636
+async fn readme_line_636() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    // Find first matching record
+    let admin = db
+        .find_one::<User, _>(|u| u.role.clone() == "admin")
+        .await?;
+
+    // Find all matching records
+    let admins = db
+        .find_all::<User, _>(|u| u.role.clone() == "admin")
+        .await?;
+    Ok(())
+}
+
+/// README.md line 646
+async fn readme_line_646() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    // Delete all matching records
+    let deleted = db.delete_where::<User, _>(|u| !u.active).await?;
+
+    // Update all matching records
+    let updated = db
+        .update_where::<User, _, _>(|u| !u.verified, |u| u.verified = true)
+        .await?;
+    Ok(())
+}
+
+/// README.md line 659
+async fn readme_line_659() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    // Find min/max by field
+    let youngest = db.query::<User>().min_by(|u| u.age).await?;
+    let oldest = db.query::<User>().max_by(|u| u.age).await?;
+
+    // Calculate average
+    let avg_age = db.query::<User>().avg_by(|u| u.age as f64).await?;
+
+    // Boolean checks
+    let has_admin = db
+        .query::<User>()
+        .any(|u| u.role.clone() == "admin")
+        .await?;
+    let all_active = db.query::<User>().all(|u| u.active).await?;
+    Ok(())
+}
+
+/// README.md line 696
+async fn readme_line_696() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    // Process in chunks/batches
+    let chunks = db.query::<User>().chunks(100).await?; // Vec<Vec<User>>
+
+    // Add index to records
+    let indexed = db.query::<User>().enumerate().await?; // Vec<(usize, User)>
+
+    // Remove consecutive duplicates
+    let deduped = db
+        .query::<User>()
+        .order_by(|u| u.role.clone())
+        .dedup_by_key(|u| u.role.clone())
+        .await?;
+
+    // Join with another collection
+    let joined = db
+        .query::<Order>()
+        .join_with(&users, |o| o.user_id.clone(), |u| u.id.clone())
+        .await?; // Vec<(Order, Option<User>)>
+    Ok(())
+}
+
+// 27 example(s) compiled, 10 skipped.
 // skipped README.md line 39: complete program: has its own fn main
-// skipped README.md line 200: its User derives no Debug, but later examples print it
-// skipped README.md line 229: uses an `orders` field the User at line 200 does not declare
-// skipped README.md line 236: aggregate closure return type is not inferable as written
-// skipped README.md line 244: same
-// skipped README.md line 255: same
-// skipped README.md line 262: same
-// skipped README.md line 299: same
-// skipped README.md line 313: same
-// skipped README.md line 335: uses generated query methods without importing UserQueryExt
-// skipped README.md line 362: same
-// skipped README.md line 377: same
-// skipped README.md line 405: same
-// skipped README.md line 423: same
-// skipped README.md line 437: same
-// skipped README.md line 458: same
-// skipped README.md line 480: annotated result type does not match what the call returns
-// skipped README.md line 496: same
-// skipped README.md line 512: contains literal `...` placeholders; illustrative, not runnable
-// skipped README.md line 528: same type mismatch
-// skipped README.md line 541: re-implements Timestamped for User, which the preamble already provides
-// skipped README.md line 558: same type mismatch
-// skipped README.md line 571: same
-// skipped README.md line 583: same
-// skipped README.md line 601: same
-// skipped README.md line 618: same
-// skipped README.md line 628: same
-// skipped README.md line 638: same
-// skipped README.md line 651: same
-// skipped README.md line 666: compares a String id against an integer
-// skipped README.md line 688: same
-// skipped README.md line 764: annotated result type does not match what the call returns
-// skipped README.md line 779: same
+// skipped README.md line 200: its own User has no `orders`, which the same fence then reads
+// skipped README.md line 244: aggregate closure return type is not inferable as written
+// skipped README.md line 321: calls a &mut self method on a binding the example declares immutably
+// skipped README.md line 343: generated query methods do not resolve with two UserQueryExt traits in scope
+// skipped README.md line 488: annotated result type does not match what the call returns
+// skipped README.md line 520: contains literal `...` placeholders; illustrative, not runnable
+// skipped README.md line 674: compares a String id against an integer
+// skipped README.md line 772: annotated result type does not match what the call returns
+// skipped README.md line 787: same
