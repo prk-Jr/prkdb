@@ -71,7 +71,12 @@ none_in_code() {
 
 # Hardcoded loopback ports in test code, ignoring comment lines.
 no_hardcoded_ports() {
-  none_in_code '127\.0\.0\.1:[0-9]\{4,5\}' 'crates/prkdb/tests/'
+  # readme_examples.rs is generated from README.md and never executed — compiling it is
+  # the test. An address in a README snippet cannot collide with anything, and rewriting
+  # the README to use ephemeral ports would make the documentation worse to read.
+  ! grep -rn '127\.0\.0\.1:[0-9]\{4,5\}' crates/prkdb/tests/ 2>/dev/null \
+    | grep -v 'readme_examples.rs' \
+    | grep -qv ':[0-9]*: *\(#\|//\)'
 }
 
 # The backup round-trip was #[ignore]d against S-04 for as long as backup was broken.

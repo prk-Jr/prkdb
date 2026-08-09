@@ -398,32 +398,6 @@ fn repo_root() -> Result<std::path::PathBuf> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn extracts_only_rust_fences() {
-        let md = "# Title\n\n```rust\nlet a = 1;\n```\n\ntext\n\n```text\nnot rust\n```\n\n```rust\nlet b = 2;\n```\n";
-        let found = extract(md);
-        assert_eq!(found.len(), 2, "a ```text fence must not be extracted");
-        assert_eq!(found[0].body, "let a = 1;");
-        assert_eq!(found[1].body, "let b = 2;");
-    }
-
-    #[test]
-    fn records_the_line_a_fence_opens_on() {
-        let md = "a\nb\n```rust\nlet a = 1;\n```\n";
-        assert_eq!(extract(md)[0].line, 3);
-    }
-
-    #[test]
-    fn a_complete_program_is_recognised() {
-        assert!(is_complete_program("#[tokio::main]\nasync fn main() {}"));
-        assert!(!is_complete_program("let x = db.get(b\"k\").await?;"));
-    }
-}
-
 /// Run the generated source through rustfmt.
 ///
 /// Returns `None` if rustfmt is unavailable or rejects the input, in which case the
@@ -448,4 +422,30 @@ fn rustfmt(source: &str) -> Option<String> {
         return None;
     }
     String::from_utf8(output.stdout).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_only_rust_fences() {
+        let md = "# Title\n\n```rust\nlet a = 1;\n```\n\ntext\n\n```text\nnot rust\n```\n\n```rust\nlet b = 2;\n```\n";
+        let found = extract(md);
+        assert_eq!(found.len(), 2, "a ```text fence must not be extracted");
+        assert_eq!(found[0].body, "let a = 1;");
+        assert_eq!(found[1].body, "let b = 2;");
+    }
+
+    #[test]
+    fn records_the_line_a_fence_opens_on() {
+        let md = "a\nb\n```rust\nlet a = 1;\n```\n";
+        assert_eq!(extract(md)[0].line, 3);
+    }
+
+    #[test]
+    fn a_complete_program_is_recognised() {
+        assert!(is_complete_program("#[tokio::main]\nasync fn main() {}"));
+        assert!(!is_complete_program("let x = db.get(b\"k\").await?;"));
+    }
 }
