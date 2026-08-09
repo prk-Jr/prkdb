@@ -119,6 +119,40 @@ not enforced by anything, and several tests reported green while testing nothing
   `__prkdb_metadata:` prefix, inheriting the WAL, Raft replication, snapshot and restore.
   **Only a SHA-256 digest of each credential is stored**, so a backup archive or a
   `fetch_segment` stream is no longer a credential dump.
+- **No shipped client could talk to a secured server.** `PrkDbClient` sent its
+  `admin_token` as a *message field*, on the admin RPCs that declare one. The data plane —
+  `put`, `get`, `delete`, `batch_put`, `watch` — has no such field, so once the server
+  enforced authorization every data call from the official client returned
+  `unauthenticated`. Securing the server without this was shipping a lock and no key. All
+  18 request sites now go through one helper that attaches the credential;
+  `connect_with_credential` exists because `Metadata` requires `Read`, so a credential set
+  after `new()` arrives too late to bootstrap.
+- **Generated Python, TypeScript and Go clients** now send a credential and raise distinct
+  errors for 401 and 403. Previously none of the three sent one, and all collapsed both
+  statuses into "request failed" — which makes a client retry a permission error forever.
+- **Principals can be administered at runtime.** `GET`/`PUT /admin/principals` and
+  `DELETE /admin/principals/:name`, all requiring `Admin` on `*` — enforced by path prefix,
+  because the default method mapping would have let any `Read` holder enumerate credentials
+  and any `Write` holder mint an admin. Revocation takes effect on the next request,
+  without a restart. The last admin cannot be revoked.
+- **`GET /collections` is filtered to the caller's grants**, with the total corrected to
+  match; an unfiltered total discloses how many collections are being hidden. A caller
+  entitled to nothing gets `200 []`, not `403` — the request was permitted, the answer is
+  empty.
+- **Both metrics servers require `Admin`.** `prkdb-server` exposed `/metrics` on its own
+  port with no authentication at all, on the assumption that a metrics port is private.
+  That is a deployment property, not a property of the binary.
+- **WebSocket authentication decided.** `PRKDB_WS_TOKEN` and the authorization layer both
+  read the same `Authorization` header, so with principals configured a client presenting
+  its own credential failed the shared-token comparison and was refused a connection it was
+  entitled to. The variable is now **ignored when authorization is enabled** (with a
+  warning) and still honoured under `--allow-anonymous`, so no deployment loses a gate. Its
+  comparison was also non-constant-time; it now uses `subtle`.
+- **`admin_token` deprecation.** The field is still accepted, now compared in constant time
+  — it used `!=`, leaking the token's prefix through response timing. An `Admin` principal
+  no longer needs it: the layer has already required `Admin` to reach the handler. The
+  relaxation is gated on authorization actually being enforced, so a server with neither
+  the layer nor a token still denies.
 - **Raft peer RPCs are now authenticated** (S-01, final part). `RaftService` carries
   `AppendEntries`, `RequestVote` and `ReadIndex` and is exempt from the client-API layer by
   design, because peers present certificates rather than bearer credentials — which meant
@@ -173,6 +207,10 @@ not enforced by anything, and several tests reported green while testing nothing
 
 ### Known issues
 
+- The mTLS peer path is proven against a real handshake in `peer_mtls.rs`, but the
+  in-process cluster harness runs peers over plaintext loopback, so a *cluster* with mTLS
+  active end to end is not exercised. `peer_authz.rs` covers the cluster with the policy
+  configured; the transport is covered separately.
 - The README's 37 Rust examples are still compiled by nothing. Including it as crate docs
   was attempted and reverted: most are two-line fragments needing hidden `# ` setup, which
   renders literally on GitHub where the README is actually read. Closing this properly

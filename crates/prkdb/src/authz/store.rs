@@ -172,6 +172,37 @@ impl PrincipalStore {
             .insert(principal.name().to_string(), principal);
     }
 
+    /// Look a principal up by name rather than by credential.
+    ///
+    /// Administration works in names; only authentication works in credentials.
+    pub fn resolve_by_name(&self, name: &str) -> Option<Principal> {
+        self.inner
+            .read()
+            .expect("the principal store lock is only poisoned if a holder panicked")
+            .get(name)
+            .cloned()
+    }
+
+    /// How many principals hold `Admin` on `*`.
+    ///
+    /// Used to refuse removing the last one: a cluster with no admin cannot be
+    /// administered again without stopping it and editing storage by hand, and whoever
+    /// does that will be doing it during an incident.
+    pub fn admin_count(&self) -> usize {
+        self.inner
+            .read()
+            .expect("the principal store lock is only poisoned if a holder panicked")
+            .values()
+            .filter(|p| p.permits("*", Permission::Admin))
+            .count()
+    }
+
+    /// Whether the named principal holds `Admin` on `*`.
+    pub fn is_admin(&self, name: &str) -> bool {
+        self.resolve_by_name(name)
+            .is_some_and(|p| p.permits("*", Permission::Admin))
+    }
+
     pub fn remove(&self, name: &str) -> Option<Principal> {
         self.inner
             .write()

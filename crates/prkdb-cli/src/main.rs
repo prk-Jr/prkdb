@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+mod admin_principals;
 mod authz_layer;
 mod collection_metadata;
 mod commands;

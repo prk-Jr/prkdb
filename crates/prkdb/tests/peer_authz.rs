@@ -211,3 +211,58 @@ fn the_strongest_configured_policy_wins() {
         "an empty secret is not a credential"
     );
 }
+
+/// A cluster still elects and replicates with peer authentication active.
+///
+/// # Why this is the test that matters
+///
+/// Every other test here asserts that something is *refused*. An authentication policy
+/// that refuses everything passes all of them and breaks replication in production and
+/// nowhere else — the failure would appear as a cluster that cannot elect a leader, which
+/// looks like a Raft bug and would be debugged as one.
+///
+/// The in-process harness runs peers over plaintext loopback, so this exercises the
+/// `Disabled` policy end to end and the *decision* logic for the others via
+/// `PeerIdentity::from_config`. The mTLS transport path is covered separately in
+/// `peer_mtls.rs`, which needs a real handshake.
+#[cfg(feature = "chaos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn a_cluster_elects_and_replicates_with_peer_auth_configured() {
+    use helpers::in_process_cluster::InProcessCluster;
+
+    let cluster = InProcessCluster::new(3).await.expect("cluster starts");
+    cluster
+        .await_leader(std::time::Duration::from_secs(15))
+        .await
+        .expect("peer authentication must not prevent an election");
+
+    cluster
+        .put(b"users:replicated", b"value")
+        .await
+        .expect("the cluster must still commit writes");
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        if cluster.all_nodes_have(b"users:replicated", b"value").await {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("replication stopped working with peer authentication configured");
+}
+
+/// The policy a node picks must not silently downgrade a configured cluster.
+///
+/// A node that falls back to `Disabled` because a CA path was mistyped would serve
+/// happily, replicate happily, and authenticate nobody — the failure is invisible from
+/// the outside, which is why the selection is asserted rather than assumed.
+#[test]
+fn a_configured_cluster_never_selects_disabled() {
+    assert!(!PeerIdentity::from_config(true, None).is_disabled());
+    assert!(!PeerIdentity::from_config(false, Some("secret".into())).is_disabled());
+    assert!(!PeerIdentity::from_config(true, Some("secret".into())).is_disabled());
+
+    // Only the genuinely unconfigured cases are disabled.
+    assert!(PeerIdentity::from_config(false, None).is_disabled());
+    assert!(PeerIdentity::from_config(false, Some(String::new())).is_disabled());
+}

@@ -187,6 +187,13 @@ check "Raft peer authentication exists"              "R12" test -f crates/prkdb/
 check "peer auth registered in prkdb-cli serve"      "R12" grep -q 'with_interceptor' crates/prkdb-cli/src/commands/serve.rs
 check "peer auth registered in prkdb-server"         "R12" grep -q 'with_interceptor' crates/prkdb/src/bin/prkdb-server.rs
 check "peer auth enforced end to end"                "R12" test -f crates/prkdb/tests/peer_authz.rs
+check "mTLS peer auth proven over real TLS"          "R12" test -f crates/prkdb/tests/peer_mtls.rs
+# A secured server whose own client cannot authenticate is a lock with no key.
+check "Rust client sends a credential"               "R12" grep -q 'fn authed' crates/prkdb-client/src/client.rs
+check "generated clients send credentials"           "R12" grep -q 'PrkDbAuthError' crates/prkdb-cli/src/commands/codegen.rs
+check "generated clients separate 401 from 403"      "R12" grep -q 'ErrPermissionDenied' crates/prkdb-cli/src/commands/codegen.rs
+check "principals can be administered at runtime"    "R12" test -f crates/prkdb-cli/src/admin_principals.rs
+check "collection listing is grant-filtered"         "R12" grep -q 'fn filter_collections' crates/prkdb-cli/src/commands/serve.rs
 check "credential compares are constant-time"        "R12" grep -rq 'ConstantTimeEq\|ct_eq' crates/prkdb/src crates/prkdb-cli/src
 
 group "Plan B · Tasks 3-7 — Production primitives"

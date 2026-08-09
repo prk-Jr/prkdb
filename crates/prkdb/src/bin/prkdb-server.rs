@@ -64,8 +64,68 @@ async fn main() -> Result<()> {
     let rpc_pool = Arc::new(RpcClientPool::new(node_id));
     db.start_multi_raft(rpc_pool, &[]);
 
+    let db_arc = Arc::new(db);
+
+    // Authorization for the client-facing service. PRKDB_BOOTSTRAP_TOKEN mints the first
+    // admin principal, matching `prkdb-cli serve`; PRKDB_ALLOW_ANONYMOUS is the explicit
+    // opt-out. Leaving this binary unguarded while `prkdb-cli` enforced would reopen S-01
+    // for anyone deploying prkdb-server, which is the image the compose files run.
+    let authz_store = {
+        let store = prkdb::authz::PrincipalStore::new();
+
+        // Recover principals persisted by earlier runs before considering bootstrap;
+        // otherwise a restart silently revokes every credential the node had.
+        let loaded = store
+            .load(db_arc.storage().as_ref())
+            .await
+            .map_err(|e| anyhow::anyhow!("loading principals: {e}"))?;
+        if loaded > 0 {
+            info!("Loaded {} principal(s) from storage", loaded);
+        }
+
+        if let Ok(token) = env::var("PRKDB_BOOTSTRAP_TOKEN") {
+            if !token.is_empty() {
+                match store.bootstrap_admin(&token) {
+                    Ok(admin) => {
+                        store
+                            .persist(db_arc.storage().as_ref(), admin)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("persisting bootstrap admin: {e}"))?;
+                        info!("Bootstrapped admin principal from PRKDB_BOOTSTRAP_TOKEN");
+                    }
+                    Err(prkdb::authz::BootstrapError::AlreadyInitialised { existing }) => {
+                        info!(
+                            "PRKDB_BOOTSTRAP_TOKEN ignored; {} principal(s) already exist",
+                            existing
+                        );
+                    }
+                    Err(e) => return Err(anyhow::anyhow!("{e}")),
+                }
+            }
+        }
+        if store.is_empty() {
+            let allowed = env::var("PRKDB_ALLOW_ANONYMOUS")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if !allowed {
+                anyhow::bail!(
+                    "No principals are configured. Set PRKDB_BOOTSTRAP_TOKEN to create an \
+                     admin principal, or set PRKDB_ALLOW_ANONYMOUS=1 to serve without \
+                     authorization (development only)."
+                );
+            }
+            tracing::warn!(
+                "serving with PRKDB_ALLOW_ANONYMOUS. Every collection is readable and \
+                 writable by anyone who can reach this port."
+            );
+            None
+        } else {
+            Some(store)
+        }
+    };
+
     // Wait for leaders in the background so the server can bind its network listeners
-    let db_clone = db.clone();
+    let db_clone = (*db_arc).clone();
     tokio::spawn(async move {
         info!("Waiting for leader election...");
         match db_clone
@@ -92,14 +152,49 @@ async fn main() -> Result<()> {
     if let Some(metrics_addr) =
         resolve_metrics_bind_address(node_id, disable_metrics, metrics_addr_override.as_deref())?
     {
+        // Metrics carry collection names, item counts and partition layout, so this
+        // listener is guarded by the same principals as everything else. It binds to its
+        // own port — historically an unauthenticated one, on the assumption that a metrics
+        // port is private. "It is on a private network" is a deployment property, not a
+        // property of the binary, and it is wrong often enough to be worth not relying on.
+        let metrics_authz = authz_store.clone();
         tokio::spawn(async move {
-            use axum::{routing::get, Router};
+            use axum::{
+                extract::State, http::StatusCode, response::IntoResponse, routing::get, Router,
+            };
 
-            async fn metrics_handler() -> String {
-                prkdb::prometheus_metrics::export_metrics()
+            async fn metrics_handler(
+                State(store): State<Option<prkdb::authz::PrincipalStore>>,
+                headers: axum::http::HeaderMap,
+            ) -> impl IntoResponse {
+                let Some(store) = store else {
+                    // PRKDB_ALLOW_ANONYMOUS: nothing to check against.
+                    return (StatusCode::OK, prkdb::prometheus_metrics::export_metrics())
+                        .into_response();
+                };
+
+                let credential = headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("Bearer "));
+
+                let Some(credential) = credential else {
+                    return StatusCode::UNAUTHORIZED.into_response();
+                };
+                // Admin, matching `prkdb-cli serve`: metrics span every collection, so no
+                // per-collection grant is sufficient authority for them.
+                if store.permits(credential, "*", prkdb::authz::Permission::Admin) {
+                    (StatusCode::OK, prkdb::prometheus_metrics::export_metrics()).into_response()
+                } else if store.resolve(credential).is_some() {
+                    StatusCode::FORBIDDEN.into_response()
+                } else {
+                    StatusCode::UNAUTHORIZED.into_response()
+                }
             }
 
-            let app = Router::new().route("/metrics", get(metrics_handler));
+            let app = Router::new()
+                .route("/metrics", get(metrics_handler))
+                .with_state(metrics_authz);
 
             let listener = match tokio::net::TcpListener::bind(metrics_addr).await {
                 Ok(l) => l,
@@ -120,7 +215,6 @@ async fn main() -> Result<()> {
     }
 
     // Create gRPC service for client data operations
-    let db_arc = Arc::new(db);
     let admin_token = env::var("PRKDB_ADMIN_TOKEN").unwrap_or_default();
     let schema_path = storage_path.join("schemas");
     let explicit_advertised_grpc_address = env::var("PRKDB_ADVERTISED_GRPC_ADDR")
@@ -146,6 +240,9 @@ async fn main() -> Result<()> {
     let grpc_service =
         PrkDbGrpcService::with_schema_storage_path(db_arc.clone(), admin_token, schema_path)
             .await
+            // The layer requires Admin for these RPCs, so the deprecated admin_token
+            // message field is no longer the only way in.
+            .with_authz_enforced(authz_store.is_some())
             .with_local_node_id(node_id)
             .with_public_address(advertised_grpc_address)
             .with_advertised_node_addresses(advertised_node_addresses)
@@ -210,64 +307,6 @@ async fn main() -> Result<()> {
 
     let data_addr = resolve_grpc_bind_address(listen_addr, grpc_port);
     info!("Starting gRPC data service on {}", data_addr);
-
-    // Authorization for the client-facing service. PRKDB_BOOTSTRAP_TOKEN mints the first
-    // admin principal, matching `prkdb-cli serve`; PRKDB_ALLOW_ANONYMOUS is the explicit
-    // opt-out. Leaving this binary unguarded while `prkdb-cli` enforced would reopen S-01
-    // for anyone deploying prkdb-server, which is the image the compose files run.
-    let authz_store = {
-        let store = prkdb::authz::PrincipalStore::new();
-
-        // Recover principals persisted by earlier runs before considering bootstrap;
-        // otherwise a restart silently revokes every credential the node had.
-        let loaded = store
-            .load(db_arc.storage().as_ref())
-            .await
-            .map_err(|e| anyhow::anyhow!("loading principals: {e}"))?;
-        if loaded > 0 {
-            info!("Loaded {} principal(s) from storage", loaded);
-        }
-
-        if let Ok(token) = env::var("PRKDB_BOOTSTRAP_TOKEN") {
-            if !token.is_empty() {
-                match store.bootstrap_admin(&token) {
-                    Ok(admin) => {
-                        store
-                            .persist(db_arc.storage().as_ref(), admin)
-                            .await
-                            .map_err(|e| anyhow::anyhow!("persisting bootstrap admin: {e}"))?;
-                        info!("Bootstrapped admin principal from PRKDB_BOOTSTRAP_TOKEN");
-                    }
-                    Err(prkdb::authz::BootstrapError::AlreadyInitialised { existing }) => {
-                        info!(
-                            "PRKDB_BOOTSTRAP_TOKEN ignored; {} principal(s) already exist",
-                            existing
-                        );
-                    }
-                    Err(e) => return Err(anyhow::anyhow!("{e}")),
-                }
-            }
-        }
-        if store.is_empty() {
-            let allowed = env::var("PRKDB_ALLOW_ANONYMOUS")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-            if !allowed {
-                anyhow::bail!(
-                    "No principals are configured. Set PRKDB_BOOTSTRAP_TOKEN to create an \
-                     admin principal, or set PRKDB_ALLOW_ANONYMOUS=1 to serve without \
-                     authorization (development only)."
-                );
-            }
-            tracing::warn!(
-                "serving with PRKDB_ALLOW_ANONYMOUS. Every collection is readable and \
-                 writable by anyone who can reach this port."
-            );
-            None
-        } else {
-            Some(store)
-        }
-    };
 
     //  Run gRPC server until shutdown
     let mut router = Server::builder()

@@ -65,6 +65,18 @@ fn spawn_seeded(
             let storage = prkdb_storage_sled::SledAdapter::open(dir.to_str().unwrap())
                 .expect("open the data directory to seed principals");
             let store = prkdb::authz::PrincipalStore::new();
+
+            // Seed the bootstrap admin too. `bootstrap_admin` refuses once any principal
+            // exists, so a server started against a pre-seeded directory never mints one —
+            // and a test that then authenticates with BOOTSTRAP gets 401 for a reason that
+            // has nothing to do with what it is testing.
+            if let Some(token) = bootstrap {
+                store
+                    .persist(&storage, prkdb::authz::Principal::admin("bootstrap", token))
+                    .await
+                    .expect("seed the bootstrap admin");
+            }
+
             for principal in seed {
                 store
                     .persist(&storage, principal.clone())
@@ -289,6 +301,301 @@ fn the_server_loads_persisted_principals_at_startup() {
     assert!(
         resp.status().is_success(),
         "a principal persisted before startup must authenticate afterwards; got {}",
+        resp.status()
+    );
+}
+
+// ── Principal administration ─────────────────────────────────────────────────
+//
+// Until these routes existed the only principal obtainable was the bootstrap admin, so
+// there was no way to add a user, narrow a grant, or revoke a leaked credential without
+// stopping the process. A credential that cannot be revoked without downtime does not get
+// revoked promptly.
+
+/// The property the acceptance criteria ask for: revocation without a restart.
+#[test]
+fn revoking_a_principal_takes_effect_without_a_restart() {
+    let Some(srv) = spawn(Some(BOOTSTRAP), &[]) else {
+        panic!("server must start");
+    };
+
+    // Create a principal through the API.
+    let resp = client()
+        .put(format!("{}/admin/principals", srv.base))
+        .bearer_auth(BOOTSTRAP)
+        .json(&serde_json::json!({
+            "name": "temp",
+            "credential": "temp-credential",
+            "grants": [{"collection": "users", "permission": "write"}]
+        }))
+        .send()
+        .expect("request");
+    assert_eq!(resp.status(), 201, "creating a principal must succeed");
+
+    // It works immediately, on the same running process.
+    let resp = client()
+        .put(format!("{}/collections/users/data", srv.base))
+        .bearer_auth("temp-credential")
+        .json(&serde_json::json!({"id": "1", "name": "Alice"}))
+        .send()
+        .expect("request");
+    assert!(
+        resp.status().is_success(),
+        "a newly created principal must authenticate without a restart; got {}",
+        resp.status()
+    );
+
+    // Revoke it.
+    let resp = client()
+        .delete(format!("{}/admin/principals/temp", srv.base))
+        .bearer_auth(BOOTSTRAP)
+        .send()
+        .expect("request");
+    assert_eq!(resp.status(), 200, "revocation must succeed");
+
+    // And it stops working immediately — same process, no restart.
+    let resp = client()
+        .put(format!("{}/collections/users/data", srv.base))
+        .bearer_auth("temp-credential")
+        .json(&serde_json::json!({"id": "2", "name": "Bob"}))
+        .send()
+        .expect("request");
+    assert_eq!(
+        resp.status(),
+        401,
+        "a revoked credential must stop working at once, not at the next restart"
+    );
+}
+
+/// Principal management requires Admin, not merely "some grant".
+///
+/// `required_permission` maps GET to Read and PUT to Write, so without an explicit rule
+/// any principal holding Read on one collection could enumerate credentials, and any
+/// holding Write could mint an admin — privilege escalation in a single call.
+#[test]
+fn principal_administration_requires_admin() {
+    use prkdb::authz::{Grant, Permission, Principal};
+
+    let writer = Principal::new(
+        "writer",
+        "writer-credential",
+        vec![Grant::new("users", Permission::Write)],
+    );
+    let Some(srv) = spawn_seeded(Some(BOOTSTRAP), &[], std::slice::from_ref(&writer)) else {
+        panic!("server must start");
+    };
+
+    let resp = client()
+        .get(format!("{}/admin/principals", srv.base))
+        .bearer_auth("writer-credential")
+        .send()
+        .expect("request");
+    assert_eq!(
+        resp.status(),
+        403,
+        "listing principals must require Admin, got {}",
+        resp.status()
+    );
+
+    let resp = client()
+        .put(format!("{}/admin/principals", srv.base))
+        .bearer_auth("writer-credential")
+        .json(&serde_json::json!({
+            "name": "escalated",
+            "credential": "escalated-credential",
+            "grants": [{"collection": "*", "permission": "admin"}]
+        }))
+        .send()
+        .expect("request");
+    assert_eq!(
+        resp.status(),
+        403,
+        "a Write principal must not be able to mint an admin"
+    );
+
+    // And the attempt created nothing.
+    let resp = client()
+        .put(format!("{}/collections/users/data", srv.base))
+        .bearer_auth("escalated-credential")
+        .json(&serde_json::json!({"id": "1"}))
+        .send()
+        .expect("request");
+    assert_eq!(resp.status(), 401, "the refused principal must not exist");
+}
+
+/// The last admin cannot be revoked.
+#[test]
+fn the_last_admin_cannot_be_revoked() {
+    let Some(srv) = spawn(Some(BOOTSTRAP), &[]) else {
+        panic!("server must start");
+    };
+
+    // Find the bootstrap admin's name.
+    let listing: serde_json::Value = client()
+        .get(format!("{}/admin/principals", srv.base))
+        .bearer_auth(BOOTSTRAP)
+        .send()
+        .expect("request")
+        .json()
+        .expect("json");
+    let name = listing["principals"][0]["name"]
+        .as_str()
+        .expect("the bootstrap admin must be listed")
+        .to_string();
+
+    let resp = client()
+        .delete(format!("{}/admin/principals/{name}", srv.base))
+        .bearer_auth(BOOTSTRAP)
+        .send()
+        .expect("request");
+    assert_eq!(
+        resp.status(),
+        409,
+        "revoking the only admin would leave the cluster unadministrable"
+    );
+
+    // The admin still works.
+    let resp = client()
+        .get(format!("{}/admin/principals", srv.base))
+        .bearer_auth(BOOTSTRAP)
+        .send()
+        .expect("request");
+    assert!(resp.status().is_success());
+}
+
+/// A listing must not disclose credentials or their digests.
+#[test]
+fn listing_principals_discloses_no_credential_material() {
+    let Some(srv) = spawn(Some(BOOTSTRAP), &[]) else {
+        panic!("server must start");
+    };
+
+    let body = client()
+        .get(format!("{}/admin/principals", srv.base))
+        .bearer_auth(BOOTSTRAP)
+        .send()
+        .expect("request")
+        .text()
+        .expect("body");
+
+    assert!(
+        !body.contains(BOOTSTRAP),
+        "the listing leaked a credential: {body}"
+    );
+    assert!(
+        !body.contains("credential_hash") && !body.contains("credential"),
+        "the listing exposed credential material: {body}"
+    );
+}
+
+/// `GET /collections` shows only what the caller may read, and an entitled-to-nothing
+/// caller gets an empty list rather than 403.
+#[test]
+fn the_collection_listing_is_filtered_to_the_callers_grants() {
+    use prkdb::authz::{Grant, Permission, Principal};
+
+    let reader = Principal::new(
+        "scoped",
+        "scoped-credential",
+        vec![Grant::new("users", Permission::Read)],
+    );
+    let Some(srv) = spawn_seeded(Some(BOOTSTRAP), &[], std::slice::from_ref(&reader)) else {
+        panic!("server must start");
+    };
+
+    // Create data in two collections as admin.
+    for collection in ["users", "orders"] {
+        let resp = client()
+            .put(format!("{}/collections/{collection}/data", srv.base))
+            .bearer_auth(BOOTSTRAP)
+            .json(&serde_json::json!({"id": "1", "name": "x"}))
+            .send()
+            .expect("request");
+        assert!(resp.status().is_success(), "seeding {collection}");
+    }
+
+    let admin_view: serde_json::Value = client()
+        .get(format!("{}/collections", srv.base))
+        .bearer_auth(BOOTSTRAP)
+        .send()
+        .expect("request")
+        .json()
+        .expect("json");
+    let admin_list = admin_view["data"]["collections"].as_array().expect("array");
+    assert!(
+        admin_list.len() >= 2,
+        "the admin should see both collections, saw {admin_list:?}"
+    );
+
+    let scoped_view: serde_json::Value = client()
+        .get(format!("{}/collections", srv.base))
+        .bearer_auth("scoped-credential")
+        .send()
+        .expect("request")
+        .json()
+        .expect("json");
+    let scoped_list = scoped_view["data"]["collections"]
+        .as_array()
+        .expect("array");
+    assert!(
+        scoped_list.iter().all(|c| c.as_str() == Some("users")),
+        "a principal granted only users must not see other collections, saw {scoped_list:?}"
+    );
+    // The total must agree, or it reveals the count of hidden collections.
+    assert_eq!(
+        scoped_view["data"]["total"].as_u64(),
+        Some(scoped_list.len() as u64),
+        "the total must count only what was returned"
+    );
+}
+
+/// `/metrics` requires Admin, not merely a credential.
+///
+/// Metrics carry collection names, item counts and partition layout — the shape of the
+/// database, for anyone who can read them. A per-collection grant is not authority over
+/// all of it.
+#[test]
+fn metrics_require_admin() {
+    use prkdb::authz::{Grant, Permission, Principal};
+
+    let reader = Principal::new(
+        "metrics-reader",
+        "metrics-reader-credential",
+        vec![Grant::new("users", Permission::Read)],
+    );
+    let Some(srv) = spawn_seeded(
+        Some(BOOTSTRAP),
+        &["--prometheus"],
+        std::slice::from_ref(&reader),
+    ) else {
+        panic!("server must start");
+    };
+
+    let resp = client()
+        .get(format!("{}/metrics", srv.base))
+        .send()
+        .expect("request");
+    assert_eq!(resp.status(), 401, "metrics must not be public");
+
+    let resp = client()
+        .get(format!("{}/metrics", srv.base))
+        .bearer_auth("metrics-reader-credential")
+        .send()
+        .expect("request");
+    assert_eq!(
+        resp.status(),
+        403,
+        "a per-collection Read grant is not authority over cluster-wide metrics"
+    );
+
+    let resp = client()
+        .get(format!("{}/metrics", srv.base))
+        .bearer_auth(BOOTSTRAP)
+        .send()
+        .expect("request");
+    assert!(
+        resp.status().is_success(),
+        "an admin must be able to scrape metrics; got {}",
         resp.status()
     );
 }

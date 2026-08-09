@@ -53,6 +53,11 @@ pub struct PrkDbGrpcService<S: prkdb_schema::SchemaStorage = InMemorySchemaStora
     watch_sequence: AtomicU64,
     /// Schema registry for cross-language SDK support
     schema_registry: Arc<SchemaRegistry<S>>,
+    /// Whether `AuthzGrpcLayer` is installed in front of this service.
+    ///
+    /// Only then may an absent `admin_token` be treated as already-authorized — see
+    /// [`validate_admin_token`](Self::validate_admin_token).
+    authz_enforced: bool,
 }
 
 impl PrkDbGrpcService<InMemorySchemaStorage> {
@@ -72,6 +77,7 @@ impl PrkDbGrpcService<InMemorySchemaStorage> {
             watch_tx,
             watch_sequence: AtomicU64::new(0),
             schema_registry,
+            authz_enforced: false,
         }
     }
 }
@@ -102,11 +108,22 @@ impl PrkDbGrpcService<FileSchemaStorage> {
             watch_tx,
             watch_sequence: AtomicU64::new(0),
             schema_registry,
+            authz_enforced: false,
         }
     }
 }
 
 impl<S: prkdb_schema::SchemaStorage> PrkDbGrpcService<S> {
+    /// Declare that `AuthzGrpcLayer` guards this service.
+    ///
+    /// Set by the binaries when a principal store is active. Without it the service keeps
+    /// its old behaviour of refusing admin RPCs when no `admin_token` is configured, so a
+    /// deployment that removes authorization cannot silently open the admin surface.
+    pub fn with_authz_enforced(mut self, enforced: bool) -> Self {
+        self.authz_enforced = enforced;
+        self
+    }
+
     pub fn with_public_address(mut self, address: String) -> Self {
         self.public_address = Some(address);
         self
@@ -1266,15 +1283,53 @@ impl<S: prkdb_schema::SchemaStorage> PrkDbGrpcService<S> {
     }
 
     #[allow(clippy::result_large_err)]
+    /// Validate the deprecated `admin_token` message field.
+    ///
+    /// # Deprecation
+    ///
+    /// `admin_token` predates the authorization model. It is a single shared secret
+    /// carried as a *field* on fifteen of the twenty-five RPCs — which is why the other
+    /// ten were unprotected for so long (spec S-01): there was no one place to add a
+    /// check, so each RPC had to remember, and ten did not.
+    ///
+    /// `AuthzGrpcLayer` now requires `Admin` for these RPCs before the handler runs, from
+    /// the `authorization` metadata, uniformly and with no per-RPC opt-in. The field is
+    /// accepted for one release so existing callers keep working.
+    ///
+    /// # Why an unconfigured token is no longer a blanket denial
+    ///
+    /// It used to deny every admin operation when the server had no `PRKDB_ADMIN_TOKEN`.
+    /// With the layer installed that is wrong in a way that matters: a principal holding
+    /// `Admin` has already been authorized, and refusing it for lacking a deprecated field
+    /// makes the new model unusable for administration.
+    ///
+    /// The relaxation is gated on `authz_enforced`, set only when a principal store is
+    /// active. A server with neither the layer nor a token still denies, so removing
+    /// authorization cannot silently open the admin surface.
     fn validate_admin_token(&self, token: &str) -> Result<(), Status> {
         if self.admin_token.is_empty() {
-            // If no token configured on server, deny all admin ops
+            if self.authz_enforced {
+                // AuthzGrpcLayer already required Admin to reach this handler.
+                return Ok(());
+            }
             return Err(Status::unauthenticated(
-                "Server has no admin token configured",
+                "Server has no admin token configured and no authorization is enforced",
             ));
         }
 
-        if token != self.admin_token {
+        // Constant-time: `!=` leaks the token's prefix through response timing, one byte
+        // at a time. Every other credential comparison in the workspace uses `subtle`;
+        // this one was missed because it predates them.
+        use subtle::ConstantTimeEq;
+        let matches = token.len() == self.admin_token.len()
+            && bool::from(token.as_bytes().ct_eq(self.admin_token.as_bytes()));
+
+        if !matches {
+            // A caller that cleared the authorization layer holds Admin already; the
+            // deprecated field being absent or wrong should not override that.
+            if self.authz_enforced && token.is_empty() {
+                return Ok(());
+            }
             return Err(Status::unauthenticated("Invalid admin token"));
         }
 

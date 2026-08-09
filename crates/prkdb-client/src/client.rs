@@ -179,8 +179,20 @@ pub struct PrkDbClient {
     /// Bootstrap servers for initial connection
     bootstrap_servers: Vec<String>,
 
-    /// Admin token for secured operations
+    /// Admin token for secured operations.
+    ///
+    /// Sent as a *message field* on the admin RPCs that still declare one. Kept for the
+    /// deprecation window; new code should use `credential`, which is what the server's
+    /// authorization layer actually reads.
     admin_token: Option<String>,
+
+    /// Bearer credential sent as `authorization` metadata on **every** request.
+    ///
+    /// The data plane — put, get, delete, batch_put, watch — has no `admin_token` field
+    /// and never did, so before this existed no shipped client could talk to a server with
+    /// authorization enabled: every data call came back `unauthenticated`. Securing the
+    /// server without this would have been shipping a lock and no key.
+    credential: Option<String>,
 
     /// Resilience configuration
     config: ClientConfig,
@@ -230,28 +242,108 @@ impl PrkDbClient {
         Self::with_config(bootstrap_servers, ClientConfig::default()).await
     }
 
+    /// Connect with a bearer credential.
+    ///
+    /// # Why this exists rather than `new(..).with_credential(..)`
+    ///
+    /// `new` fetches cluster metadata before returning, and `Metadata` requires `Read` on
+    /// a server with authorization enabled. A credential applied after construction
+    /// arrives too late — the bootstrap fetch has already been refused, and the client
+    /// reports "Failed to fetch metadata from any bootstrap server", which says nothing
+    /// about authorization and sends you looking at the network.
+    ///
+    /// `with_credential` remains useful for changing the credential on a connected
+    /// client; this is the constructor for a secured cluster.
+    pub async fn connect_with_credential(
+        bootstrap_servers: Vec<String>,
+        credential: impl Into<String>,
+    ) -> anyhow::Result<Self> {
+        Self::build(
+            bootstrap_servers,
+            ClientConfig::default(),
+            Some(credential.into()),
+        )
+        .await
+    }
+
+    /// As [`connect_with_credential`](Self::connect_with_credential), with custom config.
+    pub async fn connect_with_credential_and_config(
+        bootstrap_servers: Vec<String>,
+        credential: impl Into<String>,
+        config: ClientConfig,
+    ) -> anyhow::Result<Self> {
+        Self::build(bootstrap_servers, config, Some(credential.into())).await
+    }
+
     /// Create a new client with custom configuration
     pub async fn with_config(
         bootstrap_servers: Vec<String>,
         config: ClientConfig,
     ) -> anyhow::Result<Self> {
+        Self::build(bootstrap_servers, config, None).await
+    }
+
+    async fn build(
+        bootstrap_servers: Vec<String>,
+        config: ClientConfig,
+        credential: Option<String>,
+    ) -> anyhow::Result<Self> {
         let client = Self {
             metadata: Arc::new(RwLock::new(ClusterMetadata::default())),
             bootstrap_servers,
             admin_token: None,
+            credential,
             config,
         };
 
-        // Fetch initial metadata
+        // Fetch initial metadata. This is itself an RPC, so it carries the credential.
         client.refresh_metadata().await?;
 
         Ok(client)
     }
 
-    /// Set the admin token for secured operations
+    /// Set the admin token for secured operations.
+    ///
+    /// Also sets the bearer credential, because an admin token *is* a credential under the
+    /// authorization model — `Admin` on `*`. Without this, upgrading a server to enforce
+    /// authorization would break every existing client that had configured a token and
+    /// reasonably expected it to be sent.
     pub fn with_admin_token(mut self, token: impl Into<String>) -> Self {
-        self.admin_token = Some(token.into());
+        let token = token.into();
+        self.credential.get_or_insert_with(|| token.clone());
+        self.admin_token = Some(token);
         self
+    }
+
+    /// Set the bearer credential sent with every request.
+    pub fn with_credential(mut self, credential: impl Into<String>) -> Self {
+        self.credential = Some(credential.into());
+        self
+    }
+
+    /// Wrap a message in a request carrying the credential, if one is configured.
+    ///
+    /// Every outbound call goes through here. Inserting the header per call site would
+    /// work until the next RPC is added and someone forgets — which is exactly how ten
+    /// RPCs ended up unauthenticated on the server side (spec S-01).
+    fn authed<T>(&self, message: T) -> tonic::Request<T> {
+        let mut request = tonic::Request::new(message);
+        if let Some(credential) = &self.credential {
+            match format!("Bearer {credential}").parse() {
+                Ok(value) => {
+                    request.metadata_mut().insert("authorization", value);
+                }
+                Err(e) => {
+                    // A credential with non-ASCII bytes cannot be a header. Warn rather
+                    // than panic: the request then fails with `unauthenticated`, which is
+                    // the truthful outcome.
+                    tracing::warn!(
+                        "credential is not valid header content ({e}); sending unauthenticated"
+                    );
+                }
+            }
+        }
+        request
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -396,7 +488,7 @@ impl PrkDbClient {
     async fn fetch_metadata_from(&self, address: &str) -> anyhow::Result<()> {
         let mut client = PrkDbServiceClient::connect(address.to_string()).await?;
 
-        let request = tonic::Request::new(MetadataRequest { topics: vec![] });
+        let request = self.authed(MetadataRequest { topics: vec![] });
 
         let response = self
             .execute_rpc("metadata", client.metadata(request))
@@ -686,7 +778,7 @@ impl PrkDbClient {
             );
         }
 
-        let request = tonic::Request::new(GetRequest {
+        let request = self.authed(GetRequest {
             key: key.to_vec(),
             read_mode: i32::from(consistency),
         });
@@ -745,7 +837,7 @@ impl PrkDbClient {
             );
         }
 
-        let request = tonic::Request::new(PutRequest {
+        let request = self.authed(PutRequest {
             key: key.to_vec(),
             value: value.to_vec(),
         });
@@ -797,7 +889,7 @@ impl PrkDbClient {
             );
         }
 
-        let request = tonic::Request::new(DeleteRequest { key: key.to_vec() });
+        let request = self.authed(DeleteRequest { key: key.to_vec() });
 
         // Phase 18: Track health based on response
         match self
@@ -862,7 +954,7 @@ impl PrkDbClient {
         let mut client = self.get_any_client().await?;
         let token = self.admin_token.clone().unwrap_or_default();
 
-        let request = tonic::Request::new(CreateCollectionRequest {
+        let request = self.authed(CreateCollectionRequest {
             admin_token: token,
             name: name.to_string(),
             num_partitions,
@@ -885,7 +977,7 @@ impl PrkDbClient {
         let mut client = self.get_any_client().await?;
         let token = self.admin_token.clone().unwrap_or_default();
 
-        let request = tonic::Request::new(ListCollectionsRequest { admin_token: token });
+        let request = self.authed(ListCollectionsRequest { admin_token: token });
 
         let response: Response<ListCollectionsResponse> = client.list_collections(request).await?;
         let response = response.into_inner();
@@ -902,7 +994,7 @@ impl PrkDbClient {
         let mut client = self.get_any_client().await?;
         let token = self.admin_token.clone().unwrap_or_default();
 
-        let request = tonic::Request::new(DropCollectionRequest {
+        let request = self.authed(DropCollectionRequest {
             admin_token: token,
             name: name.to_string(),
         });
@@ -926,7 +1018,7 @@ impl PrkDbClient {
         let mut client = self.get_any_client().await?;
         let token = self.admin_token.clone().unwrap_or_default();
 
-        let request = tonic::Request::new(ListConsumerGroupsRequest { admin_token: token });
+        let request = self.authed(ListConsumerGroupsRequest { admin_token: token });
 
         let response: Response<ListConsumerGroupsResponse> =
             client.list_consumer_groups(request).await?;
@@ -947,7 +1039,7 @@ impl PrkDbClient {
         let mut client = self.get_any_client().await?;
         let token = self.admin_token.clone().unwrap_or_default();
 
-        let request = tonic::Request::new(DescribeConsumerGroupRequest {
+        let request = self.authed(DescribeConsumerGroupRequest {
             admin_token: token,
             group_id: group_id.to_string(),
         });
@@ -973,7 +1065,7 @@ impl PrkDbClient {
         let mut client = self.get_any_client().await?;
         let token = self.admin_token.clone().unwrap_or_default();
 
-        let request = tonic::Request::new(ListPartitionsRequest {
+        let request = self.authed(ListPartitionsRequest {
             admin_token: token,
             collection: collection.unwrap_or("").to_string(),
         });
@@ -996,7 +1088,7 @@ impl PrkDbClient {
         let mut client = self.get_any_client().await?;
         let token = self.admin_token.clone().unwrap_or_default();
 
-        let request = tonic::Request::new(GetPartitionAssignmentsRequest {
+        let request = self.authed(GetPartitionAssignmentsRequest {
             admin_token: token,
             group_id: group_id.unwrap_or("").to_string(),
         });
@@ -1019,7 +1111,7 @@ impl PrkDbClient {
         let mut client = self.get_any_client().await?;
         let token = self.admin_token.clone().unwrap_or_default();
 
-        let request = tonic::Request::new(GetReplicationStatusRequest { admin_token: token });
+        let request = self.authed(GetReplicationStatusRequest { admin_token: token });
 
         let response: Response<GetReplicationStatusResponse> =
             client.get_replication_status(request).await?;
@@ -1039,7 +1131,7 @@ impl PrkDbClient {
         let mut client = self.get_any_client().await?;
         let token = self.admin_token.clone().unwrap_or_default();
 
-        let request = tonic::Request::new(GetReplicationNodesRequest { admin_token: token });
+        let request = self.authed(GetReplicationNodesRequest { admin_token: token });
 
         let response: Response<GetReplicationNodesResponse> =
             client.get_replication_nodes(request).await?;
@@ -1059,7 +1151,7 @@ impl PrkDbClient {
         let mut client = self.get_any_client().await?;
         let token = self.admin_token.clone().unwrap_or_default();
 
-        let request = tonic::Request::new(GetReplicationLagRequest { admin_token: token });
+        let request = self.authed(GetReplicationLagRequest { admin_token: token });
 
         let response: Response<GetReplicationLagResponse> =
             client.get_replication_lag(request).await?;
@@ -1279,7 +1371,7 @@ impl PrkDbClient {
         let mut client = self.get_any_client().await?;
         let token = self.admin_token.clone().unwrap_or_default();
 
-        let request = tonic::Request::new(RegisterSchemaRequest {
+        let request = self.authed(RegisterSchemaRequest {
             admin_token: token,
             collection: collection.to_string(),
             schema_proto,
@@ -1304,7 +1396,7 @@ impl PrkDbClient {
     ) -> anyhow::Result<bool> {
         let mut client = self.get_any_client().await?;
 
-        let request = tonic::Request::new(CheckCompatibilityRequest {
+        let request = self.authed(CheckCompatibilityRequest {
             collection: collection.to_string(),
             schema_proto,
         });
@@ -1325,7 +1417,7 @@ impl PrkDbClient {
     ) -> anyhow::Result<Vec<u8>> {
         let mut client = self.get_any_client().await?;
 
-        let request = tonic::Request::new(GetSchemaRequest {
+        let request = self.authed(GetSchemaRequest {
             collection: collection.to_string(),
             version: version.unwrap_or(0),
         });
@@ -1344,7 +1436,7 @@ impl PrkDbClient {
         let mut client = self.get_any_client().await?;
         let token = self.admin_token.clone().unwrap_or_default();
 
-        let request = tonic::Request::new(ListSchemasRequest { admin_token: token });
+        let request = self.authed(ListSchemasRequest { admin_token: token });
 
         let response = client.list_schemas(request).await?.into_inner();
 
@@ -1411,6 +1503,7 @@ mod tests {
             metadata: Arc::new(RwLock::new(ClusterMetadata::default())),
             bootstrap_servers: vec![],
             admin_token: None,
+            credential: None,
             config: ClientConfig::default(),
         };
 
@@ -1427,6 +1520,7 @@ mod tests {
             metadata: Arc::new(RwLock::new(ClusterMetadata::default())),
             bootstrap_servers: vec![],
             admin_token: None,
+            credential: None,
             config: ClientConfig::default(),
         };
         assert_eq!(client.hash_key(b"any_key", 0), 0);
@@ -1438,6 +1532,7 @@ mod tests {
             metadata: Arc::new(RwLock::new(ClusterMetadata::default())),
             bootstrap_servers: vec![],
             admin_token: None,
+            credential: None,
             config: ClientConfig::default(),
         };
 
@@ -1468,6 +1563,7 @@ mod tests {
             metadata: Arc::new(RwLock::new(metadata)),
             bootstrap_servers: vec![],
             admin_token: None,
+            credential: None,
             config: ClientConfig::default(),
         }
     }
@@ -1477,6 +1573,7 @@ mod tests {
             metadata: Arc::new(RwLock::new(metadata)),
             bootstrap_servers: vec![],
             admin_token: None,
+            credential: None,
             config,
         }
     }

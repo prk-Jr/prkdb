@@ -44,6 +44,8 @@ humantime = "2.1"
 # Backup archive manifests. Already in the tree transitively; declared directly so the
 # verification path does not depend on another crate keeping it.
 sha2 = "0.10"
+# Constant-time credential comparison.
+subtle = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

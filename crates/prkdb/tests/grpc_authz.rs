@@ -57,13 +57,21 @@ fn store() -> PrincipalStore {
 /// Starts the server exactly as `prkdb-cli serve` does: the authorization layer wraps the
 /// whole stack rather than being applied per service.
 async fn start_server(store: Option<PrincipalStore>) -> (String, oneshot::Sender<()>) {
+    let enforced = store.is_some();
+    start_server_with(store, enforced).await
+}
+
+async fn start_server_with(
+    store: Option<PrincipalStore>,
+    authz_enforced: bool,
+) -> (String, oneshot::Sender<()>) {
     let db = Arc::new(
         PrkDb::builder()
             .with_storage(InMemoryAdapter::new())
             .build()
             .unwrap(),
     );
-    let service = PrkDbGrpcService::new(db, "unused-admin-token".to_string());
+    let service = PrkDbGrpcService::new(db, String::new()).with_authz_enforced(authz_enforced);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -233,4 +241,56 @@ async fn anonymous_mode_admits_everything() {
         }))
         .await
         .expect("anonymous mode must admit an uncredentialed write");
+}
+
+// ── The deprecated admin_token field ─────────────────────────────────────────
+
+/// An Admin principal can administer without the deprecated `admin_token` field.
+///
+/// `validate_admin_token` used to deny every admin RPC when the server had no
+/// `PRKDB_ADMIN_TOKEN` configured. With `AuthzGrpcLayer` installed that is wrong in a way
+/// that matters: the principal has already been required to hold `Admin` to reach the
+/// handler, and refusing it for lacking a field the new model does not use would make
+/// administration impossible for anyone who migrated.
+#[tokio::test]
+async fn an_admin_principal_needs_no_admin_token_field() {
+    let (url, _shutdown) = start_server_with(Some(store()), true).await;
+    let mut client = PrkDbServiceClient::connect(url).await.unwrap();
+
+    let response = client
+        .list_collections(with_credential(
+            prkdb_proto::raft::ListCollectionsRequest {
+                admin_token: String::new(),
+            },
+            ADMIN_CREDENTIAL,
+        ))
+        .await;
+
+    assert!(
+        response.is_ok(),
+        "an Admin principal must be able to administer without the deprecated field: {:?}",
+        response.err()
+    );
+}
+
+/// With no layer and no token, admin RPCs stay denied.
+///
+/// This is what makes the relaxation above safe: removing authorization must not silently
+/// open the admin surface, so the relaxation is gated on the layer actually being there
+/// rather than inferred from the token being absent.
+#[tokio::test]
+async fn without_authorization_an_unconfigured_server_still_denies_admin() {
+    let (url, _shutdown) = start_server_with(None, false).await;
+    let mut client = PrkDbServiceClient::connect(url).await.unwrap();
+
+    let status = client
+        .list_collections(tonic::Request::new(
+            prkdb_proto::raft::ListCollectionsRequest {
+                admin_token: String::new(),
+            },
+        ))
+        .await
+        .expect_err("an unconfigured server with no authorization must deny admin RPCs");
+
+    assert_eq!(status.code(), Code::Unauthenticated);
 }

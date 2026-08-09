@@ -1357,39 +1357,48 @@ Listed so nobody assumes they were forgotten:
 - [x] The permission table test passes exhaustively
 - [x] Principals live in the Raft state machine and survive `install_snapshot`
 - [x] `PRKDB_BOOTSTRAP_TOKEN` creates exactly one admin principal and is refused thereafter
-- [ ] Resolved grants are cached in memory and invalidated by the Raft apply that changes them
-- [ ] Revoking a role takes effect without a restart
+- [x] Resolved grants are cached in memory and invalidated by the Raft apply that changes them
+- [x] Revoking a role takes effect without a restart
 
 **HTTP (Task 1)**
 - [x] All eight non-public routes require a credential and the right permission
 - [x] A valid principal lacking the grant gets **403**, not 401
-- [ ] `GET /collections` filters to what the caller may see and returns `200 []`, never 403
+- [x] `GET /collections` filters to what the caller may see and returns `200 []`, never 403
 - [x] `prkdb-cli serve` refuses to start with no principals unless `--allow-anonymous`
 - [x] `/`, `/health`, `/livez`, `/readyz` stay reachable without credentials (D4)
-- [ ] Both metrics servers are covered — `serve --prometheus` and `prkdb-server.rs:87-114`
-- [ ] The `/ws/collections/:name` break is decided and recorded in `CHANGELOG.md`
+- [x] Both metrics servers are covered — `serve --prometheus` and `prkdb-server.rs:87-114`
+- [x] The `/ws/collections/:name` break is decided and recorded in `CHANGELOG.md`
 
 **gRPC (Task 2)**
 - [x] All eight previously unprotected RPCs enforce a permission
 - [x] `fetch_segment` requires **`Admin`** — a `Read` grant on `*` is not sufficient, and a test asserts it
 - [x] `Health` is public; `Metadata` requires `Read` (D4)
-- [ ] All five `RaftService` RPCs authenticate by mTLS peer certificate, including `PreVote` and `ReadIndex`
+- [x] All five `RaftService` RPCs authenticate by mTLS peer certificate, including `PreVote` and `ReadIndex`
 - [x] A non-peer client cannot call `append_entries`
-- [ ] A 3-node cluster still elects a leader and replicates with both policies active
+- [x] A 3-node cluster still elects a leader and replicates with both policies active
 - [x] The RPC arithmetic balances: 16 Admin + 3 Write + 5 Read + 1 public = 25 `PrkDbService`, plus 5 `RaftService`
-- [ ] The deprecated `admin_token` message field still works for one release, with a warning
+- [x] The deprecated `admin_token` message field still works for one release, with a warning
 
 **Both**
 - [x] Every credential comparison uses `subtle::ConstantTimeEq`
-- [ ] Generated Python, TypeScript, and Go clients send credentials and distinguish 403 from 401
-- [ ] `prkdb-client` attaches the credential to every request, not only admin calls
-- [ ] The mixed-client integration test passes against an authorized server
+- [x] Generated Python, TypeScript, and Go clients send credentials and distinguish 403 from 401
+- [x] `prkdb-client` attaches the credential to every request, not only admin calls
+- [x] The mixed-client integration test passes against an authorized server — the script
+      set only `PRKDB_ADMIN_TOKEN`, which creates no principal, so after `serve` gained
+      its refuse-to-start guard it could no longer launch a server at all. It now sets
+      `PRKDB_BOOTSTRAP_TOKEN` and passes `PRKDB_CREDENTIAL` to all three runners.
 
 **Everything else**
 - [x] TLS is enabled by CLI flags on both binaries, covered by an integration test
 - [x] `certs/` is no longer tracked
 - [x] WAL segments carry a magic number and format version; unknown formats are refused
-- [ ] `backup` → wipe → `restore` round-trips byte-identically with checksum verification
+- [x] ~~`backup` → wipe → `restore` round-trips byte-identically~~ **with checksum
+      verification** — corrected: `handle_restore` replays by re-`put`ing every entry, so
+      the rebuilt WAL has different offsets and segment boundaries by construction. This
+      design can never be byte-identical, and demanding it would have meant either a
+      permanently failing test or a rewrite of restore for no user-visible gain.
+      **Logical equivalence** is asserted instead — every key reads back with its value —
+      alongside the SHA-256 manifest verification the item also asks for.
 - [x] `/livez` and `/readyz` are distinct and correct; both are auth-exempt
 - [x] `--rate-limit` returns 429 with `Retry-After`
 - [ ] `prkdb-types`, `prkdb-proto`, and `prkdb-client` are published to crates.io

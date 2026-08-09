@@ -91,6 +91,14 @@ sqlx = { version = "0.8.2", default-features = false, features = [
 ] }
 criterion = { workspace = true }
 proptest = "1.4"
+# Test certificates for the mTLS peer-auth tests.
+#
+# default-features = false is load-bearing: rcgen's default backend is `ring`, and the
+# workspace's rustls already uses `aws-lc-rs`. Enabling both makes rustls unable to pick a
+# process-level CryptoProvider, and every TLS test panics at runtime with
+# "Could not automatically determine the process-level CryptoProvider".
+rcgen = { version = "0.13.2", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 
 [[bench]]
 name = "consumer_bench"

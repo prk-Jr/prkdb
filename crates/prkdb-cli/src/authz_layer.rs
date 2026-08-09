@@ -105,6 +105,10 @@ pub async fn authorize(
         // credential but are not scoped to one collection. /metrics carries every
         // collection's data, so it takes Admin.
         None if path == "/metrics" => principal.permits("*", Permission::Admin),
+        // Principal management is Admin regardless of method. Without this, `required_permission`
+        // would let any principal holding Read *anywhere* list credentials, and any holding
+        // Write *anywhere* mint one — which is privilege escalation to full admin in one call.
+        None if path.starts_with("/admin/") => principal.permits("*", Permission::Admin),
         None => principal
             .grants()
             .iter()
@@ -112,16 +116,30 @@ pub async fn authorize(
     };
 
     // 403: the principal is known, and may not do this.
-    if allowed {
-        Ok(next.run(req).await)
-    } else {
-        Err(StatusCode::FORBIDDEN)
+    if !allowed {
+        return Err(StatusCode::FORBIDDEN);
     }
+
+    // Hand the principal to the handler. Routes that return a *set* of things — the
+    // collection listing above all — must narrow it to what this caller may see, and a
+    // handler cannot do that if the middleware resolves the principal and drops it.
+    // Re-resolving from the header downstream would duplicate the credential comparison,
+    // and a second implementation is a second thing to get wrong.
+    let mut req = req;
+    req.extensions_mut().insert(principal);
+    Ok(next.run(req).await)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admin_paths_are_not_mistaken_for_collections() {
+        // /admin/... must reach the Admin arm, not the "any grant satisfies" fallback.
+        assert_eq!(collection_from_path("/admin/principals"), None);
+        assert_eq!(collection_from_path("/admin/principals/alice"), None);
+    }
 
     #[test]
     fn extracts_the_collection_from_every_route_shape() {
