@@ -255,14 +255,11 @@ not enforced by anything, and several tests reported green while testing nothing
   on `IndexedStorage`; and the `where_<field>_eq` examples need the generated
   `{Struct}QueryExt` trait in scope, which the README never mentions.
 
-- The mTLS peer path is proven against a real handshake in `peer_mtls.rs`, but the
-  in-process cluster harness runs peers over plaintext loopback, so a *cluster* with mTLS
-  active end to end is not exercised. `peer_authz.rs` covers the cluster with the policy
+- The mTLS peer path is proven against a real handshake in `peer_mtls.rs`, including the
+  peer client dialling over TLS (S-10). What is still not exercised is a **multi-node
+  cluster** electing and replicating with mTLS active end to end: the in-process harness
+  runs peers over plaintext loopback. `peer_authz.rs` covers a cluster with the policy
   configured; the transport is covered separately.
-- The README's 37 Rust examples are still compiled by nothing. Including it as crate docs
-  was attempted and reverted: most are two-line fragments needing hidden `# ` setup, which
-  renders literally on GitHub where the README is actually read. Closing this properly
-  means rewriting the fragments as self-contained examples.
 - Two keys read with two separate `get()` calls are still not a snapshot; use
   `snapshot_get_many` or a transaction. This is a property of the API the caller picks,
   not a defect, and `batch_atomicity.rs` asserts it so it stays explicit.
