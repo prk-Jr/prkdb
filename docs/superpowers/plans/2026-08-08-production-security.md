@@ -739,6 +739,105 @@ git commit -m "feat: authorize the gRPC data plane and authenticate Raft peers b
 
 ---
 
+## Task 2b: Register the gRPC authorization layer on the server (R12)
+
+> **Filed 2026-08-09 during execution of Task 2.** The decision logic is complete and
+> tested — `ApiAuthzInterceptor::check_http` and `PeerAuthInterceptor::check`, 12 unit
+> tests between them. **Nothing calls either yet, so the gRPC surface is still open.**
+> `fetch_segment` still streams raw WAL to any caller who can reach the port.
+>
+> Split out because it is the one part that cannot be verified without a running server,
+> and shipping it half-wired while claiming S-01 closed would be worse than saying plainly
+> that it is not.
+
+**Files:**
+- Create: `crates/prkdb/src/raft/authz_layer.rs` (tower `Layer` + `Service`)
+- Modify: `crates/prkdb-cli/src/commands/serve.rs` (~line 380, where the tonic `Server`
+  is built)
+- Modify: `crates/prkdb/src/bin/prkdb-server.rs:147-172`
+- Test: `crates/prkdb/tests/grpc_authz.rs`
+
+### Why a tower layer and not an interceptor
+
+Task 2 tried `tonic::service::Interceptor` first, as the plan specified. It cannot work:
+an `Interceptor` receives `Request<()>`, which carries metadata but **not the method being
+invoked**, and tonic sets no `grpc-method` key. It would read an empty method, fall to the
+`Admin` default, and require Admin for every RPC including `Health` — fail-closed, so not
+a hole, but it breaks every client and the cluster with them.
+
+The method is visible one layer down as the request path (`/prkdb.PrkDbService/Put`).
+`check_http` already takes an `http::Request<B>` and does the right thing; it needs a
+`tower::Service` wrapper to be called.
+
+- [ ] **Step 1: Confirm the surface is still open**
+
+```bash
+grep -rn 'check_http\|PeerAuthInterceptor' crates/prkdb/src/bin crates/prkdb-cli/src \
+  || echo "confirmed: neither is called from a binary"
+```
+
+- [ ] **Step 2: Write the failing test**
+
+`crates/prkdb/tests/grpc_authz.rs`, against a server started with a bootstrap credential:
+
+```rust
+/// The most consequential case in the suite. fetch_segment streams raw WAL across
+/// every collection; a Read grant on "*" must not be enough.
+#[tokio::test]
+async fn fetch_segment_rejects_a_read_only_principal() { /* expect PermissionDenied */ }
+
+#[tokio::test]
+async fn put_without_a_credential_is_unauthenticated() { /* expect Unauthenticated */ }
+
+#[tokio::test]
+async fn health_stays_public() { /* expect Ok */ }
+
+/// Raft peers share a port with the client API. A layer that rejects them breaks
+/// replication — in production, not here, unless this test exists.
+#[tokio::test]
+async fn a_cluster_still_elects_and_replicates_with_the_layer_active() { /* ... */ }
+```
+
+The last one needs a multi-node cluster. Plan A Task 4b's in-process harness is the right
+vehicle; until it lands, use `TestCluster` and build the binary first.
+
+- [ ] **Step 3: Implement the tower layer**
+
+A `Layer<S>` producing a `Service` whose `call` runs `check_http` and short-circuits with
+`Status::into_http()` on rejection. Apply to `PrkDbServiceServer` only.
+
+- [ ] **Step 4: Apply peer auth to `RaftService`**
+
+Separate policy, same shape: `PeerAuthInterceptor` reading `peer_certs()`. Requires
+`--tls-client-ca`, so it depends on Task 3, which has landed.
+
+**Do not exempt `RaftService` from authentication** to make replication work. That is the
+tempting shortcut and it lets any client forge `AppendEntries`.
+
+- [ ] **Step 5: Wire both binaries**
+
+`prkdb-cli serve` and `prkdb-server` both construct the tonic `Server`. Both need the
+layer, the store, and `--allow-anonymous` honoured consistently with the HTTP side.
+
+- [ ] **Step 6: Verify the arithmetic still balances**
+
+```bash
+awk '/^service /{s=$2} /^[[:space:]]*rpc /{gsub(/\(.*/,"",$2); print s"\t"$2}' \
+  crates/prkdb-proto/proto/raft.proto | awk '{print $1}' | sort | uniq -c
+```
+Expected: 5 `RaftService`, 25 `PrkDbService`. Every one of the 25 must be Admin (16),
+Write (3), Read (5) or public (1). `every_rpc_from_the_finding_is_classified` in
+`authz_interceptor.rs` already guards the eight from S-01.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add crates/prkdb/src/raft crates/prkdb/src/bin crates/prkdb-cli/src
+git commit -m "feat(authz): enforce gRPC authorization on the running server"
+```
+
+---
+
 ## Task 3: Make TLS reachable (R13)
 
 > `crates/prkdb/src/raft/server.rs:38` implements full mTLS. Its only caller in the workspace is
@@ -845,7 +944,7 @@ git commit -m "feat: expose TLS configuration from both server binaries"
 - Modify: `crates/prkdb-core/src/wal/log_segment.rs`
 - Test: `crates/prkdb-core/tests/format_version.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 //! The WAL must identify its own format and refuse formats it does not understand.
@@ -894,14 +993,14 @@ fn round_trips_the_current_format() {
 }
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 ```bash
 cargo test -p prkdb-core --test format_version -- --nocapture
 ```
 Expected: FAIL — `PRKDB_WAL_MAGIC` and `FORMAT_VERSION` do not exist.
 
-- [ ] **Step 3: Define the header**
+- [x] **Step 3: Define the header**
 
 In `log_segment.rs`:
 
@@ -918,14 +1017,14 @@ pub const FORMAT_VERSION: u32 = 1;
 const SEGMENT_HEADER_LEN: usize = 16;
 ```
 
-- [ ] **Step 4: Write the header on create, validate on open**
+- [x] **Step 4: Write the header on create, validate on open**
 
 `LogSegment::create` writes the 16-byte header before any record. `LogSegment::open` reads it
 and returns a typed error on magic mismatch or `version > FORMAT_VERSION`. All existing record
 offsets shift by `SEGMENT_HEADER_LEN` — check every offset computation in `log_segment.rs` and
 `mmap_log_segment.rs`.
 
-- [ ] **Step 5: Run the tests**
+- [x] **Step 5: Run the tests**
 
 ```bash
 cargo test -p prkdb-core --test format_version -- --nocapture
@@ -934,7 +1033,7 @@ cargo test -p prkdb-core -- --nocapture
 Expected: all PASS. The existing WAL tests must still pass — if offsets were missed, they fail
 here.
 
-- [ ] **Step 6: Handle pre-header segments**
+- [x] **Step 6: Handle pre-header segments**
 
 Any WAL written before this change has no header. Choose one and document it in
 `docs/guide/deployment.md`:
@@ -945,7 +1044,7 @@ Any WAL written before this change has no header. Choose one and document it in
 Given nothing is published to crates.io and there are no external users, the second is
 defensible and simpler. Say which was chosen and why.
 
-- [ ] **Step 7: Run the corruption suite**
+- [x] **Step 7: Run the corruption suite**
 
 ```bash
 cargo test -p prkdb --test corruption_tests -- --ignored --nocapture --test-threads=1
@@ -953,7 +1052,7 @@ cargo test -p prkdb --test corruption_tests -- --ignored --nocapture --test-thre
 These three tests are currently `#[ignore]`d. This task is the right moment to un-ignore them —
 they test exactly this layer.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/prkdb-core/

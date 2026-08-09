@@ -5,6 +5,76 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// Magic bytes at the start of every segment written by this version.
+///
+/// Lets a reader reject a file that is not ours before interpreting a single byte of it
+/// as a record. Without this, a truncated or foreign file is read as records and the
+/// failure surfaces somewhere far from the cause.
+pub const PRKDB_WAL_MAGIC: [u8; 8] = *b"PRKDBWAL";
+
+/// On-disk segment format version. Bump on any change to record framing or segment
+/// layout. A reader refuses versions above its own rather than misparsing them.
+pub const FORMAT_VERSION: u32 = 1;
+
+/// Magic (8) + version (4) + reserved (4). The reserved word leaves room for flags
+/// without spending a version bump.
+pub const SEGMENT_HEADER_LEN: u64 = 16;
+
+/// What `read_segment_header` found at the start of a segment file.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SegmentFormat {
+    /// A header written by this version or an older one we still understand.
+    Versioned(u32),
+    /// No magic. Segments written before headers existed; read at offset 0.
+    Legacy,
+}
+
+/// Inspect the first bytes of a segment file.
+///
+/// An empty file counts as `Legacy`: nothing has been written, so nothing can disagree.
+fn read_segment_header(file: &mut File) -> io::Result<SegmentFormat> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut buf = [0u8; SEGMENT_HEADER_LEN as usize];
+    match file.read_exact(&mut buf) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(SegmentFormat::Legacy),
+        Err(e) => return Err(e),
+    }
+
+    if buf[..8] != PRKDB_WAL_MAGIC {
+        return Ok(SegmentFormat::Legacy);
+    }
+
+    let version = u32::from_le_bytes(
+        buf[8..12]
+            .try_into()
+            .expect("a 4-byte slice of a 16-byte buffer"),
+    );
+
+    if version > FORMAT_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "segment format version {version} is newer than this build understands \
+                 ({FORMAT_VERSION}); refusing to read it rather than misparsing it"
+            ),
+        ));
+    }
+
+    Ok(SegmentFormat::Versioned(version))
+}
+
+/// Write the header at the start of a freshly created segment.
+fn write_segment_header(file: &mut File) -> io::Result<()> {
+    let mut buf = [0u8; SEGMENT_HEADER_LEN as usize];
+    buf[..8].copy_from_slice(&PRKDB_WAL_MAGIC);
+    buf[8..12].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+    // buf[12..16] stays zero: reserved for flags.
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(&buf)?;
+    Ok(())
+}
+
 /// Single segment file in the write-ahead log
 pub struct LogSegment {
     /// First offset in this segment
@@ -30,6 +100,13 @@ pub struct LogSegment {
 
     /// Bytes since last index entry
     bytes_since_last_index: AtomicU64,
+
+    /// Byte offset where records begin.
+    ///
+    /// `SEGMENT_HEADER_LEN` for segments written by this version, `0` for legacy ones.
+    /// The sparse index has no entry for every offset, so reads fall back to scanning
+    /// from here — falling back to 0 would read the header as a record.
+    data_start: u64,
 }
 
 impl LogSegment {
@@ -53,14 +130,20 @@ impl LogSegment {
 
         let index = OffsetIndex::create(&index_path, base_offset, 1024 * 1024)?;
 
+        // Records start after the header, so every position in this segment is offset by
+        // SEGMENT_HEADER_LEN.
+        let mut log_file = log_file;
+        write_segment_header(&mut log_file)?;
+
         Ok(Self {
             base_offset,
             log_file: Arc::new(Mutex::new(log_file)),
             index: Arc::new(Mutex::new(index)),
             current_offset: AtomicU64::new(base_offset),
-            file_position: AtomicU64::new(0),
+            file_position: AtomicU64::new(SEGMENT_HEADER_LEN),
             index_interval_bytes,
             bytes_since_last_index: AtomicU64::new(0),
+            data_start: SEGMENT_HEADER_LEN,
         })
     }
 
@@ -74,13 +157,22 @@ impl LogSegment {
 
         let mut log_file = OpenOptions::new().read(true).write(true).open(&log_path)?;
 
+        // Reject a format we do not understand before reading anything as a record.
+        // Segments written before headers existed report Legacy and are read from 0, so
+        // an existing data directory keeps working.
+        let format = read_segment_header(&mut log_file)?;
+        let data_start = match format {
+            SegmentFormat::Versioned(_) => SEGMENT_HEADER_LEN,
+            SegmentFormat::Legacy => 0,
+        };
+
         // Get current file size
-        let file_size = log_file.metadata()?.len();
+        let file_size = log_file.metadata()?.len().max(data_start);
 
         let index = OffsetIndex::open(&index_path, base_offset, 1024 * 1024)?;
 
         // Scan log to find current offset
-        let current_offset = Self::find_last_offset(&mut log_file, base_offset)?;
+        let current_offset = Self::find_last_offset(&mut log_file, base_offset, data_start)?;
 
         Ok(Self {
             base_offset,
@@ -90,6 +182,7 @@ impl LogSegment {
             file_position: AtomicU64::new(file_size),
             index_interval_bytes,
             bytes_since_last_index: AtomicU64::new(0),
+            data_start,
         })
     }
 
@@ -220,7 +313,7 @@ impl LogSegment {
             let index = self.index.lock().expect(
                 "RwLock/Mutex is only poisoned if another thread panicked while holding it",
             );
-            index.lookup(offset).unwrap_or(0)
+            index.lookup(offset).unwrap_or(self.data_start)
         };
 
         // Read from file
@@ -276,11 +369,11 @@ impl LogSegment {
     }
 
     /// Helper: Scan log file to find last offset
-    fn find_last_offset(file: &mut File, base_offset: u64) -> io::Result<u64> {
+    fn find_last_offset(file: &mut File, base_offset: u64, data_start: u64) -> io::Result<u64> {
         use crate::serialization::zerocopy::ZeroCopyLogHeader;
         use zerocopy::FromBytes;
 
-        file.seek(SeekFrom::Start(0))?;
+        file.seek(SeekFrom::Start(data_start))?;
 
         let mut last_offset = base_offset;
 
