@@ -242,3 +242,68 @@ async fn list_collections_works_on_a_data_dir_database() {
         .await
         .expect("list_collections scans a prefix and must not fail on the default adapter");
 }
+
+/// `scan_range` works on the adapter the default builder produces (S-08).
+///
+/// `CollectionHandle::scan_range_by_id_bytes` is public API and calls
+/// `storage.scan_range`, so on a `--database` database this was the fourth method missing
+/// from the same wrapper.
+#[tokio::test(flavor = "multi_thread")]
+async fn scan_range_works_on_a_data_dir_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(dir.path());
+
+    for id in ["a", "b", "c", "d"] {
+        db.storage()
+            .put(format!("users:{id}").as_bytes(), id.as_bytes())
+            .await
+            .unwrap();
+    }
+
+    let rows = db
+        .storage()
+        .scan_range(b"users:b", b"users:d")
+        .await
+        .expect("scan_range must be supported on the default adapter");
+
+    let keys: Vec<String> = rows
+        .iter()
+        .map(|(k, _)| String::from_utf8_lossy(k).into_owned())
+        .collect();
+    assert_eq!(
+        keys,
+        vec!["users:b".to_string(), "users:c".to_string()],
+        "scan_range is half-open [start, end): b and c, not d"
+    );
+}
+
+/// `fetch_segment` must not report success while streaming nothing (S-09).
+///
+/// `CollectionPartitionedAdapter` does not implement `get_changes_since` — merging N
+/// independent WALs into one ordered change stream is a design decision, not a forwarding
+/// fix, because offsets are not comparable across collections.
+///
+/// What *was* fixable, and is fixed, is the failure mode: the RPC logged the error and
+/// ended the stream, so the caller received a successful response carrying no data and
+/// concluded there was nothing to replicate. An empty log and an unreadable one must not
+/// look the same.
+///
+/// This test pins the adapter-level behaviour. When a cross-collection change stream is
+/// designed, invert it.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_changes_since_is_unsupported_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(dir.path());
+    db.storage().put(b"users:a", b"1").await.unwrap();
+
+    let err = db
+        .storage()
+        .get_changes_since(0)
+        .await
+        .expect_err("the partitioned adapter cannot merge per-collection change streams");
+
+    assert!(
+        err.to_string().contains("not supported"),
+        "the limitation must be reported, not silently returned as an empty stream: {err}"
+    );
+}

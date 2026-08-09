@@ -556,6 +556,64 @@ impl StorageAdapter for CollectionPartitionedAdapter {
         Ok(out)
     }
 
+    /// Scan the half-open key range `[start, end)`, across collections.
+    ///
+    /// The fourth method this wrapper was missing, after `take_snapshot` (S-04),
+    /// collection discovery (S-05) and `scan_prefix` (S-07). `WalStorageAdapter` implements
+    /// it; the wrapper fell through to the trait default that refuses, so
+    /// `CollectionHandle::scan_range_by_id_bytes` — public API — failed on every database
+    /// opened with `--database`.
+    ///
+    /// # Routing
+    ///
+    /// Bounds are full `collection:id` keys. Rather than reason about which collections a
+    /// range spans — `orders:z` to `users:a` covers every collection in between, and
+    /// collection names are arbitrary — each collection is scanned for its own slice of
+    /// the range and the results are filtered against the original bounds. Correct by
+    /// construction, at the cost of touching every collection; ranges that name one
+    /// collection on both sides are the common case and are narrowed first.
+    async fn scan_range(
+        &self,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+        let collections = self.load_all_collections().await;
+        let single_collection = match (
+            start.iter().position(|b| *b == b':'),
+            end.iter().position(|b| *b == b':'),
+        ) {
+            (Some(a), Some(b)) if start[..a] == end[..b] => Some(start[..a].to_vec()),
+            _ => None,
+        };
+
+        let mut out = Vec::new();
+        for (name, adapter) in collections {
+            if let Some(only) = &single_collection {
+                if name.as_bytes() != only.as_slice() {
+                    continue;
+                }
+            }
+
+            // Scan the whole collection and filter: the inner adapter's range is over
+            // *its* keys, which have the collection prefix stripped, so translating the
+            // bounds per collection would need a case for every way a bound can fall
+            // inside, outside, or across the prefix.
+            for (key, value) in adapter.scan_prefix(b"").await? {
+                let mut full = Vec::with_capacity(name.len() + 1 + key.len());
+                full.extend_from_slice(name.as_bytes());
+                full.push(b':');
+                full.extend_from_slice(&key);
+
+                if full.as_slice() >= start && full.as_slice() < end {
+                    out.push((full, value));
+                }
+            }
+        }
+
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+
     /// Snapshot every collection into a single archive.
     ///
     /// Without this the trait default refuses with "take_snapshot not supported", which is

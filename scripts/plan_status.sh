@@ -204,6 +204,9 @@ check "backup/restore round-trip test"                 "—" test -f crates/prkd
 check "backup round-trip is not ignored"               "—" no_ignored_backup_tests
 check "reopen-durability regression test"              "—" test -f crates/prkdb/tests/durability.rs
 check "database open never truncates the WAL"          "—" none_in_code 'MmapParallelWal::create' crates/prkdb/src/storage/
+# Four methods have now gone missing from the partitioned wrapper (S-04, S-05, S-07,
+# S-08), each compiling cleanly and failing at runtime. This finds the fifth on purpose.
+check "wrapper implements its inner adapter's surface" "—" bash scripts/check_wrapper_completeness.sh
 check "readiness endpoint distinct from liveness"      "—" grep -q 'readyz' crates/prkdb-cli/src/commands/serve.rs
 check "rate limiter wired into the server"             "—" grep -rq 'RateLimiter' crates/prkdb-cli/src
 check "CHANGELOG present"                              "—" test -f CHANGELOG.md

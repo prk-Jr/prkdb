@@ -1076,7 +1076,17 @@ impl<S: prkdb_schema::SchemaStorage + 'static> PrkDbServiceTrait for PrkDbGrpcSe
                     }
                 }
                 Err(e) => {
+                    // Surface it. Logging and ending the stream produced a *successful*
+                    // RPC carrying no data, so a caller replicating from this segment
+                    // concluded there was nothing to replicate. On any database opened
+                    // with `--database` that was the guaranteed outcome:
+                    // `CollectionPartitionedAdapter` does not implement
+                    // `get_changes_since`, so the call always failed and the failure was
+                    // always swallowed (spec S-09).
+                    //
+                    // An empty stream and an unreadable log must not look the same.
                     tracing::error!("FetchSegment scan error: {}", e);
+                    Err(Status::internal(format!("FetchSegment scan failed: {e}")))?;
                 }
             }
         };

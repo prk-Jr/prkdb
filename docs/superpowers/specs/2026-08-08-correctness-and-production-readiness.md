@@ -518,6 +518,85 @@ fourth should be found on purpose.
 
 ---
 
+### S-08 / S-09 — the audit of `StorageAdapter`'s error-returning defaults
+
+**Found 2026-08-09 by deliberately auditing the trait, after S-07 made it three
+accidental discoveries in a row. S-08 fixed; S-09 partially fixed and documented.**
+
+#### The pattern
+
+`StorageAdapter` has 18 methods. Three are required; ten have a default body that returns
+`"not supported"`; five have a benign default that loops over the single-key operation.
+
+A wrapper that omits a method with an **error-returning** default compiles cleanly and
+fails at runtime, in whichever feature happens to call it. The compiler cannot help,
+because inheriting a default is exactly what the language is for.
+
+`CollectionPartitionedAdapter` — what `PrkDb::builder().with_data_dir()` produces — had
+now shed four such methods:
+
+| | Method | Symptom | How it was found |
+|---|---|---|---|
+| S-04 | `take_snapshot` | `prkdb backup` refused | first backup test ever run |
+| S-05 | collection discovery | backup archived **zero entries** | chasing S-04's fix |
+| S-07 | `scan_prefix` | `list_collections` and principal loading failed | wiring persistence |
+| S-08 | `scan_range` | `CollectionHandle::scan_range_by_id_bytes` failed | **this audit** |
+
+Three of four were found by someone using the feature. That is not a detection strategy.
+
+#### S-08 — `scan_range`
+
+`CollectionHandle::scan_range_by_id_bytes` is public API and calls `storage.scan_range`.
+On any `--database` database it returned `"scan_range not supported"`.
+
+Implemented on the wrapper. Bounds are full `collection:id` keys; a range naming one
+collection on both sides is narrowed to it, otherwise every collection is scanned and
+results are filtered against the original bounds. Reasoning about which collections an
+arbitrary range spans is not worth the subtlety when the filter is exact.
+
+#### S-09 — `get_changes_since`, and a swallowed error
+
+The wrapper does not implement it, and this one is **not** a forwarding fix: it returns an
+ordered change stream, and offsets from N independent per-collection WALs are not
+comparable. Defining a merged order is a design decision.
+
+What was fixable is the failure mode. `fetch_segment` called it like this:
+
+```rust
+Err(e) => {
+    tracing::error!("FetchSegment scan error: {}", e);
+}
+```
+
+It logged, ended the stream, and returned **success**. A caller replicating from that
+segment received an empty stream and concluded there was nothing to replicate — on every
+`--database` database, guaranteed, because the call always failed. An empty log and an
+unreadable one looked identical.
+
+The error is now surfaced as `Status::internal`. The limitation remains, and
+`durability.rs` pins it so that inverting the assertion is the first step of fixing it.
+
+#### The check
+
+`scripts/check_wrapper_completeness.sh` compares the wrapper's trait impl against its
+inner adapter's, restricted to methods whose default returns an error — flagging the
+benign ones too would report three performance fallbacks beside every real defect, and a
+check that cries wolf gets muted. Exemptions require a stated reason and a test pinning
+current behaviour; `get_changes_since` is the only one.
+
+Verified load-bearing by removing `scan_prefix`, `scan_range` and `take_snapshot` in turn
+and confirming each is flagged. Runs in CI and in `plan_status.sh`.
+
+#### Also found
+
+`ShardedWalAdapter` is re-exported from `storage::mod` and implements **none** of the ten
+optional methods, so anything built on it has no prefix queries, no range scans, no
+backup, no outbox, and no replication stream. It is constructed nowhere outside its own
+tests and the builder cannot produce one. Documented as such rather than removed, since
+removing a `pub use` is a breaking change for a type someone may have named.
+
+---
+
 ## 3. Requirements
 
 Each has an ID, the finding it closes, and a **falsifiable acceptance test** — what CI runs to

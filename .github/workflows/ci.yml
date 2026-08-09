@@ -168,6 +168,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      # A wrapper that forgets a StorageAdapter method compiles cleanly and fails at
+      # runtime; this has happened four times. Cheap to check, expensive to find in a
+      # user's backup.
+      - name: Storage wrapper completeness
+        run: bash scripts/check_wrapper_completeness.sh
       - run: cargo fmt --all -- --check
 
   clippy:

@@ -107,6 +107,19 @@ not enforced by anything, and several tests reported green while testing nothing
   majority to acknowledge a heartbeat in the current term before returning an index, per
   Raft §6.4. Found by the register test's first partitioned run, reproducing about two
   runs in five.
+- **`scan_range` was unsupported on the default storage adapter** (S-08), so
+  `CollectionHandle::scan_range_by_id_bytes` — public API — failed on every database
+  opened with `--database`. Found by auditing the trait rather than by hitting it.
+- **`fetch_segment` reported success while streaming nothing** (S-09). It called
+  `get_changes_since`, which the partitioned adapter does not implement, then logged the
+  error and ended the stream — so a caller replicating from that segment concluded there
+  was nothing to replicate. An empty log and an unreadable one looked identical. The error
+  is now surfaced; the missing method is a design decision (offsets are not comparable
+  across per-collection WALs) and is documented rather than guessed at.
+- **`scripts/check_wrapper_completeness.sh`** compares a wrapper's trait implementation
+  against the adapter it wraps, restricted to methods whose default returns an error. Four
+  such methods had gone missing from `CollectionPartitionedAdapter`, three of them found
+  only when someone used the affected feature. Runs in CI.
 - **`scan_prefix` was unsupported on the default storage adapter** (S-07), with no
   regression test until a verification pass removed the fix and found the suite still
   green. `durability.rs` now covers it directly against the wrapper — a test reaching for
