@@ -51,6 +51,10 @@ pub struct ServeArgs {
     #[arg(long)]
     pub prometheus: bool,
 
+    /// Serve without authorization. Development only.
+    #[arg(long)]
+    pub allow_anonymous: bool,
+
     /// PEM server certificate. Enables TLS on both the HTTP and gRPC surfaces.
     ///
     /// Before this flag existed, `start_raft_server_tls` was implemented but reachable
@@ -195,6 +199,36 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         println!("⚠️  TLS is not configured; traffic is plaintext. Pass --tls-cert/--tls-key to enable it.");
     }
 
+    // Authorization. A cold instance has no principals and can authenticate nobody, so
+    // PRKDB_BOOTSTRAP_TOKEN mints the first admin. Refusing to start otherwise is
+    // deliberate: spec S-01 exists because this surface served every collection to
+    // anyone who could reach the port.
+    let store = prkdb::authz::PrincipalStore::new();
+    if let Ok(token) = std::env::var("PRKDB_BOOTSTRAP_TOKEN") {
+        if !token.is_empty() {
+            store
+                .bootstrap_admin(&token)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("🔑 Bootstrapped admin principal from PRKDB_BOOTSTRAP_TOKEN");
+        }
+    }
+    let authz = if store.is_empty() {
+        if !args.allow_anonymous {
+            anyhow::bail!(
+                "No principals are configured. Set PRKDB_BOOTSTRAP_TOKEN to create an \
+                 admin principal, or pass --allow-anonymous to serve without \
+                 authorization (development only)."
+            );
+        }
+        eprintln!(
+            "⚠️  WARNING: serving with --allow-anonymous. Every collection is readable \
+             and writable by anyone who can reach this port."
+        );
+        crate::authz_layer::Authz::anonymous()
+    } else {
+        crate::authz_layer::Authz::enabled(store.clone())
+    };
+
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
     let node_id_label = args.id.to_string();
 
@@ -299,6 +333,12 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
 
     // Add state
     let app = app.with_state(state);
+
+    // Authorization runs before CORS so a rejected request never reaches a handler.
+    let app = app.layer(axum::middleware::from_fn_with_state(
+        authz.clone(),
+        crate::authz_layer::authorize,
+    ));
 
     // Add CORS middleware if enabled
     let app = if args.cors {

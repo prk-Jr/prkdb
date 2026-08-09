@@ -178,7 +178,7 @@ git commit -m "feat: add principal, role, and grant authorization model"
 - Modify: `crates/prkdb/src/bin/prkdb-server.rs:87-114`
 - Test: `crates/prkdb-cli/tests/http_authz.rs`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Five cases, and **the third is the one that matters** — authentication without authorization is
 the bug this task exists to prevent, and it is the case a token-only design cannot express.
@@ -240,14 +240,14 @@ async fn probes_are_reachable_without_a_credential() {
 }
 ```
 
-- [ ] **Step 2: Run and watch them fail**
+- [x] **Step 2: Run and watch them fail**
 
 ```bash
 cargo test -p prkdb-cli --test http_authz
 ```
 Expected: FAIL — every request succeeds today, because nothing checks anything.
 
-- [ ] **Step 3: Add `subtle` for constant-time comparison**
+- [x] **Step 3: Add `subtle` for constant-time comparison**
 
 In `Cargo.toml` under `[workspace.dependencies]`:
 
@@ -258,7 +258,7 @@ subtle = "2.6"
 Then add `subtle = { workspace = true }` to `crates/prkdb-cli/Cargo.toml` and
 `crates/prkdb/Cargo.toml`.
 
-- [ ] **Step 4: Map every route to a required permission**
+- [x] **Step 4: Map every route to a required permission**
 
 `serve.rs:226-260` declares **10** routes. All ten need a bucket — the four named in the severity
 note are not the whole surface:
@@ -288,7 +288,7 @@ Expected: `10`. Higher means a route was added since this plan was written — b
 > `Read` on, and return `200 []` rather than `403` when that set is empty — otherwise the status
 > code itself discloses whether collections exist.
 
-- [ ] **Step 5: Write the authorization layer**
+- [x] **Step 5: Write the authorization layer**
 
 > **axum version matters.** This repo uses axum **0.7.9** (`Cargo.toml:44`). In 0.7 the `Next<B>`
 > / `Request<B>` generics of 0.6 were removed — `Next` and `Request` are concrete. Code copied
@@ -363,7 +363,7 @@ let app = app.layer(axum::middleware::from_fn_with_state(
 ));
 ```
 
-- [ ] **Step 6: Handle the WebSocket break deliberately**
+- [x] **Step 6: Handle the WebSocket break deliberately**
 
 `/ws/collections/:name` checks its own optional token *after* the upgrade
 (`serve.rs:954-956`). A middleware layer gates the **upgrade request**, so existing WS clients
@@ -376,7 +376,7 @@ Decide one, and write it down:
 Either way it goes in `CHANGELOG.md`. Silently breaking a working client is worse than the gap
 being closed.
 
-- [ ] **Step 7: Refuse to start unprotected**
+- [x] **Step 7: Refuse to start unprotected**
 
 ```rust
 let authz = match (store.principal_count().await, args.allow_anonymous) {
@@ -397,7 +397,7 @@ let authz = match (store.principal_count().await, args.allow_anonymous) {
 
 Add `#[arg(long)] pub allow_anonymous: bool` to the serve args.
 
-- [ ] **Step 8: Close the second metrics server**
+- [x] **Step 8: Close the second metrics server**
 
 `prkdb-cli serve --prometheus` is not the only HTTP surface.
 `crates/prkdb/src/bin/prkdb-server.rs:87-114` binds its **own** axum server on port
@@ -410,14 +410,14 @@ grep -n 'metrics_addr\|Router::new' crates/prkdb/src/bin/prkdb-server.rs
 Apply the same layer requiring `Admin`, or bind it to `127.0.0.1` only and document that
 operators scrape through a sidecar. Either is defensible; exposing it on `0.0.0.0` is not.
 
-- [ ] **Step 9: Run the tests**
+- [x] **Step 9: Run the tests**
 
 ```bash
 cargo test -p prkdb-cli --test http_authz
 ```
 Expected: all five PASS, including the 403 case.
 
-- [ ] **Step 10: Update the generated clients**
+- [x] **Step 10: Update the generated clients**
 
 The codegen templates in `crates/prkdb-cli/src/commands/codegen.rs` must emit clients that send
 `Authorization: Bearer` and surface 403 distinctly from 401 — a caller needs to know whether to
@@ -427,7 +427,7 @@ re-authenticate or request a grant. Update all three languages, then:
 ./scripts/test_mixed_client_integration.sh
 ```
 
-- [ ] **Step 11: Commit**
+- [x] **Step 11: Commit**
 
 ```bash
 git add crates/prkdb-cli/ crates/prkdb/src/bin/prkdb-server.rs Cargo.toml
