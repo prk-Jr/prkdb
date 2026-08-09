@@ -297,6 +297,59 @@ async fn get_changes_since_works_for_a_single_collection() {
     );
 }
 
+/// A multi-collection database can be replicated, one collection at a time (S-09).
+///
+/// `get_changes_since` takes a bare offset and cannot address a position across
+/// independent per-collection logs. `changes_in_collection` names the collection, which
+/// makes the pair a real cursor — and `fetch_segment` carries that name for exactly this
+/// reason, having previously ignored the `segment_id` it already had.
+#[tokio::test(flavor = "multi_thread")]
+async fn changes_can_be_read_per_collection() {
+    use prkdb_types::replication::Change;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(dir.path());
+
+    db.storage().put(b"users:alice", b"1").await.unwrap();
+    db.storage().put(b"users:bob", b"2").await.unwrap();
+    db.storage().put(b"orders:x", b"3").await.unwrap();
+
+    let users = db
+        .storage()
+        .changes_in_collection("users", 0)
+        .await
+        .expect("naming the collection makes the cursor unambiguous");
+    assert_eq!(users.len(), 2, "expected both users writes, got {users:?}");
+
+    // Keys must come back in the form a consumer can replay through `put`, not the
+    // collection-stripped form the inner adapter stores.
+    for change in &users {
+        let key = match change {
+            Change::Put { key, .. } | Change::Delete { key, .. } => key,
+        };
+        assert!(
+            key.starts_with(b"users:"),
+            "a replicated key must carry its collection, got {:?}",
+            String::from_utf8_lossy(key)
+        );
+    }
+
+    let orders = db
+        .storage()
+        .changes_in_collection("orders", 0)
+        .await
+        .expect("the other collection reads independently");
+    assert_eq!(orders.len(), 1);
+
+    // A collection that does not exist yet is early, not wrong.
+    assert!(db
+        .storage()
+        .changes_in_collection("nonexistent", 0)
+        .await
+        .expect("an unknown collection is not an error")
+        .is_empty());
+}
+
 /// `fetch_segment` must not report success while streaming nothing (S-09).
 ///
 /// `CollectionPartitionedAdapter` does not implement `get_changes_since` — merging N

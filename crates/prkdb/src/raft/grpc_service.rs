@@ -1000,13 +1000,20 @@ impl<S: prkdb_schema::SchemaStorage + 'static> PrkDbServiceTrait for PrkDbGrpcSe
 
         // Create an async stream that reads data
         let db = self.db.clone();
+        let collection = req.collection.clone();
         let stream = async_stream::try_stream! {
             let mut current_offset = start_offset;
             let mut bytes_sent: u64 = 0;
             let storage = db.storage.clone();
 
-            // Use get_changes_since to read records from the offset
-            match storage.get_changes_since(current_offset).await {
+            // Use the (collection, offset) pair as the cursor. `segment_id` was logged
+            // and otherwise ignored, and a bare offset is ambiguous on a database with one
+            // log per collection — see S-09. An empty collection keeps the old behaviour,
+            // which is well defined when there is only one.
+            match storage
+                .changes_in_collection(&collection, current_offset)
+                .await
+            {
                 Ok(changes) => {
                     let mut chunk_data: Vec<u8> = Vec::with_capacity(CHUNK_SIZE);
                     let mut chunk_start = current_offset;

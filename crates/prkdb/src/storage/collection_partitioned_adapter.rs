@@ -103,6 +103,41 @@ impl AggregatedMetrics {
     }
 }
 
+/// Restore the `collection:` prefix a per-collection adapter strips.
+///
+/// Without this a follower would receive `alice` where the leader wrote `users:alice`, and
+/// replay it into whatever collection the bare key happened to parse as.
+fn prefix_change(
+    collection: &str,
+    change: prkdb_types::replication::Change,
+) -> prkdb_types::replication::Change {
+    use prkdb_types::replication::Change;
+
+    let prefixed = |key: Vec<u8>| {
+        let mut full = Vec::with_capacity(collection.len() + 1 + key.len());
+        full.extend_from_slice(collection.as_bytes());
+        full.push(b':');
+        full.extend_from_slice(&key);
+        full
+    };
+
+    match change {
+        Change::Put {
+            key,
+            value,
+            version,
+        } => Change::Put {
+            key: prefixed(key),
+            value,
+            version,
+        },
+        Change::Delete { key, version } => Change::Delete {
+            key: prefixed(key),
+            version,
+        },
+    }
+}
+
 impl CollectionPartitionedAdapter {
     /// Create a new collection-partitioned adapter
     #[instrument(skip(config), fields(base_dir = %config.log_dir.display()))]
@@ -667,6 +702,40 @@ impl StorageAdapter for CollectionPartitionedAdapter {
                 )))
             }
         }
+    }
+
+    /// Changes after `offset` within one collection.
+    ///
+    /// This is the call that makes replication of a multi-collection database possible.
+    /// `get_changes_since` cannot be: it takes a bare offset, and each collection here has
+    /// its own log numbering from 1, so the cursor is ambiguous. Naming the collection
+    /// resolves it, and `fetch_segment` carries the name for exactly that reason.
+    ///
+    /// An unknown collection returns no changes rather than an error: a follower asking
+    /// about a collection that has not been created yet is early, not wrong.
+    async fn changes_in_collection(
+        &self,
+        collection: &str,
+        offset: u64,
+    ) -> Result<Vec<prkdb_types::replication::Change>, StorageError> {
+        let Some(adapter) = self
+            .load_all_collections()
+            .await
+            .into_iter()
+            .find(|(name, _)| name == collection)
+            .map(|(_, adapter)| adapter)
+        else {
+            return Ok(Vec::new());
+        };
+
+        // The inner adapter stores keys without the collection prefix, but a replication
+        // consumer must be able to apply what it receives — and `put` at this layer takes
+        // the full `collection:id` form. Re-prefix so a change can be replayed as-is.
+        let changes = adapter.get_changes_since(offset).await?;
+        Ok(changes
+            .into_iter()
+            .map(|change| prefix_change(collection, change))
+            .collect())
     }
 
     /// Snapshot every collection into a single archive.

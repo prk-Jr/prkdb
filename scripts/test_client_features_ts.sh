@@ -58,8 +58,13 @@ fi
 
 # Start server
 echo "🚀 Starting server on port $SERVER_PORT..."
+# --allow-anonymous: this script exercises client features, not authorization, and
+# its client calls carry no credential. `serve` refuses to start without principals
+# (spec S-01), so the choice is to state the intent here or thread a credential
+# through every call in a script that is not about credentials.
+# scripts/test_mixed_client_integration.sh covers the authorized path.
 PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" \
-    "$PRKDB_BIN" --database "$DATABASE_PATH" --verbose serve --port $SERVER_PORT --grpc-port $GRPC_PORT > "$WORK_DIR/server.log" 2>&1 &
+    "$PRKDB_BIN" --database "$DATABASE_PATH" --verbose serve --allow-anonymous --port $SERVER_PORT --grpc-port $GRPC_PORT > "$WORK_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 echo $SERVER_PID > "$WORK_DIR/server.pid"
 echo "Server PID: $SERVER_PID"

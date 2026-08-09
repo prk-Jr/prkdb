@@ -60,8 +60,13 @@ trap cleanup EXIT
 
 # 1. Start server
 echo "🚀 Starting server on HTTP $HTTP_PORT / gRPC $GRPC_PORT..."
+# --allow-anonymous: this script exercises client features, not authorization, and
+# its client calls carry no credential. `serve` refuses to start without principals
+# (spec S-01), so the choice is to state the intent here or thread a credential
+# through every call in a script that is not about credentials.
+# scripts/test_mixed_client_integration.sh covers the authorized path.
 PRKDB_ADMIN_TOKEN="$ADMIN_TOKEN" \
-    $PRKDB_BIN --database "$DATABASE_PATH" serve --port "$HTTP_PORT" --grpc-port "$GRPC_PORT" > "$LOG_FILE" 2>&1 &
+    $PRKDB_BIN --database "$DATABASE_PATH" serve --allow-anonymous --port "$HTTP_PORT" --grpc-port "$GRPC_PORT" > "$LOG_FILE" 2>&1 &
 SERVER_PID=$!
 echo "Server PID: $SERVER_PID"
 wait_for_server

@@ -1340,6 +1340,23 @@ impl PrkDbClient {
     ) -> anyhow::Result<
         impl tokio_stream::Stream<Item = Result<prkdb_proto::raft::RawChunk, tonic::Status>>,
     > {
+        self.fetch_segment_in("", start_offset, max_bytes).await
+    }
+
+    /// As [`fetch_segment_raw`](Self::fetch_segment_raw), for one collection.
+    ///
+    /// A database opened with `--database` keeps one log per collection, each numbering
+    /// its records from 1, so `start_offset` alone does not identify a position across
+    /// them. Naming the collection makes the pair a cursor. An empty name means "the whole
+    /// database", which is only well defined when there is one collection.
+    pub async fn fetch_segment_in(
+        &self,
+        collection: &str,
+        start_offset: u64,
+        max_bytes: u64,
+    ) -> anyhow::Result<
+        impl tokio_stream::Stream<Item = Result<prkdb_proto::raft::RawChunk, tonic::Status>>,
+    > {
         use prkdb_proto::raft::FetchSegmentRequest;
 
         let mut client = self.get_any_client().await?;
@@ -1348,6 +1365,7 @@ impl PrkDbClient {
             start_offset,
             max_bytes,
             segment_id: 0, // Auto-detect
+            collection: collection.to_string(),
         };
 
         let response = client.fetch_segment(request).await?;
