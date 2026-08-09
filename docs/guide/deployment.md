@@ -100,6 +100,88 @@ export PRKDB_ADMIN_TOKEN=change-me
 prkdb schema list --server http://127.0.0.1:8080
 ```
 
+## Backup and Restore
+
+`prkdb-cli backup` operates **offline**, directly on a data directory — it does not talk to
+a running server. Point it at a stopped node, or at a copy of the directory.
+
+```bash
+prkdb-cli --database /var/lib/prkdb backup --output /backups/prkdb-$(date +%F).bin
+```
+
+This writes two files: the archive, and a `.manifest` sidecar recording the archive's
+length, SHA-256, entry count, and format version.
+
+```bash
+prkdb-cli restore --input /backups/prkdb-2026-08-09.bin --data-dir /var/lib/prkdb-restored
+```
+
+`restore` verifies the archive against its manifest **before writing anything**, so a
+corrupt archive fails without leaving a half-populated target. Keep the two files
+together; a missing manifest downgrades to a warning so older archives still restore, but
+then nothing is checked.
+
+- `--force` — restore into a non-empty directory. Without it, restore refuses rather than
+  merging two databases.
+- `--skip-verify` — restore despite a manifest mismatch. This is for salvaging what is
+  readable from a damaged archive, not for silencing the check. A mismatch means the
+  archive is not the one that was backed up.
+
+### Verify the backup, not just the exit code
+
+A backup nobody has restored is not a backup. Restore into a scratch directory on a
+schedule and check a known key:
+
+```bash
+prkdb-cli restore --input "$ARCHIVE" --data-dir /tmp/verify-$$ && rm -rf /tmp/verify-$$
+```
+
+### Scheduling
+
+Scheduling belongs to the operator, not to the database — PrkDB deliberately ships no
+internal scheduler, so backups follow the same operational controls as everything else you
+run (alerting on failure, retention, offsite copies).
+
+A systemd timer, for a node whose data directory is `/var/lib/prkdb`:
+
+```ini
+# /etc/systemd/system/prkdb-backup.service
+[Unit]
+Description=PrkDB backup
+# Back up a stopped node or a snapshot of its directory. Backing up a directory that is
+# being written to captures an inconsistent point in time.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/prkdb-cli --database /var/lib/prkdb \
+    backup --output /backups/prkdb-%%i.bin
+```
+
+```ini
+# /etc/systemd/system/prkdb-backup.timer
+[Unit]
+Description=Nightly PrkDB backup
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+The cron equivalent, with retention:
+
+```cron
+# Nightly at 02:30; keep 14 days.
+30 2 * * * prkdb-cli --database /var/lib/prkdb backup \
+    --output /backups/prkdb-$(date +\%%F).bin >> /var/log/prkdb-backup.log 2>&1
+15 3 * * * find /backups -name 'prkdb-*.bin*' -mtime +14 -delete
+```
+
+Note the `*` in the retention glob: it removes each archive's `.manifest` alongside it.
+Deleting archives while leaving manifests behind accumulates files that describe nothing.
+
 ## Operational Notes
 
 - `CLUSTER_NODES` should contain every node in the cluster, including the local node.

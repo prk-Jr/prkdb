@@ -107,6 +107,21 @@ jobs:
       - name: Run Extended Chaos Tests
         run: cargo test --test extended_chaos_tests -- --nocapture
 
+      # These need `--features chaos`: partitioning is injected through the fault
+      # injector, which is compiled only under that feature. Without it the partition
+      # tests are #[cfg]'d out entirely rather than silently partitioning nothing — so
+      # they must be run somewhere that enables it, or they never run at all.
+      #
+      # They use the in-process cluster harness, so no prebuilt binary is required.
+      - name: Run Election Safety Tests
+        run: cargo test --features chaos --test election_safety -- --nocapture
+
+      - name: Run Read Consistency Mode Tests
+        run: cargo test --features chaos --test read_consistency_modes -- --nocapture
+
+      - name: Run In-Process Cluster Harness Tests
+        run: cargo test --features chaos --test in_process_cluster -- --nocapture
+
       - name: Cleanup
         if: always()
         run: |

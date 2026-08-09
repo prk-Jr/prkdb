@@ -4,6 +4,7 @@
 // Many items are reserved for future test scenarios.
 #![allow(dead_code)]
 
+pub mod in_process_cluster;
 pub mod jepsen_checker;
 pub mod leader_redirect;
 pub mod network_simulator;
@@ -60,6 +61,10 @@ pub use jepsen_checker::{
     BankAccounts, InvariantResult, LinearizabilityResult, OpKind, OpResult, Operation,
     OperationHistory,
 };
+// Each test binary compiles this module in full, so a re-export any one of them does
+// not use is a warning there. Same reason as the other re-exports below.
+#[allow(unused_imports)]
+pub use in_process_cluster::{InProcessCluster, ReadConsistency};
 pub use network_simulator::NetworkSimulator;
 #[allow(unused_imports)]
 pub use test_cluster::TestCluster;

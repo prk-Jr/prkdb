@@ -36,6 +36,23 @@ not enforced by anything, and several tests reported green while testing nothing
 
 ### Added
 
+- **An in-process cluster harness** (`InProcessCluster`). Raft tests no longer need a
+  prebuilt `prkdb-server` binary — the dependency that produced
+  `#[ignore] // Requires server binary` on the tests of a consensus implementation. It
+  forms real clusters, partitions them, and stops nodes, all inside the test process.
+- **Election safety is asserted**: at most one leader per term, sampled across partitions,
+  heals, and leader loss. Stated per term deliberately — two simultaneous leaders in
+  *different* terms is correct Raft behaviour, so the obvious assertion is the wrong one.
+- **The read consistency modes are verified to differ.** `ReadConsistency::Linearizable` is
+  public API on three surfaces and had no enforced coverage. A linearizable history is now
+  checked with the Wing & Gong search, and a partition demonstrates a stale read genuinely
+  lagging — without which a "linearizable" mode that was merely the stale code path would
+  pass every test.
+- **Backups carry a manifest**: length, SHA-256, entry count, and format version, written
+  beside the archive. `restore` verifies before writing anything, and reports truncation as
+  truncation rather than as an opaque digest mismatch. `--skip-verify` exists for salvage.
+- Backup scheduling and verification guidance in the deployment guide, with systemd-timer
+  and cron examples. The retention glob deletes each archive's manifest with it.
 - WAL segments carry a **magic number and format version**. A future format is refused
   rather than misparsed; segments written before headers existed are still read.
 - `/livez` and `/readyz` as distinct probes. Liveness touches nothing; readiness reports
@@ -83,6 +100,12 @@ not enforced by anything, and several tests reported green while testing nothing
   observe half a commit. Publication now happens under a dedicated barrier, and
   `snapshot_get_many` holds it for the duration of a multi-key read. Nothing was ever lost;
   this was always a read-visibility property, not a durability one.
+- **All 70 documentation examples in `prkdb` now compile**, from 7 passing and 63
+  `#[ignore]`d. Converting them surfaced eight API drifts that no test could have caught,
+  including `Transaction::insert` documented as `async` when it is synchronous,
+  `create_compound_index` shown with one generic argument where it takes two, and
+  `PartitionedStreamingAdapter::new` shown with a partition-count argument it does not
+  take. A README diagram mistagged as `rust` is now `text`.
 - **The linearizability checker could not fail.** It asked only whether *some* write of the
   same value had started before the read ended — a condition any earlier write satisfies.
   Replaced with Wing & Gong linear search, guarded by a meta-test that injects the
@@ -111,7 +134,13 @@ not enforced by anything, and several tests reported green while testing nothing
 
 ### Known issues
 
-- 63 documentation examples are still `#[ignore]`d and do not compile.
+- **`RaftService` is unauthenticated.** Peers are exempt from the client-API layer by
+  design and `PeerAuthInterceptor` is written but not installed, so a caller who can reach
+  the port can still forge `AppendEntries`. Tracked as Task 2b Step 4.
+- The README's 37 Rust examples are still compiled by nothing. Including it as crate docs
+  was attempted and reverted: most are two-line fragments needing hidden `# ` setup, which
+  renders literally on GitHub where the README is actually read. Closing this properly
+  means rewriting the fragments as self-contained examples.
 - Two keys read with two separate `get()` calls are still not a snapshot; use
   `snapshot_get_many` or a transaction. This is a property of the API the caller picks,
   not a defect, and `batch_atomicity.rs` asserts it so it stays explicit.

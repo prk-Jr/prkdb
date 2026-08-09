@@ -6,12 +6,20 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
-//! let tx = db.begin_transaction();
-//! tx.put(b"key1", b"value1")?;
-//! tx.put(b"key2", b"value2")?;
+//! ```no_run
+//! # use prkdb::storage::WalStorageAdapter;
+//! # use prkdb::transaction::TransactionExt;
+//! # use prkdb_core::wal::WalConfig;
+//! # use std::sync::Arc;
+//! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+//! # let db = Arc::new(WalStorageAdapter::new(WalConfig::default())?);
+//! let mut tx = db.begin_transaction();
+//! tx.put(b"key1".to_vec(), b"value1")?;
+//! tx.put(b"key2".to_vec(), b"value2")?;
 //! let value = tx.get(b"key3").await?;
 //! tx.commit().await?;  // Atomic commit of all changes
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Performance

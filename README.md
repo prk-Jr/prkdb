@@ -385,7 +385,7 @@ let users = db.search::<User>("bio", "rust async developer").await?;
 
 ### Query Plan Explain
 
-```rust
+```text
 let plan = db.query::<User>()
     .filter(|u| u.age > 18)
     .take(10)

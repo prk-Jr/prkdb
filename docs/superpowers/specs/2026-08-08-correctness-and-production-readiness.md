@@ -527,8 +527,31 @@ means they get looked at less.
 **Acceptance:**
 1. Zero ```` ```ignore ```` fences on public API items in `crates/prkdb/src`. Examples that
    cannot execute use `no_run`, which still type-checks. Non-Rust content uses ```` ```text ````.
-2. `#![doc = include_str!("../../../README.md")]` on the `prkdb` crate root.
+2. ~~`#![doc = include_str!("../../../README.md")]` on the `prkdb` crate root.~~
+   **Not done — see below.**
 3. `cargo test --doc -p prkdb` reports ≥60 passing.
+
+> **Status: 1 and 3 done 2026-08-09.** `cargo test --doc -p prkdb` reports **70 passed, 0
+> failed, 0 ignored**, from 7 passed / 63 ignored. Converting the fences found eight real
+> API drifts that no test could have caught, among them `Transaction::insert` documented as
+> `async` when it is synchronous, `create_compound_index` shown with one generic argument
+> where the method takes two, and `PartitionedStreamingAdapter::new` shown with a partition
+> count it has not accepted for some time. Those examples had been wrong for as long as
+> they had been `ignore`d, which is the argument for the requirement.
+>
+> **Acceptance 2 was attempted and deliberately reverted.** Including the README compiles
+> its 38 Rust fences: 1 was a box-drawing diagram mistagged as `rust` (fixed — it now says
+> `text`), and 37 are real code, of which roughly thirty are two- and three-line fragments
+> like `let count = db.count::<User>().await?;`. Making those compile requires a hidden
+> `# ` setup preamble on each. Hidden lines are invisible in rustdoc but **render literally
+> on GitHub**, where the README is mostly read — so satisfying this item would put ~120
+> lines of `# use …` noise into the project's front page to benefit a doctest run.
+>
+> The requirement's purpose is that documentation cannot drift from the API without
+> something failing. That is now true of all 70 in-crate doctests. It is still **not** true
+> of the README, which remains unverified; the honest way to close that is to rewrite its
+> fragments as self-contained runnable examples, which is a documentation rewrite rather
+> than a test change and is not attempted here.
 
 ### R6 — Chaos injection must not ship in release builds
 

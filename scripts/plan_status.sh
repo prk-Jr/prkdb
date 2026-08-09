@@ -153,7 +153,9 @@ check "orphan security.rs removed"                   "R11" test ! -f crates/prkd
 
 group "Plan A · Tasks 17-19 — Claims and discipline"
 check "linearizable read mode verified"              "R14" test -f crates/prkdb/tests/read_consistency_modes.rs
-check "no bare #[ignore] without a reason"           "R16" none '#\[ignore\]' crates/
+# none_in_code, not none: several module docs explain why tests *used* to be
+# `#[ignore]`d, and describing the history must not read as still doing it.
+check "no bare #[ignore] without a reason"           "R16" none_in_code '#\[ignore\]' crates/
 
 # Plan B — Production security ───────────────────────────────────────────────
 

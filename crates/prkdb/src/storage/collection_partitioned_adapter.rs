@@ -306,7 +306,10 @@ impl CollectionPartitionedAdapter {
     /// Reads from multiple collections in parallel for maximum throughput.
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::storage::CollectionPartitionedAdapter;
+    /// # async fn demo(adapter: &CollectionPartitionedAdapter)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
     /// let queries = vec![
     ///     ("users".to_string(), b"john".to_vec()),
     ///     ("orders".to_string(), b"order_123".to_vec()),
@@ -315,6 +318,8 @@ impl CollectionPartitionedAdapter {
     ///
     /// // All 3 reads happen in PARALLEL!
     /// let results = adapter.multi_collection_get(queries).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn multi_collection_get(
         &self,

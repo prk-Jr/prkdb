@@ -10,14 +10,21 @@
 //! - **Zero-copy reads**: Direct mmap access for consumers
 //!
 //! # Example
-//! ```ignore
-//! let adapter = StreamingStorageAdapter::new(config)?;
+//! ```no_run
+//! # use prkdb::storage::streaming_adapter::{
+//! #     StreamingConfig, StreamingRecord, StreamingStorageAdapter,
+//! # };
+//! # async fn demo(config: StreamingConfig, records: Vec<StreamingRecord>)
+//! #     -> Result<(), Box<dyn std::error::Error>> {
+//! let adapter = StreamingStorageAdapter::new(config).await?;
 //!
 //! // Append records (returns starting offset)
 //! let offset = adapter.append_batch(records).await?;
 //!
 //! // Read from offset
 //! let records = adapter.read_from(offset, 1000).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use prkdb_core::wal::mmap_parallel_wal::MmapParallelWal;

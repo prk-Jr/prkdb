@@ -17,14 +17,14 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust,ignore
+//! ```no_run
 //! use prkdb::indexed_storage::IndexedStorage;
 //! use prkdb::storage::InMemoryAdapter;
 //! use prkdb_macros::Collection;
 //! use serde::{Serialize, Deserialize};
 //! use std::sync::Arc;
 //!
-//! #[derive(Collection, Serialize, Deserialize, Clone)]
+//! #[derive(Collection, Serialize, Deserialize, Clone, Debug)]
 //! struct User {
 //!     #[id]
 //!     id: String,
@@ -397,12 +397,81 @@ impl std::fmt::Display for QueryPlan {
 /// Query builder for fluent query construction
 ///
 /// # Example
-/// ```ignore
+/// ```no_run
+/// # use prkdb::indexed_storage::IndexedStorage;
+/// # use prkdb::prelude::*;
+/// # use prkdb::storage::InMemoryAdapter;
+/// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+/// # use serde::{Deserialize, Serialize};
+/// # use std::collections::HashMap;
+/// # use std::sync::Arc;
+/// # use std::time::Duration;
+/// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+/// # struct User {
+/// #     #[id]
+/// #     id: u64,
+/// #     #[index]
+/// #     age: u32,
+/// #     #[index]
+/// #     name: String,
+/// #     #[index]
+/// #     role: String,
+/// #     active: bool,
+/// #     email_verified: bool,
+/// #     deleted: bool,
+/// #     salary: f64,
+/// #     bio: String,
+/// #     birth_date: u64,
+/// #     created_at: u64,
+/// #     updated_at: u64,
+/// # }
+/// # impl SoftDeletable for User {
+/// #     fn is_deleted(&self) -> bool { self.deleted }
+/// #     fn mark_deleted(&mut self) { self.deleted = true; }
+/// #     fn restore(&mut self) { self.deleted = false; }
+/// # }
+/// # impl Timestamped for User {
+/// #     fn created_at(&self) -> u64 { self.created_at }
+/// #     fn updated_at(&self) -> u64 { self.updated_at }
+/// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+/// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+/// # }
+/// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+/// # struct Order {
+/// #     #[id]
+/// #     id: u64,
+/// #     #[index]
+/// #     user_id: u64,
+/// #     total: f64,
+/// # }
+/// # fn sample_user() -> User {
+/// #     User {
+/// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+/// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+/// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+/// #     }
+/// # }
+/// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+/// #     -> Result<(), Box<dyn std::error::Error>> {
+/// # let storage = Arc::new(InMemoryAdapter::new());
+/// # let backup_storage = Arc::new(InMemoryAdapter::new());
+/// # let user_id: u64 = 1;
+/// # let now: u64 = 0;
+/// # let user = sample_user();
+/// # let new_user = sample_user();
+/// # let old_user = sample_user();
+/// # let updated_user = sample_user();
+/// # let user1 = sample_user();
+/// # let user2 = sample_user();
+/// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+/// #          &old_user, &updated_user, &user1, &user2);
 /// let users = db.query::<User>()
 ///     .filter(|u| u.age > 18)
 ///     .order_by(|u| u.created_at)
 ///     .take(10)
 ///     .collect().await?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct QueryBuilder<'a, S: StorageAdapter, T> {
     storage: &'a IndexedStorage<S>,
@@ -475,7 +544,74 @@ where
     /// Works by filtering out records with IDs <= the cursor.
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// // First page
     /// let page1 = db.query::<User>()
     ///     .order_by(|u| u.id)
@@ -489,6 +625,8 @@ where
     ///     .order_by(|u| u.id)
     ///     .take(10)
     ///     .collect().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn after(self, cursor: &<T as Collection>::Id) -> Self
     where
@@ -503,7 +641,74 @@ where
     /// Returns results along with the cursor for the next page.
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let (users, next_cursor) = db.query::<User>()
     ///     .order_by(|u| u.id)
     ///     .paginate(10, None).await?;
@@ -514,6 +719,8 @@ where
     ///         .order_by(|u| u.id)
     ///         .paginate(10, Some(cursor)).await?;
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn paginate(
         self,
@@ -550,12 +757,81 @@ where
     /// Explain the query execution plan without executing it
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let plan = db.query::<User>()
     ///     .filter(|u| u.age > 18)
     ///     .take(10)
     ///     .explain();
     /// println!("{}", plan);  // Pretty-printed query plan
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn explain(&self) -> QueryPlan {
         let collection = std::any::type_name::<T>().to_string();
@@ -647,13 +923,82 @@ where
     /// Add computed fields to results
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let users_with_age = db.query::<User>()
     ///     .with_computed(|user| {
     ///         let age_days = (now - user.birth_date) / 86400;
     ///         age_days
     ///     })
-    ///     .collect().await?;  // Vec<WithComputed<User, u64>>
+    ///     .await?;  // Vec<WithComputed<User, u64>>
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn with_computed<C, F>(
         self,
@@ -675,10 +1020,79 @@ where
     /// Extract a single field from all records (like SQL SELECT column)
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let names: Vec<String> = db.query::<User>()
     ///     .pluck(|u| u.name.clone())
     ///     .await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn pluck<V, F>(self, field_fn: F) -> Result<Vec<V>, StorageError>
     where
@@ -693,10 +1107,79 @@ where
     /// Returns (matching, not_matching)
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let (active, inactive) = db.query::<User>()
     ///     .partition(|u| u.active)
     ///     .await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn partition<F>(self, predicate: F) -> Result<(Vec<T>, Vec<T>), StorageError>
     where
@@ -710,11 +1193,80 @@ where
     /// Take records while predicate is true
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let early_users = db.query::<User>()
     ///     .order_by(|u| u.id as i64)
     ///     .take_while(|u| u.id < 100)
     ///     .await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn take_while<F>(self, predicate: F) -> Result<Vec<T>, StorageError>
     where
@@ -727,11 +1279,80 @@ where
     /// Skip records while predicate is true
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let later_users = db.query::<User>()
     ///     .order_by(|u| u.id as i64)
     ///     .skip_while(|u| u.id < 100)
     ///     .await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn skip_while<F>(self, predicate: F) -> Result<Vec<T>, StorageError>
     where
@@ -744,10 +1365,79 @@ where
     /// Get distinct values by a key function
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let unique_roles = db.query::<User>()
     ///     .distinct(|u| u.role.clone())
     ///     .await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn distinct<K, F>(self, key_fn: F) -> Result<Vec<K>, StorageError>
     where
@@ -769,10 +1459,79 @@ where
     /// Group results by a key function
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let by_role = db.query::<User>()
     ///     .group_by(|u| u.role.clone())
     ///     .await?;  // HashMap<String, Vec<User>>
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn group_by<K, F>(
         self,
@@ -794,10 +1553,79 @@ where
     /// Sum values by a key function (grouped aggregation)
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let salaries_by_role = db.query::<User>()
     ///     .sum_by(|u| u.role.clone(), |u| u.salary)
     ///     .await?;  // HashMap<String, f64>
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn sum_by<K, V, KF, VF>(
         self,
@@ -824,10 +1652,79 @@ where
     /// Count records by a key function (grouped count)
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let users_by_role = db.query::<User>()
     ///     .count_by(|u| u.role.clone())
     ///     .await?;  // HashMap<String, usize>
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn count_by<K, F>(
         self,
@@ -849,10 +1746,79 @@ where
     /// Find minimum value by a field
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let youngest = db.query::<User>()
     ///     .min_by(|u| u.age)
     ///     .await?;  // Option<User>
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn min_by<K, F>(self, key_fn: F) -> Result<Option<T>, StorageError>
     where
@@ -866,10 +1832,79 @@ where
     /// Find maximum value by a field
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let oldest = db.query::<User>()
     ///     .max_by(|u| u.age)
     ///     .await?;  // Option<User>
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn max_by<K, F>(self, key_fn: F) -> Result<Option<T>, StorageError>
     where
@@ -883,10 +1918,79 @@ where
     /// Calculate average of a numeric field
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let avg_age = db.query::<User>()
     ///     .avg_by(|u| u.age as f64)
     ///     .await?;  // Option<f64>
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn avg_by<F>(self, field_fn: F) -> Result<Option<f64>, StorageError>
     where
@@ -903,10 +2007,79 @@ where
     /// Check if any record matches a predicate
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let has_admin = db.query::<User>()
     ///     .any(|u| u.role == "admin")
     ///     .await?;  // bool
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn any<F>(self, predicate: F) -> Result<bool, StorageError>
     where
@@ -919,10 +2092,79 @@ where
     /// Check if all records match a predicate
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let all_active = db.query::<User>()
     ///     .all(|u| u.active)
     ///     .await?;  // bool
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn all<F>(self, predicate: F) -> Result<bool, StorageError>
     where
@@ -935,10 +2177,79 @@ where
     /// Fold/reduce over records with initial value
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let total_salary = db.query::<User>()
     ///     .fold(0.0, |acc, u| acc + u.salary)
     ///     .await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn fold<B, F>(self, init: B, fold_fn: F) -> Result<B, StorageError>
     where
@@ -951,10 +2262,79 @@ where
     /// Get a random sample of records
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let sample = db.query::<User>()
     ///     .sample(5)
     ///     .await?;  // 5 random users
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn sample(self, n: usize) -> Result<Vec<T>, StorageError> {
         use std::collections::hash_map::DefaultHasher;
@@ -983,11 +2363,80 @@ where
     /// Get last matching record
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let last_admin = db.query::<User>()
     ///     .filter(|u| u.role == "admin")
     ///     .last()
     ///     .await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn last(self) -> Result<Option<T>, StorageError> {
         let records = self.collect().await?;
@@ -999,10 +2448,79 @@ where
     /// Returns Vec of Vec where each inner Vec has at most `size` elements.
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let chunks = db.query::<User>()
     ///     .chunks(10)
     ///     .await?;  // Vec<Vec<User>>, each with up to 10 users
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn chunks(self, size: usize) -> Result<Vec<Vec<T>>, StorageError> {
         let records = self.collect().await?;
@@ -1012,10 +2530,79 @@ where
     /// Add index to each record (like enumerate)
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let indexed = db.query::<User>()
     ///     .enumerate()
     ///     .await?;  // Vec<(usize, User)>
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn enumerate(self) -> Result<Vec<(usize, T)>, StorageError> {
         let records = self.collect().await?;
@@ -1025,11 +2612,80 @@ where
     /// Remove consecutive duplicates by key
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let unique_roles = db.query::<User>()
     ///     .order_by(|u| u.role.clone())
     ///     .dedup_by_key(|u| u.role.clone())
     ///     .await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn dedup_by_key<K, F>(self, key_fn: F) -> Result<Vec<T>, StorageError>
     where
@@ -1054,11 +2710,80 @@ where
     /// Join two record sets by a key
     ///
     /// # Example
-    /// ```ignore
-    /// let users = vec![...];
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
+    /// let users = vec![sample_user()];
     /// let joined = db.query::<Order>()
     ///     .join_with(&users, |order| order.user_id, |user| user.id)
     ///     .await?;  // Vec<(Order, Option<User>)>
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn join_with<R, FK, RK, K>(
         self,
@@ -1103,7 +2828,74 @@ where
     /// avoiding N+1 query problem.
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// // User has many Orders
     /// let users_with_orders = db.query::<User>()
     ///     .filter(|u| u.active)
@@ -1114,6 +2906,8 @@ where
     /// for (user, orders) in users_with_orders {
     ///     println!("{} has {} orders", user.name, orders.len());
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn collect_with<R, FK, RK>(
         self,
@@ -1160,13 +2954,82 @@ where
     /// Eager load a single related record (has_one/belongs_to relationship)
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// // Order belongs to User
     /// let orders_with_user = db.query::<Order>()
     ///     .collect_with_one::<User, _>(|order| order.user_id.clone())
     ///     .await?;
     ///
     /// // Returns Vec<(Order, Option<User>)>
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn collect_with_one<R, FK>(
         self,
@@ -1256,13 +3119,82 @@ enum TxOperation {
 /// Transaction for atomic operations with rollback support
 ///
 /// # Example
-/// ```ignore
+/// ```no_run
+/// # use prkdb::indexed_storage::IndexedStorage;
+/// # use prkdb::prelude::*;
+/// # use prkdb::storage::InMemoryAdapter;
+/// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+/// # use serde::{Deserialize, Serialize};
+/// # use std::collections::HashMap;
+/// # use std::sync::Arc;
+/// # use std::time::Duration;
+/// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+/// # struct User {
+/// #     #[id]
+/// #     id: u64,
+/// #     #[index]
+/// #     age: u32,
+/// #     #[index]
+/// #     name: String,
+/// #     #[index]
+/// #     role: String,
+/// #     active: bool,
+/// #     email_verified: bool,
+/// #     deleted: bool,
+/// #     salary: f64,
+/// #     bio: String,
+/// #     birth_date: u64,
+/// #     created_at: u64,
+/// #     updated_at: u64,
+/// # }
+/// # impl SoftDeletable for User {
+/// #     fn is_deleted(&self) -> bool { self.deleted }
+/// #     fn mark_deleted(&mut self) { self.deleted = true; }
+/// #     fn restore(&mut self) { self.deleted = false; }
+/// # }
+/// # impl Timestamped for User {
+/// #     fn created_at(&self) -> u64 { self.created_at }
+/// #     fn updated_at(&self) -> u64 { self.updated_at }
+/// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+/// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+/// # }
+/// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+/// # struct Order {
+/// #     #[id]
+/// #     id: u64,
+/// #     #[index]
+/// #     user_id: u64,
+/// #     total: f64,
+/// # }
+/// # fn sample_user() -> User {
+/// #     User {
+/// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+/// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+/// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+/// #     }
+/// # }
+/// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+/// #     -> Result<(), Box<dyn std::error::Error>> {
+/// # let storage = Arc::new(InMemoryAdapter::new());
+/// # let backup_storage = Arc::new(InMemoryAdapter::new());
+/// # let user_id: u64 = 1;
+/// # let now: u64 = 0;
+/// # let user = sample_user();
+/// # let new_user = sample_user();
+/// # let old_user = sample_user();
+/// # let updated_user = sample_user();
+/// # let user1 = sample_user();
+/// # let user2 = sample_user();
+/// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+/// #          &old_user, &updated_user, &user1, &user2);
 /// let mut tx = db.transaction();
-/// tx.insert(&user1).await?;
+/// tx.insert(&user1)?;
 /// tx.savepoint("sp1");
-/// tx.insert(&user2).await?;
-/// tx.rollback_to("sp1"); // user2 insert removed
-/// tx.commit().await?;    // Only user1 inserted
+/// tx.insert(&user2)?;
+/// tx.rollback_to("sp1")?; // user2 insert removed
+/// tx.commit().await?;     // Only user1 inserted
+/// # Ok(())
+/// # }
 /// ```
 pub struct Transaction<'a, S: StorageAdapter> {
     storage: &'a IndexedStorage<S>,
@@ -1532,13 +3464,82 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Start a transaction for atomic operations
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let mut tx = db.transaction();
     /// tx.insert(&user1)?;
     /// tx.insert(&user2)?;
     /// tx.delete(&old_user)?;
     /// tx.commit().await?;  // All applied atomically
     /// // OR: tx.rollback();  // Nothing changed
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn transaction(&self) -> Transaction<'_, S> {
         Transaction::new(self)
@@ -1586,8 +3587,77 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Create indexed storage with indexes loaded from disk
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let db = IndexedStorage::load_from(storage, "./data/indexes.db").await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn load_from<P: AsRef<std::path::Path>>(
         storage: Arc<S>,
@@ -1628,9 +3698,78 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Start background auto-sync of indexes to disk
     ///
     /// # Example
-    /// ```ignore
-    /// let db = IndexedStorage::load_from(storage, "./indexes.db").await?;
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
+    /// let mut db = IndexedStorage::load_from(storage, "./indexes.db").await?;
     /// db.start_auto_sync(Duration::from_secs(30)).await;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn start_auto_sync(&mut self, interval: std::time::Duration) {
         // Stop any existing sync task
@@ -1685,8 +3824,77 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Save indexes to disk
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// db.save_indexes("./data/indexes.db").await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn save_indexes<P: AsRef<std::path::Path>>(
         &self,
@@ -1829,12 +4037,81 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Create a full-text index on a field
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// // Index all existing records
     /// db.create_text_index::<User, _>("bio", |u| &u.bio).await?;
     ///
     /// // Later, search the index
     /// let results = db.search::<User>("bio", "rust developer").await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn create_text_index<T, F>(
         &self,
@@ -1872,9 +4149,78 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Uses lock-free DashMap for concurrent text search.
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let results = db.search::<User>("bio", "rust async").await?;
     /// // Returns users whose bio contains "rust" and/or "async", ranked by match count
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn search<T: Collection + DeserializeOwned>(
         &self,
@@ -1966,18 +4312,88 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Calls before_insert before saving, after_insert after saving.
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// impl Hooks for User {
     ///     fn before_insert(&mut self) -> Result<(), String> {
     ///         self.name = self.name.trim().to_string();
     ///         Ok(())
     ///     }
     ///     fn after_insert(&self) {
-    ///         log::info!("User {} created", self.id);
+    ///         println!("User {} created", self.id);
     ///     }
     /// }
     ///
+    /// let mut user = sample_user();
     /// db.insert_with_hooks(&mut user).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn insert_with_hooks<T>(&self, record: &mut T) -> Result<(), StorageError>
     where
@@ -2015,7 +4431,74 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Insert a record with validation
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// impl Validatable for User {
     ///     fn validate(&self) -> Result<(), Vec<ValidationError>> {
     ///         let mut errors = Vec::new();
@@ -2028,6 +4511,8 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     ///
     /// // Will fail if validation fails
     /// db.insert_validated(&user).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn insert_validated<T>(&self, record: &T) -> Result<(), StorageError>
     where
@@ -2048,10 +4533,82 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Sets created_at and updated_at to current time before insert.
     ///
     /// # Example
-    /// ```ignore
-    /// let mut user = User { id: 1, name: "Alice".into(), created_at: 0, updated_at: 0 };
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
+    /// let mut user = User {
+    ///     id: 1, name: "Alice".into(), created_at: 0, updated_at: 0,
+    ///     ..sample_user()
+    /// };
     /// db.insert_timestamped(&mut user).await?;
     /// println!("Created at: {}", user.created_at);
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn insert_timestamped<T>(&self, record: &mut T) -> Result<(), StorageError>
     where
@@ -2088,9 +4645,78 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// If not, a new record will be inserted.
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// // Always works, whether user exists or not
     /// db.upsert(&user).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn upsert<T: Indexed + Collection>(&self, record: &T) -> Result<bool, StorageError> {
         let primary_key = serde_json::to_vec(record.id())
@@ -2113,10 +4739,79 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Check if a record exists by ID
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// if db.exists::<User>(&user_id).await? {
     ///     println!("User exists!");
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn exists<T: Collection>(&self, id: &T::Id) -> Result<bool, StorageError> {
         let primary_key = serde_json::to_vec(id)
@@ -2131,11 +4826,80 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Returns None if the record doesn't exist.
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let updated = db.update::<User, _>(&user_id, |user| {
     ///     user.name = "New Name".to_string();
     ///     user.age += 1;
     /// }).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn update<T, F>(&self, id: &T::Id, update_fn: F) -> Result<Option<T>, StorageError>
     where
@@ -2160,7 +4924,74 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Soft delete a record (mark as deleted instead of removing)
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// // Mark user as deleted (keeps data)
     /// db.soft_delete::<User>(&user_id).await?;
     ///
@@ -2168,6 +4999,8 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// let active = db.query::<User>()
     ///     .filter(|u| u.is_active())
     ///     .collect().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn soft_delete<T>(&self, id: &T::Id) -> Result<bool, StorageError>
     where
@@ -2185,9 +5018,78 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Restore a soft-deleted record
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// // Undo soft delete
     /// db.restore::<User>(&user_id).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn restore<T>(&self, id: &T::Id) -> Result<bool, StorageError>
     where
@@ -2205,8 +5107,77 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Query only active (non-deleted) records
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let active_users = db.query_active::<User>().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn query_active<T>(&self) -> Result<Vec<T>, StorageError>
     where
@@ -2344,9 +5315,78 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Slightly slower than BTreeMap range due to post-sorting, but lock-free.
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// // Find users with scores between 50 and 100
     /// let users: Vec<User> = db.query_range_lockfree("score", &50, &100).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn query_range_lockfree<T: Indexed + Collection + DeserializeOwned>(
         &self,
@@ -2389,7 +5429,74 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Returns records and next cursor for continuation.
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// // First page
     /// let (users, cursor) = db.query_with_cursor::<User>("role", &"admin", None, 100).await?;
     ///
@@ -2397,6 +5504,8 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// if let Some(cursor) = cursor {
     ///     let (more_users, _) = db.query_with_cursor::<User>("role", &"admin", Some(&cursor), 100).await?;
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn query_with_cursor<T: Indexed + Collection + DeserializeOwned>(
         &self,
@@ -2532,10 +5641,79 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Create a compound index on existing records
     ///
     /// # Example
-    /// ```ignore
-    /// db.create_compound_index::<User>("role_age", |u| {
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
+    /// db.create_compound_index("role_age", |u: &User| {
     ///     vec![u.role.clone(), u.age.to_string()]
     /// }).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn create_compound_index<T, F>(
         &self,
@@ -2575,8 +5753,77 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Query by compound index
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let users = db.query_compound::<User>("role_age", vec!["Admin".into(), "30".into()]).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn query_compound<T: Indexed + Collection + DeserializeOwned>(
         &self,
@@ -2615,12 +5862,81 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// - ~1.5M+ ops/sec on in-memory storage
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let users = vec![
-    ///     User { id: 1, name: "Alice".into() },
-    ///     User { id: 2, name: "Bob".into() },
+    ///     User { id: 1, name: "Alice".into(), ..sample_user() },
+    ///     User { id: 2, name: "Bob".into(), ..sample_user() },
     /// ];
     /// db.insert_batch(&users).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn insert_batch<T: Indexed + Collection + Send + Sync>(
         &self,
@@ -2798,10 +6114,79 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Delete all records matching a predicate
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// // Delete all inactive users
     /// let deleted = db.delete_where::<User, _>(|u| !u.active).await?;
     /// println!("Deleted {} inactive users", deleted);
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn delete_where<T, F>(&self, predicate: F) -> Result<usize, StorageError>
     where
@@ -2819,12 +6204,81 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Update all records matching a predicate
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// // Mark all users as verified
     /// let updated = db.update_where::<User, _, _>(
     ///     |u| u.email_verified == false,
     ///     |u| u.email_verified = true
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn update_where<T, P, U>(
         &self,
@@ -2870,9 +6324,78 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Get detailed index statistics for a collection
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let stats = db.collection_stats::<User>().await;
     /// println!("User Index Stats: {}", stats);
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn collection_stats<T: Collection>(&self) -> IndexStats {
         let collection_name = std::any::type_name::<T>();
@@ -2896,9 +6419,78 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Create a snapshot of a collection (returns all records)
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let snapshot: Vec<User> = db.snapshot::<User>().await?;
     /// // snapshot can be used for backup, migration, or testing
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn snapshot<T: Indexed + Collection + DeserializeOwned + Clone>(
         &self,
@@ -2911,9 +6503,78 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Copies all records from this storage to another.
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let backup_db = IndexedStorage::new(backup_storage);
     /// db.clone_to::<User>(&backup_db).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn clone_to<T: Indexed + Collection + DeserializeOwned + Clone>(
         &self,
@@ -2933,8 +6594,77 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// as it stops at the first match.
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let admin = db.find_one::<User, _>(|u| u.role == "admin").await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn find_one<T, F>(&self, predicate: F) -> Result<Option<T>, StorageError>
     where
@@ -2948,8 +6678,77 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// Find all records matching a predicate
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::indexed_storage::IndexedStorage;
+    /// # use prkdb::prelude::*;
+    /// # use prkdb::storage::InMemoryAdapter;
+    /// # use prkdb_types::collection::{Hooks, SoftDeletable, Timestamped, Validatable, ValidationError};
+    /// # use serde::{Deserialize, Serialize};
+    /// # use std::collections::HashMap;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct User {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     age: u32,
+    /// #     #[index]
+    /// #     name: String,
+    /// #     #[index]
+    /// #     role: String,
+    /// #     active: bool,
+    /// #     email_verified: bool,
+    /// #     deleted: bool,
+    /// #     salary: f64,
+    /// #     bio: String,
+    /// #     birth_date: u64,
+    /// #     created_at: u64,
+    /// #     updated_at: u64,
+    /// # }
+    /// # impl SoftDeletable for User {
+    /// #     fn is_deleted(&self) -> bool { self.deleted }
+    /// #     fn mark_deleted(&mut self) { self.deleted = true; }
+    /// #     fn restore(&mut self) { self.deleted = false; }
+    /// # }
+    /// # impl Timestamped for User {
+    /// #     fn created_at(&self) -> u64 { self.created_at }
+    /// #     fn updated_at(&self) -> u64 { self.updated_at }
+    /// #     fn set_created_at(&mut self, t: u64) { self.created_at = t; }
+    /// #     fn set_updated_at(&mut self, t: u64) { self.updated_at = t; }
+    /// # }
+    /// # #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
+    /// # struct Order {
+    /// #     #[id]
+    /// #     id: u64,
+    /// #     #[index]
+    /// #     user_id: u64,
+    /// #     total: f64,
+    /// # }
+    /// # fn sample_user() -> User {
+    /// #     User {
+    /// #         id: 1, age: 30, name: "Alice".into(), role: "admin".into(),
+    /// #         active: true, email_verified: true, deleted: false, salary: 100.0,
+    /// #         bio: "bio".into(), birth_date: 0, created_at: 0, updated_at: 0,
+    /// #     }
+    /// # }
+    /// # async fn demo(db: &mut IndexedStorage<InMemoryAdapter>)
+    /// #     -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(InMemoryAdapter::new());
+    /// # let backup_storage = Arc::new(InMemoryAdapter::new());
+    /// # let user_id: u64 = 1;
+    /// # let now: u64 = 0;
+    /// # let user = sample_user();
+    /// # let new_user = sample_user();
+    /// # let old_user = sample_user();
+    /// # let updated_user = sample_user();
+    /// # let user1 = sample_user();
+    /// # let user2 = sample_user();
+    /// # let _ = (&storage, &backup_storage, &user_id, &now, &user, &new_user,
+    /// #          &old_user, &updated_user, &user1, &user2);
     /// let admins = db.find_all::<User, _>(|u| u.role == "admin").await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn find_all<T, F>(&self, predicate: F) -> Result<Vec<T>, StorageError>
     where

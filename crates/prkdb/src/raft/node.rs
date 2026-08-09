@@ -403,6 +403,16 @@ impl RaftNode {
         *self.state.read().await
     }
 
+    /// This node's current Raft term.
+    ///
+    /// Exposed because election safety — *at most one leader per term* — cannot be stated
+    /// without it. Sampling only `get_state()` finds two nodes both believing they lead,
+    /// which is legal during a partition provided their terms differ, so an assertion
+    /// built on state alone is either wrong or vacuous.
+    pub async fn current_term(&self) -> u64 {
+        *self.current_term.read().await
+    }
+
     /// Get the current size of the log
     pub async fn log_size(&self) -> usize {
         self.log.read().await.len()

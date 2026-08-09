@@ -250,13 +250,21 @@ where
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use prkdb::collection_handle::CollectionHandle;
+    /// # use prkdb_types::collection::Collection;
+    /// # async fn demo<C: Collection + Clone + Send + Sync + 'static>(
+    /// #     handle: &CollectionHandle<C>,
+    /// #     item1: C, item2: C, critical_item: C,
+    /// # ) -> Result<(), Box<dyn std::error::Error>> {
     /// // High-throughput batched writes
     /// handle.put(item1).await?;
     /// handle.put(item2).await?;
     ///
     /// // Critical write that must complete immediately
     /// handle.put_sync(critical_item).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn put_sync(&self, item: C) -> Result<(), DbError> {
         self.put_immediate(item).await
