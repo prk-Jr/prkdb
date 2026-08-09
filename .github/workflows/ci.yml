@@ -54,14 +54,12 @@ jobs:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: Swatinem/rust-cache@v2
-      # Floor is the measured baseline (54.34% lines on 2026-08-08), rounded down.
-      # Ratchet it up as coverage improves; never lower it to make a PR pass.
-      #
-      # xtask is excluded because its snapshot determinism test fails under a
-      # concurrent workspace run and takes the whole coverage build down with it.
-      # That is Plan A Task 16b — remove this exclusion once it lands.
+      # Floor is the measured baseline (55.46% lines across the whole workspace),
+      # rounded down. Ratchet it up as coverage improves; never lower it to make a PR
+      # pass. xtask was excluded here until Task 16b fixed the fixture collision that
+      # made its snapshot test fail under a concurrent workspace run.
       - name: Measure coverage
-        run: cargo llvm-cov --workspace --exclude xtask --fail-under-lines 54
+        run: cargo llvm-cov --workspace --fail-under-lines 55
       - name: Upload lcov
         if: always()
         run: cargo llvm-cov report --lcov --output-path lcov.info

@@ -1591,14 +1591,14 @@ parent. Two candidates:
    should write. This is the likelier cause and the more valuable fix.
 2. The nested `cargo run` blocks on, or observes partial state from, the outer build.
 
-- [ ] **Step 1: Reproduce deterministically**
+- [x] **Step 1: Reproduce deterministically**
 
 ```bash
 cargo llvm-cov --workspace --summary-only
 ```
 Expected today: fails in `xtask`, taking the coverage baseline down with it.
 
-- [ ] **Step 2: Establish which candidate it is**
+- [x] **Step 2: Establish which candidate it is**
 
 Copy the fixture, run the tool twice by hand, and look for writes between runs:
 
@@ -1612,7 +1612,7 @@ cargo run -q -p xtask --manifest-path "$REPO/Cargo.toml" -- repo-status snapshot
 diff /tmp/a.json /tmp/b.json
 ```
 
-- [ ] **Step 3: Fix the cause, not the assertion**
+- [x] **Step 3: Fix the cause, not the assertion**
 
 If candidate 1: make `snapshot` read-only, so only `render` writes.
 If candidate 2: give the test its own `CARGO_TARGET_DIR` and invoke the already-built
@@ -1622,7 +1622,7 @@ binary directly instead of going through `cargo run`.
 > many times it has run is a real defect in the drift detector, which is one of the better
 > things in this repository.
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 ```bash
 cargo llvm-cov --workspace --summary-only
@@ -1630,7 +1630,7 @@ for i in $(seq 1 5); do cargo test --workspace || break; done
 ```
 Expected: coverage completes, and five consecutive workspace runs pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add xtask/
