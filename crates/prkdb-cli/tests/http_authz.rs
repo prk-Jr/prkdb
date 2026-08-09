@@ -61,6 +61,8 @@ fn spawn(bootstrap: Option<&str>, extra: &[&str]) -> Option<Server> {
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {
         if let Ok(Some(status)) = child.try_wait() {
+            // The process is already reaped by try_wait; this is the refuses-to-start
+            // path, which the caller asserts on.
             assert!(!status.success() || bootstrap.is_none());
             return None;
         }
@@ -71,6 +73,7 @@ fn spawn(bootstrap: Option<&str>, extra: &[&str]) -> Option<Server> {
     }
 
     let _ = child.kill();
+    let _ = child.wait();
     panic!("server did not become healthy within 20s");
 }
 
