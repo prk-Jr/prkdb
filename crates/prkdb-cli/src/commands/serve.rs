@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     extract::{
         ws::{Message, WebSocket},
@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use tokio::sync::broadcast;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
@@ -49,6 +50,22 @@ pub struct ServeArgs {
     /// Enable Prometheus metrics endpoint at /metrics
     #[arg(long)]
     pub prometheus: bool,
+
+    /// PEM server certificate. Enables TLS on both the HTTP and gRPC surfaces.
+    ///
+    /// Before this flag existed, `start_raft_server_tls` was implemented but reachable
+    /// only from an example — no shipped binary could turn TLS on (spec S-02).
+    #[arg(long, requires = "tls_key")]
+    pub tls_cert: Option<PathBuf>,
+
+    /// PEM private key matching `--tls-cert`.
+    #[arg(long, requires = "tls_cert")]
+    pub tls_key: Option<PathBuf>,
+
+    /// PEM CA certificate. Supplying it requires clients to present a certificate signed
+    /// by this CA (mTLS), which is how Raft peers authenticate to each other.
+    #[arg(long, requires = "tls_cert")]
+    pub tls_client_ca: Option<PathBuf>,
 
     /// Enable CORS for web dashboards
     #[arg(long)]
@@ -155,6 +172,29 @@ impl<T> ApiResponse<T> {
 }
 
 pub async fn handle_serve(args: ServeArgs) -> Result<()> {
+    // Resolve TLS before binding anything. A server that binds first and discovers an
+    // unreadable key on the first handshake has already advertised a port it cannot
+    // serve; worse, one that silently falls back to plaintext is exactly the failure
+    // spec S-02 describes.
+    let tls = crate::tls::TlsPaths::from_args(
+        args.tls_cert.clone(),
+        args.tls_key.clone(),
+        args.tls_client_ca.clone(),
+    )?;
+    if let Some(t) = &tls {
+        println!(
+            "🔒 TLS enabled (cert {}){}",
+            t.cert.display(),
+            if t.requires_client_certs() {
+                ", client certificates required (mTLS)"
+            } else {
+                ""
+            }
+        );
+    } else {
+        println!("⚠️  TLS is not configured; traffic is plaintext. Pass --tls-cert/--tls-key to enable it.");
+    }
+
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
     let node_id_label = args.id.to_string();
 
@@ -316,6 +356,7 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         let rpc_pool = std::sync::Arc::new(prkdb::raft::RpcClientPool::new(args.id));
         db.start_multi_raft(rpc_pool, &[0]);
 
+        let grpc_tls = tls.clone();
         tokio::spawn(async move {
             use prkdb::raft::grpc_service::PrkDbGrpcService;
             use prkdb::raft::rpc::prk_db_service_server::PrkDbServiceServer;
@@ -337,6 +378,21 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
             .with_advertised_node_addresses(advertised_node_addresses);
 
             let mut builder = Server::builder();
+            if let Some(t) = &grpc_tls {
+                match t.tonic_config() {
+                    Ok(cfg) => match builder.tls_config(cfg) {
+                        Ok(b) => builder = b,
+                        Err(e) => {
+                            eprintln!("❌ gRPC TLS configuration rejected: {}", e);
+                            return;
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("❌ could not read TLS material: {}", e);
+                        return;
+                    }
+                }
+            }
 
             // Register client service
             let mut router = builder.add_service(PrkDbServiceServer::new(service));
@@ -360,17 +416,45 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let shutdown_db = crate::database_manager::get_db_instance().await.ok();
 
-    axum::serve(listener, app.into_make_service())
-        .with_graceful_shutdown(async move {
-            shutdown_signal().await;
+    if let Some(t) = &tls {
+        // axum-server terminates TLS in front of the same tower service axum builds.
+        // Its own graceful-shutdown handle differs from axum::serve's, so the flush runs
+        // after the server returns rather than inside a shutdown future.
+        let rustls = axum_server::tls_rustls::RustlsConfig::from_pem(t.read_cert()?, t.read_key()?)
+            .await
+            .context("building the HTTPS listener from --tls-cert/--tls-key")?;
 
-            if let Some(db) = shutdown_db {
-                if let Err(error) = flush_db_state(&db).await {
-                    eprintln!("⚠️ Failed to flush storage during shutdown: {}", error);
-                }
+        drop(listener);
+        let handle = axum_server::Handle::new();
+        let shutdown_handle = handle.clone();
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
+        });
+
+        axum_server::bind_rustls(addr, rustls)
+            .handle(handle)
+            .serve(app.into_make_service())
+            .await?;
+
+        if let Some(db) = shutdown_db {
+            if let Err(error) = flush_db_state(&db).await {
+                eprintln!("⚠️ Failed to flush storage during shutdown: {}", error);
             }
-        })
-        .await?;
+        }
+    } else {
+        axum::serve(listener, app.into_make_service())
+            .with_graceful_shutdown(async move {
+                shutdown_signal().await;
+
+                if let Some(db) = shutdown_db {
+                    if let Err(error) = flush_db_state(&db).await {
+                        eprintln!("⚠️ Failed to flush storage during shutdown: {}", error);
+                    }
+                }
+            })
+            .await?;
+    }
 
     if args.prometheus {
         prkdb::prometheus_metrics::SERVER_UP

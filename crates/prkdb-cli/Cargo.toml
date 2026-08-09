@@ -24,6 +24,7 @@ tokio = { workspace = true }
 
 # HTTP server (for serve command)
 axum = { workspace = true, features = ["ws", "json"] }
+axum-server = { workspace = true }
 tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["cors", "fs"] }
 futures-util = "0.3"

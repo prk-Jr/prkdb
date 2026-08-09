@@ -751,7 +751,7 @@ git commit -m "feat: authorize the gRPC data plane and authenticate Raft peers b
 - Modify: `.gitignore`
 - Delete: `certs/`
 
-- [ ] **Step 1: Confirm TLS is unreachable**
+- [x] **Step 1: Confirm TLS is unreachable**
 
 ```bash
 grep -rn 'start_raft_server_tls\|TlsConfig' crates/prkdb-cli/src crates/prkdb/src/bin --include='*.rs' \
@@ -759,32 +759,32 @@ grep -rn 'start_raft_server_tls\|TlsConfig' crates/prkdb-cli/src crates/prkdb/sr
 ```
 Expected: `no binary references TLS`.
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 `crates/prkdb-cli/tests/tls_integration.rs`: generate a CA and server cert into a `TempDir` via
 `scripts/gen_certs.sh`, start the server with `--tls-cert`/`--tls-key`, then assert:
 1. a client trusting the test CA connects and reads successfully;
 2. a plaintext HTTP client is rejected.
 
-- [ ] **Step 3: Run it and watch it fail**
+- [x] **Step 3: Run it and watch it fail**
 
 ```bash
 cargo test -p prkdb-cli --test tls_integration -- --nocapture
 ```
 Expected: FAIL — the flags do not exist.
 
-- [ ] **Step 4: Add the CLI flags**
+- [x] **Step 4: Add the CLI flags**
 
 `--tls-cert <PATH>`, `--tls-key <PATH>`, `--tls-client-ca <PATH>` (optional, enables mTLS) on
 both `prkdb-cli serve` and `prkdb-server`. All three refuse to start if the files are unreadable
 — fail loudly at startup rather than silently serving plaintext.
 
-- [ ] **Step 5: Wire the Raft transport**
+- [x] **Step 5: Wire the Raft transport**
 
 Where `start_raft_server` is called, branch to `start_raft_server_tls` when TLS args are present.
 The `TlsConfig` struct already exists at `server.rs:11`.
 
-- [ ] **Step 6: Wire the HTTP surface**
+- [x] **Step 6: Wire the HTTP surface**
 
 Use `axum-server` with its `rustls` feature — the smaller change than terminating TLS via
 `tokio-rustls` by hand.
@@ -798,14 +798,14 @@ axum-server = { version = "0.8", features = ["tls-rustls"] }
 > and `tower-service ^0.3`. It couples to the tower/hyper stack, not to an axum major version, so
 > it serves any `tower::Service` — which is what `app.into_make_service()` produces on axum 0.7.
 
-- [ ] **Step 7: Run the test**
+- [x] **Step 7: Run the test**
 
 ```bash
 cargo test -p prkdb-cli --test tls_integration -- --nocapture
 ```
 Expected: PASS.
 
-- [ ] **Step 8: Confirm `certs/` is already clean — no work required**
+- [x] **Step 8: Confirm `certs/` is already clean — no work required**
 
 An earlier revision of this plan called for removing committed private keys. That was a phantom
 finding. Verify rather than act:
@@ -820,12 +820,12 @@ The keys under `certs/` are local dev fixtures produced by `scripts/gen_certs.sh
 never been in the repository and `/certs/` has been ignored all along. Nothing to remove, no
 history to rewrite. Tick this box once the three commands confirm it.
 
-- [ ] **Step 9: Document it**
+- [x] **Step 9: Document it**
 
 Add a TLS section to `docs/guide/deployment.md` covering cert generation, the flags, and mTLS
 between Raft peers.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add -A

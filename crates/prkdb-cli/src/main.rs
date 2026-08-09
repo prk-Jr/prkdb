@@ -7,6 +7,7 @@ mod commands;
 mod database_manager;
 mod output;
 mod storage_keys;
+mod tls;
 mod uptime_tracker;
 
 use commands::*;
@@ -89,6 +90,16 @@ pub enum Commands {
         /// Enable Prometheus metrics endpoint
         #[arg(long)]
         prometheus: bool,
+        /// PEM server certificate. Enables TLS on both the HTTP and gRPC surfaces.
+        #[arg(long, requires = "tls_key")]
+        tls_cert: Option<std::path::PathBuf>,
+        /// PEM private key matching --tls-cert.
+        #[arg(long, requires = "tls_cert")]
+        tls_key: Option<std::path::PathBuf>,
+        /// PEM CA certificate. Requires clients to present a certificate signed by it
+        /// (mTLS) — how Raft peers authenticate to each other.
+        #[arg(long, requires = "tls_cert")]
+        tls_client_ca: Option<std::path::PathBuf>,
         /// Enable CORS for web dashboards
         #[arg(long)]
         cors: bool,
@@ -180,6 +191,9 @@ async fn main() -> anyhow::Result<()> {
             grpc_port,
             host,
             prometheus,
+            tls_cert,
+            tls_key,
+            tls_client_ca,
             cors,
             websockets,
             id,
@@ -230,6 +244,9 @@ async fn main() -> anyhow::Result<()> {
                 grpc_port: *grpc_port,
                 host: host.clone(),
                 prometheus: *prometheus,
+                tls_cert: tls_cert.clone(),
+                tls_key: tls_key.clone(),
+                tls_client_ca: tls_client_ca.clone(),
                 cors: *cors,
                 websockets: *websockets,
                 id: *id,
