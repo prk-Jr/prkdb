@@ -107,6 +107,20 @@ not enforced by anything, and several tests reported green while testing nothing
   majority to acknowledge a heartbeat in the current term before returning an index, per
   Raft §6.4. Found by the register test's first partitioned run, reproducing about two
   runs in five.
+- **A correct test was switched off for finding a real bug.**
+  `chaos_test_rapid_recovery` carried
+  `#[ignore = "Manual investigation: integration harness still diverges from WAL recovery
+  unit tests"]`. The harness did not diverge — `WalStorageAdapter::new` truncated the WAL,
+  so every reopen destroyed the previous cycle, and the test said so: *"Lost data from
+  cycle 0 key 0"*. It passes now, and reverting `open_or_create` reproduces the original
+  failure. `scripts/check_ignore_reasons.sh` closes the category list so a test can be
+  skipped for being slow or needing a binary, never for failing.
+- **Mutation testing in CI**, scoped to the authorization model and the storage wrapper.
+  Coverage says a line ran; it does not say an assertion would have noticed the line being
+  wrong, and this repository has had the second without the first three times. The manual
+  version of this — delete the fix, see whether anything complains — is what found S-07's
+  missing test.
+- Coverage floor ratcheted 55 → 58 (measured 59.03% lines, from a 55.46% baseline).
 - **`scan_range` was unsupported on the default storage adapter** (S-08), so
   `CollectionHandle::scan_range_by_id_bytes` — public API — failed on every database
   opened with `--database`. Found by auditing the trait rather than by hitting it.

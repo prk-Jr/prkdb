@@ -207,6 +207,10 @@ check "database open never truncates the WAL"          "—" none_in_code 'MmapP
 # Four methods have now gone missing from the partitioned wrapper (S-04, S-05, S-07,
 # S-08), each compiling cleanly and failing at runtime. This finds the fifth on purpose.
 check "wrapper implements its inner adapter's surface" "—" bash scripts/check_wrapper_completeness.sh
+# A reason is not enough: chaos_test_rapid_recovery was switched off with a plausible one
+# while it was correctly reporting a real data-loss bug (S-05).
+check "every #[ignore] reason is an allowed category"  "R16" bash scripts/check_ignore_reasons.sh
+check "mutation testing runs in CI"                    "R9" grep -q 'cargo-mutants' .github/workflows/ci.yml
 check "readiness endpoint distinct from liveness"      "—" grep -q 'readyz' crates/prkdb-cli/src/commands/serve.rs
 check "rate limiter wired into the server"             "—" grep -rq 'RateLimiter' crates/prkdb-cli/src
 check "CHANGELOG present"                              "—" test -f CHANGELOG.md
