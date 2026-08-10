@@ -112,17 +112,24 @@ jobs:
     runs-on: ubuntu-latest
     # Sharded because the unsharded job could never finish, and a job that cannot finish
     # reports nothing. Run 31329241574 found 100 mutants in the first step alone and spent
-    # ~133s on each (75s build + 58s test), so a full pass needed ~3.7 hours against a
+    # ~133s on each (75s build + 58s test), so that step alone needed ~3.7 hours against a
     # 45-minute limit; it was cancelled after testing 7. The comment above already said "a
     # job people cancel is a job that tests nothing" — this is that, arrived at by timeout
     # rather than by anyone pressing cancel.
     #
-    # 10 shards puts ~13 mutants in each, about 30 minutes plus a ~4-minute baseline.
+    # The full file set below is 203 mutants (measured with `cargo mutants --list`, not
+    # estimated). Ten shards is 21 each — `--sharding slice` by default, so 21×9 + 14 —
+    # about 47 minutes at the observed rate, plus a ~4-minute baseline. The 90-minute limit
+    # is deliberate headroom: a CI runner slower than the one that produced the 133s figure
+    # must still finish, because the entire point of this change is that a job which times
+    # out reports nothing.
+    #
+    # Shard indices are 0-based and k must be < n.
     strategy:
       fail-fast: false
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - name: Install Protoc
