@@ -34,6 +34,7 @@ fi
 PASS=0
 FAIL=0
 CURRENT_GROUP=""
+DEFER=0
 
 group() {
   CURRENT_GROUP="$1"
@@ -52,6 +53,28 @@ check() {
     FAIL=$((FAIL + 1))
     [[ $QUIET -eq 0 ]] && printf '  %s✗%s %-52s %s%s%s\n' "$R" "$N" "$label" "$D" "$req" "$N"
   fi
+}
+
+# deferred <label> <requirement-id> <why>
+#
+# A decision that has been taken, not work that is missing. It is reported separately and
+# does not count against completion.
+#
+# # Why this exists
+#
+# Publishing was deliberately postponed, and while it sat in `check` the tracker read
+# "55/56 complete — 1 outstanding" indefinitely and `--ci` exited non-zero forever. A
+# permanent red is a signal people learn to skip, which is the exact failure this whole
+# script was written to expose elsewhere in the repository — a badge advertising 19
+# passing chaos tests that were not running, a required status check that could never
+# report.
+#
+# The reason is mandatory. "Deferred" with no why is indistinguishable from forgotten.
+deferred() {
+  local label="$1" req="$2" why="$3"
+  DEFER=$((DEFER + 1))
+  [[ $QUIET -eq 0 ]] && printf '  %s\u25cb%s %-52s %s%s%s\n' "$Y" "$N" "$label" "$D" "$req" "$N"
+  [[ $QUIET -eq 0 ]] && printf '    %s\u2514\u2500 deferred: %s%s\n' "$D" "$why" "$N"
 }
 
 # Helpers ────────────────────────────────────────────────────────────────────
@@ -219,10 +242,12 @@ check "mutation testing runs in CI"                    "R9" grep -q 'cargo-mutan
 check "readiness endpoint distinct from liveness"      "—" grep -q 'readyz' crates/prkdb-cli/src/commands/serve.rs
 check "rate limiter wired into the server"             "—" grep -rq 'RateLimiter' crates/prkdb-cli/src
 check "CHANGELOG present"                              "—" test -f CHANGELOG.md
-check "crates published to crates.io"                  "—" bash -c 'git tag | grep -q "^v"'
+deferred "crates published to crates.io" "—" \
+  "the public API changed in #20 (--credential, an implemented QueryBuilder DSL, a new StorageAdapter method); publishing now would pin that as 0.6.0's surface"
 
 # Summary ────────────────────────────────────────────────────────────────────
 
+# Deferred items are excluded from the denominator: they are decisions, not debt.
 TOTAL=$((PASS + FAIL))
 PCT=$(( TOTAL > 0 ? PASS * 100 / TOTAL : 0 ))
 
@@ -233,6 +258,10 @@ if [[ $FAIL -eq 0 ]]; then
 else
   printf '%s%s/%s complete (%s%%)%s — %s%s outstanding%s\n' \
     "$Y" "$PASS" "$TOTAL" "$PCT" "$N" "$R" "$FAIL" "$N"
+fi
+if [[ $DEFER -gt 0 ]]; then
+  printf '%s%s deferred (a decision, not missing work \u2014 see the reason above each)%s\n' \
+    "$Y" "$DEFER" "$N"
 fi
 printf '%sChecks read repository state, not plan checkboxes.%s\n' "$D" "$N"
 
