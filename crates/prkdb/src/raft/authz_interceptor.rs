@@ -293,7 +293,13 @@ mod tests {
     #[test]
     fn a_read_grant_admits_reads() {
         let reader = ApiAuthzInterceptor::new(Some(store_with(&[("*", Permission::Read)])));
-        for method in ["Get", "Watch", "GetSchema", "CheckCompatibility", "Metadata"] {
+        for method in [
+            "Get",
+            "Watch",
+            "GetSchema",
+            "CheckCompatibility",
+            "Metadata",
+        ] {
             assert_eq!(
                 required_permission(&format!("/prkdb.PrkDbService/{method}")),
                 Some(Permission::Read),
