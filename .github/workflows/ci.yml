@@ -121,9 +121,9 @@ jobs:
   # cancel is a job that tests nothing.
   mutants:
     name: "🧬 Mutation Testing (targeted)"
-    # The *full* sweep is nightly, because 234 mutants take roughly an hour even sharded
-    # ten ways. Pull requests get `mutants-diff` below instead, which mutates only the
-    # lines the pull request touched and finishes in minutes.
+    # The *full* sweep is nightly, because 403 mutants take the better part of an hour even
+    # sharded twenty ways. Pull requests get `mutants-diff` below instead, which mutates
+    # only the lines the pull request touched and finishes in minutes.
     #
     # Deliberately *not* `continue-on-error`: a check whose result is discarded is not a
     # check, which is why that flag was removed from the chaos workflow.
@@ -136,9 +136,9 @@ jobs:
     # job people cancel is a job that tests nothing" — this is that, arrived at by timeout
     # rather than by anyone pressing cancel.
     #
-    # The full file set below is 234 mutants (measured with `cargo mutants --list`, not
-    # estimated) — 204 in prkdb plus 30 in prkdb-cli's authorization files. Ten shards is
-    # 24 each, about 53 minutes at the observed rate plus a ~4-minute baseline. The
+    # The full file set below is 403 mutants (measured with `cargo mutants --list`, not
+    # estimated) — 373 in prkdb plus 30 in prkdb-cli's authorization files. Twenty shards is
+    # 21 each, about 47 minutes at the observed rate plus a ~4-minute baseline. The
     # 90-minute limit is deliberate headroom: a CI runner slower than the one that produced
     # the 133s figure must still finish, because the entire point of this change is that a
     # job which times out reports nothing.
@@ -148,6 +148,16 @@ jobs:
     # `admin_count`, `is_admin`, `from_principals`, `Grant::pattern` — were unkillable for
     # no better reason than that their only callers sat in a package the run did not cover.
     #
+    # `storage/wal_adapter.rs` is included for the same reason one step lower down the
+    # stack: the file set covered the wrappers *around* the storage engine and never the
+    # engine itself, so the durability path had never been mutated at all. That path is
+    # where this repository's worst defect lived — opening a database truncated its own
+    # write-ahead log, and every write was lost on reopen; three independent defects, each
+    # sufficient on its own to cause it. Durability is where a silent wrong answer costs
+    # the most, because a lost write still reports success. At 168 mutants it is the
+    # largest single file here, and it is what took the sweep from 235 to 403 and the
+    # matrix from ten shards to twenty.
+    #
     # Only its authorization files, not the whole crate: `--package prkdb --package
     # prkdb-cli` with no file filter is 4415 mutants, which at this rate is about 163 hours.
     #
@@ -155,7 +165,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -173,15 +183,16 @@ jobs:
 
       # One invocation, not two: cargo-mutants shards the mutant list it is given, so two
       # separate commands would each shard their own list and the split would be uneven.
-      - name: Mutate the authorization model and storage wrapper
+      - name: Mutate the authorization model and storage engine
         run: |
           cargo mutants --no-shuffle --timeout 300 \
-            --shard ${{ matrix.shard }}/10 \
+            --shard ${{ matrix.shard }}/20 \
             --package prkdb --package prkdb-cli \
             --file 'crates/prkdb/src/authz/*.rs' \
             --file 'crates/prkdb/src/raft/authz_interceptor.rs' \
             --file 'crates/prkdb/src/raft/peer_auth.rs' \
             --file 'crates/prkdb/src/storage/collection_partitioned_adapter.rs' \
+            --file 'crates/prkdb/src/storage/wal_adapter.rs' \
             --file 'crates/prkdb-cli/src/authz_layer.rs' \
             --file 'crates/prkdb-cli/src/admin_principals.rs' \
             --file 'crates/prkdb-cli/src/remote_client.rs'
