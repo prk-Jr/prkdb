@@ -10,6 +10,25 @@ on:
   schedule:
     - cron: "0 4 * * *"
 
+# One live run per branch.
+#
+# This workflow is ~21 jobs. Without a concurrency group every push queues a fresh full
+# matrix and nothing ever reclaims the superseded one, so runs accumulate until they
+# exhaust the account's concurrent-job allowance and everything after them waits.
+#
+# That is not hypothetical: merging #20 left main's verification run stuck on "Waiting for
+# a runner to pick up this job" behind roughly 300 jobs from 14 open Dependabot pull
+# requests. The condition it was blocked on had already evaluated `true` — it simply had
+# nowhere to run. A check that cannot get a runner reports nothing, which is the same
+# outcome as not having the check.
+#
+# `cancel-in-progress` is deliberately *not* applied to main: a superseded pull-request run
+# is worthless, but a run verifying a commit that is already on main is the record of
+# whether that commit is good, and killing it would leave main unverified.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
