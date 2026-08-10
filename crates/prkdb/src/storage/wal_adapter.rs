@@ -197,12 +197,70 @@ impl WalStorageAdapterBuilder {
     }
 }
 
+/// Test-only fault injection for the storage layer.
+///
+/// # Why this exists
+///
+/// `CollectionPartitionedAdapter::flush` forwards to each collection's adapter, and
+/// mutation testing replaced its whole body with `Ok(())` — a flush that flushes nothing
+/// and reports success — without a single test noticing (run 31358158012, shard 7). It
+/// was unkillable through the public surface: this adapter's `put` path writes through
+/// rather than accumulating, so a value survives a reopen whether or not `flush` ran.
+///
+/// The only observable difference is whether the wrapper *forwards* — which needs an
+/// inner adapter that can fail. That is what this provides.
+///
+/// # Why `cfg(test)` and not a Cargo feature
+///
+/// Both adapters live in this crate, so a unit test compiles with `cfg(test)` active and
+/// can reach this directly. A feature would put fault injection in the public API and
+/// risk it being enabled in a release build — the mistake the `chaos` feature already
+/// made once, where anyone able to write `CHAOS_CONFIG_PATH` could partition a live
+/// cluster. Integration tests in `tests/` compile the crate without `cfg(test)`, so this
+/// is invisible there, which is correct: it is a unit-level seam.
+///
+/// Keyed by WAL directory rather than by a flag on the adapter, so no constructor
+/// changes. Tests use a unique `tempdir`, so parallel tests cannot collide.
+#[cfg(test)]
+pub(crate) mod fault_injection {
+    use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+
+    fn registry() -> &'static Mutex<HashSet<PathBuf>> {
+        static REGISTRY: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+        REGISTRY.get_or_init(|| Mutex::new(HashSet::new()))
+    }
+
+    /// Make `flush` fail for the adapter whose WAL lives at `dir`.
+    pub fn fail_flush_at(dir: impl Into<PathBuf>) {
+        registry()
+            .lock()
+            .expect("fault registry lock")
+            .insert(dir.into());
+    }
+
+    /// Stop failing `flush` for `dir`. Call it when the assertion is done, so a later
+    /// flush in the same test — including one during teardown — is not affected.
+    pub fn clear_flush_failure(dir: &Path) {
+        registry().lock().expect("fault registry lock").remove(dir);
+    }
+
+    pub(super) fn flush_should_fail(dir: &Path) -> bool {
+        registry()
+            .lock()
+            .expect("fault registry lock")
+            .contains(dir)
+    }
+}
+
 /// Storage adapter backed by Write-Ahead Log (Mmap Parallel)
 ///
 /// Provides high-performance sequential write with memory-mapped I/O
 /// (throughput unverified; see `docs/benchmarks/methodology.md`)
 /// while maintaining an in-memory index for fast reads.
 #[derive(Clone)]
+
 pub struct WalStorageAdapter {
     inner: Arc<WalStorageInner>,
     // Phase 2: Dedicated sync writer
@@ -746,6 +804,14 @@ impl WalStorageAdapter {
 
     /// Flush all data to disk
     pub async fn flush(&self) -> Result<(), StorageError> {
+        #[cfg(test)]
+        if fault_injection::flush_should_fail(&self.inner._config.wal.log_dir) {
+            return Err(StorageError::Internal(format!(
+                "injected flush failure at {}",
+                self.inner._config.wal.log_dir.display()
+            )));
+        }
+
         // Flush accumulator
         Self::flush_accumulator_inner(&self.inner).await;
 

@@ -1350,4 +1350,69 @@ mod tests {
         assert_eq!(single_collection_bound(b":a", b":z"), Some(Vec::new()));
         assert_eq!(single_collection_bound(b":a", b"users:z"), None);
     }
+
+    /// `flush` must forward to every collection, and report a failure rather than
+    /// swallow it.
+    ///
+    /// # What this catches, and why it needed a new seam
+    ///
+    /// Replacing this method's whole body with `Ok(())` — a flush that flushes nothing
+    /// and reports success — survived the entire suite (run 31358158012, shard 7), and
+    /// stayed unkillable long enough to be recorded as an accepted exclusion in
+    /// `.cargo/mutants.toml`.
+    ///
+    /// It was unkillable through the public surface for a specific reason: this adapter's
+    /// `put` path writes through rather than accumulating, so a value survives a reopen
+    /// whether or not `flush` ran. `a_flushed_write_survives_reopening` passes with the
+    /// body replaced. The only observable difference is whether the wrapper *forwards* —
+    /// which needs an inner adapter that can fail, and none existed.
+    ///
+    /// `wal_adapter::fault_injection` is that missing capability. With one collection's
+    /// flush failing, a wrapper that forwards returns `Err` and a wrapper that returns
+    /// `Ok(())` does not. The exclusion is deleted in the same change.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flush_reports_a_collection_failure_rather_than_swallowing_it() {
+        use crate::storage::wal_adapter::fault_injection;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            log_dir: temp_dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        };
+        let adapter = CollectionPartitionedAdapter::new(config).unwrap();
+
+        adapter.put(b"users:a", b"1").await.unwrap();
+        adapter.put(b"orders:b", b"2").await.unwrap();
+
+        // Healthy to begin with, so the failure below is attributable to the injection
+        // and not to flush being broken already.
+        adapter
+            .flush()
+            .await
+            .expect("flush succeeds while every collection is healthy");
+
+        // `orders` is deliberately not the first collection created: a wrapper that
+        // stopped after the first would otherwise pass.
+        let failing = temp_dir.path().join("collections").join("orders");
+        fault_injection::fail_flush_at(&failing);
+
+        let outcome = adapter.flush().await;
+
+        // Clear before asserting, so a panic does not leave the fault set for the drop
+        // path — the adapter flushes as its last handle goes away.
+        fault_injection::clear_flush_failure(&failing);
+
+        let err = outcome
+            .expect_err("flush must report a collection whose own flush failed, not return Ok");
+        assert!(
+            err.to_string().contains("injected flush failure"),
+            "the error must be the inner failure, not something invented: {err}"
+        );
+
+        // And it recovers: the fault was the only reason it failed.
+        adapter
+            .flush()
+            .await
+            .expect("flush succeeds again once the injected fault is cleared");
+    }
 }
