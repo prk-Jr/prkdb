@@ -960,4 +960,132 @@ mod tests {
             Some(b"Product 456".to_vec())
         );
     }
+
+    /// A batch write must actually write.
+    ///
+    /// Replacing the whole body of `put_batch_to_collection` with `Ok(())` — a batch that
+    /// stores nothing and reports success — survived the entire suite (mutation run
+    /// 31358158012, shard 6). Nothing read back what a batch wrote, so the loudest
+    /// possible failure, silent total data loss on the batch path, was invisible.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_batch_write_is_readable_afterwards() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            log_dir: temp_dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        };
+        let adapter = CollectionPartitionedAdapter::new(config).unwrap();
+
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = (0..8)
+            .map(|i| (format!("k{i}").into_bytes(), format!("v{i}").into_bytes()))
+            .collect();
+
+        adapter
+            .put_batch_to_collection("users", entries.clone())
+            .await
+            .expect("the batch commits");
+
+        for (key, value) in &entries {
+            assert_eq!(
+                adapter.get_from_collection("users", key).await.unwrap(),
+                Some(value.clone()),
+                "batch key {} did not survive the write",
+                String::from_utf8_lossy(key)
+            );
+        }
+
+        assert!(
+            adapter.metrics.get_total_writes() >= entries.len() as u64,
+            "the batch path must count its writes"
+        );
+    }
+
+    /// A collection that exists only in memory must still be listed.
+    ///
+    /// `collection_names_on_disk` unions the in-memory map over the directory listing
+    /// precisely because a freshly created collection may not have been flushed yet —
+    /// that omission is spec S-05. Removing the `!` from `if !names.contains(..)` inverts
+    /// the union into a no-op and drops those collections, and no test noticed (mutation
+    /// run 31358158012, shard 5).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_collection_not_yet_on_disk_is_still_listed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            log_dir: temp_dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        };
+        let adapter = CollectionPartitionedAdapter::new(config).unwrap();
+
+        adapter
+            .put_to_collection("just_created", b"k", b"v")
+            .await
+            .unwrap();
+
+        // Removing the directory while the adapter keeps its in-memory entry reproduces
+        // the state the union exists for: known to this process, not visible on disk.
+        // Writing the collection and listing it immediately does not — `put_to_collection`
+        // creates the directory, so the disk listing already contains it and the union is
+        // redundant. A test that skips this step passes with the `!` removed.
+        std::fs::remove_dir_all(temp_dir.path().join("collections").join("just_created"))
+            .expect("the collection directory exists to be removed");
+
+        let names = adapter.collection_names_on_disk();
+        assert!(
+            names.contains(&"just_created".to_string()),
+            "a collection held in memory must appear in the listing, found {names:?}"
+        );
+
+        // No duplicates, whether the collection reached disk or not.
+        let mut sorted = names.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            names.len(),
+            "listing repeats a collection: {names:?}"
+        );
+    }
+
+    /// The metrics accessors report what was recorded.
+    ///
+    /// `get_total_reads` replaced by `1` and `get_collection_names` replaced by an empty,
+    /// blank, or junk vector all survived (mutation run 31358158012, shard 5): the
+    /// counters were incremented by other tests and read back by none.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn metrics_report_recorded_activity() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            log_dir: temp_dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        };
+        let adapter = CollectionPartitionedAdapter::new(config).unwrap();
+
+        adapter
+            .put_to_collection("users", b"a", b"1")
+            .await
+            .unwrap();
+        adapter
+            .put_to_collection("orders", b"b", b"2")
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            adapter.get_from_collection("users", b"a").await.unwrap();
+        }
+
+        let metrics = adapter.metrics;
+        assert_eq!(
+            metrics.get_total_reads(),
+            3,
+            "three reads were issued; a constant would not track them"
+        );
+        assert!(metrics.get_total_writes() >= 2);
+
+        let mut names = metrics.get_collection_names();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["orders".to_string(), "users".to_string()],
+            "the names must be the collections touched, not a placeholder"
+        );
+    }
 }

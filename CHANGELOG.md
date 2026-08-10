@@ -280,6 +280,13 @@ not enforced by anything, and several tests reported green while testing nothing
 - **Chaos test results were discarded.** The workflow never built `prkdb-server`, which
   every test needs, and `continue-on-error` hid the resulting failure while a README badge
   advertised "19 passing".
+- **A batch write that stored nothing and reported success passed every test.** Replacing
+  the body of `put_batch_to_collection` with `Ok(())` — silent, total data loss on the
+  batch path — survived the suite, because nothing read back what a batch had written.
+  Also unguarded in the same file: the union in `collection_names_on_disk` that keeps a
+  not-yet-flushed collection visible (removing its `!` drops those collections, which is
+  spec S-05 exactly), and the metrics accessors, which every test incremented and none
+  read.
 - **Nothing asserted that a `Write` grant admits writes.** Every authorization test checked
   that insufficient authority is *refused*; none checked that sufficient authority is
   *admitted*. Deleting the `"Put" | "BatchPut" | "Delete" => Write` arm from
