@@ -226,7 +226,7 @@ fn the_strongest_configured_policy_wins() {
 /// `PeerIdentity::from_config`. The mTLS transport path is covered separately in
 /// `peer_mtls.rs`, which needs a real handshake.
 #[cfg(feature = "chaos")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cluster_elects_and_replicates_with_peer_auth_configured() {
     use helpers::in_process_cluster::InProcessCluster;
 
