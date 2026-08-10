@@ -155,6 +155,10 @@ fn preamble() -> &'static str {
     unused_macros,
     dead_code,
     unreachable_code,
+    // Several fences show how to implement a trait, and every fence is wrapped in a
+    // function — so the impl lands inside one. That is the mechanism, not a mistake.
+    // Fires on newer toolchains than the pinned one, which is how CI found it.
+    non_local_definitions,
     clippy::all
 )]
 

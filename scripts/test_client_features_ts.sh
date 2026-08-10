@@ -181,7 +181,11 @@ EOF
 # Initialize NPM project (needed for module resolution)
 cd "$WORK_DIR"
 npm init -y > /dev/null
-npm install --save-dev typescript ts-node @types/node > /dev/null
+# Pinned. Unpinned, this resolved whatever npm served that day, and ts-node 10 breaks
+# against TypeScript >= 5.7 with "Cannot read properties of undefined (reading
+# 'fileExists')" — a failure that appears without anyone changing the repository, and
+# whose message points nowhere near the cause.
+npm install --save-dev typescript@5.6.3 ts-node@10.9.2 @types/node@22 > /dev/null
 
 # Configure tsconfig
 cat > tsconfig.json <<EOF
