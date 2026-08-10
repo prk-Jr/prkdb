@@ -44,7 +44,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - name: Run repo status snapshot
         run: cargo run -p xtask -- repo-status snapshot --fail-on-objective-drift
@@ -76,7 +76,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
@@ -157,7 +157,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants
@@ -217,7 +217,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p prkdb --test load_tests -- --ignored --test-threads=1
       - run: cargo test -p prkdb --test chaos_tests chaos_test_memory_pressure -- --ignored --test-threads=1
@@ -232,7 +232,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       # --locked is required: newer cargo-audit/cargo-deny releases pull crates that
       # need a rustc above the version pinned in rust-toolchain.toml.
@@ -276,7 +276,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace
 
@@ -290,7 +290,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt
       # A wrapper that forgets a StorageAdapter method compiles cleanly and fails at
@@ -321,7 +321,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -344,7 +344,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --no-fail-fast
 
@@ -360,7 +360,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -388,7 +388,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -416,7 +416,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -442,7 +442,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - name: Setup Go
         uses: actions/setup-go@v4
@@ -468,7 +468,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -562,7 +562,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       
       - name: Build benchmarks
@@ -875,7 +875,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       
       - name: Setup Python
