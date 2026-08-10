@@ -251,6 +251,66 @@ mod tests {
             .expect("Admin may stream segments");
     }
 
+    /// A `Write` grant must actually be sufficient to write.
+    ///
+    /// # What this catches
+    ///
+    /// Every other test here checks that insufficient authority is *refused*. Nothing
+    /// checked that sufficient authority is *admitted*, so the classification could drift
+    /// tighter without failing anything: deleting the
+    /// `"Put" | "BatchPut" | "Delete" => Write` arm drops those three RPCs through to the
+    /// `_ => Admin` fallback, locking out every writer, and the whole suite stayed green.
+    ///
+    /// Mutation testing found this (run 31358158012, shard 3). It is the direction a
+    /// refusal-only suite is blind to, and it is the one that pages you at 3am: nobody
+    /// notices a permission that got stricter until writes start failing in production.
+    #[test]
+    fn a_write_grant_admits_writes_and_nothing_more() {
+        for method in ["Put", "BatchPut", "Delete"] {
+            assert_eq!(
+                required_permission(&format!("/prkdb.PrkDbService/{method}")),
+                Some(Permission::Write),
+                "{method} must require Write — not Admin, which would lock out writers"
+            );
+        }
+
+        let writer = ApiAuthzInterceptor::new(Some(store_with(&[("*", Permission::Write)])));
+        for method in ["Put", "BatchPut", "Delete"] {
+            writer
+                .check(&format!("/prkdb.PrkDbService/{method}"), Some("cred"))
+                .unwrap_or_else(|e| panic!("a Write grant must admit {method}: {e}"));
+        }
+
+        // Write is not Admin: the same principal is still refused the admin surface.
+        let err = writer
+            .check("/prkdb.PrkDbService/FetchSegment", Some("cred"))
+            .expect_err("Write on * must not stream raw WAL");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    /// A `Read` grant admits reads. The counterpart of the test above, for the same
+    /// reason: nothing asserted that `Get`/`Watch`/`Metadata` stay readable by a reader.
+    #[test]
+    fn a_read_grant_admits_reads() {
+        let reader = ApiAuthzInterceptor::new(Some(store_with(&[("*", Permission::Read)])));
+        for method in ["Get", "Watch", "GetSchema", "CheckCompatibility", "Metadata"] {
+            assert_eq!(
+                required_permission(&format!("/prkdb.PrkDbService/{method}")),
+                Some(Permission::Read),
+                "{method} must require Read"
+            );
+            reader
+                .check(&format!("/prkdb.PrkDbService/{method}"), Some("cred"))
+                .unwrap_or_else(|e| panic!("a Read grant must admit {method}: {e}"));
+        }
+
+        // Read is not Write.
+        let err = reader
+            .check("/prkdb.PrkDbService/Put", Some("cred"))
+            .expect_err("Read on * must not write");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
     #[test]
     fn missing_and_unknown_credentials_are_unauthenticated() {
         let i = ApiAuthzInterceptor::new(Some(store_with(&[("*", Permission::Admin)])));

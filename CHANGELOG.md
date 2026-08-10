@@ -280,6 +280,12 @@ not enforced by anything, and several tests reported green while testing nothing
 - **Chaos test results were discarded.** The workflow never built `prkdb-server`, which
   every test needs, and `continue-on-error` hid the resulting failure while a README badge
   advertised "19 passing".
+- **Nothing asserted that a `Write` grant admits writes.** Every authorization test checked
+  that insufficient authority is *refused*; none checked that sufficient authority is
+  *admitted*. Deleting the `"Put" | "BatchPut" | "Delete" => Write` arm from
+  `required_permission` drops those three RPCs through to the `_ => Admin` fallback and
+  locks out every writer — and the whole suite stayed green. Found by the mutation run
+  once sharding let it finish, and fixed by the tests a refusal-only suite was missing.
 - **The mutation-testing job could not finish, so it reported nothing.** Its first step
   alone found 100 mutants and spent ~133s on each, needing ~3.7 hours against a 45-minute
   limit; run 31329241574 was cancelled having tested 7. Its own comment already warned

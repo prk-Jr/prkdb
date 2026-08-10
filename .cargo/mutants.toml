@@ -1,0 +1,24 @@
+# cargo-mutants configuration.
+#
+# `exclude_re` is for mutants that no test can kill *because they change nothing* — an
+# equivalent mutant. It is not for mutants that are merely inconvenient to cover: a
+# survivor that changes behaviour is a missing test, and the fix is the test.
+#
+# The same discipline as `scripts/check_ignore_reasons.sh` and the `EXEMPT` map in
+# `scripts/check_wrapper_completeness.sh`: every entry names why, and "hard to test" is
+# not a why.
+exclude_re = [
+    # `required_permission` classifies FetchSegment as Admin with an explicit arm, and its
+    # fallback arm is *also* Admin. Deleting the explicit arm therefore changes no
+    # behaviour for any input, so no test can distinguish it — an equivalent mutant.
+    #
+    # The arm stays despite being redundant today. It is what keeps FetchSegment at Admin
+    # if the fallback is ever loosened, and FetchSegment streams raw WAL across every
+    # collection — the exact hole spec S-01 was filed for. Deleting it to satisfy the
+    # mutation report would trade a real safety property for a clean number.
+    #
+    # Found by run 31358158012, shard 3, alongside a genuine gap in the same function
+    # (nothing asserted that a Write grant admits writes) which was fixed with a test
+    # rather than an exclusion.
+    'delete match arm "FetchSegment" in required_permission',
+]
