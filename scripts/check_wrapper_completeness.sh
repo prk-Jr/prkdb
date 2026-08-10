@@ -53,7 +53,6 @@ wrapper_methods=$(awk -v s="$wrapper_start" 'NR>=s' "$WRAPPER" \
 # Methods the wrapper cannot meaningfully forward, with the reason it cannot.
 # Anything listed here must have a test pinning the current behaviour.
 declare -A EXEMPT=(
-  [get_changes_since]="offsets are not comparable across independent per-collection WALs; merging them into one ordered change stream is a design decision, not a forwarding fix (S-09)"
 )
 
 missing=""

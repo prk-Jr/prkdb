@@ -43,6 +43,12 @@ tracing-subscriber = "0.3"
 criterion = { version = "0.5", features = ["async_tokio"] }
 rstest = "0.26"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
+# Hoisted so the workspace resolves one HTTP stack. prkdb was on 0.12 and prkdb-cli on
+# 0.11, which meant two TLS configurations and two CVE surfaces for the same job; deny.toml
+# documented the deferral and kept `multiple-versions = "warn"`, which is the "suppress
+# rather than fix" outcome R10 said not to take. `blocking` is enabled here because the
+# CLI's integration tests use it.
+reqwest = { version = "0.12", features = ["json", "blocking"] }
 subtle = "2.6"
 dashmap = "5.5"
 uuid = { version = "1.11", features = ["v4"] }

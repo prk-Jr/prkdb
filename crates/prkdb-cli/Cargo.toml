@@ -25,6 +25,9 @@ tokio = { workspace = true }
 # HTTP server (for serve command)
 axum = { workspace = true, features = ["ws", "json"] }
 axum-server = { workspace = true }
+# Pinned to the same backend as the workspace so `install_default()` below has exactly one
+# provider to choose. See the panic it prevents in serve.rs.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["cors", "fs"] }
 futures-util = "0.3"
@@ -51,9 +54,16 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 prost.workspace = true
 prost-types.workspace = true
-reqwest = { version = "0.11", features = ["json", "blocking"] }
+reqwest = { workspace = true }
 
 [dev-dependencies]
 prkdb-proto = { path = "../prkdb-proto" }
 rand = "0.8"
 tempfile = "3.8"
+# Test certificates for the HTTPS listener test.
+#
+# default-features = false is load-bearing: rcgen's default backend is `ring`, and the
+# workspace's rustls already uses `aws-lc-rs`. Enabling both makes rustls unable to pick a
+# process-level CryptoProvider, and every TLS test panics at runtime with
+# "Could not automatically determine the process-level CryptoProvider".
+rcgen = { version = "0.13.2", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }

@@ -12,7 +12,7 @@ Docs: https://prk-jr.github.io/prkdb/
 
 - **High-throughput local writes** - mmap WAL + batch writes tuned for embedded and single-node deployments
 - **Fast local replay** - optimized append/read paths for local streaming workloads
-- **894K queries/sec** - Lock-free indexed lookups
+- **Lock-free indexed lookups** - see [benchmark methodology](docs/benchmarks/methodology.md) for measured figures and their status
 - **ACID Transactions** - Commit/rollback, savepoints, conflict detection
 - **TTL/Expiration** - Auto-expire records after configurable duration
 - **Secondary Indexes** - Type-safe queries with `#[index]` macro
@@ -816,7 +816,7 @@ let new_partition = partitioner.split_partition(b"middle_key".to_vec());
 ### Benchmarks
 ```bash
 cargo run --release --example kafka_comparison        # Full benchmark suite
-cargo run --release --example ultra_performance       # 199K writes, 7.3M reads
+cargo run --release --example ultra_performance       # see docs/benchmarks/methodology.md
 cargo run --release --example max_performance         # Peak performance
 cargo run --release --example streaming_benchmark     # Streaming throughput
 cargo run --release --example transaction_example     # Transaction demo

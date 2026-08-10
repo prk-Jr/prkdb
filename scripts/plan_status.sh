@@ -119,6 +119,22 @@ perf_claims_are_sourced() {
   [[ "$bare" -eq 0 ]]
 }
 
+# The same rule for README.md, which the check above could not see (R15.3).
+#
+# It scanned only `crates/*/src` doc comments and matched only the literal `ops/sec`, so
+# `- **894K queries/sec** - Lock-free indexed lookups` on line 15 of the README passed
+# both filters — while `docs/benchmarks/methodology.md:48` recorded that exact figure as
+# "Unverified. Against in-memory storage, if reproducible at all."
+#
+# The README is the first thing a reader sees, so an unsourced number there costs more
+# than one buried in a doc comment.
+readme_perf_claims_are_sourced() {
+  local bare
+  bare=$(grep -nE '[0-9][0-9,.]*[KMB]\+?[[:space:]]*(queries|ops|writes|reads|msg|records)/(sec|s)\b|[0-9][0-9,.]*[KMB][[:space:]]+(writes|reads|queries)\b' README.md 2>/dev/null \
+    | grep -viE 'methodology|unverified|rate.?limit|per_second' | wc -l | tr -d ' ')
+  [[ "$bare" -eq 0 ]]
+}
+
 # Doc examples fenced with ```ignore never compile, so they cannot catch API drift.
 # The pattern must allow leading whitespace: anchoring at ^/// matched 2 of 61 real
 # occurrences and would have reported this green while 59 remained.
@@ -186,6 +202,7 @@ check "storage adapters free of production unwraps"   "R8" prod_unwraps_below cr
 check "coverage job in CI"                            "R9" grep -q 'llvm-cov' .github/workflows/ci.yml
 check "performance claims cite a source"             "R15" perf_claims_are_sourced
 check "benchmark methodology is published"           "R15" test -f docs/benchmarks/methodology.md
+check "README performance claims are sourced"       "R15" readme_perf_claims_are_sourced
 check "deny.toml present"                            "R10" test -f deny.toml
 check "dependabot configured"                        "R10" test -f .github/dependabot.yml
 check "dead module storage_old_inmemory removed"     "R11" none 'mod storage_old_inmemory' crates/prkdb/src/lib.rs
