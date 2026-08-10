@@ -138,6 +138,30 @@ fn prefix_change(
     }
 }
 
+/// The collection both bounds name, when they name the same one.
+///
+/// # Why this is a free function with its own tests
+///
+/// Inside `scan_range` this is a pure optimisation: every candidate row is filtered
+/// against the original bounds afterwards, so a detector that wrongly returns `None` only
+/// costs work — the rows come out the same. That makes it invisible from the outside, and
+/// mutants on either `position` call survived the entire suite (run 31362753534, shard 8)
+/// for exactly that reason. Testing `scan_range` cannot distinguish a broken detector
+/// from a working one; testing the detector can.
+///
+/// The one direction that *is* observable is a wrong `Some`, which skips collections
+/// holding matching rows — covered both here and by
+/// `a_range_spanning_collections_returns_rows_from_each`.
+fn single_collection_bound(start: &[u8], end: &[u8]) -> Option<Vec<u8>> {
+    match (
+        start.iter().position(|b| *b == b':'),
+        end.iter().position(|b| *b == b':'),
+    ) {
+        (Some(a), Some(b)) if start[..a] == end[..b] => Some(start[..a].to_vec()),
+        _ => None,
+    }
+}
+
 impl CollectionPartitionedAdapter {
     /// Create a new collection-partitioned adapter
     #[instrument(skip(config), fields(base_dir = %config.log_dir.display()))]
@@ -613,13 +637,7 @@ impl StorageAdapter for CollectionPartitionedAdapter {
         end: &[u8],
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
         let collections = self.load_all_collections().await;
-        let single_collection = match (
-            start.iter().position(|b| *b == b':'),
-            end.iter().position(|b| *b == b':'),
-        ) {
-            (Some(a), Some(b)) if start[..a] == end[..b] => Some(start[..a].to_vec()),
-            _ => None,
-        };
+        let single_collection = single_collection_bound(start, end);
 
         let mut out = Vec::new();
         for (name, adapter) in collections {
@@ -1242,5 +1260,94 @@ mod tests {
             adapter.scan_prefix(b"zzz").await.unwrap().is_empty(),
             "an unmatched prefix must select no collection"
         );
+    }
+
+    /// A range spanning two collections must return rows from both.
+    ///
+    /// # What this catches
+    ///
+    /// `scan_range` narrows to a single collection only when both bounds name the *same*
+    /// one, which the guard `start[..a] == end[..b]` decides. Forcing that guard to `true`
+    /// makes any pair of colon-bearing bounds look single-collection, so a range from
+    /// `orders:` to `users:` is answered from `orders` alone and every `users` row is
+    /// silently dropped.
+    ///
+    /// Every existing test ranged within one collection (`users:b` to `users:d`), where
+    /// the narrowing is correct either way, so the mutant survived (run 31362753534,
+    /// shard 8). Spanning two collections is the only shape that exercises the guard.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_range_spanning_collections_returns_rows_from_each() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            log_dir: temp_dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        };
+        let adapter = CollectionPartitionedAdapter::new(config).unwrap();
+
+        adapter.put(b"orders:1", b"o1").await.unwrap();
+        adapter.put(b"orders:2", b"o2").await.unwrap();
+        adapter.put(b"users:alice", b"a").await.unwrap();
+        adapter.put(b"users:bob", b"b").await.unwrap();
+
+        // "orders:1" ..< "users:c" covers both collections entirely.
+        let rows = adapter.scan_range(b"orders:1", b"users:c").await.unwrap();
+        let keys: Vec<String> = rows
+            .iter()
+            .map(|(k, _)| String::from_utf8_lossy(k).into_owned())
+            .collect();
+
+        assert_eq!(
+            keys,
+            vec![
+                "orders:1".to_string(),
+                "orders:2".to_string(),
+                "users:alice".to_string(),
+                "users:bob".to_string(),
+            ],
+            "a range spanning two collections must return rows from both, sorted"
+        );
+
+        // Half-open, across the boundary: excluding users:bob must not exclude users:alice.
+        let rows = adapter.scan_range(b"orders:2", b"users:bob").await.unwrap();
+        let keys: Vec<String> = rows
+            .iter()
+            .map(|(k, _)| String::from_utf8_lossy(k).into_owned())
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["orders:2".to_string(), "users:alice".to_string()],
+            "scan_range is half-open [start, end) across collections too"
+        );
+    }
+
+    /// The single-collection detector, tested directly.
+    ///
+    /// Both `position` calls and the guard are only reachable in a way that changes
+    /// results when the answer is a wrong `Some`; a wrong `None` merely costs a full
+    /// scan. Asserting the exact answer here makes all four mutations on this expression
+    /// observable — before it was extracted, three of them survived the whole suite.
+    #[test]
+    fn the_single_collection_detector_answers_exactly() {
+        // Both bounds name the same collection.
+        assert_eq!(
+            single_collection_bound(b"users:a", b"users:z"),
+            Some(b"users".to_vec()),
+            "both bounds name `users`, so only `users` need be scanned"
+        );
+
+        // Different collections: no narrowing is permissible, or the other collection's
+        // rows are dropped.
+        assert_eq!(single_collection_bound(b"orders:1", b"users:9"), None);
+        assert_eq!(single_collection_bound(b"users:1", b"user:9"), None);
+        assert_eq!(single_collection_bound(b"a:1", b"ab:9"), None);
+
+        // A bound with no colon does not name a collection.
+        assert_eq!(single_collection_bound(b"users", b"users:z"), None);
+        assert_eq!(single_collection_bound(b"users:a", b"users"), None);
+        assert_eq!(single_collection_bound(b"", b""), None);
+
+        // A leading colon means an empty collection name on that side.
+        assert_eq!(single_collection_bound(b":a", b":z"), Some(Vec::new()));
+        assert_eq!(single_collection_bound(b":a", b"users:z"), None);
     }
 }
