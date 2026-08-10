@@ -121,12 +121,12 @@ jobs:
   # cancel is a job that tests nothing.
   mutants:
     name: "🧬 Mutation Testing (targeted)"
-    # Nightly, not per-PR. It takes tens of minutes and explores rather than gates, and a
-    # slow job on every push gets cancelled — at which point it tests nothing.
+    # The *full* sweep is nightly, because 234 mutants take roughly an hour even sharded
+    # ten ways. Pull requests get `mutants-diff` below instead, which mutates only the
+    # lines the pull request touched and finishes in minutes.
     #
-    # Deliberately *not* `continue-on-error` on the PR path instead: a check whose result
-    # is discarded is not a check, which is why that flag was removed from the chaos
-    # workflow. Nightly runs produce a real pass or fail that someone can act on.
+    # Deliberately *not* `continue-on-error`: a check whose result is discarded is not a
+    # check, which is why that flag was removed from the chaos workflow.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     # Sharded because the unsharded job could never finish, and a job that cannot finish
@@ -136,12 +136,20 @@ jobs:
     # job people cancel is a job that tests nothing" — this is that, arrived at by timeout
     # rather than by anyone pressing cancel.
     #
-    # The full file set below is 203 mutants (measured with `cargo mutants --list`, not
-    # estimated). Ten shards is 21 each — `--sharding slice` by default, so 21×9 + 14 —
-    # about 47 minutes at the observed rate, plus a ~4-minute baseline. The 90-minute limit
-    # is deliberate headroom: a CI runner slower than the one that produced the 133s figure
-    # must still finish, because the entire point of this change is that a job which times
-    # out reports nothing.
+    # The full file set below is 234 mutants (measured with `cargo mutants --list`, not
+    # estimated) — 204 in prkdb plus 30 in prkdb-cli's authorization files. Ten shards is
+    # 24 each, about 53 minutes at the observed rate plus a ~4-minute baseline. The
+    # 90-minute limit is deliberate headroom: a CI runner slower than the one that produced
+    # the 133s figure must still finish, because the entire point of this change is that a
+    # job which times out reports nothing.
+    #
+    # prkdb-cli is included because the authorization *layer* lives there, and until now it
+    # had never been mutated. A whole batch of survivors from run 31358158012 —
+    # `admin_count`, `is_admin`, `from_principals`, `Grant::pattern` — were unkillable for
+    # no better reason than that their only callers sat in a package the run did not cover.
+    #
+    # Only its authorization files, not the whole crate: `--package prkdb --package
+    # prkdb-cli` with no file filter is 4415 mutants, which at this rate is about 163 hours.
     #
     # Shard indices are 0-based and k must be < n.
     strategy:
@@ -169,16 +177,85 @@ jobs:
         run: |
           cargo mutants --no-shuffle --timeout 300 \
             --shard ${{ matrix.shard }}/10 \
-            --package prkdb \
+            --package prkdb --package prkdb-cli \
             --file 'crates/prkdb/src/authz/*.rs' \
             --file 'crates/prkdb/src/raft/authz_interceptor.rs' \
             --file 'crates/prkdb/src/raft/peer_auth.rs' \
-            --file 'crates/prkdb/src/storage/collection_partitioned_adapter.rs'
+            --file 'crates/prkdb/src/storage/collection_partitioned_adapter.rs' \
+            --file 'crates/prkdb-cli/src/authz_layer.rs' \
+            --file 'crates/prkdb-cli/src/admin_principals.rs' \
+            --file 'crates/prkdb-cli/src/remote_client.rs'
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: mutants-${{ github.run_number }}-shard-${{ matrix.shard }}
+          path: mutants.out/
+          if-no-files-found: warn
+
+  # Mutation testing on the lines a pull request actually changed.
+  #
+  # # Why this exists
+  #
+  # The full sweep above runs nightly, which meant no pull request ever ran mutation at
+  # all — the check only fired when somebody remembered to trigger it. It has since caught
+  # a cluster-secret comparison whose `&&` becoming `||` would have authenticated any
+  # string of the right length, a batch write that stored nothing and reported success, and
+  # 35 other real gaps. A check that depends on someone remembering is not a check.
+  #
+  # `--in-diff` makes it affordable: it mutates only code the diff touched. Measured on a
+  # three-line method, that is 7 mutants against 4415 for the same package scope
+  # unfiltered — minutes rather than the better part of a week.
+  #
+  # The scope is deliberately *not* filtered by file. The nightly sweep is narrowed to the
+  # modules where a silent wrong answer costs most; this one should look at whatever the
+  # author actually wrote, which is the code least likely to be covered yet.
+  mutants-diff:
+    name: "🧬 Mutation Testing (diff)"
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # Generous relative to the measured cost, because the bound scales with the size of
+    # the diff and a large refactor should still get an answer rather than a timeout.
+    timeout-minutes: 45
+    steps:
+      # fetch-depth: 0 — the diff is computed against the merge base, which a shallow
+      # clone does not contain.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      - uses: Swatinem/rust-cache@v2
+
+      # Three dots: the diff against the merge base, not against the current tip of the
+      # base branch. Two dots would include everything that landed on main since this
+      # branch started, and mutate code the author never touched.
+      - name: Diff against the merge base
+        run: |
+          # `--depth=0` is fatal here ("depth 0 is not a positive number"); the clone is
+          # already complete because of fetch-depth: 0 above, so a plain fetch of the base
+          # branch is all that is needed to name it.
+          git fetch --no-tags origin "${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+          git diff "origin/${{ github.base_ref }}...HEAD" > /tmp/pr.diff
+          echo "changed lines: $(wc -l < /tmp/pr.diff)"
+          if [ ! -s /tmp/pr.diff ]; then
+            echo "empty diff — nothing to mutate"
+          fi
+
+      - name: Mutate the changed lines
+        run: |
+          cargo mutants --no-shuffle --timeout 300 \
+            --in-diff /tmp/pr.diff \
+            --package prkdb --package prkdb-cli
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants-diff-${{ github.run_number }}
           path: mutants.out/
           if-no-files-found: warn
 
