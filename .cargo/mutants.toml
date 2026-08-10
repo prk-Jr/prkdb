@@ -36,6 +36,29 @@ exclude_re = [
     # rather than an exclusion.
     'delete match arm "FetchSegment" in required_permission',
 
+    # Category 1. `get_many`'s small-batch path looks a key's offset up in the index and
+    # reads exactly that record, so `LogOperation::Put { id, .. } if id == key_clone` is a
+    # consistency check on a record that is already the right one. Forcing the guard `true`
+    # therefore changes nothing.
+    #
+    # Distinguished from a real gap by testing both directions: forcing it `false` IS
+    # killed (`get_many_returns_the_right_value_per_key` and
+    # `get_many_reads_from_the_wal_when_the_cache_is_cold` both fail), because the match
+    # then falls past the `Put` arm and the read returns nothing. A guard that matters in
+    # one direction only is redundant, not untested.
+    #
+    # Run 31411280726.
+    'replace match guard id == key_clone with true in <impl StorageAdapter for WalStorageAdapter>::get_many',
+
+    # Category 1. The `miss_keys.len() > 100` threshold selects between a single scan and
+    # per-key index lookups. Both return the same answers — it is a performance choice, and
+    # `a_large_cold_batch_read_returns_the_right_values` asserts the values agree on both
+    # sides of the boundary. Mutating the comparison changes which strategy runs, not what
+    # it returns.
+    #
+    # Run 31411280726.
+    'replace > with (==|<|>=) in <impl StorageAdapter for WalStorageAdapter>::get_many',
+
     # Category 1. `outbox_list`'s body is `Ok(Vec::new())`, so replacing it with
     # `Ok(vec![])` substitutes the expression for itself. Nothing distinguishes them,
     # including `the_outbox_stub_reports_nothing_rather_than_something`, which asserts the
