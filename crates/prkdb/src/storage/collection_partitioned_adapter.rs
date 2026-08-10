@@ -1191,4 +1191,56 @@ mod tests {
             "a flushed write did not survive reopening"
         );
     }
+
+    /// A prefix with no colon names a *partial collection name* and must select the
+    /// collections it prefixes — not the ones it does not.
+    ///
+    /// # What this catches
+    ///
+    /// That branch guards with `if !name.as_bytes().starts_with(prefix) { continue; }`.
+    /// Removing the `!` inverts the selection exactly: `scan_prefix(b"use")` then skips
+    /// `users` and scans every other collection, so the caller gets a confident answer
+    /// made entirely of the wrong rows.
+    ///
+    /// The existing coverage all used `b"users:"`, which takes the *other* branch — the
+    /// one where the prefix contains a colon and names a collection outright — so the
+    /// partial-name path had no test at all and the mutant survived (run 31362753534,
+    /// shard 8).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_partial_collection_name_selects_only_matching_collections() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            log_dir: temp_dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        };
+        let adapter = CollectionPartitionedAdapter::new(config).unwrap();
+
+        adapter.put(b"users:alice", b"a").await.unwrap();
+        adapter.put(b"users:bob", b"b").await.unwrap();
+        adapter.put(b"orders:1", b"o").await.unwrap();
+
+        // "use" prefixes "users" and not "orders".
+        let hits = adapter.scan_prefix(b"use").await.unwrap();
+        let mut keys: Vec<String> = hits
+            .iter()
+            .map(|(k, _)| String::from_utf8_lossy(k).into_owned())
+            .collect();
+        keys.sort();
+
+        assert_eq!(
+            keys,
+            vec!["users:alice".to_string(), "users:bob".to_string()],
+            "a partial collection name must select the collections it prefixes"
+        );
+        assert!(
+            !keys.iter().any(|k| k.starts_with("orders")),
+            "a collection the prefix does not match must not be scanned: {keys:?}"
+        );
+
+        // A prefix matching nothing returns nothing rather than everything.
+        assert!(
+            adapter.scan_prefix(b"zzz").await.unwrap().is_empty(),
+            "an unmatched prefix must select no collection"
+        );
+    }
 }

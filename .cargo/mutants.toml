@@ -29,6 +29,19 @@ exclude_re = [
     # rather than an exclusion.
     'delete match arm "FetchSegment" in required_permission',
 
+    # Category 1. `outbox_list`'s body is `Ok(Vec::new())`, so replacing it with
+    # `Ok(vec![])` substitutes the expression for itself. Nothing distinguishes them,
+    # including `the_outbox_stub_reports_nothing_rather_than_something`, which asserts the
+    # list is empty and so kills every *populated* replacement of this function while
+    # necessarily passing for this one.
+    #
+    # Anchored on the empty-vector variant on purpose: the six mutants returning invented
+    # entries are not equivalent and stay in scope, because a caller draining the outbox
+    # would act on rows that were never saved.
+    #
+    # Run 31362753534, shard 7.
+    'outbox_list .* with Ok\(vec!\[\]\)$',
+
     # Category 2. `CollectionPartitionedAdapter::flush` forwards to each collection's
     # `WalStorageAdapter::flush`, which drains a batch accumulator and flushes the WAL.
     # That inner work is real, so this is *not* an equivalent mutant — but nothing that
