@@ -6,7 +6,6 @@
 //!   prkdb codegen --server http://localhost:50051 --lang go --out ./clients/go/
 
 use clap::{Args, ValueEnum};
-use prkdb_client::PrkDbClient;
 use prost::Message;
 use prost_types::FileDescriptorSet;
 use std::path::PathBuf;
@@ -35,6 +34,12 @@ pub struct CodegenArgs {
     #[arg(long, env = "PRKDB_ADMIN_TOKEN")]
     pub admin_token: Option<String>,
 
+    /// Bearer credential for a server with authorization enabled.
+    ///
+    /// `--admin-token` doubles as one; this is for a principal that is not an admin.
+    #[arg(long, env = "PRKDB_CREDENTIAL")]
+    pub credential: Option<String>,
+
     /// Target language for code generation
     #[arg(short, long, value_enum)]
     pub lang: Language,
@@ -59,13 +64,12 @@ pub async fn handle_codegen(args: CodegenArgs) -> anyhow::Result<()> {
     println!("   Output: {}", args.out.display());
 
     // Connect to server
-    let client = if let Some(token) = args.admin_token.clone() {
-        PrkDbClient::new(vec![args.server.clone()])
-            .await?
-            .with_admin_token(token)
-    } else {
-        PrkDbClient::new(vec![args.server.clone()]).await?
-    };
+    let client = crate::remote_client::connect(
+        vec![args.server.clone()],
+        args.credential.clone(),
+        args.admin_token.clone(),
+    )
+    .await?;
     println!("✓ Connected to server");
 
     // Create output directory
@@ -811,7 +815,16 @@ func (c *PrkDbClient) ListRaw(collection string, opts ListOptions) ([]map[string
 		params.Set("sort", opts.Sort)
 	}
 
-	resp, err := c.Client.Get(fmt.Sprintf("%s/collections/%s/data?%s", c.Host, collection, params.Encode()))
+	// http.Client.Get cannot carry headers, so it silently skipped authorize() and every
+	// read against a secured server failed with ErrUnauthenticated while writes — which
+	// build their request explicitly — succeeded.
+	req, err := http.NewRequest("GET", fmt.Sprintf("%s/collections/%s/data?%s", c.Host, collection, params.Encode()), nil)
+	if err != nil {
+		return nil, err
+	}
+	c.authorize(req)
+
+	resp, err := c.Client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -1230,6 +1243,53 @@ mod tests {
         assert!(
             go.contains("ErrUnauthenticated") && go.contains("ErrPermissionDenied"),
             "go: 401 and 403 are not distinguished"
+        );
+    }
+
+    /// Every Go request must be built through `authorize`, not merely be able to be.
+    ///
+    /// The assertion above — that the header-setting line exists somewhere — passed while
+    /// `ListRaw` called `c.Client.Get(url)`, a helper that takes no headers and so skipped
+    /// `authorize` entirely. Reads against a secured server failed with
+    /// `prkdb: not authenticated` while writes succeeded, because writes build their
+    /// request explicitly. Only the mixed-client integration test caught it, and only once
+    /// it began running against an authorized server.
+    ///
+    /// `authorize`'s own doc comment claimed "every request is built through this, so a
+    /// new method cannot silently ship unauthenticated". That was an aspiration with
+    /// nothing enforcing it. This is the enforcement.
+    #[tokio::test]
+    async fn no_go_request_bypasses_authorize() {
+        let dir = tempdir().unwrap();
+        let go_dir = dir.path().join("go");
+        generate_go_client_lib(&go_dir).await.unwrap();
+        let go = fs::read_to_string(go_dir.join("client.go")).await.unwrap();
+
+        // The convenience helpers on http.Client accept no headers, so any use of one is
+        // a request that cannot be authenticated.
+        for helper in [
+            "c.Client.Get(",
+            "c.Client.Post(",
+            "c.Client.Head(",
+            "c.Client.PostForm(",
+        ] {
+            assert!(
+                !go.contains(helper),
+                "go: {helper} takes no headers and therefore bypasses authorize(); \
+                 build the request with http.NewRequest and call c.authorize(req)"
+            );
+        }
+
+        // Every dispatched request must have been authorized first.
+        let dispatched = go.matches("c.Client.Do(req)").count();
+        let authorized = go.matches("c.authorize(req)").count();
+        assert_eq!(
+            dispatched, authorized,
+            "go: {dispatched} request(s) dispatched but only {authorized} authorized"
+        );
+        assert!(
+            dispatched > 0,
+            "go: the template dispatches no requests at all"
         );
     }
 

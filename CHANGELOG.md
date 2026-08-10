@@ -77,6 +77,31 @@ not enforced by anything, and several tests reported green while testing nothing
 
 ### Fixed
 
+- **The CLI could not talk to a server that enforced authorization.** Every remote
+  subcommand built its client as `PrkDbClient::new(servers).await?.with_admin_token(token)`,
+  but `new` fetches cluster metadata before returning and `Metadata` requires `Read`. The
+  credential arrived one step after the call that needed it, so `prkdb-cli schema list`
+  against a server started with `PRKDB_BOOTSTRAP_TOKEN` failed with `Failed to fetch
+  metadata from any bootstrap server` — a message naming the network and never mentioning
+  authorization. Twelve call sites now route through one `remote_client::connect`, and a
+  global `--credential` / `PRKDB_CREDENTIAL` lets a non-admin principal use the CLI. The
+  bug survived local testing because every script that exercised the CLI ran it against an
+  anonymous server; it surfaced only once the mixed-client integration test was switched
+  to an authorized one.
+- **A server started with `--allow-anonymous` could be written to by anyone and
+  administered by no one.** The deprecated-`admin_token` check denied every admin RPC when
+  the server had neither a token nor the authorization layer. That is right when the layer
+  went missing by accident and wrong when the operator asked for it: `ListSchemas`
+  answered every caller with `Unauthenticated` on a server whose collections were already
+  open to unauthenticated reads and writes. The two cases are now distinguished, and the
+  accidental one still denies.
+- **The generated Go client sent no credential on reads.** `ListRaw` called
+  `http.Client.Get`, which takes no headers and so skipped `authorize()` entirely, while
+  writes — which build their request explicitly — were authenticated. Reads against a
+  secured server failed with `prkdb: not authenticated`. `authorize`'s own doc comment
+  claimed "every request is built through this, so a new method cannot silently ship
+  unauthenticated"; that was an aspiration with nothing enforcing it, and a test now
+  asserts the dispatched-request count equals the authorized-request count.
 - **The database lost every write when it was reopened.** Three independent defects, each
   sufficient on its own, and each masking the others:
   - `MmapLogSegment::create` opens with `truncate(true)`, and the path
@@ -235,6 +260,16 @@ not enforced by anything, and several tests reported green while testing nothing
 - **Chaos test results were discarded.** The workflow never built `prkdb-server`, which
   every test needs, and `continue-on-error` hid the resulting failure while a README badge
   advertised "19 passing".
+- **The mutation-testing job could not finish, so it reported nothing.** Its first step
+  alone found 100 mutants and spent ~133s on each, needing ~3.7 hours against a 45-minute
+  limit; run 31329241574 was cancelled having tested 7. Its own comment already warned
+  that "a job people cancel is a job that tests nothing" — it arrived there by timeout
+  instead. Now sharded ten ways. The seven mutants it did reach all survived, every one an
+  accessor (`Grant::pattern`, `Role::name`, `Role::grants`, `Principal::grants`,
+  `Principal::credential_hash`) whose only callers are in `prkdb-cli` while the run was
+  `--package prkdb` — a scoping artifact rather than a logic gap, but the consequences are
+  real enough (`credential_hash` returning `""` writes a principal no credential can
+  match) that they are now pinned by direct tests instead of by widening the scope.
 - Three WAL corruption tests were `#[ignore]`d for no stated reason and pass in 0.7s.
 - CI jobs had no `timeout-minutes`, so a hung test consumed GitHub's six-hour default.
 - `cargo clippy --all-targets -- -D warnings` did not pass on the pinned toolchain.

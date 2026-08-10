@@ -58,6 +58,8 @@ pub struct PrkDbGrpcService<S: prkdb_schema::SchemaStorage = InMemorySchemaStora
     /// Only then may an absent `admin_token` be treated as already-authorized — see
     /// [`validate_admin_token`](Self::validate_admin_token).
     authz_enforced: bool,
+    /// The operator passed --allow-anonymous. See [`Self::with_anonymous_access`].
+    allow_anonymous: bool,
 }
 
 impl PrkDbGrpcService<InMemorySchemaStorage> {
@@ -78,6 +80,7 @@ impl PrkDbGrpcService<InMemorySchemaStorage> {
             watch_sequence: AtomicU64::new(0),
             schema_registry,
             authz_enforced: false,
+            allow_anonymous: false,
         }
     }
 }
@@ -109,6 +112,7 @@ impl PrkDbGrpcService<FileSchemaStorage> {
             watch_sequence: AtomicU64::new(0),
             schema_registry,
             authz_enforced: false,
+            allow_anonymous: false,
         }
     }
 }
@@ -121,6 +125,32 @@ impl<S: prkdb_schema::SchemaStorage> PrkDbGrpcService<S> {
     /// deployment that removes authorization cannot silently open the admin surface.
     pub fn with_authz_enforced(mut self, enforced: bool) -> Self {
         self.authz_enforced = enforced;
+        self
+    }
+
+    /// Declare that the operator asked to serve without authorization.
+    ///
+    /// # Why this is not the same as `!authz_enforced`
+    ///
+    /// `authz_enforced == false` has two causes that call for opposite answers:
+    ///
+    /// 1. `--allow-anonymous`, an explicit operator decision.
+    /// 2. The layer is simply absent — a refactor dropped it, or a binary forgot to
+    ///    install it.
+    ///
+    /// Case 2 must keep denying admin RPCs, which is what [`Self::with_authz_enforced`]
+    /// protects. But applying the same denial to case 1 produces a server nobody can
+    /// administer: `--allow-anonymous` leaves every collection readable and writable by
+    /// anyone who can reach the port, while `ListSchemas` answers every caller with
+    /// `Unauthenticated: "Server has no admin token configured and no authorization is
+    /// enforced"`. Refusing to list schemas on a server that will accept arbitrary writes
+    /// protects nothing; it only breaks the tooling.
+    ///
+    /// So the deprecated-token check passes when authorization is enforced (the layer
+    /// already required `Admin`) **or** when it was explicitly waived — and still denies
+    /// when it went missing by accident.
+    pub fn with_anonymous_access(mut self, allowed: bool) -> Self {
+        self.allow_anonymous = allowed;
         self
     }
 
@@ -1327,6 +1357,10 @@ impl<S: prkdb_schema::SchemaStorage> PrkDbGrpcService<S> {
         if self.admin_token.is_empty() {
             if self.authz_enforced {
                 // AuthzGrpcLayer already required Admin to reach this handler.
+                return Ok(());
+            }
+            if self.allow_anonymous {
+                // Authorization was waived deliberately; see `with_anonymous_access`.
                 return Ok(());
             }
             return Err(Status::unauthenticated(

@@ -293,6 +293,9 @@ wait_for_pid "$TS_READ_PID" "TypeScript reader" "$TS_LOG_DIR/read"
 wait_for_pid "$GO_READ_PID" "Go reader" "$GO_LOG_DIR/read"
 
 echo "🔎 Verifying aggregate results..."
+# The verifier reads the collection back over HTTP, so it needs the same credential the
+# three writers used; the server this test runs against enforces authorization.
+PRKDB_CREDENTIAL="$ADMIN_TOKEN" \
 python3 scripts/verify_mixed_client_results.py \
     --server "$SERVER_HTTP_URL" \
     --collection "$COLLECTION_NAME" \

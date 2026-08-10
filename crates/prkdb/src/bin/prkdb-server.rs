@@ -70,6 +70,7 @@ async fn main() -> Result<()> {
     // admin principal, matching `prkdb-cli serve`; PRKDB_ALLOW_ANONYMOUS is the explicit
     // opt-out. Leaving this binary unguarded while `prkdb-cli` enforced would reopen S-01
     // for anyone deploying prkdb-server, which is the image the compose files run.
+    let mut anonymous_access = false;
     let authz_store = {
         let store = prkdb::authz::PrincipalStore::new();
 
@@ -118,6 +119,7 @@ async fn main() -> Result<()> {
                 "serving with PRKDB_ALLOW_ANONYMOUS. Every collection is readable and \
                  writable by anyone who can reach this port."
             );
+            anonymous_access = true;
             None
         } else {
             Some(store)
@@ -243,6 +245,9 @@ async fn main() -> Result<()> {
             // The layer requires Admin for these RPCs, so the deprecated admin_token
             // message field is no longer the only way in.
             .with_authz_enforced(authz_store.is_some())
+            // Distinct from `!authz_enforced`: only an explicit PRKDB_ALLOW_ANONYMOUS
+            // waives the admin check, so a missing layer still denies.
+            .with_anonymous_access(anonymous_access)
             .with_local_node_id(node_id)
             .with_public_address(advertised_grpc_address)
             .with_advertised_node_addresses(advertised_node_addresses)

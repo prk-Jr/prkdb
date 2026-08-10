@@ -179,6 +179,56 @@ impl Principal {
 
 #[cfg(test)]
 mod tests {
+    /// Pins the accessors that carry authorization data between crates.
+    ///
+    /// # Why these are worth asserting directly
+    ///
+    /// Mutation run 31329241574 replaced each of them with a constant — `Grant::pattern`
+    /// with `""` and `"xyzzy"`, `Role::name` with `""`, `Role::grants` and
+    /// `Principal::grants` with an empty slice, `Principal::credential_hash` with `""` —
+    /// and every one survived the `prkdb` test suite.
+    ///
+    /// They survived for a scoping reason rather than a logic one: their only callers are
+    /// in `prkdb-cli` (`authz_layer.rs` and `admin_principals.rs`), and the run was
+    /// `--package prkdb`, so no test that could have killed them was in scope. The
+    /// consequences are real anyway — `Role::grants` returning empty silently strips a
+    /// role's authority, and `credential_hash` returning `""` writes a principal that no
+    /// credential can ever match — so the fix is to pin them here rather than to widen the
+    /// mutation scope and pay a full workspace test run per mutant.
+    #[test]
+    fn accessors_return_what_was_configured() {
+        let grant = Grant::new("orders:*", Permission::Write);
+        assert_eq!(grant.pattern(), "orders:*");
+        assert_eq!(grant.permission(), Permission::Write);
+
+        let role = Role::new("auditor", vec![grant.clone()]);
+        assert_eq!(role.name(), "auditor");
+        assert_eq!(role.grants().len(), 1);
+        assert_eq!(role.grants()[0].pattern(), "orders:*");
+
+        let principal = Principal::new("alice", "s3cret", vec![grant]);
+        assert_eq!(principal.name(), "alice");
+        assert_eq!(principal.grants().len(), 1);
+        assert_eq!(principal.grants()[0].pattern(), "orders:*");
+    }
+
+    /// The stored digest is the SHA-256 of the credential, and never the credential.
+    #[test]
+    fn credential_hash_is_the_digest_of_the_credential() {
+        let principal = Principal::new("alice", "s3cret", vec![]);
+        let hash = principal.credential_hash();
+
+        assert_eq!(hash, hash_credential("s3cret"));
+        assert_eq!(hash.len(), 64, "hex SHA-256 is 64 characters");
+        assert!(!hash.is_empty());
+        assert_ne!(hash, "s3cret", "the credential must not be stored in the clear");
+
+        // An empty digest would match nothing, so this also guards the accessor being
+        // replaced by a constant.
+        assert!(principal.credential_matches("s3cret"));
+        assert!(!principal.credential_matches("wrong"));
+    }
+
     use super::*;
 
     #[test]

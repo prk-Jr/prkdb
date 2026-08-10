@@ -110,7 +110,19 @@ jobs:
     # workflow. Nightly runs produce a real pass or fail that someone can act on.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Sharded because the unsharded job could never finish, and a job that cannot finish
+    # reports nothing. Run 31329241574 found 100 mutants in the first step alone and spent
+    # ~133s on each (75s build + 58s test), so a full pass needed ~3.7 hours against a
+    # 45-minute limit; it was cancelled after testing 7. The comment above already said "a
+    # job people cancel is a job that tests nothing" — this is that, arrived at by timeout
+    # rather than by anyone pressing cancel.
+    #
+    # 10 shards puts ~13 mutants in each, about 30 minutes plus a ~4-minute baseline.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Install Protoc
@@ -125,24 +137,22 @@ jobs:
           tool: cargo-mutants
       - uses: Swatinem/rust-cache@v2
 
-      - name: Mutate the authorization model
+      # One invocation, not two: cargo-mutants shards the mutant list it is given, so two
+      # separate commands would each shard their own list and the split would be uneven.
+      - name: Mutate the authorization model and storage wrapper
         run: |
           cargo mutants --no-shuffle --timeout 300 \
+            --shard ${{ matrix.shard }}/10 \
             --package prkdb \
             --file 'crates/prkdb/src/authz/*.rs' \
             --file 'crates/prkdb/src/raft/authz_interceptor.rs' \
-            --file 'crates/prkdb/src/raft/peer_auth.rs'
-
-      - name: Mutate the storage wrapper
-        run: |
-          cargo mutants --no-shuffle --timeout 300 \
-            --package prkdb \
+            --file 'crates/prkdb/src/raft/peer_auth.rs' \
             --file 'crates/prkdb/src/storage/collection_partitioned_adapter.rs'
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: mutants-${{ github.run_number }}
+          name: mutants-${{ github.run_number }}-shard-${{ matrix.shard }}
           path: mutants.out/
           if-no-files-found: warn
 
@@ -865,7 +875,15 @@ jobs:
 
       - name: Start PrkDB Server
         run: |
-          ./target/release/prkdb-cli --database /tmp/prkdb-cross-lang-benchmark.db serve --port 8080 --grpc-port 50051 &
+          # --allow-anonymous: `serve` now refuses to start with neither a bootstrap
+          # credential nor this flag, and without it this step fails with "No principals
+          # are configured". Anonymous is the right choice *here* specifically: the job
+          # compares three language clients against each other, so the numbers are
+          # relative and a per-request credential check would be constant across all
+          # three. It does mean these figures exclude authorization overhead. The
+          # authorized path is covered by the Mixed Client Integration job, which runs
+          # the same generated clients against a server started with a bootstrap token.
+          ./target/release/prkdb-cli --database /tmp/prkdb-cross-lang-benchmark.db serve --port 8080 --grpc-port 50051 --allow-anonymous &
           echo "Waiting for server..."
           for i in {1..30}; do
             if curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1 \

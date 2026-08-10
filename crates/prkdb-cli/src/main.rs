@@ -9,6 +9,7 @@ mod commands;
 mod database_manager;
 mod output;
 mod probes;
+mod remote_client;
 mod storage_keys;
 mod tls;
 mod uptime_tracker;
@@ -39,6 +40,13 @@ pub struct Cli {
     /// Admin token for secured operations
     #[arg(long, env = "PRKDB_ADMIN_TOKEN")]
     pub admin_token: Option<String>,
+
+    /// Bearer credential sent with every request to a secured server.
+    ///
+    /// `--admin-token` also works as one, since an admin token is `Admin` on `*`. This
+    /// exists so a non-admin principal can use the CLI without claiming admin authority.
+    #[arg(long, env = "PRKDB_CREDENTIAL")]
+    pub credential: Option<String>,
 
     /// Use local embedded database instead of remote server
     #[arg(long)]
@@ -281,10 +289,10 @@ async fn main() -> anyhow::Result<()> {
             commands::serve::handle_serve(args).await
         }
         // Client commands - DO NOT init database manager (pure remote)
-        Commands::Get(args) => data::handle_get(args.clone()).await,
-        Commands::Put(args) => data::handle_put(args.clone()).await,
-        Commands::Delete(args) => data::handle_delete(args.clone()).await,
-        Commands::BatchPut(args) => data::handle_batch_put(args.clone()).await,
+        Commands::Get(args) => data::handle_get(args.clone(), &cli).await,
+        Commands::Put(args) => data::handle_put(args.clone(), &cli).await,
+        Commands::Delete(args) => data::handle_delete(args.clone(), &cli).await,
+        Commands::BatchPut(args) => data::handle_batch_put(args.clone(), &cli).await,
         Commands::Subscribe(args) => subscribe::handle_subscribe(args.clone()).await,
 
         // Backup/Restore commands (Offline)

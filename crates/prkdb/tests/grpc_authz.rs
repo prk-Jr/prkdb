@@ -65,13 +65,24 @@ async fn start_server_with(
     store: Option<PrincipalStore>,
     authz_enforced: bool,
 ) -> (String, oneshot::Sender<()>) {
+    start_server_full(store, authz_enforced, false).await
+}
+
+/// As [`start_server_with`], plus the explicit `--allow-anonymous` decision.
+async fn start_server_full(
+    store: Option<PrincipalStore>,
+    authz_enforced: bool,
+    allow_anonymous: bool,
+) -> (String, oneshot::Sender<()>) {
     let db = Arc::new(
         PrkDb::builder()
             .with_storage(InMemoryAdapter::new())
             .build()
             .unwrap(),
     );
-    let service = PrkDbGrpcService::new(db, String::new()).with_authz_enforced(authz_enforced);
+    let service = PrkDbGrpcService::new(db, String::new())
+        .with_authz_enforced(authz_enforced)
+        .with_anonymous_access(allow_anonymous);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -295,4 +306,33 @@ async fn without_authorization_an_unconfigured_server_still_denies_admin() {
         .expect_err("an unconfigured server with no authorization must deny admin RPCs");
 
     assert_eq!(status.code(), Code::Unauthenticated);
+}
+
+/// `--allow-anonymous` must leave the server administrable.
+///
+/// The two conditions above — layer present, or token configured — both being false was
+/// treated as "deny". That is right when the layer went missing by accident, and wrong
+/// when the operator asked for it: `--allow-anonymous` opens every collection to
+/// unauthenticated reads and writes, yet `ListCollections` answered every caller with
+/// `Unauthenticated`, so the server could be written to by anyone and administered by
+/// no one. It also broke `prkdb-cli schema list`, which is how the cross-language
+/// benchmark waits for readiness.
+#[tokio::test]
+async fn explicit_anonymous_access_permits_admin_rpcs() {
+    let (url, _shutdown) = start_server_full(None, false, true).await;
+    let mut client = PrkDbServiceClient::connect(url).await.unwrap();
+
+    let response = client
+        .list_collections(tonic::Request::new(
+            prkdb_proto::raft::ListCollectionsRequest {
+                admin_token: String::new(),
+            },
+        ))
+        .await;
+
+    assert!(
+        response.is_ok(),
+        "a server serving anonymously by explicit request must still be administrable: {:?}",
+        response.err()
+    );
 }

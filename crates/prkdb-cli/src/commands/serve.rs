@@ -584,6 +584,9 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
             // The layer requires Admin for these RPCs, so the deprecated admin_token
             // message field is no longer the only way in.
             .with_authz_enforced(grpc_authz_store.is_some())
+            // Distinct from `!authz_enforced`: only an explicit --allow-anonymous waives
+            // the admin check, so a missing layer still denies.
+            .with_anonymous_access(args.allow_anonymous)
             .with_local_node_id(args.id)
             .with_public_address(advertised_grpc_address)
             .with_advertised_node_addresses(advertised_node_addresses);
