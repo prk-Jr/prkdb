@@ -101,6 +101,18 @@ impl PrkDb {
         config: crate::raft::ClusterConfig,
         storage_path: std::path::PathBuf,
     ) -> Result<Self, Error> {
+        Self::new_multi_raft_with_authz(num_partitions, config, storage_path, None)
+    }
+
+    /// As [`new_multi_raft`](Self::new_multi_raft), handing partition 0 the authorization
+    /// cache so replicated principal changes reach every node's `resolve`, not just its
+    /// storage. See [`propose_authz`](Self::propose_authz) for why partition 0.
+    pub fn new_multi_raft_with_authz(
+        num_partitions: usize,
+        config: crate::raft::ClusterConfig,
+        storage_path: std::path::PathBuf,
+        authz: Option<crate::authz::PrincipalStore>,
+    ) -> Result<Self, Error> {
         use crate::raft::PartitionManager;
         use crate::raft::PrkDbStateMachine;
         use crate::storage::wal_adapter::WalStorageAdapter;
@@ -115,14 +127,16 @@ impl PrkDb {
             num_partitions,
             config,
             storage_path.clone(),
-            |_partition_id, storage| {
-                // Create a state machine for this partition
-                // In a real implementation, this would be connected to a storage engine
-                // For now, we'll create a dummy state machine or a real one if possible
-                // Let's check PrkDbStateMachine constructor
-                Arc::new(PrkDbStateMachine::new(
-                    storage, // Pass the partition's storage adapter
-                ))
+            move |partition_id, storage| {
+                let machine = PrkDbStateMachine::new(storage);
+                // Only partition 0 owns the authz keyspace (E1), so only it needs the
+                // cache. Giving it to every partition would have each one apply the same
+                // upsert N times.
+                let machine = match (partition_id, authz.clone()) {
+                    (0, Some(store)) => machine.with_authz(store),
+                    _ => machine,
+                };
+                Arc::new(machine)
             },
         )
         .map_err(|e| Error::Storage(prkdb_types::error::StorageError::Internal(e.to_string())))?;
@@ -155,6 +169,56 @@ impl PrkDb {
             partition_manager: Some(Arc::new(partition_manager)),
             replication_targets: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         })
+    }
+
+    /// Whether authorization writes must go through Raft on this instance.
+    ///
+    /// False for embedded use and for `serve` without `--peers`, where no partition
+    /// manager is built at all and the local write is the only path there is.
+    pub fn replicates_authz(&self) -> bool {
+        self.partition_manager.is_some()
+    }
+
+    /// Propose an authorization change and wait for it to commit.
+    ///
+    /// # Partition 0 owns the authz keyspace (decision E1)
+    ///
+    /// Ordinary keys route by `seahash(key) % num_partitions`, which would scatter
+    /// principals across partitions — each consistently, but with availability that
+    /// depends on which partition a *name* happens to hash to. "Can I revoke this
+    /// credential right now?" would have a different answer per principal, which is the
+    /// worst property to discover during an incident.
+    ///
+    /// Partition 0 by convention instead: one predictable availability domain, and a
+    /// sentence an operator can hold — authorization lives in partition 0.
+    ///
+    /// # Refusing when there is no leader (decision E2)
+    ///
+    /// `propose` returns `NotLeader` immediately, carrying the known leader's id. That
+    /// error is surfaced rather than falling back to a local write: a local write is
+    /// exactly the bug this replaces, because it succeeds on one node and silently leaves
+    /// every other node disagreeing about who may do what.
+    pub async fn propose_authz(&self, command: crate::raft::command::Command) -> Result<(), Error> {
+        let pm = self.partition_manager.as_ref().ok_or_else(|| {
+            Error::Storage(prkdb_types::error::StorageError::Internal(
+                "propose_authz called on an instance with no partition manager; callers must \
+                 check replicates_authz() and take the local path"
+                    .into(),
+            ))
+        })?;
+
+        const AUTHZ_PARTITION: u64 = 0;
+        let raft = pm
+            .get_partition(AUTHZ_PARTITION)
+            .ok_or_else(|| partition_not_found_error(AUTHZ_PARTITION))?;
+
+        raft.propose(command.serialize())
+            .await
+            .map_err(raft_error_to_error)?
+            .wait_commit()
+            .await
+            .map_err(raft_error_to_error)?;
+        Ok(())
     }
 
     /// Start Multi-Raft partitions

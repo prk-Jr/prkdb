@@ -28,4 +28,4 @@ mod model;
 mod store;
 
 pub use model::{Grant, Permission, Principal, Role};
-pub use store::{BootstrapError, PrincipalStore, PRINCIPAL_KEY_PREFIX};
+pub use store::{principal_key, BootstrapError, PrincipalStore, PRINCIPAL_KEY_PREFIX};

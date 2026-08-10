@@ -142,9 +142,33 @@ pub async fn upsert(
         Err(e) => return server_error(&format!("storage unavailable: {e}")),
     };
 
-    // Storage before cache: a principal the cache admits but storage never recorded
-    // disappears on restart, and someone will have already been told it was created.
-    if let Err(e) = admin.store.persist(db.storage().as_ref(), principal).await {
+    // Clustered: propose, so every node updates its durable copy *and* its in-memory
+    // cache in log order. Authentication reads that cache, so a write that reached only
+    // this node's storage would be invisible everywhere else until a restart.
+    //
+    // Single node: no partition manager exists, so the local write is the only path
+    // (decision E3). `replicates_authz` is the same condition the write path uses.
+    if db.replicates_authz() {
+        let encoded = match serde_json::to_vec(&principal) {
+            Ok(bytes) => bytes,
+            Err(e) => return server_error(&format!("failed to encode principal: {e}")),
+        };
+        let command = prkdb::raft::command::Command::UpsertPrincipal {
+            name: body.name.clone(),
+            encoded,
+        };
+        if let Err(e) = db.propose_authz(command).await {
+            // Refused rather than written locally (decision E2). A local write here is
+            // the bug this replaces: it succeeds on one node and leaves every other node
+            // disagreeing about who may do what.
+            return server_error(&format!(
+                "failed to replicate principal: {e}. No principal was created; retry \
+                 against the partition-0 leader."
+            ));
+        }
+    } else if let Err(e) = admin.store.persist(db.storage().as_ref(), principal).await {
+        // Storage before cache: a principal the cache admits but storage never recorded
+        // disappears on restart, and someone will have already been told it was created.
         return server_error(&format!("failed to persist principal: {e}"));
     }
 
@@ -182,7 +206,18 @@ pub async fn revoke(State(admin): State<PrincipalAdmin>, Path(name): Path<String
         Err(e) => return server_error(&format!("storage unavailable: {e}")),
     };
 
-    if let Err(e) = admin.store.forget(db.storage().as_ref(), &name).await {
+    if db.replicates_authz() {
+        let command = prkdb::raft::command::Command::RevokePrincipal { name: name.clone() };
+        if let Err(e) = db.propose_authz(command).await {
+            // Refusing matters more here than on create: reporting a revoke that did not
+            // replicate tells an operator a credential is dead while it still works on
+            // every other node.
+            return server_error(&format!(
+                "failed to replicate revocation: {e}. The credential is still valid; \
+                 retry against the partition-0 leader."
+            ));
+        }
+    } else if let Err(e) = admin.store.forget(db.storage().as_ref(), &name).await {
         return server_error(&format!("failed to revoke principal: {e}"));
     }
 

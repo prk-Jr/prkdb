@@ -217,6 +217,11 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     // anyone who could reach the port.
     let store = prkdb::authz::PrincipalStore::new();
 
+    // Before the database is first opened: partition 0's state machine needs this exact
+    // cache, or a replicated principal reaches every node's storage and none of their
+    // `resolve` calls.
+    crate::database_manager::set_authz_store(store.clone());
+
     // Load first. Principals are persisted through the storage layer, so a restarted node
     // must recover the ones it already had — otherwise every restart would silently
     // revoke every credential and PRKDB_BOOTSTRAP_TOKEN would be required forever.
