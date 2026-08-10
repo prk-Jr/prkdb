@@ -462,26 +462,58 @@ impl InProcessCluster {
     }
 
     /// Propose a write through the current leader and wait for it to commit.
+    ///
+    /// # Why this retries
+    ///
+    /// A proposal accepted by a node that then loses leadership never commits: the entry
+    /// is replaced by the next leader's, and `wait_commit` returns `Timeout` after ten
+    /// seconds. That is a transient outcome, not a broken cluster, and re-proposing to the
+    /// new leader is exactly what a real client does.
+    ///
+    /// Without this, `a_stale_read_needs_no_leader` failed the mutation-testing baseline
+    /// with "commit failed: Timeout waiting for commit". It writes immediately after
+    /// `await_leader` returns, which is the window where a freshly elected leader is most
+    /// likely to be superseded, and it is asserting something about *stale reads* — so
+    /// failing in its setup reports a problem it does not test.
+    ///
+    /// The retry is bounded and re-resolves the leader each time, so a cluster that
+    /// genuinely cannot commit still fails rather than looping.
     pub async fn put(&self, key: &[u8], value: &[u8]) -> anyhow::Result<()> {
-        let leader_id = self
-            .leader()
-            .await
-            .ok_or_else(|| anyhow::anyhow!("no leader to accept a write"))?;
-        let raft = self
-            .raft_of(leader_id)
-            .ok_or_else(|| anyhow::anyhow!("leader {leader_id} vanished"))?;
+        const ATTEMPTS: usize = 3;
+        let mut last_error = None;
 
-        let command = Command::Put {
-            key: key.to_vec(),
-            value: value.to_vec(),
-        };
-        raft.propose(command.serialize())
-            .await
-            .map_err(|e| anyhow::anyhow!("propose failed: {e}"))?
-            .wait_commit()
-            .await
-            .map_err(|e| anyhow::anyhow!("commit failed: {e}"))?;
-        Ok(())
+        for attempt in 1..=ATTEMPTS {
+            let leader_id = self
+                .leader()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("no leader to accept a write"))?;
+            let raft = self
+                .raft_of(leader_id)
+                .ok_or_else(|| anyhow::anyhow!("leader {leader_id} vanished"))?;
+
+            let command = Command::Put {
+                key: key.to_vec(),
+                value: value.to_vec(),
+            };
+            let outcome = match raft.propose(command.serialize()).await {
+                Ok(pending) => pending.wait_commit().await.map(|_| ()),
+                Err(e) => Err(e),
+            };
+
+            match outcome {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    last_error = Some(format!("attempt {attempt} via node {leader_id}: {e}"));
+                    // Let the next election settle before re-resolving the leader.
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "write did not commit after {ATTEMPTS} attempts; last error: {}",
+            last_error.unwrap_or_else(|| "none recorded".into())
+        ))
     }
 
     /// Read a key under the requested consistency.
