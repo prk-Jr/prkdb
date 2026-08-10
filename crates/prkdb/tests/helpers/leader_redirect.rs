@@ -163,6 +163,28 @@ pub async fn read_with_redirect(
                             continue;
                         }
 
+                        // A cluster mid-election reports no leader at all, which is not the
+                        // same as a redirect: there is nowhere to redirect to yet. It is
+                        // transient in exactly the way a transport error is, so retry
+                        // rather than fail.
+                        //
+                        // Treating it as terminal is why `test_leader_crash_during_write`
+                        // failed in CI with "Not leader. Leader is None" immediately after
+                        // restarting a node — the test asserts a data-consistency property
+                        // and was failing for a reason that has nothing to do with
+                        // consistency. It passes locally because a faster machine finishes
+                        // the election before the read.
+                        if msg.contains("Leader is None") || msg.contains("no known leader") {
+                            tracing::warn!(
+                                "Attempt {}: cluster is electing, will retry: {}",
+                                attempt + 1,
+                                msg
+                            );
+                            sleep(Duration::from_millis(500)).await;
+                            current_node_id = (current_node_id % cluster.node_count() as u64) + 1;
+                            continue;
+                        }
+
                         // Handle connection errors
                         if msg.contains("transport error") || msg.contains("h2 protocol error") {
                             tracing::warn!(

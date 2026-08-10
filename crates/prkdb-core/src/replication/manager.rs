@@ -74,7 +74,11 @@ impl ReplicationManager {
         }
 
         // Acquire semaphore permit for backpressure
-        let permit = self.in_flight.acquire().await.unwrap();
+        let permit = self
+            .in_flight
+            .acquire()
+            .await
+            .expect("the in-flight semaphore is never closed while the manager is alive");
 
         let batch_id = self.next_batch_id.fetch_add(1, Ordering::SeqCst);
 

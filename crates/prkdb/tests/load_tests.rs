@@ -104,7 +104,7 @@ async fn test_bulk_operations() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore] // This test takes longer, run with --ignored flag
+#[ignore = "slow: ~60s sustained write load — runs in the nightly-slow-tests CI job via --ignored"]
 async fn test_sustained_throughput() {
     let harness = LoadTestHarness::new().await;
 
@@ -144,7 +144,7 @@ async fn test_sustained_throughput() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore] // High memory test, run with --ignored flag
+#[ignore = "slow: allocates a large dataset — runs in the nightly-slow-tests CI job via --ignored"]
 async fn test_large_dataset() {
     let harness = LoadTestHarness::new().await;
 

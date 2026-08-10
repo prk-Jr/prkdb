@@ -1,5 +1,5 @@
 use clap::{Args, ValueEnum};
-use prkdb_client::{PrkDbClient, ReadConsistency};
+use prkdb_client::ReadConsistency;
 use std::path::PathBuf;
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -92,8 +92,10 @@ impl From<ReadConsistencyCli> for ReadConsistency {
     }
 }
 
-pub async fn handle_get(args: GetArgs) -> anyhow::Result<()> {
-    let client = PrkDbClient::new(args.server).await?;
+pub async fn handle_get(args: GetArgs, cli: &crate::Cli) -> anyhow::Result<()> {
+    let client =
+        crate::remote_client::connect(args.server, cli.credential.clone(), cli.admin_token.clone())
+            .await?;
     let val = client
         .get_with_consistency(args.key.as_bytes(), args.consistency.into())
         .await?;
@@ -119,8 +121,10 @@ pub async fn handle_get(args: GetArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn handle_put(args: PutArgs) -> anyhow::Result<()> {
-    let client = PrkDbClient::new(args.server).await?;
+pub async fn handle_put(args: PutArgs, cli: &crate::Cli) -> anyhow::Result<()> {
+    let client =
+        crate::remote_client::connect(args.server, cli.credential.clone(), cli.admin_token.clone())
+            .await?;
     client
         .put(args.key.as_bytes(), args.value.as_bytes())
         .await?;
@@ -128,14 +132,16 @@ pub async fn handle_put(args: PutArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn handle_delete(args: DeleteArgs) -> anyhow::Result<()> {
-    let client = PrkDbClient::new(args.server).await?;
+pub async fn handle_delete(args: DeleteArgs, cli: &crate::Cli) -> anyhow::Result<()> {
+    let client =
+        crate::remote_client::connect(args.server, cli.credential.clone(), cli.admin_token.clone())
+            .await?;
     client.delete(args.key.as_bytes()).await?;
     println!("OK");
     Ok(())
 }
 
-pub async fn handle_batch_put(args: BatchPutArgs) -> anyhow::Result<()> {
+pub async fn handle_batch_put(args: BatchPutArgs, cli: &crate::Cli) -> anyhow::Result<()> {
     let file = File::open(&args.file).await?;
     let reader = BufReader::new(file);
     let mut lines = reader.lines();
@@ -154,7 +160,9 @@ pub async fn handle_batch_put(args: BatchPutArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let client = PrkDbClient::new(args.server).await?;
+    let client =
+        crate::remote_client::connect(args.server, cli.credential.clone(), cli.admin_token.clone())
+            .await?;
     println!("Sending batch of {} items...", batch.len());
     client.batch_put(batch).await?;
     println!("Batch put successful");

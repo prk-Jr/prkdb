@@ -134,6 +134,27 @@ impl MmapLogSegment {
         })
     }
 
+    /// Open the segment if it exists, otherwise create it.
+    ///
+    /// This is what opening a database means, and it is deliberately not what [`create`]
+    /// does: `create` passes `truncate(true)`, so calling it on a populated directory
+    /// destroys the log. Every caller that means "open this data directory" must use this
+    /// instead.
+    ///
+    /// [`create`]: Self::create
+    pub async fn open_or_create(
+        dir: &Path,
+        base_offset: u64,
+        index_interval_bytes: u64,
+    ) -> Result<Self, std::io::Error> {
+        let log_path = dir.join(format!("{:020}.log", base_offset));
+        if log_path.exists() {
+            Self::open(dir, base_offset, index_interval_bytes).await
+        } else {
+            Self::create(dir, base_offset, index_interval_bytes).await
+        }
+    }
+
     /// Append a record to this segment
     pub async fn append(&self, mut record: LogRecord) -> Result<u64, std::io::Error> {
         let offset = self.current_offset.fetch_add(1, Ordering::SeqCst);

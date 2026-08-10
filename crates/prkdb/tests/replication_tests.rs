@@ -58,6 +58,31 @@ async fn wait_for_changes(
     false
 }
 
+/// Allocate `n` distinct ephemeral ports, holding every listener until all are chosen
+/// so the OS cannot hand out the same one twice within a call.
+///
+/// These tests previously hardcoded 8080-8088 and 9010-9012. `ReplicationManager::start`
+/// really binds `self_node.address` (replication.rs:297), so 8080 in particular collided
+/// with any local dev server and failed for reasons that looked nothing like replication.
+async fn free_ports(n: usize) -> Vec<u16> {
+    let mut listeners = Vec::with_capacity(n);
+    for _ in 0..n {
+        listeners.push(
+            tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("binding an ephemeral port on loopback cannot fail"),
+        );
+    }
+    listeners
+        .iter()
+        .map(|l| {
+            l.local_addr()
+                .expect("a bound listener always has a local address")
+                .port()
+        })
+        .collect()
+}
+
 // Generate unique port ranges for each test to avoid conflicts in parallel execution
 fn get_test_ports(test_name: &str) -> (u16, u16) {
     let mut hasher = DefaultHasher::new();
@@ -127,11 +152,12 @@ async fn create_leader_follower_setup_with_ports(
 
 #[tokio::test]
 async fn test_replication_manager_creation() {
+    let ports = free_ports(1).await;
     let db = create_test_db();
     let config = ReplicationConfig {
         self_node: ReplicaNode {
             id: "leader1".to_string(),
-            address: "127.0.0.1:8080".to_string(),
+            address: format!("127.0.0.1:{}", ports[0]),
         },
         leader_address: None,
         followers: vec![],
@@ -142,11 +168,12 @@ async fn test_replication_manager_creation() {
 
 #[tokio::test]
 async fn test_leader_starts() {
+    let ports = free_ports(1).await;
     let db = create_test_db();
     let config = ReplicationConfig {
         self_node: ReplicaNode {
             id: "leader1".to_string(),
-            address: "127.0.0.1:8081".to_string(),
+            address: format!("127.0.0.1:{}", ports[0]),
         },
         leader_address: None,
         followers: vec![],
@@ -158,13 +185,14 @@ async fn test_leader_starts() {
 
 #[tokio::test]
 async fn test_follower_starts() {
+    let ports = free_ports(2).await;
     let db = create_test_db();
     let config = ReplicationConfig {
         self_node: ReplicaNode {
             id: "follower1".to_string(),
-            address: "127.0.0.1:8082".to_string(),
+            address: format!("127.0.0.1:{}", ports[1]),
         },
-        leader_address: Some("127.0.0.1:8081".to_string()),
+        leader_address: Some(format!("127.0.0.1:{}", ports[0])),
         followers: vec![],
         timing: ReplicationTiming::default(),
     };
@@ -177,13 +205,14 @@ async fn test_follower_starts() {
 
 #[tokio::test]
 async fn test_replicate_change_on_follower_fails() {
+    let ports = free_ports(2).await;
     let db = create_test_db();
     let config = ReplicationConfig {
         self_node: ReplicaNode {
             id: "follower1".to_string(),
-            address: "127.0.0.1:8083".to_string(),
+            address: format!("127.0.0.1:{}", ports[1]),
         },
-        leader_address: Some("127.0.0.1:8081".to_string()),
+        leader_address: Some(format!("127.0.0.1:{}", ports[0])),
         followers: vec![],
         timing: ReplicationTiming::default(),
     };
@@ -201,11 +230,12 @@ async fn test_replicate_change_on_follower_fails() {
 
 #[tokio::test]
 async fn test_leader_is_leader() {
+    let ports = free_ports(1).await;
     let db = create_test_db();
     let config = ReplicationConfig {
         self_node: ReplicaNode {
             id: "leader1".to_string(),
-            address: "127.0.0.1:8084".to_string(),
+            address: format!("127.0.0.1:{}", ports[0]),
         },
         leader_address: None,
         followers: vec![],
@@ -217,13 +247,14 @@ async fn test_leader_is_leader() {
 
 #[tokio::test]
 async fn test_follower_is_not_leader() {
+    let ports = free_ports(2).await;
     let db = create_test_db();
     let config = ReplicationConfig {
         self_node: ReplicaNode {
             id: "follower1".to_string(),
-            address: "127.0.0.1:8085".to_string(),
+            address: format!("127.0.0.1:{}", ports[1]),
         },
-        leader_address: Some("127.0.0.1:8084".to_string()),
+        leader_address: Some(format!("127.0.0.1:{}", ports[0])),
         followers: vec![],
         timing: ReplicationTiming::default(),
     };
@@ -233,13 +264,14 @@ async fn test_follower_is_not_leader() {
 
 #[tokio::test]
 async fn test_get_replication_state() {
+    let ports = free_ports(2).await;
     let db = create_test_db();
     let config = ReplicationConfig {
         self_node: ReplicaNode {
             id: "follower1".to_string(),
-            address: "127.0.0.1:8086".to_string(),
+            address: format!("127.0.0.1:{}", ports[1]),
         },
-        leader_address: Some("127.0.0.1:8084".to_string()),
+        leader_address: Some(format!("127.0.0.1:{}", ports[0])),
         followers: vec![],
         timing: ReplicationTiming::default(),
     };
@@ -252,11 +284,12 @@ async fn test_get_replication_state() {
 
 #[tokio::test]
 async fn test_get_changes_since_on_leader() {
+    let ports = free_ports(1).await;
     let db = create_test_db();
     let config = ReplicationConfig {
         self_node: ReplicaNode {
             id: "leader1".to_string(),
-            address: "127.0.0.1:8087".to_string(),
+            address: format!("127.0.0.1:{}", ports[0]),
         },
         leader_address: None,
         followers: vec![],
@@ -271,13 +304,14 @@ async fn test_get_changes_since_on_leader() {
 
 #[tokio::test]
 async fn test_get_changes_since_on_follower_fails() {
+    let ports = free_ports(2).await;
     let db = create_test_db();
     let config = ReplicationConfig {
         self_node: ReplicaNode {
             id: "follower1".to_string(),
-            address: "127.0.0.1:8088".to_string(),
+            address: format!("127.0.0.1:{}", ports[1]),
         },
-        leader_address: Some("127.0.0.1:8087".to_string()),
+        leader_address: Some(format!("127.0.0.1:{}", ports[0])),
         followers: vec![],
         timing: ReplicationTiming::default(),
     };
@@ -445,6 +479,7 @@ async fn test_replication_state_tracking() {
 
 #[tokio::test]
 async fn test_multi_follower_replication() {
+    let ports = free_ports(3).await;
     let leader_db = create_test_db();
     let follower1_db = create_test_db();
     let follower2_db = create_test_db();
@@ -452,17 +487,17 @@ async fn test_multi_follower_replication() {
     let leader_config = ReplicationConfig {
         self_node: ReplicaNode {
             id: "leader".to_string(),
-            address: "127.0.0.1:9010".to_string(),
+            address: format!("127.0.0.1:{}", ports[0]),
         },
         leader_address: None,
         followers: vec![
             ReplicaNode {
                 id: "follower1".to_string(),
-                address: "127.0.0.1:9011".to_string(),
+                address: format!("127.0.0.1:{}", ports[1]),
             },
             ReplicaNode {
                 id: "follower2".to_string(),
-                address: "127.0.0.1:9012".to_string(),
+                address: format!("127.0.0.1:{}", ports[2]),
             },
         ],
         timing: ReplicationTiming::default(),
@@ -471,9 +506,9 @@ async fn test_multi_follower_replication() {
     let follower1_config = ReplicationConfig {
         self_node: ReplicaNode {
             id: "follower1".to_string(),
-            address: "127.0.0.1:9011".to_string(),
+            address: format!("127.0.0.1:{}", ports[1]),
         },
-        leader_address: Some("127.0.0.1:9010".to_string()),
+        leader_address: Some(format!("127.0.0.1:{}", ports[0])),
         followers: vec![],
         timing: ReplicationTiming::default(),
     };
@@ -481,9 +516,9 @@ async fn test_multi_follower_replication() {
     let follower2_config = ReplicationConfig {
         self_node: ReplicaNode {
             id: "follower2".to_string(),
-            address: "127.0.0.1:9012".to_string(),
+            address: format!("127.0.0.1:{}", ports[2]),
         },
-        leader_address: Some("127.0.0.1:9010".to_string()),
+        leader_address: Some(format!("127.0.0.1:{}", ports[0])),
         followers: vec![],
         timing: ReplicationTiming::default(),
     };

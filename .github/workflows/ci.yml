@@ -5,6 +5,10 @@ on:
     branches: [ main, master ]
   pull_request:
   workflow_dispatch:
+  # Drives nightly-slow-tests. Tests marked #[ignore = "slow: ..."] are excluded from
+  # every PR run, so without a schedule they would never execute at all.
+  schedule:
+    - cron: "0 4 * * *"
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,9 +18,14 @@ jobs:
   repo-status-snapshot:
     name: Repo Status Snapshot
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
+      # newer compiler than the repository declares — and failing on lints no
+      # contributor could reproduce locally. `nightly-check` keeps the forward-looking
+      # signal, on purpose and out of the gating path.
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - name: Run repo status snapshot
         run: cargo run -p xtask -- repo-status snapshot --fail-on-objective-drift
@@ -36,35 +45,264 @@ jobs:
           cat target/repo-status/repo-status.snapshot.json >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
-  check:
-    name: Check
+  coverage:
+    name: Coverage
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
+      # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
+      # newer compiler than the repository declares — and failing on lints no
+      # contributor could reproduce locally. `nightly-check` keeps the forward-looking
+      # signal, on purpose and out of the gating path.
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+      # Ratcheted 2026-08-09: 55 -> 58, after measuring 59.03% lines. The margin is
+      # deliberate — coverage moves a little between runners — but the direction is one
+      # way. Never lower it to make a PR pass; if a change drops coverage, that is the
+      # finding.
+      #
+      # Coverage is a floor, not evidence. It says a line ran, not that any assertion
+      # would have noticed the line being wrong. The mutants job below is what checks the
+      # second, and it exists because this repository has repeatedly had high coverage
+      # over tests that could not fail.
+      - name: Measure coverage
+        run: cargo llvm-cov --workspace --fail-under-lines 58
+      - name: Upload lcov
+        if: always()
+        run: cargo llvm-cov report --lcov --output-path lcov.info
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-lcov-${{ github.run_number }}
+          path: lcov.info
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # MUTATION TESTING
+  # ═══════════════════════════════════════════════════════════════════════════
+  #
+  # Coverage says a line ran. It does not say an assertion would have noticed if the line
+  # were wrong — and this repository has repeatedly had the second without the first:
+  #
+  #   - a linearizability checker that could not fail
+  #   - a bank invariant test that asserted a property of std::sync::Mutex
+  #   - `scan_prefix` removed from the storage wrapper with 611 tests still green
+  #
+  # Each was found by hand, by deleting the code and seeing whether anything complained.
+  # cargo-mutants does that systematically: it removes or alters a piece of behaviour and
+  # reports the ones no test caught.
+  #
+  # Scoped to the modules where a silent wrong answer costs the most, because mutating the
+  # whole workspace takes hours. Widen it as it proves itself, not before — a job people
+  # cancel is a job that tests nothing.
+  mutants:
+    name: "🧬 Mutation Testing (targeted)"
+    # Nightly, not per-PR. It takes tens of minutes and explores rather than gates, and a
+    # slow job on every push gets cancelled — at which point it tests nothing.
+    #
+    # Deliberately *not* `continue-on-error` on the PR path instead: a check whose result
+    # is discarded is not a check, which is why that flag was removed from the chaos
+    # workflow. Nightly runs produce a real pass or fail that someone can act on.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # Sharded because the unsharded job could never finish, and a job that cannot finish
+    # reports nothing. Run 31329241574 found 100 mutants in the first step alone and spent
+    # ~133s on each (75s build + 58s test), so that step alone needed ~3.7 hours against a
+    # 45-minute limit; it was cancelled after testing 7. The comment above already said "a
+    # job people cancel is a job that tests nothing" — this is that, arrived at by timeout
+    # rather than by anyone pressing cancel.
+    #
+    # The full file set below is 203 mutants (measured with `cargo mutants --list`, not
+    # estimated). Ten shards is 21 each — `--sharding slice` by default, so 21×9 + 14 —
+    # about 47 minutes at the observed rate, plus a ~4-minute baseline. The 90-minute limit
+    # is deliberate headroom: a CI runner slower than the one that produced the 133s figure
+    # must still finish, because the entire point of this change is that a job which times
+    # out reports nothing.
+    #
+    # Shard indices are 0-based and k must be < n.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
+      # newer compiler than the repository declares — and failing on lints no
+      # contributor could reproduce locally. `nightly-check` keeps the forward-looking
+      # signal, on purpose and out of the gating path.
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      - uses: Swatinem/rust-cache@v2
+
+      # One invocation, not two: cargo-mutants shards the mutant list it is given, so two
+      # separate commands would each shard their own list and the split would be uneven.
+      - name: Mutate the authorization model and storage wrapper
+        run: |
+          cargo mutants --no-shuffle --timeout 300 \
+            --shard ${{ matrix.shard }}/10 \
+            --package prkdb \
+            --file 'crates/prkdb/src/authz/*.rs' \
+            --file 'crates/prkdb/src/raft/authz_interceptor.rs' \
+            --file 'crates/prkdb/src/raft/peer_auth.rs' \
+            --file 'crates/prkdb/src/storage/collection_partitioned_adapter.rs'
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants-${{ github.run_number }}-shard-${{ matrix.shard }}
+          path: mutants.out/
+          if-no-files-found: warn
+
+  ignore-discipline:
+    name: Ignore Discipline
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # A switched-off test is one nobody will remember why they switched off. Three
+      # corruption tests were disabled this way and turned out to pass in 0.7s.
+      #
+      # This job originally required only that an #[ignore] carry a reason. That is not
+      # sufficient: `chaos_test_rapid_recovery` had one — "Manual investigation:
+      # integration harness still diverges from WAL recovery unit tests" — and was a
+      # correct test switched off for reporting real data loss (spec S-05).
+      #
+      # The script closes the category list, so a reason must also be a legitimate one,
+      # and keeps a single implementation of the rule.
+      - name: Ignore reasons
+        run: bash scripts/check_ignore_reasons.sh
+
+  nightly-slow-tests:
+    name: Nightly Slow Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # An #[ignore] that means "slow" is a test you have silently deleted unless
+    # something runs it. These take ~2 minutes combined, which is too slow for every
+    # PR but trivial nightly.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
+      # newer compiler than the repository declares — and failing on lints no
+      # contributor could reproduce locally. `nightly-check` keeps the forward-looking
+      # signal, on purpose and out of the gating path.
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p prkdb --test load_tests -- --ignored --test-threads=1
+      - run: cargo test -p prkdb --test chaos_tests chaos_test_memory_pressure -- --ignored --test-threads=1
+
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
+      # newer compiler than the repository declares — and failing on lints no
+      # contributor could reproduce locally. `nightly-check` keeps the forward-looking
+      # signal, on purpose and out of the gating path.
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      # --locked is required: newer cargo-audit/cargo-deny releases pull crates that
+      # need a rustc above the version pinned in rust-toolchain.toml.
+      - name: Install scanners
+        run: cargo install --locked cargo-audit cargo-deny
+      # Both run because their advisory databases refresh independently and do not
+      # always agree; cargo-audit caught two advisories cargo-deny did not.
+      # Accepted risks live in deny.toml and .cargo/audit.toml, each with a reason.
+      - name: cargo deny (advisories, licenses, bans, sources)
+        run: cargo deny check
+      - name: cargo audit
+        run: cargo audit
+
+  nightly-check:
+    name: Nightly (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Advisory only. This is the one legitimate use of continue-on-error in the repo:
+    # it warns that a future stable release will break the clippy gate, without
+    # blocking today's work. The chaos-tests use of it is removed in Plan A Task 9.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
+      # newer compiler than the repository declares — and failing on lints no
+      # contributor could reproduce locally. `nightly-check` keeps the forward-looking
+      # signal, on purpose and out of the gating path.
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace
 
   fmt:
     name: Format
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
+      # newer compiler than the repository declares — and failing on lints no
+      # contributor could reproduce locally. `nightly-check` keeps the forward-looking
+      # signal, on purpose and out of the gating path.
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt
+      # A wrapper that forgets a StorageAdapter method compiles cleanly and fails at
+      # runtime; this has happened four times. Cheap to check, expensive to find in a
+      # user's backup.
+      - name: Storage wrapper completeness
+        run: bash scripts/check_wrapper_completeness.sh
+      # The generated README test must match README.md. Without this the examples drift
+      # from the file they were extracted from, and the test goes on passing against a
+      # stale copy — which is the failure it exists to prevent, one level up.
+      - name: README examples are up to date
+        run: cargo run -p xtask -- readme-tests --check
+      # A skipped test must be skipped for a reason that still runs it somewhere, never
+      # because it failed. See scripts/check_ignore_reasons.sh for the case that prompted it.
+      - name: Ignore reasons
+        run: bash scripts/check_ignore_reasons.sh
       - run: cargo fmt --all -- --check
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
+      # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
+      # newer compiler than the repository declares — and failing on lints no
+      # contributor could reproduce locally. `nightly-check` keeps the forward-looking
+      # signal, on purpose and out of the gating path.
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -73,6 +311,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Free disk space
         run: |
@@ -82,18 +321,27 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
+      # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
+      # newer compiler than the repository declares — and failing on lints no
+      # contributor could reproduce locally. `nightly-check` keeps the forward-looking
+      # signal, on purpose and out of the gating path.
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --no-fail-fast
 
   schema-integration:
     name: Schema E2E Integration
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
+      # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
+      # newer compiler than the repository declares — and failing on lints no
+      # contributor could reproduce locally. `nightly-check` keeps the forward-looking
+      # signal, on purpose and out of the gating path.
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -112,11 +360,16 @@ jobs:
   client-features-integration:
     name: Client Features Integration
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
+      # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
+      # newer compiler than the repository declares — and failing on lints no
+      # contributor could reproduce locally. `nightly-check` keeps the forward-looking
+      # signal, on purpose and out of the gating path.
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -135,11 +388,16 @@ jobs:
   client-features-integration-ts:
     name: Client Features Integration (TypeScript)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
+      # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
+      # newer compiler than the repository declares — and failing on lints no
+      # contributor could reproduce locally. `nightly-check` keeps the forward-looking
+      # signal, on purpose and out of the gating path.
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -156,11 +414,16 @@ jobs:
   client-features-integration-go:
     name: Client Features Integration (Go)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
+      # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
+      # newer compiler than the repository declares — and failing on lints no
+      # contributor could reproduce locally. `nightly-check` keeps the forward-looking
+      # signal, on purpose and out of the gating path.
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - name: Setup Go
         uses: actions/setup-go@v4
@@ -177,11 +440,16 @@ jobs:
   mixed-client-integration:
     name: Mixed Client Integration
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
+      # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
+      # newer compiler than the repository declares — and failing on lints no
+      # contributor could reproduce locally. `nightly-check` keeps the forward-looking
+      # signal, on purpose and out of the gating path.
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -198,7 +466,7 @@ jobs:
       - name: Install Python dependencies
         run: pip install httpx
       - name: Install TypeScript runner
-        run: npm install -g tsx typescript
+        run: npm install -g tsx@4.19.2 typescript@5.6.3
       - name: Build PrkDB CLI
         run: cargo build -p prkdb-cli --bin prkdb-cli
       - name: Run Mixed Client Integration Test
@@ -212,7 +480,10 @@ jobs:
   # ═══════════════════════════════════════════════════════════════════════════
   chaos-tests:
     name: "🐵 Chaos Tests"
-    if: github.event_name == 'pull_request'
+    # Runs on pushes to main as well as PRs. Gating only on PRs meant main could sit
+    # broken indefinitely, and the badge advertised results nothing enforced.
+    # Excluded from the nightly schedule, which has its own slow-test job.
+    if: github.event_name != 'schedule'
     needs: [check, test]
     uses: ./.github/workflows/chaos-tests.yml
 
@@ -227,6 +498,7 @@ jobs:
   benchmark:
     name: "📊 Benchmarks: Local PrkDB + Kafka Reference"
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     
     services:
       zookeeper:
@@ -267,7 +539,11 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get install -y protobuf-compiler bc jq
         
-      - uses: dtolnay/rust-toolchain@stable
+      # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
+      # newer compiler than the repository declares — and failing on lints no
+      # contributor could reproduce locally. `nightly-check` keeps the forward-looking
+      # signal, on purpose and out of the gating path.
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       
       - name: Build benchmarks
@@ -568,6 +844,7 @@ jobs:
   cross-lang-benchmark:
     name: "🌍 Cross-Language Benchmarks"
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     env:
       PRKDB_ADMIN_TOKEN: benchmark_ci_admin_token
     steps:
@@ -575,7 +852,11 @@ jobs:
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       
-      - uses: dtolnay/rust-toolchain@stable
+      # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
+      # newer compiler than the repository declares — and failing on lints no
+      # contributor could reproduce locally. `nightly-check` keeps the forward-looking
+      # signal, on purpose and out of the gating path.
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       
       - name: Setup Python
@@ -601,7 +882,15 @@ jobs:
 
       - name: Start PrkDB Server
         run: |
-          ./target/release/prkdb-cli --database /tmp/prkdb-cross-lang-benchmark.db serve --port 8080 --grpc-port 50051 &
+          # --allow-anonymous: `serve` now refuses to start with neither a bootstrap
+          # credential nor this flag, and without it this step fails with "No principals
+          # are configured". Anonymous is the right choice *here* specifically: the job
+          # compares three language clients against each other, so the numbers are
+          # relative and a per-request credential check would be constant across all
+          # three. It does mean these figures exclude authorization overhead. The
+          # authorized path is covered by the Mixed Client Integration job, which runs
+          # the same generated clients against a server started with a bootstrap token.
+          ./target/release/prkdb-cli --database /tmp/prkdb-cross-lang-benchmark.db serve --port 8080 --grpc-port 50051 --allow-anonymous &
           echo "Waiting for server..."
           for i in {1..30}; do
             if curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1 \
@@ -651,7 +940,7 @@ jobs:
           
       - name: "📘 Run TypeScript Benchmark"
         run: |
-          npm install -g tsx typescript
+          npm install -g tsx@4.19.2 typescript@5.6.3
           tsx benches/bench_ts.ts
         env:
           PRKDB_SERVER: http://127.0.0.1:8080

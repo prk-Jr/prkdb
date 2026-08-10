@@ -9,11 +9,19 @@
 //! - **Linear scaling**: Near-linear throughput scaling with partitions
 //!
 //! # Example
-//! ```ignore
-//! let adapter = PartitionedStreamingAdapter::new(config, 8).await?;
+//! ```no_run
+//! # use prkdb::storage::partitioned_streaming_adapter::{
+//! #     PartitionedStreamingAdapter, PartitionedStreamingConfig,
+//! # };
+//! # use prkdb::storage::streaming_adapter::StreamingRecord;
+//! # async fn demo(config: PartitionedStreamingConfig, records: Vec<StreamingRecord>)
+//! #     -> Result<(), Box<dyn std::error::Error>> {
+//! let adapter = PartitionedStreamingAdapter::new(config).await?;
 //!
 //! // Writes are distributed across partitions
 //! let offset = adapter.append_batch(records).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::storage::streaming_adapter::{

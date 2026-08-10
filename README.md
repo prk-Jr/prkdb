@@ -2,9 +2,9 @@
 
 **A high-performance, Rust-native event streaming database**
 
-[![Benchmarks](https://img.shields.io/badge/Benchmarks-Raw%20artifacts-blue)]()
-[![Chaos Tests](https://img.shields.io/badge/Chaos%20Tests-19%20passing-blue)]()
-[![Rust](https://img.shields.io/badge/Rust-1.70+-orange)]()
+[![CI](https://github.com/prk-Jr/prkdb/actions/workflows/ci.yml/badge.svg)](https://github.com/prk-Jr/prkdb/actions/workflows/ci.yml)
+[![Chaos Tests](https://github.com/prk-Jr/prkdb/actions/workflows/chaos-tests.yml/badge.svg)](https://github.com/prk-Jr/prkdb/actions/workflows/chaos-tests.yml)
+[![Rust](https://img.shields.io/badge/Rust-1.95+-orange)](https://blog.rust-lang.org/)
 
 Docs: https://prk-jr.github.io/prkdb/
 
@@ -200,16 +200,27 @@ Type-safe queries on any field with `#[index]` attribute.
 ```rust
 use prkdb::prelude::*;
 
-#[derive(Collection, Clone, Serialize, Deserialize)]
+#[derive(Collection, Clone, Debug, Serialize, Deserialize)]
 struct User {
     #[key]
     pub id: String,
-    
+
     #[index]
     pub age: u32,
-    
+
     #[index(unique)]
     pub email: String,
+
+    // Indexed because the query examples below filter on them.
+    #[index]
+    pub name: String,
+    #[index]
+    pub role: String,
+
+    pub active: bool,
+
+    // Read by the closure filter below and by the aggregation examples.
+    pub orders: u32,
 }
 
 // Query by indexed field
@@ -227,7 +238,7 @@ let vip: Vec<User> = db.filter(|u: &User| u.age > 18 && u.orders > 100).await?;
 ### Batch Operations
 
 ```rust
-db.insert_batch(&[user1, user2, user3]).await?;  // Returns count
+db.insert_batch(&[user1.clone(), user2.clone(), user3]).await?;  // Returns count
 db.delete_batch(&[user1, user2]).await?;
 ```
 
@@ -236,14 +247,14 @@ db.delete_batch(&[user1, user2]).await?;
 ```rust
 let page1: Vec<User> = db.paginate(10, 0).await?;   // limit=10, offset=0
 let page2: Vec<User> = db.paginate(10, 10).await?;  // Next page
-let filtered: Vec<User> = db.filter_paginated(|u| u.age > 18, 5, 0).await?;
+let filtered: Vec<User> = db.filter_paginated(|u: &User| u.age > 18, 5, 0).await?;
 ```
 
 ### Aggregations
 
 ```rust
 let count = db.count::<User>().await?;
-let total = db.sum(|u: &User| u.orders).await?;
+let total: f64 = db.sum(|u: &User| u.orders as f64).await?;
 let avg = db.avg(|u: &User| u.age as f64).await?;
 let min = db.min(|u: &User| u.age).await?;
 let max = db.max(|u: &User| u.age).await?;
@@ -298,7 +309,7 @@ prkdb status
 
 ```rust
 // Create compound index at runtime
-db.create_compound_index::<User>("role_age", |u| {
+db.create_compound_index("role_age", |u: &User| {
     vec![u.role.clone(), u.age.to_string()]
 }).await?;
 
@@ -312,7 +323,8 @@ let admins_30 = db.query_compound::<User>("role_age",
 
 ```rust
 // Load indexes from disk on startup (or create fresh if not found)
-let db = IndexedStorage::load_from(storage, "./data/indexes.db").await?;
+// `mut` because start_auto_sync/stop_auto_sync below take &mut self.
+let mut db = IndexedStorage::load_from(storage, "./data/indexes.db").await?;
 
 // Save before shutdown or periodically
 db.save_indexes("./data/indexes.db").await?;
@@ -385,7 +397,7 @@ let users = db.search::<User>("bio", "rust async developer").await?;
 
 ### Query Plan Explain
 
-```rust
+```text
 let plan = db.query::<User>()
     .filter(|u| u.age > 18)
     .take(10)
@@ -458,13 +470,13 @@ db.insert_validated(&user).await?;
 ```rust
 // First page
 let (users, next_cursor) = db.query::<User>()
-    .order_by(|u| u.id)
+    .order_by(|u| u.id.clone())
     .paginate(10, None).await?;
 
 // Next page
 if let Some(cursor) = next_cursor {
     let (more, _) = db.query::<User>()
-        .order_by(|u| u.id)
+        .order_by(|u| u.id.clone())
         .paginate(10, Some(cursor)).await?;
 }
 
@@ -480,8 +492,8 @@ let page2 = db.query::<User>()
 ```rust
 use prkdb::cache::LruCache;
 
-let cache = LruCache::<u64, User>::new(1000);
-cache.put(user_id, user);
+let cache = LruCache::<String, User>::new(1000);
+cache.put(user_id.clone(), user);
 
 if let Some(user) = cache.get(&user_id) {
     // Cache hit
@@ -497,13 +509,13 @@ println!("{:.1}% utilized", stats.utilization());
 // User has many Orders (eager load, avoids N+1)
 let users_with_orders = db.query::<User>()
     .collect_with::<Order, _, _>(
-        |user| user.id,          // parent key
-        |order| order.user_id    // foreign key
+        |user| user.id.clone(),          // parent key
+        |order| order.user_id.clone()    // foreign key
     ).await?;  // Vec<(User, Vec<Order>)>
 
 // Order belongs to User
 let orders_with_user = db.query::<Order>()
-    .collect_with_one::<User, _>(|order| order.user_id)
+    .collect_with_one::<User, _>(|order| order.user_id.clone())
     .await?;  // Vec<(Order, Option<User>)>
 ```
 
@@ -520,7 +532,9 @@ db.update::<User, _>(&user_id, |u| {
 }).await?;
 
 // Check existence
-if db.exists::<User>(&user_id).await? { ... }
+if db.exists::<User>(&user_id).await? {
+    println!("user {user_id} is present");
+}
 ```
 
 ### Soft Delete
@@ -587,7 +601,7 @@ impl Hooks for User {
         Ok(())
     }
     fn after_insert(&self) {
-        log::info!("User {} created", self.id);
+        println!("User {} created", self.id);
     }
 }
 
@@ -627,10 +641,10 @@ db.clone_to::<User>(&backup_db).await?;
 
 ```rust
 // Find first matching record
-let admin = db.find_one::<User, _>(|u| u.role == "admin").await?;
+let admin = db.find_one::<User, _>(|u| u.role.clone() == "admin").await?;
 
 // Find all matching records
-let admins = db.find_all::<User, _>(|u| u.role == "admin").await?;
+let admins = db.find_all::<User, _>(|u| u.role.clone() == "admin").await?;
 ```
 
 ### Bulk Conditional Operations
@@ -657,7 +671,7 @@ let oldest = db.query::<User>().max_by(|u| u.age).await?;
 let avg_age = db.query::<User>().avg_by(|u| u.age as f64).await?;
 
 // Boolean checks
-let has_admin = db.query::<User>().any(|u| u.role == "admin").await?;
+let has_admin = db.query::<User>().any(|u| u.role.clone() == "admin").await?;
 let all_active = db.query::<User>().all(|u| u.active).await?;
 ```
 
@@ -680,7 +694,7 @@ let sample = db.query::<User>().sample(5).await?;  // 5 random users
 let last = db.query::<User>().last().await?;
 
 // Take/skip while condition
-let early = db.query::<User>().take_while(|u| u.id < 100).await?;
+let early = db.query::<User>().take_while(|u| u.age < 100).await?;
 ```
 
 ### Advanced Query Helpers
@@ -699,7 +713,7 @@ let deduped = db.query::<User>()
 
 // Join with another collection
 let joined = db.query::<Order>()
-    .join_with(&users, |o| o.user_id, |u| u.id)
+    .join_with(&users, |o| o.user_id.clone(), |u| u.id.clone())
     .await?;  // Vec<(Order, Option<User>)>
 ```
 
@@ -764,28 +778,34 @@ cargo run --release -p prkdb --bin prkdb-server
 ```rust
 use prkdb::raft::rpc::ReadMode;
 
+// These three are methods on `PrkDb`, not on `IndexedStorage`.
+let db = PrkDb::builder().build()?;
+
 // Linearizable (default) - Always reads from leader
-let value = db.get(key).await?;
+let value = db.get(&key).await?;
 
 // Stale read - Fast local read (may be stale)
-let value = db.get_local(key).await?;
+let value = db.get_local(&key).await?;
 
 // Follower read - Linearizable from any node
-let value = db.get_follower_read(key).await?;
+let value = db.get_follower_read(&key).await?;
 ```
 
 ### Sharding Strategies
 
 ```rust
-use prkdb::raft::{ConsistentHashRing, RangePartitioner, PartitionStrategy};
+use prkdb::raft::{ConsistentHashRing, RangePartitioner};
 
 // Consistent hashing (default) - Minimal data movement on rebalance
 let ring = ConsistentHashRing::new(3, 150); // 3 partitions, 150 virtual nodes
-let partition = ring.get_partition(key);
+let partition: u64 = ring.get_partition_for_key(&key);
+
+// Which node currently owns that key
+let owner = ring.get_node(&key);
 
 // Range partitioning - For ordered access patterns
-let mut partitioner = RangePartitioner::new(3);
-let partition = partitioner.get_partition(key);
+let partitioner = RangePartitioner::new(3);
+let partition: u64 = partitioner.get_partition_for_key(&key);
 
 // Split hotspots
 let new_partition = partitioner.split_partition(b"middle_key".to_vec());

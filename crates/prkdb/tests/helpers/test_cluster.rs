@@ -1,12 +1,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::time::{sleep, Duration};
-
-static CLUSTER_OFFSET: AtomicU16 = AtomicU16::new(0);
 
 use super::NetworkSimulator;
 
@@ -41,13 +38,16 @@ impl TestCluster {
         let network = Arc::new(NetworkSimulator::new(Some(config_path)));
         let mut nodes = HashMap::new();
 
-        // Reserve ports for each node
-        // Use atomic offset to avoid port conflicts in parallel tests
-        let offset = CLUSTER_OFFSET.fetch_add(10, Ordering::Relaxed);
-        let base_data_port = 19000 + offset; // Start from 19000 block
-        for i in 0..num_nodes {
+        // Reserve ports for each node.
+        //
+        // This previously used `19000 + atomic_offset`, which avoids collisions between
+        // clusters inside a single test binary but not between binaries — cargo runs
+        // those concurrently, and every one of them started counting at 19000. It also
+        // gave no protection against a process orphaned by a killed run still holding
+        // the port. Let the OS assign instead.
+        let ports = super::free_ports(num_nodes).await;
+        for (i, &data_port) in ports.iter().enumerate() {
             let node_id = (i + 1) as u64;
-            let data_port = base_data_port + i as u16;
             // With multiplexing, Raft traffic uses the same port as data traffic
             let raft_port = data_port;
             let data_dir = base_dir.path().join(format!("node{}", node_id));
@@ -78,7 +78,7 @@ impl TestCluster {
 
     /// Start all nodes in the cluster
     pub async fn start_all(&mut self) -> anyhow::Result<()> {
-        // Build cluster_nodes string: "1@127.0.0.1:60011,2@127.0.0.1:60012,..."
+        // Build cluster_nodes string: "1@127.0.0.1:<port>,2@127.0.0.1:<port>,..."
         let cluster_nodes: Vec<String> = self
             .nodes
             .values()
@@ -180,6 +180,13 @@ impl TestCluster {
             .env("STORAGE_PATH", node.data_dir.to_str().unwrap())
             .env("GRPC_PORT", node.data_port.to_string())
             .env("PRKDB_DISABLE_METRICS", "1")
+            // prkdb-server refuses to start unconfigured, so say so explicitly rather
+            // than relying on a default. A test cluster that silently served without
+            // authorization is what let S-01 live as long as it did.
+            .env("PRKDB_ALLOW_ANONYMOUS", "1")
+            // Likewise explicit: these nodes are a real multi-node cluster, so
+            // prkdb-server refuses to start without peer authentication unless told.
+            .env("PRKDB_ALLOW_UNAUTHENTICATED_PEERS", "1")
             .env("RUST_LOG", "prkdb::raft=debug,info")
             .env("CHAOS_CONFIG_PATH", chaos_config_path)
             .stdout(Stdio::from(log_file.try_clone()?))
@@ -244,6 +251,40 @@ impl TestCluster {
     }
 
     /// Get a node by ID
+    /// Block until every running node answers gRPC, or fail saying which did not.
+    ///
+    /// Replaces `sleep(Duration::from_secs(5))` after `start_all`. A fixed sleep is wrong
+    /// in both directions: too short on a loaded CI runner, so the test fails for reasons
+    /// unrelated to what it tests; and pure waste on a fast one. It also reports the
+    /// eventual assertion failure rather than "node 2 never came up", which is the
+    /// sentence someone reading CI output needs.
+    pub async fn await_ready(&self, within: std::time::Duration) -> anyhow::Result<()> {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            let mut pending = Vec::new();
+            for node in self.nodes.values() {
+                if !self.is_node_running(node.node_id) {
+                    continue;
+                }
+                let url = format!("http://127.0.0.1:{}", node.data_port);
+                let reachable = match tonic::transport::Channel::from_shared(url) {
+                    Ok(channel) => channel.connect().await.is_ok(),
+                    Err(_) => false,
+                };
+                if !reachable {
+                    pending.push(node.node_id);
+                }
+            }
+            if pending.is_empty() {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                anyhow::bail!("nodes {pending:?} did not accept connections within {within:?}");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
     pub fn get_node(&self, node_id: u64) -> Option<&TestNode> {
         self.nodes.get(&node_id)
     }

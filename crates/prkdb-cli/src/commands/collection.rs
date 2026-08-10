@@ -44,8 +44,6 @@ struct FieldInfo {
     sample_values: Vec<String>,
 }
 
-use prkdb_client::PrkDbClient;
-
 pub async fn execute(cmd: CollectionCommands, cli: &Cli) -> Result<()> {
     match cmd {
         CollectionCommands::Create {
@@ -89,7 +87,12 @@ async fn create_collection(
     replication_factor: u32,
     cli: &Cli,
 ) -> Result<()> {
-    let client = PrkDbClient::new(vec![cli.server.clone()]).await?;
+    let client = crate::remote_client::connect(
+        vec![cli.server.clone()],
+        cli.credential.clone(),
+        cli.admin_token.clone(),
+    )
+    .await?;
     let client = if let Some(token) = &cli.admin_token {
         client.with_admin_token(token)
     } else {
@@ -122,7 +125,12 @@ async fn put_collection_data(name: &str, data: &str, cli: &Cli) -> Result<()> {
     let key = format!("{}:{}", name, id);
 
     // Connect client
-    let client = PrkDbClient::new(vec![cli.server.clone()]).await?;
+    let client = crate::remote_client::connect(
+        vec![cli.server.clone()],
+        cli.credential.clone(),
+        cli.admin_token.clone(),
+    )
+    .await?;
     let client = if let Some(token) = &cli.admin_token {
         client.with_admin_token(token)
     } else {
@@ -145,7 +153,12 @@ async fn put_collection_data(name: &str, data: &str, cli: &Cli) -> Result<()> {
 }
 
 async fn drop_collection(name: &str, cli: &Cli) -> Result<()> {
-    let client = PrkDbClient::new(vec![cli.server.clone()]).await?;
+    let client = crate::remote_client::connect(
+        vec![cli.server.clone()],
+        cli.credential.clone(),
+        cli.admin_token.clone(),
+    )
+    .await?;
     let client = if let Some(token) = &cli.admin_token {
         client.with_admin_token(token)
     } else {
@@ -158,7 +171,12 @@ async fn drop_collection(name: &str, cli: &Cli) -> Result<()> {
 }
 
 async fn list_collections(cli: &Cli) -> Result<()> {
-    let client = PrkDbClient::new(vec![cli.server.clone()]).await?;
+    let client = crate::remote_client::connect(
+        vec![cli.server.clone()],
+        cli.credential.clone(),
+        cli.admin_token.clone(),
+    )
+    .await?;
     let client = if let Some(token) = &cli.admin_token {
         client.with_admin_token(token)
     } else {

@@ -7,6 +7,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
 
+/// Bind an ephemeral port and return it, so concurrently-running test binaries
+/// cannot collide on a fixed number.
+async fn free_port() -> u16 {
+    tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("binding an ephemeral port on loopback cannot fail")
+        .local_addr()
+        .expect("a bound listener always has a local address")
+        .port()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_log_compaction() {
     // Create storage
@@ -20,10 +31,15 @@ async fn test_log_compaction() {
     // Create state machine
     let state_machine = Arc::new(PrkDbStateMachine::new(storage.clone()));
 
-    // Create cluster config
+    // Create cluster config.
+    //
+    // The port is allocated by the OS rather than hardcoded: test binaries in this
+    // workspace run concurrently, and 50001 was previously used by both this file
+    // and read_index_test.rs.
+    let port = free_port().await;
     let mut peers = HashMap::new();
-    peers.insert(1, "127.0.0.1:50001".to_string());
-    let listen_addr = "127.0.0.1:50001".parse().unwrap();
+    peers.insert(1, format!("127.0.0.1:{port}"));
+    let listen_addr = format!("127.0.0.1:{port}").parse().unwrap();
 
     let config = ClusterConfig {
         local_node_id: 1,

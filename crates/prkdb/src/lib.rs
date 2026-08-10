@@ -2,6 +2,15 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+// So `#[derive(Collection)]` works inside this crate as well as outside it.
+//
+// The derive emits `impl ... for prkdb::indexed_storage::QueryBuilder<..>`, which is how
+// every consumer refers to the type — but inside `prkdb` itself the name `prkdb` is not in
+// scope, and the derive is used by unit tests in `consumer.rs` and `indexed_storage.rs`.
+// This alias makes the one path resolve in both places, the same way serde uses it.
+extern crate self as prkdb;
+
+pub mod authz; // Principals, roles and grants (spec R12)
 mod batch_accumulator;
 pub mod builder;
 pub mod cache; // LRU cache layer
@@ -25,7 +34,6 @@ pub mod rate_limit; // Rate limiting for operations
 pub mod replication;
 pub mod scheduler;
 pub mod storage;
-mod storage_old_inmemory; // Renamed from storage.rs to allow storage/ directory
 pub mod streaming;
 pub mod transaction;
 pub mod ttl;

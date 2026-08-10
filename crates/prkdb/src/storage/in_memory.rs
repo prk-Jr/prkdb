@@ -1,3 +1,12 @@
+//! In-memory storage adapter.
+//!
+//! This is the default backend when [`PrkDbBuilder`](crate::builder::PrkDbBuilder) is given no
+//! data directory, and the one most integration tests use. Nothing here is persisted — the map
+//! lives for the process lifetime only.
+//!
+//! Previously `storage_old_inmemory.rs`. The "old" was a leftover from splitting `storage.rs`
+//! into the `storage/` directory, not a statement about the module's status.
+
 use dashmap::DashMap;
 use prkdb_types::error::StorageError;
 use prkdb_types::storage::StorageAdapter;

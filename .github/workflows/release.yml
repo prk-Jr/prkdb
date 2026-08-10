@@ -1,0 +1,106 @@
+name: Release
+
+# Publishing is triggered only by pushing a signed `v*` tag, never automatically on
+# merge. A publish to crates.io cannot be undone — a version can be yanked but never
+# replaced — so it should be a deliberate act with a name attached to it.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Verify without publishing"
+        type: boolean
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  verify:
+    name: Verify the tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # A tag that does not match the manifest produces a release nobody can reproduce
+      # from source. Cheap to check, expensive to discover later.
+      - name: Tag must match the workspace version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          MANIFEST=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "$TAG" != "$MANIFEST" ]; then
+            echo "::error::tag v$TAG does not match workspace version $MANIFEST"
+            exit 1
+          fi
+          echo "tag and manifest agree on $TAG"
+
+      - name: Changelog must mention this version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          grep -q "\[$TAG\]" CHANGELOG.md || {
+            echo "::error::CHANGELOG.md has no entry for $TAG"
+            exit 1
+          }
+
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  publish:
+    name: Publish to crates.io
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Requires a GitHub environment with a manual approval gate, so a mistaken tag push
+    # cannot publish on its own.
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Dependency order is fixed by the graph, not by preference: every crate must
+      # already exist on the registry at the declared version before its dependents can
+      # be published. prkdb-client depends on prkdb-proto, so it is not a leaf.
+      #
+      # Path dependencies also need `version = ` alongside `path = ` or crates.io rejects
+      # the publish outright. That is not yet done — see the note below.
+      - name: Publish in dependency order
+        if: ${{ !inputs.dry_run }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          for crate in prkdb-types prkdb-proto prkdb-client; do
+            echo "::group::publishing $crate"
+            cargo publish -p "$crate" --locked
+            # crates.io needs a moment to index a new version before a dependent can
+            # resolve it.
+            sleep 30
+            echo "::endgroup::"
+          done
+
+      - name: Dry run
+        if: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          for crate in prkdb-types prkdb-proto prkdb-client; do
+            echo "::group::dry-run $crate"
+            # Dependents will fail here until their dependencies are actually on the
+            # registry — --dry-run cannot resolve a version that does not exist yet.
+            cargo publish -p "$crate" --locked --dry-run || \
+              echo "note: expected to fail until its dependencies are published"
+            echo "::endgroup::"
+          done

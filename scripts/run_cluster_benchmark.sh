@@ -30,7 +30,12 @@ mkdir -p /tmp/prkdb_cluster_3
 echo -e "${GREEN}Starting 3-node cluster...${NC}"
 
 # Node 1 (Bootstrap leader)
-RUST_LOG=debug,raft=debug,prkdb=debug,openraft=debug $PRKDB_CLI --verbose serve \
+# --allow-anonymous: this script exercises client features, not authorization, and
+# its client calls carry no credential. `serve` refuses to start without principals
+# (spec S-01), so the choice is to state the intent here or thread a credential
+# through every call in a script that is not about credentials.
+# scripts/test_mixed_client_integration.sh covers the authorized path.
+RUST_LOG=debug,raft=debug,prkdb=debug,openraft=debug $PRKDB_CLI --verbose serve --allow-anonymous \
     --id 1 \
     --port 8081 \
     --grpc-port 50051 \
@@ -42,7 +47,7 @@ PID1=$!
 sleep 2
 
 # Node 2
-RUST_LOG=debug,raft=debug,prkdb=debug,openraft=debug $PRKDB_CLI --verbose serve \
+RUST_LOG=debug,raft=debug,prkdb=debug,openraft=debug $PRKDB_CLI --verbose serve --allow-anonymous \
     --id 2 \
     --port 8082 \
     --grpc-port 50052 \
@@ -51,7 +56,7 @@ RUST_LOG=debug,raft=debug,prkdb=debug,openraft=debug $PRKDB_CLI --verbose serve 
 PID2=$!
 
 # Node 3
-RUST_LOG=debug,raft=debug,prkdb=debug,openraft=debug $PRKDB_CLI --verbose serve \
+RUST_LOG=debug,raft=debug,prkdb=debug,openraft=debug $PRKDB_CLI --verbose serve --allow-anonymous \
     --id 3 \
     --port 8083 \
     --grpc-port 50053 \

@@ -1,3 +1,4 @@
+mod readme_tests;
 mod repo_status;
 
 use anyhow::Result;
@@ -12,6 +13,8 @@ fn main() -> Result<()> {
         ["repo-status", "audit"] => repo_status::audit(false),
         ["repo-status", "audit", "--run-commands"] => repo_status::audit(true),
         ["repo-status", "render"] => repo_status::render(),
+        ["readme-tests"] => readme_tests::generate(false),
+        ["readme-tests", "--check"] => readme_tests::generate(true),
         _ => {
             print_usage_and_exit();
         }
@@ -20,7 +23,9 @@ fn main() -> Result<()> {
 
 fn print_usage_and_exit() -> ! {
     eprintln!(
-        "Usage: cargo run -p xtask -- repo-status <snapshot|audit|render> [--fail-on-objective-drift|--run-commands]"
+        "Usage:\n  \
+         cargo run -p xtask -- repo-status <snapshot|audit|render> [--fail-on-objective-drift|--run-commands]\n  \
+         cargo run -p xtask -- readme-tests [--check]"
     );
     std::process::exit(2);
 }

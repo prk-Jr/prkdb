@@ -19,6 +19,13 @@ pub enum RpcError {
     InvalidUri(String),
 }
 
+/// Fault-injection rules, read from the file named by `CHAOS_CONFIG_PATH`.
+///
+/// Compiled only under the `chaos` feature. Before that gate existed this shipped in
+/// release builds, where the check read an environment variable, then read and JSON-parsed
+/// a file, on every `get_client` call — and gave anyone who could write that file the
+/// ability to partition a live cluster.
+#[cfg(feature = "chaos")]
 #[derive(Debug, serde::Deserialize)]
 pub enum ChaosRule {
     Partition { node1: u64, node2: u64 },
@@ -26,10 +33,35 @@ pub enum ChaosRule {
     Drop { src: u64, dst: u64, rate: f64 },
 }
 
+/// How this pool dials peers.
+///
+/// Without it, `get_client` built `http://{addr}` unconditionally — so a cluster whose
+/// servers required client certificates could not form at all: every peer dialled
+/// plaintext at a TLS listener and the handshake failed. `PeerIdentity::MutualTls` was
+/// therefore selectable and unusable, which is worse than unavailable, because the node
+/// starts and only replication is broken (spec S-10).
+#[derive(Clone, Default)]
+pub struct PeerTls {
+    /// PEM client certificate this node presents to its peers.
+    pub cert_pem: Vec<u8>,
+    /// PEM private key for `cert_pem`.
+    pub key_pem: Vec<u8>,
+    /// PEM CA that peers' server certificates must chain to.
+    pub ca_pem: Vec<u8>,
+    /// Name to verify against the peer's certificate.
+    pub domain: String,
+}
+
 /// Manages gRPC connections to peer Raft nodes
 pub struct RpcClientPool {
+    /// This pool's own node id. Currently read only by the chaos fault injector, so it
+    /// is dead code without that feature — kept because it identifies the pool and the
+    /// peer-authentication work in the production-security plan will need it.
+    #[cfg_attr(not(feature = "chaos"), allow(dead_code))]
     local_node_id: NodeId,
     clients: Arc<RwLock<HashMap<NodeId, RaftServiceClient<Channel>>>>,
+    /// `None` dials plaintext, which is what a cluster without peer certificates wants.
+    tls: Option<PeerTls>,
 }
 
 impl RpcClientPool {
@@ -37,10 +69,21 @@ impl RpcClientPool {
         Self {
             local_node_id,
             clients: Arc::new(RwLock::new(HashMap::new())),
+            tls: None,
         }
     }
 
+    /// Dial peers over TLS, presenting this node's certificate.
+    ///
+    /// Required whenever the servers are configured with a client CA: they will demand a
+    /// certificate, and a plaintext dial never gets far enough to present one.
+    pub fn with_tls(mut self, tls: PeerTls) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
     /// Check if we should block or delay traffic to the target node based on chaos rules
+    #[cfg(feature = "chaos")]
     async fn check_chaos(&self, target_node: NodeId) -> Result<(), RpcError> {
         if let Ok(config_path) = std::env::var("CHAOS_CONFIG_PATH") {
             if let Ok(content) = tokio::fs::read_to_string(config_path).await {
@@ -85,23 +128,45 @@ impl RpcClientPool {
         node_id: NodeId,
         addr: &str,
     ) -> Result<RaftServiceClient<Channel>, RpcError> {
-        // Check chaos rules first
-        self.check_chaos(node_id).await?;
-
-        // Check if client exists
+        // Cache hit first. The chaos check below used to run ahead of this, putting a
+        // file read and a JSON parse in front of every cached connection.
         {
             let clients = self.clients.read().await;
             if let Some(client) = clients.get(&node_id) {
+                #[cfg(feature = "chaos")]
+                self.check_chaos(node_id).await?;
                 return Ok(client.clone());
             }
         }
 
-        // Create new client
-        let endpoint = format!("http://{}", addr);
-        let channel = Channel::from_shared(endpoint)
-            .map_err(|e| RpcError::InvalidUri(e.to_string()))?
-            .connect()
-            .await?;
+        #[cfg(feature = "chaos")]
+        self.check_chaos(node_id).await?;
+
+        // Create new client. The scheme must match how the peer is listening: dialling
+        // http:// at a TLS listener fails the handshake, which is what made mTLS peer
+        // authentication unusable in a real cluster.
+        let channel = match &self.tls {
+            None => {
+                Channel::from_shared(format!("http://{}", addr))
+                    .map_err(|e| RpcError::InvalidUri(e.to_string()))?
+                    .connect()
+                    .await?
+            }
+            Some(tls) => {
+                let client_tls = tonic::transport::ClientTlsConfig::new()
+                    .domain_name(tls.domain.clone())
+                    .ca_certificate(tonic::transport::Certificate::from_pem(&tls.ca_pem))
+                    .identity(tonic::transport::Identity::from_pem(
+                        &tls.cert_pem,
+                        &tls.key_pem,
+                    ));
+                Channel::from_shared(format!("https://{}", addr))
+                    .map_err(|e| RpcError::InvalidUri(e.to_string()))?
+                    .tls_config(client_tls)?
+                    .connect()
+                    .await?
+            }
+        };
 
         let client = RaftServiceClient::new(channel);
 

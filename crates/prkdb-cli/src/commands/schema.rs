@@ -1,5 +1,5 @@
 use clap::{Args, Subcommand, ValueEnum};
-use prkdb_client::{CompatibilityMode, PrkDbClient};
+use prkdb_client::CompatibilityMode;
 use std::io::Write;
 use std::path::PathBuf;
 use tokio::fs;
@@ -17,6 +17,12 @@ pub struct SchemaArgs {
     /// Admin token for schema registry write and list operations
     #[arg(long, env = "PRKDB_ADMIN_TOKEN")]
     pub admin_token: Option<String>,
+
+    /// Bearer credential for a server with authorization enabled.
+    ///
+    /// `--admin-token` doubles as one; this is for a principal that is not an admin.
+    #[arg(long, env = "PRKDB_CREDENTIAL")]
+    pub credential: Option<String>,
 
     #[command(subcommand)]
     pub command: SchemaCommands,
@@ -90,13 +96,12 @@ impl From<CompatibilityModeArg> for CompatibilityMode {
 
 pub async fn handle_schema(args: SchemaArgs) -> anyhow::Result<()> {
     // Connect to server
-    let client = if let Some(token) = args.admin_token.clone() {
-        PrkDbClient::new(vec![args.server.clone()])
-            .await?
-            .with_admin_token(token)
-    } else {
-        PrkDbClient::new(vec![args.server.clone()]).await?
-    };
+    let client = crate::remote_client::connect(
+        vec![args.server.clone()],
+        args.credential.clone(),
+        args.admin_token.clone(),
+    )
+    .await?;
 
     match args.command {
         SchemaCommands::Register {

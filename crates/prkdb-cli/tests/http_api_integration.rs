@@ -66,6 +66,10 @@ impl TestServer {
             .arg(http_port.to_string())
             .arg("--grpc-port")
             .arg(grpc_port.to_string())
+            // These tests exercise the HTTP API itself, not authorization, which has its
+            // own suite in http_authz.rs. Since Task 1 the server refuses to start with
+            // no principals, so the opt-out has to be explicit here.
+            .arg("--allow-anonymous")
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
 

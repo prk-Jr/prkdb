@@ -119,12 +119,12 @@ async fn execute_local(cmd: ReplicationCommands, _cli: &Cli) -> Result<()> {
 }
 
 async fn create_client(cli: &Cli) -> Result<PrkDbClient> {
-    let client = PrkDbClient::new(vec![cli.server.clone()]).await?;
-    let client = if let Some(token) = &cli.admin_token {
-        client.with_admin_token(token)
-    } else {
-        client
-    };
+    let client = crate::remote_client::connect(
+        vec![cli.server.clone()],
+        cli.credential.clone(),
+        cli.admin_token.clone(),
+    )
+    .await?;
     Ok(client)
 }
 

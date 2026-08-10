@@ -4,6 +4,13 @@
 
 set -e
 
+
+# Local development cluster: serve without authorization, stated explicitly.
+# prkdb-server refuses to start unconfigured so that a production deployment
+# cannot end up anonymous by accident (spec S-01).
+export PRKDB_ALLOW_ANONYMOUS=1
+export PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1
+
 echo ""
 echo "🔐 PrkDB 3-Node Raft Cluster"
 echo "============================"

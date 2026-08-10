@@ -142,7 +142,7 @@ func ensureClientDir(clientDir string) {
 }
 
 func runWrite(config runnerConfig) {
-	client := models.NewPrkDbClient(config.ServerURL)
+	client := models.NewPrkDbClientWithCredential(config.ServerURL, os.Getenv("PRKDB_CREDENTIAL"))
 
 	for index := 0; index < config.Records; index++ {
 		if err := client.Put(config.Collection, buildRecord(index, config.IDPrefix)); err != nil {
@@ -162,7 +162,7 @@ func runWrite(config runnerConfig) {
 }
 
 func runRead(config runnerConfig) {
-	client := models.NewPrkDbClient(config.ServerURL)
+	client := models.NewPrkDbClientWithCredential(config.ServerURL, os.Getenv("PRKDB_CREDENTIAL"))
 	rows, err := client.ListRaw(config.Collection, models.ListOptions{Limit: 10000})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ read failed: %v\n", err)

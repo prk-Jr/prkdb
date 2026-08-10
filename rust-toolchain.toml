@@ -1,0 +1,10 @@
+# Pin the toolchain so CI, local builds, and the MSRV claim in Cargo.toml all agree.
+#
+# Before this file, CI used `dtolnay/rust-toolchain@stable` with no pin, which meant a
+# new stable release could turn the clippy gate red without anything in the repository
+# changing. The `nightly-check` job in ci.yml is the early warning for that instead.
+#
+# Keep `channel` in sync with `rust-version` in the workspace Cargo.toml.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]

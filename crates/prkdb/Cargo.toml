@@ -2,6 +2,7 @@
 name = "prkdb"
 version = "0.6.0"
 edition = "2021"
+license.workspace = true
 
 [[test]]
 name = "integration_tests"
@@ -11,6 +12,10 @@ name = "load_tests"
 path = "tests/load_tests.rs"
 
 [dependencies]
+subtle = { workspace = true }
+# Credential digests for persisted principals.
+sha2 = "0.10"
+http = "1"
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 bincode = { workspace = true }
@@ -42,6 +47,10 @@ lz4 = { workspace = true }                                             # Compres
 axum = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
 pin-project = "1.1"
+# Layer/Service traits for the gRPC authorization layer. These are the same crates
+# tonic itself builds on, so the traits unify with tonic's tower stack.
+tower-layer = "0.3"
+tower-service = "0.3"
 minicbor = { version = "0.20", features = ["derive", "std"] }
 tonic = { workspace = true, features = ["tls", "tls-roots"] }
 prost = { workspace = true }
@@ -61,6 +70,10 @@ clap = { workspace = true, features = ["derive"] }
 [features]
 default = ["metrics"]
 metrics = []
+# Fault injection for chaos tests. MUST NOT be enabled in production builds: it lets
+# anyone who can set CHAOS_CONFIG_PATH, or write the file it names, partition a live
+# cluster. Enabled by the chaos-tests workflow only.
+chaos = []
 
 [dev-dependencies]
 prkdb-orm-macros = { workspace = true }
@@ -71,12 +84,21 @@ prkdb-metrics = { workspace = true }
 
 
 tempfile = "3"
+rstest = { workspace = true }
 sqlx = { version = "0.8.2", default-features = false, features = [
     "runtime-tokio",
     "sqlite",
 ] }
 criterion = { workspace = true }
 proptest = "1.4"
+# Test certificates for the mTLS peer-auth tests.
+#
+# default-features = false is load-bearing: rcgen's default backend is `ring`, and the
+# workspace's rustls already uses `aws-lc-rs`. Enabling both makes rustls unable to pick a
+# process-level CryptoProvider, and every TLS test panics at runtime with
+# "Could not automatically determine the process-level CryptoProvider".
+rcgen = { version = "0.13.2", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 
 [[bench]]
 name = "consumer_bench"

@@ -112,9 +112,20 @@ async fn chaos_test_concurrent_mixed_operations() {
     println!("✅ Chaos test: Concurrent mixed operations completed");
 }
 
-/// Chaos testing: Rapid open/close cycles
+/// Rapid open/close cycles must not lose data.
+///
+/// # This test was right and was switched off anyway
+///
+/// It carried `#[ignore = "Manual investigation: integration harness still diverges from
+/// WAL recovery unit tests"]` — blaming the harness for disagreeing with the unit tests.
+/// The harness was correct. `WalStorageAdapter::new` opened the WAL with
+/// `MmapParallelWal::create`, which truncates, so each cycle's writer destroyed every
+/// earlier cycle. The failure message said exactly that: "Lost data from cycle 0 key 0".
+///
+/// The unit tests it "diverged" from never reopened a data directory, so they could not
+/// see it. Fixed as spec S-05; verified by reverting `open_or_create`, which reproduces
+/// the original failure on the first cycle.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "Manual investigation: integration harness still diverges from WAL recovery unit tests"]
 async fn chaos_test_rapid_recovery() {
     let dir = tempfile::tempdir().unwrap();
     let config = WalConfig {
@@ -187,7 +198,7 @@ async fn chaos_test_operation_timeouts() {
 
 /// Chaos testing: Memory pressure under high load
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore] // Run with --ignored flag
+#[ignore = "slow: ~24s under simulated memory pressure — runs in the nightly-slow-tests CI job via --ignored"]
 async fn chaos_test_memory_pressure() {
     let dir = tempfile::tempdir().unwrap();
     let config = WalConfig {

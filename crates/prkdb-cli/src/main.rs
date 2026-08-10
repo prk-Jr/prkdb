@@ -2,11 +2,16 @@ use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+mod admin_principals;
+mod authz_layer;
 mod collection_metadata;
 mod commands;
 mod database_manager;
 mod output;
+mod probes;
+mod remote_client;
 mod storage_keys;
+mod tls;
 mod uptime_tracker;
 
 use commands::*;
@@ -35,6 +40,13 @@ pub struct Cli {
     /// Admin token for secured operations
     #[arg(long, env = "PRKDB_ADMIN_TOKEN")]
     pub admin_token: Option<String>,
+
+    /// Bearer credential sent with every request to a secured server.
+    ///
+    /// `--admin-token` also works as one, since an admin token is `Admin` on `*`. This
+    /// exists so a non-admin principal can use the CLI without claiming admin authority.
+    #[arg(long, env = "PRKDB_CREDENTIAL")]
+    pub credential: Option<String>,
 
     /// Use local embedded database instead of remote server
     #[arg(long)]
@@ -89,6 +101,29 @@ pub enum Commands {
         /// Enable Prometheus metrics endpoint
         #[arg(long)]
         prometheus: bool,
+        /// Serve without authorization. Development only: every collection becomes
+        /// readable and writable by anyone who can reach the port.
+        #[arg(long)]
+        allow_anonymous: bool,
+        /// Serve a multi-node cluster without authenticating Raft peers.
+        ///
+        /// Development only. Raft RPCs can rewrite the log, so a node with peers refuses
+        /// to start without --tls-client-ca or PRKDB_CLUSTER_SECRET unless this is passed.
+        #[arg(long)]
+        allow_unauthenticated_peers: bool,
+        /// Shed requests above this rate, per second. Probe endpoints are exempt.
+        #[arg(long)]
+        rate_limit: Option<u64>,
+        /// PEM server certificate. Enables TLS on both the HTTP and gRPC surfaces.
+        #[arg(long, requires = "tls_key")]
+        tls_cert: Option<std::path::PathBuf>,
+        /// PEM private key matching --tls-cert.
+        #[arg(long, requires = "tls_cert")]
+        tls_key: Option<std::path::PathBuf>,
+        /// PEM CA certificate. Requires clients to present a certificate signed by it
+        /// (mTLS) — how Raft peers authenticate to each other.
+        #[arg(long, requires = "tls_cert")]
+        tls_client_ca: Option<std::path::PathBuf>,
         /// Enable CORS for web dashboards
         #[arg(long)]
         cors: bool,
@@ -180,6 +215,12 @@ async fn main() -> anyhow::Result<()> {
             grpc_port,
             host,
             prometheus,
+            allow_anonymous,
+            allow_unauthenticated_peers,
+            rate_limit,
+            tls_cert,
+            tls_key,
+            tls_client_ca,
             cors,
             websockets,
             id,
@@ -230,6 +271,12 @@ async fn main() -> anyhow::Result<()> {
                 grpc_port: *grpc_port,
                 host: host.clone(),
                 prometheus: *prometheus,
+                allow_anonymous: *allow_anonymous,
+                allow_unauthenticated_peers: *allow_unauthenticated_peers,
+                rate_limit: *rate_limit,
+                tls_cert: tls_cert.clone(),
+                tls_key: tls_key.clone(),
+                tls_client_ca: tls_client_ca.clone(),
                 cors: *cors,
                 websockets: *websockets,
                 id: *id,
@@ -242,10 +289,10 @@ async fn main() -> anyhow::Result<()> {
             commands::serve::handle_serve(args).await
         }
         // Client commands - DO NOT init database manager (pure remote)
-        Commands::Get(args) => data::handle_get(args.clone()).await,
-        Commands::Put(args) => data::handle_put(args.clone()).await,
-        Commands::Delete(args) => data::handle_delete(args.clone()).await,
-        Commands::BatchPut(args) => data::handle_batch_put(args.clone()).await,
+        Commands::Get(args) => data::handle_get(args.clone(), &cli).await,
+        Commands::Put(args) => data::handle_put(args.clone(), &cli).await,
+        Commands::Delete(args) => data::handle_delete(args.clone(), &cli).await,
+        Commands::BatchPut(args) => data::handle_batch_put(args.clone(), &cli).await,
         Commands::Subscribe(args) => subscribe::handle_subscribe(args.clone()).await,
 
         // Backup/Restore commands (Offline)

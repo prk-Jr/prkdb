@@ -207,8 +207,16 @@ impl SegmentedLogAdapter {
                 break;
             }
             let op = cursor[0];
-            let key_len = u32::from_le_bytes(cursor[1..5].try_into().unwrap()) as usize;
-            let val_len = u32::from_le_bytes(cursor[5..9].try_into().unwrap()) as usize;
+            let key_len = u32::from_le_bytes(
+                cursor[1..5]
+                    .try_into()
+                    .expect("the `cursor.len() < 13` guard above makes this 4 bytes"),
+            ) as usize;
+            let val_len = u32::from_le_bytes(
+                cursor[5..9]
+                    .try_into()
+                    .expect("the `cursor.len() < 13` guard above makes this 4 bytes"),
+            ) as usize;
             if cursor.len() < 13 + key_len + val_len {
                 break;
             }
@@ -218,7 +226,9 @@ impl SegmentedLogAdapter {
             let key = cursor[key_start..val_start].to_vec();
             let val_slice = &cursor[val_start..val_start + val_len];
             let expected_crc =
-                u32::from_le_bytes(cursor[crc_start..crc_start + 4].try_into().unwrap());
+                u32::from_le_bytes(cursor[crc_start..crc_start + 4].try_into().expect(
+                    "the `cursor.len() < 13 + key_len + val_len` guard above makes this 4 bytes",
+                ));
             let mut hasher = crc32fast::Hasher::new();
             hasher.update(&cursor[..crc_start]);
             let actual_crc = hasher.finalize();

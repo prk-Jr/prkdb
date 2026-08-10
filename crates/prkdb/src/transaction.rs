@@ -6,18 +6,27 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
-//! let tx = db.begin_transaction();
-//! tx.put(b"key1", b"value1")?;
-//! tx.put(b"key2", b"value2")?;
+//! ```no_run
+//! # use prkdb::storage::WalStorageAdapter;
+//! # use prkdb::transaction::TransactionExt;
+//! # use prkdb_core::wal::WalConfig;
+//! # use std::sync::Arc;
+//! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+//! # let db = Arc::new(WalStorageAdapter::new(WalConfig::default())?);
+//! let mut tx = db.begin_transaction();
+//! tx.put(b"key1".to_vec(), b"value1")?;
+//! tx.put(b"key2".to_vec(), b"value2")?;
 //! let value = tx.get(b"key3").await?;
 //! tx.commit().await?;  // Atomic commit of all changes
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Performance
 //!
 //! - Regular operations bypass transaction code entirely (zero overhead)
-//! - Transaction commit uses `put_batch` (same 214K ops/sec throughput)
+//! - Transaction commit uses `put_batch`, so it inherits batch throughput rather than
+//!   paying per-key cost (figure unverified; see `docs/benchmarks/methodology.md`)
 //! - Reads within a transaction see uncommitted writes (read-your-writes)
 
 use crate::storage::WalStorageAdapter;

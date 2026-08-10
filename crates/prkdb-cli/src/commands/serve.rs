@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     extract::{
         ws::{Message, WebSocket},
@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use tokio::sync::broadcast;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
@@ -49,6 +50,38 @@ pub struct ServeArgs {
     /// Enable Prometheus metrics endpoint at /metrics
     #[arg(long)]
     pub prometheus: bool,
+
+    /// Serve without authorization. Development only.
+    #[arg(long)]
+    pub allow_anonymous: bool,
+
+    /// Serve a multi-node cluster without authenticating Raft peers. Development only.
+    ///
+    /// Without this, a node with peers refuses to start unless --tls-client-ca or
+    /// PRKDB_CLUSTER_SECRET is set. Raft RPCs can rewrite the log, so leaving them open
+    /// is a decision that should be stated rather than defaulted into.
+    #[arg(long)]
+    pub allow_unauthenticated_peers: bool,
+
+    /// Shed requests above this rate, per second. Probe endpoints are exempt.
+    #[arg(long)]
+    pub rate_limit: Option<u64>,
+
+    /// PEM server certificate. Enables TLS on both the HTTP and gRPC surfaces.
+    ///
+    /// Before this flag existed, `start_raft_server_tls` was implemented but reachable
+    /// only from an example — no shipped binary could turn TLS on (spec S-02).
+    #[arg(long, requires = "tls_key")]
+    pub tls_cert: Option<PathBuf>,
+
+    /// PEM private key matching `--tls-cert`.
+    #[arg(long, requires = "tls_cert")]
+    pub tls_key: Option<PathBuf>,
+
+    /// PEM CA certificate. Supplying it requires clients to present a certificate signed
+    /// by this CA (mTLS), which is how Raft peers authenticate to each other.
+    #[arg(long, requires = "tls_cert")]
+    pub tls_client_ca: Option<PathBuf>,
 
     /// Enable CORS for web dashboards
     #[arg(long)]
@@ -155,6 +188,138 @@ impl<T> ApiResponse<T> {
 }
 
 pub async fn handle_serve(args: ServeArgs) -> Result<()> {
+    // Resolve TLS before binding anything. A server that binds first and discovers an
+    // unreadable key on the first handshake has already advertised a port it cannot
+    // serve; worse, one that silently falls back to plaintext is exactly the failure
+    // spec S-02 describes.
+    let tls = crate::tls::TlsPaths::from_args(
+        args.tls_cert.clone(),
+        args.tls_key.clone(),
+        args.tls_client_ca.clone(),
+    )?;
+    if let Some(t) = &tls {
+        println!(
+            "🔒 TLS enabled (cert {}){}",
+            t.cert.display(),
+            if t.requires_client_certs() {
+                ", client certificates required (mTLS)"
+            } else {
+                ""
+            }
+        );
+    } else {
+        println!("⚠️  TLS is not configured; traffic is plaintext. Pass --tls-cert/--tls-key to enable it.");
+    }
+
+    // Authorization. A cold instance has no principals and can authenticate nobody, so
+    // PRKDB_BOOTSTRAP_TOKEN mints the first admin. Refusing to start otherwise is
+    // deliberate: spec S-01 exists because this surface served every collection to
+    // anyone who could reach the port.
+    let store = prkdb::authz::PrincipalStore::new();
+
+    // Load first. Principals are persisted through the storage layer, so a restarted node
+    // must recover the ones it already had — otherwise every restart would silently
+    // revoke every credential and PRKDB_BOOTSTRAP_TOKEN would be required forever.
+    {
+        let db = crate::database_manager::get_db_instance()
+            .await
+            .map_err(|e| anyhow::anyhow!("opening storage to load principals: {e}"))?;
+        let loaded = store
+            .load(db.storage().as_ref())
+            .await
+            .map_err(|e| anyhow::anyhow!("loading principals: {e}"))?;
+        if loaded > 0 {
+            println!("🔑 Loaded {loaded} principal(s) from storage");
+        }
+
+        if let Ok(token) = std::env::var("PRKDB_BOOTSTRAP_TOKEN") {
+            if !token.is_empty() {
+                // bootstrap_admin refuses once any principal exists, so a restart with the
+                // variable still set is a no-op rather than a second back door.
+                match store.bootstrap_admin(&token) {
+                    Ok(admin) => {
+                        store
+                            .persist(db.storage().as_ref(), admin)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("persisting bootstrap admin: {e}"))?;
+                        println!("🔑 Bootstrapped admin principal from PRKDB_BOOTSTRAP_TOKEN");
+                    }
+                    Err(prkdb::authz::BootstrapError::AlreadyInitialised { existing }) => {
+                        println!(
+                            "🔑 PRKDB_BOOTSTRAP_TOKEN ignored; {existing} principal(s)                              already exist"
+                        );
+                    }
+                    Err(e) => return Err(anyhow::anyhow!("{e}")),
+                }
+            }
+        }
+    }
+    let authz = if store.is_empty() {
+        if !args.allow_anonymous {
+            anyhow::bail!(
+                "No principals are configured. Set PRKDB_BOOTSTRAP_TOKEN to create an \
+                 admin principal, or pass --allow-anonymous to serve without \
+                 authorization (development only)."
+            );
+        }
+        eprintln!(
+            "⚠️  WARNING: serving with --allow-anonymous. Every collection is readable \
+             and writable by anyone who can reach this port."
+        );
+        crate::authz_layer::Authz::anonymous()
+    } else {
+        crate::authz_layer::Authz::enabled(store.clone())
+    };
+
+    // Raft peer authentication. `RaftService` carries AppendEntries, RequestVote and
+    // ReadIndex; a caller who can reach the port and is not challenged can rewrite the
+    // log or forge the ReadIndex round-trip that linearizable follower reads depend on.
+    //
+    // Refusing to start applies only to a node that actually has peers. A single-node
+    // instance has no cluster to protect, and making certificates a prerequisite for
+    // `prkdb-cli serve` on a laptop would push people toward the opt-out by default.
+    // mTLS requires the peer *client* to present a certificate too, so it is only
+    // selectable when this node has its own cert and key to present. Choosing it from the
+    // CA alone produced a node that started happily and could never form a cluster: its
+    // peers dial TLS, get asked for a certificate, and have none (spec S-10).
+    let peer_identity = prkdb::raft::peer_auth::PeerIdentity::from_config(
+        args.tls_client_ca.is_some() && tls.is_some(),
+        std::env::var("PRKDB_CLUSTER_SECRET").ok(),
+    );
+    if args.tls_client_ca.is_some() && tls.is_none() {
+        anyhow::bail!(
+            "--tls-client-ca requires --tls-cert and --tls-key: peers must present a \
+             certificate to each other, and this node has none to present."
+        );
+    }
+    if peer_identity.is_disabled() && !args.peers.is_empty() && !args.allow_unauthenticated_peers {
+        anyhow::bail!(
+            "This node has {} configured peer(s) but no Raft peer authentication. Pass \
+             --tls-client-ca to require client certificates, set PRKDB_CLUSTER_SECRET, or \
+             pass --allow-unauthenticated-peers to serve a cluster whose Raft RPCs anyone \
+             who can reach the port may call.",
+            args.peers.len()
+        );
+    }
+    if peer_identity.is_disabled() {
+        eprintln!(
+            "⚠️  Raft peer authentication is disabled; any caller reaching this port can \
+             issue AppendEntries."
+        );
+    } else {
+        println!("🔒 Raft peer authentication: {}", peer_identity.describe());
+    }
+    let peer_identity_requires_tls = peer_identity.requires_tls();
+    let peer_auth = prkdb::raft::peer_auth::PeerAuthInterceptor::new(peer_identity);
+
+    // The gRPC surface takes the same principals. `None` means anonymous, matching the
+    // HTTP layer, so the two cannot disagree about whether the node is open.
+    let grpc_authz_store = if store.is_empty() {
+        None
+    } else {
+        Some(store.clone())
+    };
+
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
     let node_id_label = args.id.to_string();
 
@@ -174,9 +339,30 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
 
     // Create broadcast channel for WebSocket updates
     let (broadcast_tx, _) = broadcast::channel::<String>(HTTP_BROADCAST_CHANNEL_CAPACITY);
+    // PRKDB_WS_TOKEN predates the authorization model and guards only `/ws/collections/:name`
+    // with a single shared secret. That route is now covered by `authz_layer`, which checks
+    // a principal's permission on the named collection — strictly stronger, and per-user.
+    //
+    // The two conflict: both read the same `Authorization: Bearer` header, so with
+    // principals configured a client presenting its own credential would fail the shared-
+    // token comparison and be refused a connection it is entitled to.
+    //
+    // Decision (recorded in CHANGELOG): when authorization is enabled, PRKDB_WS_TOKEN is
+    // ignored and a warning is printed. Under --allow-anonymous it still applies, so
+    // deployments that rely on it as their only gate keep it. This can weaken nothing:
+    // the case where it is dropped is the case where something stronger replaced it.
     let websocket_auth_token = std::env::var("PRKDB_WS_TOKEN")
         .ok()
         .filter(|token| !token.is_empty());
+    let websocket_auth_token = match (&websocket_auth_token, args.allow_anonymous) {
+        (Some(_), false) => {
+            eprintln!(
+                "⚠️  PRKDB_WS_TOKEN is set but ignored: WebSocket access is governed by                  principals. Grant Read on the collection instead. The variable still                  applies under --allow-anonymous."
+            );
+            None
+        }
+        _ => websocket_auth_token,
+    };
 
     if args.prometheus {
         prkdb::prometheus_metrics::init_prometheus_metrics();
@@ -228,6 +414,10 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     let mut app = Router::new()
         .route("/", get(root_handler))
         .route("/health", get(health_handler))
+        // Liveness and readiness answer different questions and must not be conflated:
+        // /livez touches nothing, /readyz reports whether this node can serve.
+        .route("/livez", get(crate::probes::livez_handler))
+        .route("/readyz", get(crate::probes::readyz_handler))
         .route("/collections", get(list_collections_handler))
         .route("/collections/:name", get(get_collection_handler))
         .route(
@@ -259,6 +449,51 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
 
     // Add state
     let app = app.with_state(state);
+
+    // Principal management. Mounted with its own state because it needs the live store,
+    // not AppState; `authz_layer` requires Admin on every /admin/ path.
+    //
+    // Only mounted when authorization is on: with --allow-anonymous there is no store to
+    // administer, and exposing an unauthenticated endpoint that mints credentials would
+    // be strictly worse than the anonymous mode it sits inside.
+    let app = match &grpc_authz_store {
+        Some(store) => {
+            let admin = crate::admin_principals::PrincipalAdmin::new(store.clone());
+            app.merge(
+                Router::new()
+                    .route(
+                        "/admin/principals",
+                        get(crate::admin_principals::list).put(crate::admin_principals::upsert),
+                    )
+                    .route(
+                        "/admin/principals/:name",
+                        axum::routing::delete(crate::admin_principals::revoke),
+                    )
+                    .with_state(admin),
+            )
+        }
+        None => app,
+    };
+
+    // Rate limiting sits outside authorization: shedding load must not require first
+    // resolving a credential, or the limiter cannot protect the thing it guards.
+    let rate_limit = match args.rate_limit {
+        Some(n) => {
+            println!("🚦 Rate limit: {n} requests/sec (probe endpoints exempt)");
+            crate::probes::RateLimit::per_second(n)
+        }
+        None => crate::probes::RateLimit::disabled(),
+    };
+    let app = app.layer(axum::middleware::from_fn_with_state(
+        rate_limit,
+        crate::probes::limit,
+    ));
+
+    // Authorization runs before CORS so a rejected request never reaches a handler.
+    let app = app.layer(axum::middleware::from_fn_with_state(
+        authz.clone(),
+        crate::authz_layer::authorize,
+    ));
 
     // Add CORS middleware if enabled
     let app = if args.cors {
@@ -313,9 +548,23 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         // Start Multi-Raft partitions (background tasks)
         // Skip serving Partition 0's Raft server here, as we'll multiplex it on the main gRPC server below
         // This avoids port collision on 50051
-        let rpc_pool = std::sync::Arc::new(prkdb::raft::RpcClientPool::new(args.id));
+        let rpc_pool = std::sync::Arc::new({
+            let pool = prkdb::raft::RpcClientPool::new(args.id);
+            // Dial peers the same way they listen. Without this the pool builds
+            // `http://` and the handshake fails against a TLS peer.
+            match (&tls, peer_identity_requires_tls) {
+                (Some(t), true) => pool.with_tls(prkdb::raft::rpc_client::PeerTls {
+                    cert_pem: t.read_cert()?,
+                    key_pem: t.read_key()?,
+                    ca_pem: t.read_client_ca()?.unwrap_or_default(),
+                    domain: args.host.clone(),
+                }),
+                _ => pool,
+            }
+        });
         db.start_multi_raft(rpc_pool, &[0]);
 
+        let grpc_tls = tls.clone();
         tokio::spawn(async move {
             use prkdb::raft::grpc_service::PrkDbGrpcService;
             use prkdb::raft::rpc::prk_db_service_server::PrkDbServiceServer;
@@ -332,20 +581,56 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
                 schema_storage_path,
             )
             .await
+            // The layer requires Admin for these RPCs, so the deprecated admin_token
+            // message field is no longer the only way in.
+            .with_authz_enforced(grpc_authz_store.is_some())
+            // Distinct from `!authz_enforced`: only an explicit --allow-anonymous waives
+            // the admin check, so a missing layer still denies.
+            .with_anonymous_access(args.allow_anonymous)
             .with_local_node_id(args.id)
             .with_public_address(advertised_grpc_address)
             .with_advertised_node_addresses(advertised_node_addresses);
 
-            let mut builder = Server::builder();
+            // Authorization runs as a tower layer rather than a tonic interceptor: an
+            // interceptor sees Request<()> and cannot read the method name, so it could
+            // not tell `Health` from `FetchSegment`. This closes spec S-01 on the gRPC
+            // side — `fetch_segment` streams raw WAL segments and required no credential.
+            let mut builder = Server::builder().layer(
+                prkdb::raft::authz_interceptor::AuthzGrpcLayer::new(grpc_authz_store),
+            );
+            if let Some(t) = &grpc_tls {
+                match t.tonic_config() {
+                    Ok(cfg) => match builder.tls_config(cfg) {
+                        Ok(b) => builder = b,
+                        Err(e) => {
+                            eprintln!("❌ gRPC TLS configuration rejected: {}", e);
+                            return;
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("❌ could not read TLS material: {}", e);
+                        return;
+                    }
+                }
+            }
 
             // Register client service
             let mut router = builder.add_service(PrkDbServiceServer::new(service));
 
             // Register Raft service for all partitions (multiplexed on same port)
+            //
+            // Peer authentication is applied here rather than in AuthzGrpcLayer, which
+            // deliberately passes RaftService through: peers present client certificates,
+            // not bearer credentials. A tonic Interceptor is sufficient here — unlike the
+            // client API, the policy is the same for all five RPCs, so it does not need
+            // the method name the interceptor cannot see.
             if let Some(pm) = &db.partition_manager {
                 println!("✨ Multiplexing Raft Service (All Partitions) on main port");
                 let raft_service = RaftServiceImpl::new(pm.clone());
-                router = router.add_service(RaftServiceServer::new(raft_service));
+                router = router.add_service(RaftServiceServer::with_interceptor(
+                    raft_service,
+                    peer_auth.clone(),
+                ));
             }
 
             if let Err(e) = router.serve(grpc_addr).await {
@@ -360,17 +645,45 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let shutdown_db = crate::database_manager::get_db_instance().await.ok();
 
-    axum::serve(listener, app.into_make_service())
-        .with_graceful_shutdown(async move {
-            shutdown_signal().await;
+    if let Some(t) = &tls {
+        // axum-server terminates TLS in front of the same tower service axum builds.
+        // Its own graceful-shutdown handle differs from axum::serve's, so the flush runs
+        // after the server returns rather than inside a shutdown future.
+        let rustls = axum_server::tls_rustls::RustlsConfig::from_pem(t.read_cert()?, t.read_key()?)
+            .await
+            .context("building the HTTPS listener from --tls-cert/--tls-key")?;
 
-            if let Some(db) = shutdown_db {
-                if let Err(error) = flush_db_state(&db).await {
-                    eprintln!("⚠️ Failed to flush storage during shutdown: {}", error);
-                }
+        drop(listener);
+        let handle = axum_server::Handle::new();
+        let shutdown_handle = handle.clone();
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
+        });
+
+        axum_server::bind_rustls(addr, rustls)
+            .handle(handle)
+            .serve(app.into_make_service())
+            .await?;
+
+        if let Some(db) = shutdown_db {
+            if let Err(error) = flush_db_state(&db).await {
+                eprintln!("⚠️ Failed to flush storage during shutdown: {}", error);
             }
-        })
-        .await?;
+        }
+    } else {
+        axum::serve(listener, app.into_make_service())
+            .with_graceful_shutdown(async move {
+                shutdown_signal().await;
+
+                if let Some(db) = shutdown_db {
+                    if let Err(error) = flush_db_state(&db).await {
+                        eprintln!("⚠️ Failed to flush storage during shutdown: {}", error);
+                    }
+                }
+            })
+            .await?;
+    }
 
     if args.prometheus {
         prkdb::prometheus_metrics::SERVER_UP
@@ -455,9 +768,30 @@ async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
-async fn list_collections_handler() -> impl IntoResponse {
+/// List collections, narrowed to what the caller may see.
+///
+/// # Why this filters rather than refusing
+///
+/// The route needs *some* grant, so a principal with `Read` on `users` reaches it. Showing
+/// them every collection in the database would leak the schema of collections they cannot
+/// touch — names alone often say more than they should. Returning 403 instead would be
+/// wrong the other way: they are entitled to see their own.
+///
+/// A caller entitled to nothing gets `200` with an empty list, not `403`. The request was
+/// permitted; the answer is empty. Conflating "you may not ask" with "there is nothing"
+/// makes the two indistinguishable to a client.
+///
+/// The principal arrives via extensions from `authz_layer::authorize`. Its absence means
+/// authorization is disabled, in which case there is nothing to filter by.
+async fn list_collections_handler(
+    principal: Option<axum::Extension<prkdb::authz::Principal>>,
+) -> impl IntoResponse {
     match execute_collection_command(CollectionCommands::List).await {
         Ok(output) => {
+            let output = match principal {
+                Some(axum::Extension(principal)) => filter_collections(output, &principal),
+                None => output,
+            };
             // Extract the total from the inner data for the outer response
             let total = output.get("total").and_then(|t| t.as_u64()).unwrap_or(0) as usize;
             Json(ApiResponse::success_with_total(output, total)).into_response()
@@ -468,6 +802,35 @@ async fn list_collections_handler() -> impl IntoResponse {
         )
             .into_response(),
     }
+}
+
+/// Drop collections the principal cannot read, and correct the total to match.
+///
+/// A `total` left at the unfiltered count would tell the caller exactly how many
+/// collections they are not allowed to see, which is most of what hiding them was for.
+fn filter_collections(mut output: Value, principal: &prkdb::authz::Principal) -> Value {
+    use prkdb::authz::Permission;
+
+    let Some(list) = output.get_mut("collections").and_then(|c| c.as_array_mut()) else {
+        return output;
+    };
+
+    // `get_collections_list` emits an array of plain strings. Objects with a `name` field
+    // are accepted too, so a future richer shape does not silently stop being filtered —
+    // a filter that quietly matches nothing would leak everything.
+    list.retain(|entry| {
+        let name = match entry {
+            Value::String(name) => Some(name.as_str()),
+            other => other.get("name").and_then(|n| n.as_str()),
+        };
+        name.is_some_and(|name| principal.permits(name, Permission::Read))
+    });
+
+    let visible = list.len();
+    if let Some(total) = output.get_mut("total") {
+        *total = Value::from(visible);
+    }
+    output
 }
 
 async fn get_collection_handler(Path(name): Path<String>) -> impl IntoResponse {
@@ -953,7 +1316,15 @@ async fn websocket_handler(
 ) -> impl IntoResponse {
     if let Some(expected_token) = &state.websocket_auth_token {
         let provided_token = extract_bearer_token(&headers);
-        if provided_token.as_deref() != Some(expected_token.as_str()) {
+        // Constant-time: `!=` on the token leaks its prefix through response timing, one
+        // byte at a time, which is the whole reason the rest of the codebase compares
+        // credentials with `subtle`.
+        let matches = provided_token.as_deref().is_some_and(|provided| {
+            use subtle::ConstantTimeEq;
+            provided.len() == expected_token.len()
+                && bool::from(provided.as_bytes().ct_eq(expected_token.as_bytes()))
+        });
+        if !matches {
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(ApiResponse::<Value>::error(

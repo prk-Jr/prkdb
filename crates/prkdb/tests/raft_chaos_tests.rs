@@ -24,7 +24,7 @@ use tokio::time::sleep;
 /// 6. Heal partition
 /// 7. Verify log convergence
 #[tokio::test]
-#[ignore] // Run with: cargo test --test raft_chaos_tests -- --ignored
+#[ignore = "needs a built prkdb-server binary; runs in the gating chaos-tests workflow via --ignored. These drive process-level behaviour — crash, restart, log inspection via read_node_log — which is what TestCluster is for; the in-process harness deliberately cannot do it"]
 async fn test_network_partition_split_brain() {
     // Create a 3-node cluster
     let mut cluster = TestCluster::new(3).await.unwrap();
@@ -183,12 +183,15 @@ async fn test_network_partition_split_brain() {
 /// 4. Verify new leader elected
 /// 5. Check data consistency
 #[tokio::test]
-#[ignore]
+#[ignore = "needs a built prkdb-server binary; runs in the gating chaos-tests workflow via --ignored. These drive process-level behaviour — crash, restart, log inspection via read_node_log — which is what TestCluster is for; the in-process harness deliberately cannot do it"]
 async fn test_leader_crash_during_write() {
     let mut cluster = TestCluster::new(3).await.unwrap();
     cluster.start_all().await.unwrap();
 
-    sleep(Duration::from_secs(5)).await;
+    cluster
+        .await_ready(Duration::from_secs(30))
+        .await
+        .expect("the cluster must come up");
 
     // Connect to node 1 (likely leader after election)
     let _client = connect_with_retry(format!(
@@ -230,10 +233,17 @@ async fn test_leader_crash_during_write() {
 
     // Restart node 1
     cluster.restart_node(1).await.unwrap();
-    sleep(Duration::from_secs(5)).await;
+    cluster
+        .await_ready(Duration::from_secs(30))
+        .await
+        .expect("node 1 must come back up");
 
     // Verify data consistency (cluster-wide)
-    let value = read_with_redirect(&cluster, b"key_75".to_vec(), 3)
+    // 30, not 3: this read follows a node restart, so it may arrive during an election
+    // and each retry sleeps 500ms. Three attempts gave the cluster ~1.5s to elect a
+    // leader, which is enough on a developer machine and not on a CI runner. The other
+    // post-disruption reads in this file already use 30 and 50.
+    let value = read_with_redirect(&cluster, b"key_75".to_vec(), 30)
         .await
         .unwrap();
     assert_eq!(value, b"value_75".to_vec());
@@ -253,12 +263,15 @@ async fn test_leader_crash_during_write() {
 /// 5. Restart follower
 /// 6. Verify follower catches up (via AppendEntries or InstallSnapshot)
 #[tokio::test]
-#[ignore] // Requires server binary
+#[ignore = "needs a built prkdb-server binary; runs in the gating chaos-tests workflow via --ignored. These drive process-level behaviour — crash, restart, log inspection via read_node_log — which is what TestCluster is for; the in-process harness deliberately cannot do it"]
 async fn test_follower_crash_and_recovery() {
     let mut cluster = TestCluster::new(3).await.unwrap();
     cluster.start_all().await.unwrap();
 
-    sleep(Duration::from_secs(5)).await;
+    cluster
+        .await_ready(Duration::from_secs(30))
+        .await
+        .expect("the cluster must come up");
 
     // Write initial data
     for i in 0..1000 {
@@ -290,7 +303,13 @@ async fn test_follower_crash_and_recovery() {
 
     // Restart node 3
     cluster.restart_node(3).await.unwrap();
-    sleep(Duration::from_secs(10)).await; // Give time for catch-up
+    cluster
+        .await_ready(Duration::from_secs(30))
+        .await
+        .expect("node 3 must come back up");
+    // Catch-up is still a duration rather than a condition: the assertions below are what
+    // decide whether it happened, and polling them here would just move the check.
+    sleep(Duration::from_secs(10)).await;
 
     // Verify node 3 has the data (use helper for leader redirect)
     for i in 0..10 {
@@ -328,12 +347,15 @@ async fn test_follower_crash_and_recovery() {
 /// 7. Restart 2 nodes
 /// 8. Verify cluster recovers
 #[tokio::test]
-#[ignore]
+#[ignore = "needs a built prkdb-server binary; runs in the gating chaos-tests workflow via --ignored. These drive process-level behaviour — crash, restart, log inspection via read_node_log — which is what TestCluster is for; the in-process harness deliberately cannot do it"]
 async fn test_cascading_failures() {
     let mut cluster = TestCluster::new(5).await.unwrap();
     cluster.start_all().await.unwrap();
 
-    sleep(Duration::from_secs(5)).await;
+    cluster
+        .await_ready(Duration::from_secs(30))
+        .await
+        .expect("the cluster must come up");
 
     // Write initial data
     let mut client = connect_with_retry(format!(
@@ -423,7 +445,7 @@ async fn test_cascading_failures() {
 /// which provides some resilience to clock skew. This test verifies
 /// that the cluster remains stable under normal operations.
 #[tokio::test]
-#[ignore]
+#[ignore = "needs a built prkdb-server binary; runs in the gating chaos-tests workflow via --ignored. These drive process-level behaviour — crash, restart, log inspection via read_node_log — which is what TestCluster is for; the in-process harness deliberately cannot do it"]
 async fn test_clock_skew_resilience() {
     let mut cluster = TestCluster::new(3).await.unwrap();
     cluster.start_all().await.unwrap();
@@ -534,7 +556,7 @@ async fn test_clock_skew_resilience() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "needs a built prkdb-server binary; runs in the gating chaos-tests workflow via --ignored. These drive process-level behaviour — crash, restart, log inspection via read_node_log — which is what TestCluster is for; the in-process harness deliberately cannot do it"]
 async fn test_snapshot_recovery() {
     let result = async {
         let mut cluster = TestCluster::new(3).await?;
@@ -803,7 +825,7 @@ async fn test_snapshot_recovery() {
 ///
 /// This test simulates real production chaos scenarios.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore] // Run with: cargo test --test raft_chaos_tests test_chaos_monkey_continuous_load -- --ignored --nocapture
+#[ignore = "needs a built prkdb-server binary; runs in the gating chaos-tests workflow via --ignored. These drive process-level behaviour — crash, restart, log inspection via read_node_log — which is what TestCluster is for; the in-process harness deliberately cannot do it"]
 async fn test_chaos_monkey_continuous_load() {
     use rand::Rng;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

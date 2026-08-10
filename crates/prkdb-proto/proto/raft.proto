@@ -525,6 +525,16 @@ message FetchSegmentRequest {
     uint64 start_offset = 1;     // Starting offset in WAL
     uint64 max_bytes = 2;        // Maximum bytes to return (0 = no limit)
     uint32 segment_id = 3;       // Optional: specific segment (0 = auto-detect)
+
+    // Collection to stream. Empty means "the whole database", which is only well defined
+    // when there is one collection.
+    //
+    // A database opened with --database keeps one WAL per collection, each numbering its
+    // records from 1, so `start_offset` alone does not identify a position across them.
+    // Naming the collection makes the pair (collection, start_offset) a real cursor. Added
+    // rather than reusing segment_id because that is a WAL segment index within one
+    // collection, not a collection selector.
+    string collection = 4;
 }
 
 // Raw data chunk for zero-copy streaming

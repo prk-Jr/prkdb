@@ -6,6 +6,10 @@ export default defineConfig({
     'A persistent, distributed key-value store with advanced features',
   base: '/prkdb/',
   ignoreDeadLinks: true,
+  // Internal engineering specs and plans live under docs/superpowers/ so they are
+  // version-controlled alongside the code they describe. They are not user-facing
+  // documentation and must not be published to the site.
+  srcExclude: ['superpowers/**'],
   themeConfig: {
     nav: [
       { text: 'Home', link: '/' },

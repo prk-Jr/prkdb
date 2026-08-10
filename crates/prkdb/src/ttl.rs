@@ -6,10 +6,14 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```no_run
 //! use prkdb::ttl::TtlStorage;
 //! use std::time::Duration;
-//!
+//! # use prkdb::storage::WalStorageAdapter;
+//! # use prkdb_core::wal::WalConfig;
+//! # use std::sync::Arc;
+//! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+//! # let storage = Arc::new(WalStorageAdapter::new(WalConfig::default())?);
 //! // Wrap storage with TTL support
 //! let ttl_storage = TtlStorage::new(storage);
 //!
@@ -21,6 +25,8 @@
 //!
 //! // Check remaining TTL
 //! let remaining = ttl_storage.ttl(b"session:123").await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Performance

@@ -1,0 +1,62 @@
+# cargo-mutants configuration.
+#
+# Two things may be excluded, and nothing else:
+#
+#   1. Equivalent mutants — they change no behaviour for any input, so no test can
+#      distinguish them.
+#   2. Mutants not reachable through the crate's public surface, where the entry names
+#      the specific capability that is missing and would remove it.
+#
+# "Hard to test" is not a reason. A survivor that changes observable behaviour is a
+# missing test, and the fix is the test — that is how the other 36 survivors from run
+# 31358158012 were handled, including a cluster-secret bypass that authenticated any
+# string of the right length.
+#
+# The same discipline as `scripts/check_ignore_reasons.sh` and the `EXEMPT` map in
+# `scripts/check_wrapper_completeness.sh`.
+exclude_re = [
+    # `required_permission` classifies FetchSegment as Admin with an explicit arm, and its
+    # fallback arm is *also* Admin. Deleting the explicit arm therefore changes no
+    # behaviour for any input, so no test can distinguish it — an equivalent mutant.
+    #
+    # The arm stays despite being redundant today. It is what keeps FetchSegment at Admin
+    # if the fallback is ever loosened, and FetchSegment streams raw WAL across every
+    # collection — the exact hole spec S-01 was filed for. Deleting it to satisfy the
+    # mutation report would trade a real safety property for a clean number.
+    #
+    # Found by run 31358158012, shard 3, alongside a genuine gap in the same function
+    # (nothing asserted that a Write grant admits writes) which was fixed with a test
+    # rather than an exclusion.
+    'delete match arm "FetchSegment" in required_permission',
+
+    # Category 1. `outbox_list`'s body is `Ok(Vec::new())`, so replacing it with
+    # `Ok(vec![])` substitutes the expression for itself. Nothing distinguishes them,
+    # including `the_outbox_stub_reports_nothing_rather_than_something`, which asserts the
+    # list is empty and so kills every *populated* replacement of this function while
+    # necessarily passing for this one.
+    #
+    # Anchored on the empty-vector variant on purpose: the six mutants returning invented
+    # entries are not equivalent and stay in scope, because a caller draining the outbox
+    # would act on rows that were never saved.
+    #
+    # Run 31362753534, shard 7.
+    'outbox_list .* with Ok\(vec!\[\]\)$',
+
+    # Category 2. `CollectionPartitionedAdapter::flush` forwards to each collection's
+    # `WalStorageAdapter::flush`, which drains a batch accumulator and flushes the WAL.
+    # That inner work is real, so this is *not* an equivalent mutant — but nothing that
+    # reaches this wrapper leaves observable pending state: its `put` path writes through
+    # rather than accumulating, and the accumulator is fed only by `append_raft_entry`,
+    # which already awaits persistence on a oneshot before returning. A value written and
+    # flushed therefore survives a reopen whether or not `flush` ran, which is what the
+    # `a_flushed_write_survives_reopening` test confirms — it passes with the body
+    # replaced by `Ok(())`.
+    #
+    # Missing capability: a fault-injecting inner adapter whose `flush` fails, so the
+    # wrapper can be observed forwarding to every collection. Build that and delete this
+    # entry; the test to write is "flush reports an inner collection's failure rather
+    # than swallowing it".
+    #
+    # Run 31358158012, shard 7.
+    'replace <impl StorageAdapter for CollectionPartitionedAdapter>::flush',
+]

@@ -51,8 +51,14 @@ pub trait StorageAdapter: Send + Sync + 'static {
     /// as it batches WAL writes and reduces overhead from channels, locks, etc.
     ///
     /// # Performance
-    /// - Individual puts: ~375 ops/sec
-    /// - Batched puts: ~300K+ ops/sec (800x faster!)
+    ///
+    /// Measured with `cargo bench -p prkdb --bench storage_bench` on an Apple M3
+    /// (2026-08-09): single put **822 ops/sec**, 100-key batch **78.4 K ops/sec** — a
+    /// **95x** difference. The shape of the win is the point; the absolute numbers are
+    /// hardware-specific.
+    ///
+    /// The earlier "800x faster" claim was unverified and wrong by roughly a factor of
+    /// eight. See `docs/benchmarks/methodology.md`.
     async fn put_batch(&self, entries: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), StorageError> {
         // Default implementation: fall back to individual puts
         for (key, value) in entries {
@@ -171,6 +177,30 @@ pub trait StorageAdapter: Send + Sync + 'static {
         Err(StorageError::BackendError(
             "get_changes_since not supported".into(),
         ))
+    }
+
+    /// Changes after `offset` within one collection.
+    ///
+    /// # Why the collection is part of the cursor
+    ///
+    /// An adapter that keeps one log per collection numbers each from 1, so `offset` alone
+    /// does not identify a position across them — collection `a` offset 5 and collection
+    /// `b` offset 5 are unrelated events. Naming the collection makes the pair a real
+    /// cursor without needing a cluster-wide sequence, which would mean a log format
+    /// change and a write on the hot path.
+    ///
+    /// The default ignores the collection and defers to
+    /// [`get_changes_since`](Self::get_changes_since), which is correct for every adapter
+    /// backed by a single log: there is only one, so naming it adds nothing. This is
+    /// deliberately a *benign* default rather than one that returns an error — an adapter
+    /// that forgets to override it degrades to the single-log answer rather than failing
+    /// at runtime.
+    async fn changes_in_collection(
+        &self,
+        _collection: &str,
+        offset: u64,
+    ) -> Result<Vec<crate::replication::Change>, StorageError> {
+        self.get_changes_since(offset).await
     }
 
     /// Take a full snapshot of the database

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections import Counter
 from typing import Any, Dict, Iterable, List
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 
 DEFAULT_COLLECTION = "benchmark"
@@ -33,12 +34,27 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def auth_headers() -> Dict[str, str]:
+    """Bearer header from PRKDB_CREDENTIAL, when the server enforces authorization.
+
+    This script reads back what the three language clients wrote, so it needs the same
+    credential they used. Without it the run reached the very last step and failed with
+    ``HTTP Error 401: Unauthorized`` — after every writer and reader had already
+    succeeded, which reads as a data-verification failure rather than a missing header.
+
+    Absent variable means no header, so the script still works against an anonymous
+    server.
+    """
+    credential = os.environ.get("PRKDB_CREDENTIAL", "")
+    return {"Authorization": f"Bearer {credential}"} if credential else {}
+
+
 def fetch_page(server: str, collection: str, offset: int, limit: int) -> List[Dict[str, Any]]:
     query = urlencode({"limit": limit, "offset": offset})
     url = f"{server.rstrip('/')}/collections/{collection}/data?{query}"
 
     try:
-        with urlopen(url) as response:
+        with urlopen(Request(url, headers=auth_headers())) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         raise RuntimeError(f"failed to fetch {url}: {exc}") from exc
