@@ -7,6 +7,13 @@
 #   2. Mutants not reachable through the crate's public surface, where the entry names
 #      the specific capability that is missing and would remove it.
 #
+# Category 2 is currently **empty**, and that is the point of naming the missing capability
+# rather than writing "hard to test". Its one entry was
+# `CollectionPartitionedAdapter::flush`, which said it needed a fault-injecting inner
+# adapter; that adapter now exists as `wal_adapter::fault_injection`, the test it called
+# for is written, and the entry is gone. An exemption that states its own exit condition
+# is a to-do item. One that does not is permanent.
+#
 # "Hard to test" is not a reason. A survivor that changes observable behaviour is a
 # missing test, and the fix is the test — that is how the other 36 survivors from run
 # 31358158012 were handled, including a cluster-secret bypass that authenticated any
@@ -42,21 +49,4 @@ exclude_re = [
     # Run 31362753534, shard 7.
     'outbox_list .* with Ok\(vec!\[\]\)$',
 
-    # Category 2. `CollectionPartitionedAdapter::flush` forwards to each collection's
-    # `WalStorageAdapter::flush`, which drains a batch accumulator and flushes the WAL.
-    # That inner work is real, so this is *not* an equivalent mutant — but nothing that
-    # reaches this wrapper leaves observable pending state: its `put` path writes through
-    # rather than accumulating, and the accumulator is fed only by `append_raft_entry`,
-    # which already awaits persistence on a oneshot before returning. A value written and
-    # flushed therefore survives a reopen whether or not `flush` ran, which is what the
-    # `a_flushed_write_survives_reopening` test confirms — it passes with the body
-    # replaced by `Ok(())`.
-    #
-    # Missing capability: a fault-injecting inner adapter whose `flush` fails, so the
-    # wrapper can be observed forwarding to every collection. Build that and delete this
-    # entry; the test to write is "flush reports an inner collection's failure rather
-    # than swallowing it".
-    #
-    # Run 31358158012, shard 7.
-    'replace <impl StorageAdapter for CollectionPartitionedAdapter>::flush',
 ]
