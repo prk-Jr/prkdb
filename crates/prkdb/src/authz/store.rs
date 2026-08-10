@@ -280,6 +280,97 @@ impl PrincipalStore {
 mod tests {
     use super::*;
 
+    /// The administration surface: name lookup, counting, removal, listing.
+    ///
+    /// # Why these were untested
+    ///
+    /// Their only callers are `admin_principals.rs` in `prkdb-cli`, so `--package prkdb`
+    /// mutation had nothing in scope to kill them and every one survived (run
+    /// 31358158012, shards 1 and 2): `resolve_by_name` -> `None`, `admin_count` -> 0 or 1,
+    /// `is_admin` -> `true` or `false`, `remove` -> `None`, `is_empty` -> `true`, `names`
+    /// -> empty or junk, `from_principals` -> an empty store.
+    ///
+    /// Two of those are not cosmetic. `admin_count` and `is_admin` are what refuse to
+    /// revoke the last admin — a constant `1` for the count, or `true` for `is_admin`,
+    /// lets the check pass while the cluster loses its only administrator, which is
+    /// discovered during the next incident. And `from_principals` returning an empty store
+    /// means a node that restarts loads no principals at all and refuses everyone.
+    #[test]
+    fn the_administration_surface_reports_the_real_store() {
+        let admin = Principal::admin("root", "root-cred");
+        let reader = Principal::new(
+            "reader",
+            "reader-cred",
+            vec![Grant::new("*", Permission::Read)],
+        );
+
+        let store = PrincipalStore::from_principals(vec![admin.clone(), reader.clone()]);
+
+        // from_principals must actually load them.
+        assert_eq!(store.len(), 2, "from_principals dropped its input");
+        assert!(!store.is_empty());
+
+        let mut names = store.names();
+        names.sort();
+        assert_eq!(names, vec!["reader".to_string(), "root".to_string()]);
+
+        // resolve_by_name finds each, and reports None for a name that is not there.
+        assert_eq!(
+            store.resolve_by_name("root").map(|p| p.name().to_string()),
+            Some("root".into())
+        );
+        assert_eq!(
+            store
+                .resolve_by_name("reader")
+                .map(|p| p.name().to_string()),
+            Some("reader".into())
+        );
+        assert!(store.resolve_by_name("nobody").is_none());
+
+        // Exactly one of the two holds Admin on *.
+        assert_eq!(store.admin_count(), 1, "only root is an admin");
+        assert!(store.is_admin("root"));
+        assert!(!store.is_admin("reader"), "a Read grant is not Admin");
+        assert!(!store.is_admin("nobody"), "an unknown name is not an admin");
+
+        // remove returns what it removed, and only once.
+        let removed = store.remove("reader").expect("reader was present");
+        assert_eq!(removed.name(), "reader");
+        assert!(
+            store.remove("reader").is_none(),
+            "a second removal finds nothing"
+        );
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.admin_count(), 1);
+
+        // Emptying it is observable.
+        store.remove("root").expect("root was present");
+        assert!(store.is_empty(), "a store with everything removed is empty");
+        assert_eq!(store.admin_count(), 0, "no principals means no admins");
+        assert!(store.names().is_empty());
+    }
+
+    /// Two admins count as two, so revoking one still leaves an administrator.
+    ///
+    /// Separated from the test above because a constant `1` for `admin_count` survives any
+    /// test that only ever has one admin.
+    #[test]
+    fn admin_count_tracks_more_than_one() {
+        let store = PrincipalStore::from_principals(vec![
+            Principal::admin("a", "cred-a"),
+            Principal::admin("b", "cred-b"),
+            Principal::new("c", "cred-c", vec![Grant::new("*", Permission::Write)]),
+        ]);
+
+        assert_eq!(store.admin_count(), 2);
+        store.remove("a");
+        assert_eq!(
+            store.admin_count(),
+            1,
+            "removing one admin leaves the other"
+        );
+    }
+
     #[test]
     fn bootstrap_creates_one_admin_then_refuses() {
         let store = PrincipalStore::new();

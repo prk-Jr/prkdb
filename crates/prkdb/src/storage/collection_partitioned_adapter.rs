@@ -1079,6 +1079,11 @@ mod tests {
             "three reads were issued; a constant would not track them"
         );
         assert!(metrics.get_total_writes() >= 2);
+        assert_eq!(
+            metrics.get_total_collections(),
+            2,
+            "two collections were created; a constant would not track them"
+        );
 
         let mut names = metrics.get_collection_names();
         names.sort();
@@ -1086,6 +1091,104 @@ mod tests {
             names,
             vec!["orders".to_string(), "users".to_string()],
             "the names must be the collections touched, not a placeholder"
+        );
+    }
+
+    /// `delete_with_outbox` must delete.
+    ///
+    /// Replacing its body with `Ok(())` — a delete that removes nothing and reports
+    /// success — survived the suite (mutation run 31358158012, shard 7).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delete_with_outbox_removes_the_key() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            log_dir: temp_dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        };
+        let adapter = CollectionPartitionedAdapter::new(config).unwrap();
+
+        adapter.put(b"users:gone", b"value").await.unwrap();
+        assert_eq!(
+            adapter.get(b"users:gone").await.unwrap(),
+            Some(b"value".to_vec())
+        );
+
+        adapter
+            .delete_with_outbox(b"users:gone", "outbox-1", b"event")
+            .await
+            .expect("the delete succeeds");
+
+        assert_eq!(
+            adapter.get(b"users:gone").await.unwrap(),
+            None,
+            "delete_with_outbox reported success without deleting"
+        );
+    }
+
+    /// `put_with_outbox` must write, for the same reason.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn put_with_outbox_writes_the_key() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            log_dir: temp_dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        };
+        let adapter = CollectionPartitionedAdapter::new(config).unwrap();
+
+        adapter
+            .put_with_outbox(b"users:added", b"value", "outbox-1", b"event")
+            .await
+            .expect("the write succeeds");
+
+        assert_eq!(
+            adapter.get(b"users:added").await.unwrap(),
+            Some(b"value".to_vec())
+        );
+    }
+
+    /// The outbox on this adapter is a stub, and this pins that it is an *empty* stub.
+    ///
+    /// `outbox_list` returns `Ok(Vec::new())` — the outbox pattern is not implemented
+    /// here. Mutants replacing it with a populated vector survived, which matters more
+    /// than it looks: a caller draining the outbox would act on invented entries. The
+    /// contract this asserts is "empty", so if the stub is ever replaced by a real
+    /// implementation this test is where that shows up.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_outbox_stub_reports_nothing_rather_than_something() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            log_dir: temp_dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        };
+        let adapter = CollectionPartitionedAdapter::new(config).unwrap();
+
+        adapter.outbox_save("id-1", b"payload").await.unwrap();
+        assert!(
+            adapter.outbox_list().await.unwrap().is_empty(),
+            "the outbox is a stub; it must report nothing, not invented entries"
+        );
+    }
+
+    /// Flushing must reach disk: a value written and flushed survives a reopen.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_flushed_write_survives_reopening() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            log_dir: temp_dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        };
+
+        {
+            let adapter = CollectionPartitionedAdapter::new(config.clone()).unwrap();
+            adapter.put(b"users:durable", b"value").await.unwrap();
+            adapter.flush().await.expect("flush succeeds");
+        }
+
+        let reopened = CollectionPartitionedAdapter::new(config).unwrap();
+        assert_eq!(
+            reopened.get(b"users:durable").await.unwrap(),
+            Some(b"value".to_vec()),
+            "a flushed write did not survive reopening"
         );
     }
 }

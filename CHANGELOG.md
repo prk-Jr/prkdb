@@ -280,6 +280,13 @@ not enforced by anything, and several tests reported green while testing nothing
 - **Chaos test results were discarded.** The workflow never built `prkdb-server`, which
   every test needs, and `continue-on-error` hid the resulting failure while a README badge
   advertised "19 passing".
+- **Any string of the right length authenticated as the cluster secret**, had the `&&`
+  in the constant-time comparison ever been an `||`. Every existing case in
+  `cluster_secret_mode_compares_exactly` used a secret of the *wrong* length, so all of
+  them failed under that mutation for the wrong reason and it survived — a full peer
+  authentication bypass, and with it the authority to forge `AppendEntries` and rewrite
+  the log. Same length, different bytes is the only input that separates the two
+  operators, and it is now tested.
 - **A batch write that stored nothing and reported success passed every test.** Replacing
   the body of `put_batch_to_collection` with `Ok(())` — silent, total data loss on the
   batch path — survived the suite, because nothing read back what a batch had written.

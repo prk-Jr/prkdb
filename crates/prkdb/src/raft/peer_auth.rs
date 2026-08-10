@@ -190,6 +190,87 @@ mod tests {
         assert!(auth.check(false, None).is_err());
     }
 
+    /// A wrong secret of the *right length* must still be refused.
+    ///
+    /// # The bypass this exists for
+    ///
+    /// The comparison is
+    ///
+    /// ```text
+    /// expected.len() == presented.len() && ct_eq(expected, presented)
+    /// ```
+    ///
+    /// Changing that `&&` to `||` makes a length match sufficient on its own, so **any**
+    /// six-character string authenticates as the cluster secret — full peer authentication
+    /// bypass, and with it the authority to forge AppendEntries and rewrite the log.
+    ///
+    /// Every case in the test above uses a secret of the wrong length (`"s3cre"` is 5,
+    /// `"s3cret "` is 7), so all of them fail under the mutant for the wrong reason and it
+    /// survived the suite (mutation run 31358158012, shard 4). Same length, different
+    /// bytes is the only input that separates the two operators.
+    #[test]
+    fn a_same_length_wrong_secret_is_refused() {
+        let auth = PeerAuthInterceptor::new(PeerIdentity::ClusterSecret("s3cret".into()));
+
+        for wrong in ["s3creT", "S3cret", "xxxxxx", "s3crXt", "aaaaaa"] {
+            assert_eq!(
+                wrong.len(),
+                "s3cret".len(),
+                "test input must be the same length"
+            );
+            let err = auth
+                .check(false, Some(wrong))
+                .expect_err("a same-length wrong secret must not authenticate");
+            assert_eq!(err.code(), tonic::Code::Unauthenticated);
+        }
+
+        // The empty secret against an empty expectation: lengths match and so do bytes.
+        let empty = PeerAuthInterceptor::new(PeerIdentity::ClusterSecret(String::new()));
+        assert!(
+            empty.check(false, Some("x")).is_err(),
+            "a non-empty secret must not match an empty expectation"
+        );
+    }
+
+    /// `describe` names the active policy for the startup log.
+    ///
+    /// Replacing it with `""` or `"xyzzy"` survived: an operator reads this line to learn
+    /// which policy is in force, and a blank or wrong answer there is how a cluster gets
+    /// run with authentication the operator believes is stronger than it is.
+    #[test]
+    fn describe_names_the_active_policy() {
+        assert!(PeerIdentity::MutualTls.describe().contains("mutual TLS"));
+        assert!(PeerIdentity::ClusterSecret("s".into())
+            .describe()
+            .contains("secret"));
+        assert_eq!(PeerIdentity::Disabled.describe(), "disabled");
+
+        // All three must be distinguishable from one another.
+        let all = [
+            PeerIdentity::MutualTls.describe(),
+            PeerIdentity::ClusterSecret("s".into()).describe(),
+            PeerIdentity::Disabled.describe(),
+        ];
+        for d in all {
+            assert!(!d.is_empty(), "a policy description must not be blank");
+        }
+        assert_ne!(all[0], all[1]);
+        assert_ne!(all[1], all[2]);
+    }
+
+    /// `requires_tls` is true for mTLS and false for the other two.
+    ///
+    /// Both constant replacements survived. A caller uses this to refuse to start a
+    /// multi-node cluster whose policy cannot be enforced, so a constant `false` starts a
+    /// cluster that authenticates nothing and a constant `true` refuses to start one that
+    /// is correctly configured for a shared secret.
+    #[test]
+    fn requires_tls_is_true_only_for_mutual_tls() {
+        assert!(PeerIdentity::MutualTls.requires_tls());
+        assert!(!PeerIdentity::ClusterSecret("s".into()).requires_tls());
+        assert!(!PeerIdentity::Disabled.requires_tls());
+    }
+
     #[test]
     fn disabled_accepts_everything_and_says_it_needs_no_tls() {
         let auth = PeerAuthInterceptor::new(PeerIdentity::Disabled);
