@@ -242,15 +242,56 @@ jobs:
           git fetch --no-tags origin "${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
           git diff "origin/${{ github.base_ref }}...HEAD" > /tmp/pr.diff
           echo "changed lines: $(wc -l < /tmp/pr.diff)"
+
+          # An empty diff is the one outcome that cannot legitimately happen: a pull
+          # request changes something by definition. It means the merge base was not
+          # resolved — a shallow clone, a missing base ref, a fetch that failed — and the
+          # next step would then report "Diff changes no Rust source files" and pass,
+          # producing a green indistinguishable from a real one.
+          #
+          # This is the check that would have caught `git fetch --depth=0`, which is fatal
+          # and was in this job until it was tested by running it.
+          #
+          # Deliberately *not* "fail if the diff has .rs but zero mutants": test files and
+          # #[cfg(test)] code are not mutated, and neither are comment-only changes, so
+          # that rule fails honest pull requests. #41 changed two Rust files, both under
+          # tests/, and zero mutants was the correct answer.
           if [ ! -s /tmp/pr.diff ]; then
-            echo "empty diff — nothing to mutate"
+            echo "::error::The diff against origin/${{ github.base_ref }} is empty."
+            echo "A pull request always changes something, so this means the merge base"
+            echo "was not resolved and mutation testing would silently verify nothing."
+            exit 1
           fi
 
+      # The outcome is written to the job summary so that "passed having tested 40
+      # mutants" and "passed having tested none" do not look identical. A check whose
+      # green means two different things is one people stop reading.
       - name: Mutate the changed lines
         run: |
+          set -o pipefail
           cargo mutants --no-shuffle --timeout 300 \
             --in-diff /tmp/pr.diff \
-            --package prkdb --package prkdb-cli
+            --package prkdb --package prkdb-cli 2>&1 | tee /tmp/mutants.log
+          status=$?
+
+          {
+            echo "### 🧬 Mutation testing (diff-scoped)"
+            echo
+            if grep -q "no Rust source files" /tmp/mutants.log; then
+              echo "**No mutants generated.** The diff touches no mutable Rust in"
+              echo '`prkdb` or `prkdb-cli` — test code, comments, or another package.'
+              echo "Nothing was verified here, which is the correct outcome for this"
+              echo "diff rather than a clean bill of health."
+            elif grep -qE "[0-9]+ mutants? tested" /tmp/mutants.log; then
+              echo "\`\`\`"
+              grep -E "[0-9]+ mutants? tested" /tmp/mutants.log
+              echo "\`\`\`"
+            else
+              echo "Could not classify the outcome; see the job log."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit $status
 
       - uses: actions/upload-artifact@v4
         if: always()
