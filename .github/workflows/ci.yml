@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
@@ -50,7 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
@@ -131,7 +131,7 @@ jobs:
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
@@ -168,7 +168,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # A switched-off test is one nobody will remember why they switched off. Three
       # corruption tests were disabled this way and turned out to pass in 0.7s.
       #
@@ -191,7 +191,7 @@ jobs:
     # PR but trivial nightly.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
@@ -208,7 +208,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
@@ -236,7 +236,7 @@ jobs:
     # blocking today's work. The chaos-tests use of it is removed in Plan A Task 9.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       - uses: dtolnay/rust-toolchain@nightly
@@ -250,7 +250,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
@@ -266,7 +266,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
@@ -295,7 +295,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
@@ -318,7 +318,7 @@ jobs:
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
@@ -334,7 +334,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
@@ -362,7 +362,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
@@ -390,7 +390,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
@@ -416,7 +416,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
@@ -442,7 +442,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
@@ -534,7 +534,7 @@ jobs:
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
           
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       
       - name: Install dependencies
         run: sudo apt-get install -y protobuf-compiler bc jq
@@ -848,7 +848,7 @@ jobs:
     env:
       PRKDB_ADMIN_TOKEN: benchmark_ci_admin_token
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       
