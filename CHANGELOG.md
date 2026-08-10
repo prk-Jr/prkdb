@@ -244,6 +244,26 @@ not enforced by anything, and several tests reported green while testing nothing
   observe half a commit. Publication now happens under a dedicated barrier, and
   `snapshot_get_many` holds it for the duration of a multi-key read. Nothing was ever lost;
   this was always a read-visibility property, not a durability one.
+- **The QueryBuilder DSL was documented but implemented for nothing.** The `Collection`
+  derive emitted a `{Struct}QueryExt` trait whose `where_*` methods all carried default
+  bodies, and then implemented it for no type, so
+  `db.query::<User>().where_role_eq("admin")` — shown in the README as "type-safe, fluent
+  query API with macro-generated field methods" — compiled for no one. Nothing had ever
+  compiled the README, and the working `where_*_eq` methods elsewhere in the workspace
+  come from `prkdb-orm-macros`, a different derive. The missing impl is now emitted.
+- **Every README example compiles.** The skip list is empty, from nine entries. Each was a
+  real defect: a struct whose own fence read a field it did not declare, an aggregate
+  closure with an uninferable return type, `start_auto_sync` on an immutable binding, an
+  `LruCache` keyed by the wrong type, `take_while` comparing a `String` against an integer,
+  `get_local`/`get_follower_read` shown on an `IndexedStorage` when they are `PrkDb`
+  methods, `ConsistentHashRing::get_partition` (the method is `get_partition_for_key`), and
+  a fence tagged `rust` containing `...` placeholders.
+- **`test_leader_crash_during_write` failed in CI on a property it does not test.** The
+  read helper treated "Not leader. Leader is None" as terminal, though a cluster mid
+  election is transient in exactly the way a transport error is, and the post-restart read
+  allowed three retries where its neighbours allow thirty. The test asserts data
+  consistency and was failing on election timing. It surfaced now because this is the first
+  branch on which the chaos job actually runs.
 - **All 70 documentation examples in `prkdb` now compile**, from 7 passing and 63
   `#[ignore]`d. Converting them surfaced eight API drifts that no test could have caught,
   including `Transaction::insert` documented as `async` when it is synchronous,

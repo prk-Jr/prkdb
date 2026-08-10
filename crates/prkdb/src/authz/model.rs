@@ -221,7 +221,10 @@ mod tests {
         assert_eq!(hash, hash_credential("s3cret"));
         assert_eq!(hash.len(), 64, "hex SHA-256 is 64 characters");
         assert!(!hash.is_empty());
-        assert_ne!(hash, "s3cret", "the credential must not be stored in the clear");
+        assert_ne!(
+            hash, "s3cret",
+            "the credential must not be stored in the clear"
+        );
 
         // An empty digest would match nothing, so this also guards the accessor being
         // replaced by a constant.

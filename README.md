@@ -218,6 +218,9 @@ struct User {
     pub role: String,
 
     pub active: bool,
+
+    // Read by the closure filter below and by the aggregation examples.
+    pub orders: u32,
 }
 
 // Query by indexed field
@@ -244,14 +247,14 @@ db.delete_batch(&[user1, user2]).await?;
 ```rust
 let page1: Vec<User> = db.paginate(10, 0).await?;   // limit=10, offset=0
 let page2: Vec<User> = db.paginate(10, 10).await?;  // Next page
-let filtered: Vec<User> = db.filter_paginated(|u| u.age > 18, 5, 0).await?;
+let filtered: Vec<User> = db.filter_paginated(|u: &User| u.age > 18, 5, 0).await?;
 ```
 
 ### Aggregations
 
 ```rust
 let count = db.count::<User>().await?;
-let total = db.sum(|u: &User| u.orders).await?;
+let total: f64 = db.sum(|u: &User| u.orders as f64).await?;
 let avg = db.avg(|u: &User| u.age as f64).await?;
 let min = db.min(|u: &User| u.age).await?;
 let max = db.max(|u: &User| u.age).await?;
@@ -320,7 +323,8 @@ let admins_30 = db.query_compound::<User>("role_age",
 
 ```rust
 // Load indexes from disk on startup (or create fresh if not found)
-let db = IndexedStorage::load_from(storage, "./data/indexes.db").await?;
+// `mut` because start_auto_sync/stop_auto_sync below take &mut self.
+let mut db = IndexedStorage::load_from(storage, "./data/indexes.db").await?;
 
 // Save before shutdown or periodically
 db.save_indexes("./data/indexes.db").await?;
@@ -488,8 +492,8 @@ let page2 = db.query::<User>()
 ```rust
 use prkdb::cache::LruCache;
 
-let cache = LruCache::<u64, User>::new(1000);
-cache.put(user_id, user);
+let cache = LruCache::<String, User>::new(1000);
+cache.put(user_id.clone(), user);
 
 if let Some(user) = cache.get(&user_id) {
     // Cache hit
@@ -528,7 +532,9 @@ db.update::<User, _>(&user_id, |u| {
 }).await?;
 
 // Check existence
-if db.exists::<User>(&user_id).await? { ... }
+if db.exists::<User>(&user_id).await? {
+    println!("user {user_id} is present");
+}
 ```
 
 ### Soft Delete
@@ -688,7 +694,7 @@ let sample = db.query::<User>().sample(5).await?;  // 5 random users
 let last = db.query::<User>().last().await?;
 
 // Take/skip while condition
-let early = db.query::<User>().take_while(|u| u.id.clone() < 100).await?;
+let early = db.query::<User>().take_while(|u| u.age < 100).await?;
 ```
 
 ### Advanced Query Helpers
@@ -772,28 +778,34 @@ cargo run --release -p prkdb --bin prkdb-server
 ```rust
 use prkdb::raft::rpc::ReadMode;
 
+// These three are methods on `PrkDb`, not on `IndexedStorage`.
+let db = PrkDb::builder().build()?;
+
 // Linearizable (default) - Always reads from leader
-let value = db.get(key).await?;
+let value = db.get(&key).await?;
 
 // Stale read - Fast local read (may be stale)
-let value = db.get_local(key).await?;
+let value = db.get_local(&key).await?;
 
 // Follower read - Linearizable from any node
-let value = db.get_follower_read(key).await?;
+let value = db.get_follower_read(&key).await?;
 ```
 
 ### Sharding Strategies
 
 ```rust
-use prkdb::raft::{ConsistentHashRing, RangePartitioner, PartitionStrategy};
+use prkdb::raft::{ConsistentHashRing, RangePartitioner};
 
 // Consistent hashing (default) - Minimal data movement on rebalance
 let ring = ConsistentHashRing::new(3, 150); // 3 partitions, 150 virtual nodes
-let partition = ring.get_partition(key);
+let partition: u64 = ring.get_partition_for_key(&key);
+
+// Which node currently owns that key
+let owner = ring.get_node(&key);
 
 // Range partitioning - For ordered access patterns
-let mut partitioner = RangePartitioner::new(3);
-let partition = partitioner.get_partition(key);
+let partitioner = RangePartitioner::new(3);
+let partition: u64 = partitioner.get_partition_for_key(&key);
 
 // Split hotspots
 let new_partition = partitioner.split_partition(b"middle_key".to_vec());

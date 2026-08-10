@@ -37,44 +37,24 @@ const GENERATED: &str = "crates/prkdb/tests/readme_examples.rs";
 /// These were found by building this generator, which is the point: none of them were
 /// visible before, because nothing had ever compiled the README.
 const SKIP: &[(usize, &str)] = &[
-    // Defines its own `User`, then a later line in the same fence reads `.orders` from it.
-    // The fence is internally inconsistent; fixing it means deciding what the canonical
-    // example struct is, which is a documentation decision rather than a code one.
-    (
-        200,
-        "its own User has no `orders`, which the same fence then reads",
-    ),
-    // `db.sum(|u: &User| u.orders)`: the closure's return type is not inferable from the
-    // call, so the example needs an annotation it does not show.
-    (
-        244,
-        "aggregate closure return type is not inferable as written",
-    ),
-    // `db.start_auto_sync(..)` takes &mut self; the example's `db` is not declared mut.
-    (
-        321,
-        "calls a &mut self method on a binding the example declares immutably",
-    ),
-    // Two `UserQueryExt` traits are in scope — the harness's and the one fence 200 emits
-    // for its own User — and the impl does not match the QueryBuilder being called.
-    (
-        343,
-        "generated query methods do not resolve with two UserQueryExt traits in scope",
-    ),
-    (
-        488,
-        "annotated result type does not match what the call returns",
-    ),
-    (
-        520,
-        "contains literal `...` placeholders; illustrative, not runnable",
-    ),
-    (674, "compares a String id against an integer"),
-    (
-        772,
-        "annotated result type does not match what the call returns",
-    ),
-    (787, "same"),
+    // Empty, and it should stay that way. Every entry that was here named a real defect
+    // in a README example, and all of them are now fixed rather than excused:
+    //
+    //   - a `User` whose own fence then read a field it did not declare
+    //   - an aggregate closure whose return type was not inferable
+    //   - `start_auto_sync` called on a binding declared immutably
+    //   - `LruCache::<u64, _>` keyed by a `String`, and a value used after being moved
+    //   - `take_while` comparing a `String` id against an integer
+    //   - `get_local`/`get_follower_read` shown on a `db` the fence never typed; they are
+    //     `PrkDb` methods, not `IndexedStorage` ones
+    //   - `ConsistentHashRing::get_partition`, which does not exist — it is
+    //     `get_partition_for_key`
+    //   - `...` placeholders in a fence tagged `rust`
+    //   - the QueryBuilder DSL, whose `where_*` methods were declared by the `Collection`
+    //     derive and implemented for nothing, so the documented API compiled for no one
+    //
+    // Adding an entry here means shipping a README example that nothing checks. Fix the
+    // example instead.
 ];
 
 /// Bindings injected into every generated function.

@@ -259,7 +259,26 @@ pub fn collection_derive(input: TokenStream) -> TokenStream {
     // Create QueryBuilder extension trait name
     let query_ext_trait = format_ident!("{}QueryExt", struct_name);
 
-    // Generate the extension trait
+    // Generate the extension trait, and the one impl that makes it usable.
+    //
+    // # Why the impl is not optional
+    //
+    // Every `where_*` method above carries a default body written in terms of `filter`, so
+    // the trait was complete — but nothing implemented it for `QueryBuilder`, and a trait
+    // with no implementors has no callers. The README documented the result as
+    // "type-safe, fluent query API with macro-generated field methods" and showed
+    // `db.query::<User>().where_role_eq("admin")`, which did not compile for anyone. It
+    // went unnoticed because nothing had ever compiled the README, and the working
+    // `where_*_eq` methods elsewhere in the workspace come from `prkdb-orm-macros`, a
+    // different derive.
+    //
+    // The `where` clause repeats `QueryBuilder`'s own bounds rather than requiring them:
+    // an unsatisfied bound then makes the impl inapplicable instead of a compile error, so
+    // deriving `Collection` on a type that is not `Clone` keeps working as before.
+    //
+    // This is the one place the derive names `prkdb` rather than `prkdb_types`, because
+    // `QueryBuilder` lives there. Renaming the dependency breaks it, which is the same
+    // assumption every derive of this shape makes.
     let query_builder_ext = quote! {
         /// Extension trait for type-safe query methods
         pub trait #query_ext_trait<'a, S: prkdb_types::storage::StorageAdapter + 'static>: Sized {
@@ -267,6 +286,21 @@ pub fn collection_derive(input: TokenStream) -> TokenStream {
 
             /// Generic filter using a closure
             fn filter<F: Fn(&#struct_name) -> bool + 'a>(self, predicate: F) -> Self;
+        }
+
+        impl<'a, S: prkdb_types::storage::StorageAdapter + 'static> #query_ext_trait<'a, S>
+            for prkdb::indexed_storage::QueryBuilder<'a, S, #struct_name>
+        where
+            #struct_name: prkdb_types::index::Indexed
+                + prkdb_types::collection::Collection
+                + serde::de::DeserializeOwned
+                + Clone,
+        {
+            fn filter<F: Fn(&#struct_name) -> bool + 'a>(self, predicate: F) -> Self {
+                // Fully qualified so it resolves to QueryBuilder's inherent `filter`
+                // rather than recursing into this one.
+                prkdb::indexed_storage::QueryBuilder::filter(self, predicate)
+            }
         }
     };
 

@@ -298,8 +298,65 @@ async fn readme_line_185() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 237
-async fn readme_line_237() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 200
+async fn readme_line_200() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    use prkdb::prelude::*;
+
+    #[derive(Collection, Clone, Debug, Serialize, Deserialize)]
+    struct User {
+        #[key]
+        pub id: String,
+
+        #[index]
+        pub age: u32,
+
+        #[index(unique)]
+        pub email: String,
+
+        // Indexed because the query examples below filter on them.
+        #[index]
+        pub name: String,
+        #[index]
+        pub role: String,
+
+        pub active: bool,
+
+        // Read by the closure filter below and by the aggregation examples.
+        pub orders: u32,
+    }
+
+    // Query by indexed field
+    let admins: Vec<User> = db.query_by("role", &"admin").await?;
+    let alice: Option<User> = db.query_unique_by("email", &"a@b.com").await?;
+
+    // Range queries
+    let adults: Vec<User> = db.query_range("age", &18, &65).await?;
+    let al_names: Vec<User> = db.query_prefix("name", "Al").await?;
+
+    // Flexible closure filter (scans all, O(n))
+    let vip: Vec<User> = db.filter(|u: &User| u.age > 18 && u.orders > 100).await?;
+    Ok(())
+}
+
+/// README.md line 240
+async fn readme_line_240() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -323,8 +380,33 @@ async fn readme_line_237() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 252
-async fn readme_line_252() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 247
+async fn readme_line_247() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    let page1: Vec<User> = db.paginate(10, 0).await?; // limit=10, offset=0
+    let page2: Vec<User> = db.paginate(10, 10).await?; // Next page
+    let filtered: Vec<User> = db.filter_paginated(|u: &User| u.age > 18, 5, 0).await?;
+    Ok(())
+}
+
+/// README.md line 255
+async fn readme_line_255() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -343,7 +425,7 @@ async fn readme_line_252() -> Result<(), Box<dyn std::error::Error>> {
     let key = b"users:1".to_vec();
     let now: u64 = 0;
     let count = db.count::<User>().await?;
-    let total = db.sum(|u: &User| u.orders).await?;
+    let total: f64 = db.sum(|u: &User| u.orders as f64).await?;
     let avg = db.avg(|u: &User| u.age as f64).await?;
     let min = db.min(|u: &User| u.age).await?;
     let max = db.max(|u: &User| u.age).await?;
@@ -351,8 +433,8 @@ async fn readme_line_252() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 263
-async fn readme_line_263() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 266
+async fn readme_line_266() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -375,8 +457,8 @@ async fn readme_line_263() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 270
-async fn readme_line_270() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 273
+async fn readme_line_273() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -407,8 +489,8 @@ async fn readme_line_270() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 307
-async fn readme_line_307() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 310
+async fn readme_line_310() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -439,8 +521,89 @@ async fn readme_line_307() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 370
-async fn readme_line_370() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 324
+async fn readme_line_324() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    // Load indexes from disk on startup (or create fresh if not found)
+    // `mut` because start_auto_sync/stop_auto_sync below take &mut self.
+    let mut db = IndexedStorage::load_from(storage, "./data/indexes.db").await?;
+
+    // Save before shutdown or periodically
+    db.save_indexes("./data/indexes.db").await?;
+
+    // Get index stats
+    let stats = db.index_stats().await; // BTreeMap<collection, count>
+
+    // Auto-sync in background (recommended!)
+    db.start_auto_sync(Duration::from_secs(30)).await;
+    // Indexes saved automatically every 30 seconds
+
+    // On shutdown
+    db.stop_auto_sync();
+    Ok(())
+}
+
+/// README.md line 347
+async fn readme_line_347() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    // Fluent query building with type-safe field methods
+    let users = db
+        .query::<User>()
+        .where_role_eq("admin") // Generated method
+        .where_age_gt(18) // Generated method
+        .filter(|u| u.verified) // Generic closure
+        .order_by(|u| u.created_at)
+        .take(10)
+        .collect()
+        .await?;
+
+    // Projection to different type
+    let summaries = db
+        .query::<User>()
+        .where_role_eq("admin")
+        .select(|u| UserSummary {
+            id: u.id,
+            name: u.name.clone(),
+        })
+        .collect()
+        .await?;
+    Ok(())
+}
+
+/// README.md line 374
+async fn readme_line_374() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -473,8 +636,8 @@ async fn readme_line_370() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 385
-async fn readme_line_385() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 389
+async fn readme_line_389() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -501,8 +664,8 @@ async fn readme_line_385() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 413
-async fn readme_line_413() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 417
+async fn readme_line_417() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -536,8 +699,8 @@ async fn readme_line_413() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 431
-async fn readme_line_431() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 435
+async fn readme_line_435() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -571,8 +734,8 @@ async fn readme_line_431() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 445
-async fn readme_line_445() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 449
+async fn readme_line_449() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -613,8 +776,8 @@ async fn readme_line_445() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 466
-async fn readme_line_466() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 470
+async fn readme_line_470() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -658,8 +821,41 @@ async fn readme_line_466() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 504
-async fn readme_line_504() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 492
+async fn readme_line_492() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    use prkdb::cache::LruCache;
+
+    let cache = LruCache::<String, User>::new(1000);
+    cache.put(user_id.clone(), user);
+
+    if let Some(user) = cache.get(&user_id) {
+        // Cache hit
+    }
+
+    let stats = cache.stats();
+    println!("{:.1}% utilized", stats.utilization());
+    Ok(())
+}
+
+/// README.md line 508
+async fn readme_line_508() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -694,8 +890,44 @@ async fn readme_line_504() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 536
-async fn readme_line_536() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 524
+async fn readme_line_524() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    // Upsert: Insert or update if exists
+    db.upsert(&user).await?; // Returns true if updated, false if inserted
+
+    // Update: Modify existing record with closure
+    db.update::<User, _>(&user_id, |u| {
+        u.name = "New Name".to_string();
+        u.age += 1;
+    })
+    .await?;
+
+    // Check existence
+    if db.exists::<User>(&user_id).await? {
+        println!("user {user_id} is present");
+    }
+    Ok(())
+}
+
+/// README.md line 542
+async fn readme_line_542() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -724,8 +956,8 @@ async fn readme_line_536() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 549
-async fn readme_line_549() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 555
+async fn readme_line_555() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -766,8 +998,8 @@ async fn readme_line_549() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 566
-async fn readme_line_566() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 572
+async fn readme_line_572() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -797,8 +1029,8 @@ async fn readme_line_566() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 579
-async fn readme_line_579() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 585
+async fn readme_line_585() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -826,8 +1058,8 @@ async fn readme_line_579() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 591
-async fn readme_line_591() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 597
+async fn readme_line_597() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -861,8 +1093,8 @@ async fn readme_line_591() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 609
-async fn readme_line_609() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 615
+async fn readme_line_615() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -895,8 +1127,8 @@ async fn readme_line_609() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 626
-async fn readme_line_626() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 632
+async fn readme_line_632() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -922,8 +1154,8 @@ async fn readme_line_626() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 636
-async fn readme_line_636() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 642
+async fn readme_line_642() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -953,8 +1185,8 @@ async fn readme_line_636() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 646
-async fn readme_line_646() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 652
+async fn readme_line_652() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -982,8 +1214,8 @@ async fn readme_line_646() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 659
-async fn readme_line_659() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 665
+async fn readme_line_665() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -1017,8 +1249,50 @@ async fn readme_line_659() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 696
-async fn readme_line_696() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 680
+async fn readme_line_680() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    // Extract single field (like SQL SELECT column)
+    let names: Vec<String> = db.query::<User>().pluck(|u| u.name.clone()).await?;
+
+    // Partition into matching/non-matching
+    let (active, inactive) = db.query::<User>().partition(|u| u.active).await?;
+
+    // Custom fold/reduce
+    let total_salary = db
+        .query::<User>()
+        .fold(0.0, |acc, u| acc + u.salary)
+        .await?;
+
+    // Random sample
+    let sample = db.query::<User>().sample(5).await?; // 5 random users
+
+    // Get last record
+    let last = db.query::<User>().last().await?;
+
+    // Take/skip while condition
+    let early = db.query::<User>().take_while(|u| u.age < 100).await?;
+    Ok(())
+}
+
+/// README.md line 702
+async fn readme_line_702() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -1057,14 +1331,77 @@ async fn readme_line_696() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// 27 example(s) compiled, 10 skipped.
+/// README.md line 778
+async fn readme_line_778() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    use prkdb::raft::rpc::ReadMode;
+
+    // These three are methods on `PrkDb`, not on `IndexedStorage`.
+    let db = PrkDb::builder().build()?;
+
+    // Linearizable (default) - Always reads from leader
+    let value = db.get(&key).await?;
+
+    // Stale read - Fast local read (may be stale)
+    let value = db.get_local(&key).await?;
+
+    // Follower read - Linearizable from any node
+    let value = db.get_follower_read(&key).await?;
+    Ok(())
+}
+
+/// README.md line 796
+async fn readme_line_796() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = a_db();
+    let client = a_client();
+    let mut storage = any_storage();
+    let any_storage_adapter = any_storage();
+    let backup_db = a_db();
+    let prkdb = a_prkdb();
+    let mut user = any_user();
+    let mut user1 = any_user();
+    let mut user2 = any_user();
+    let mut user3 = any_user();
+    let mut old_user = any_user();
+    let mut record = any_user();
+    let users: Vec<User> = Vec::new();
+    let user_id = String::new();
+    let last_id = String::new();
+    let key = b"users:1".to_vec();
+    let now: u64 = 0;
+    use prkdb::raft::{ConsistentHashRing, RangePartitioner};
+
+    // Consistent hashing (default) - Minimal data movement on rebalance
+    let ring = ConsistentHashRing::new(3, 150); // 3 partitions, 150 virtual nodes
+    let partition: u64 = ring.get_partition_for_key(&key);
+
+    // Which node currently owns that key
+    let owner = ring.get_node(&key);
+
+    // Range partitioning - For ordered access patterns
+    let partitioner = RangePartitioner::new(3);
+    let partition: u64 = partitioner.get_partition_for_key(&key);
+
+    // Split hotspots
+    let new_partition = partitioner.split_partition(b"middle_key".to_vec());
+    Ok(())
+}
+
+// 36 example(s) compiled, 1 skipped.
 // skipped README.md line 39: complete program: has its own fn main
-// skipped README.md line 200: its own User has no `orders`, which the same fence then reads
-// skipped README.md line 244: aggregate closure return type is not inferable as written
-// skipped README.md line 321: calls a &mut self method on a binding the example declares immutably
-// skipped README.md line 343: generated query methods do not resolve with two UserQueryExt traits in scope
-// skipped README.md line 488: annotated result type does not match what the call returns
-// skipped README.md line 520: contains literal `...` placeholders; illustrative, not runnable
-// skipped README.md line 674: compares a String id against an integer
-// skipped README.md line 772: annotated result type does not match what the call returns
-// skipped README.md line 787: same

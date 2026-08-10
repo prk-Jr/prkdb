@@ -239,7 +239,11 @@ async fn test_leader_crash_during_write() {
         .expect("node 1 must come back up");
 
     // Verify data consistency (cluster-wide)
-    let value = read_with_redirect(&cluster, b"key_75".to_vec(), 3)
+    // 30, not 3: this read follows a node restart, so it may arrive during an election
+    // and each retry sleeps 500ms. Three attempts gave the cluster ~1.5s to elect a
+    // leader, which is enough on a developer machine and not on a CI runner. The other
+    // post-disruption reads in this file already use 30 and 50.
+    let value = read_with_redirect(&cluster, b"key_75".to_vec(), 30)
         .await
         .unwrap();
     assert_eq!(value, b"value_75".to_vec());
