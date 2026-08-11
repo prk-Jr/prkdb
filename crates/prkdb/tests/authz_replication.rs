@@ -334,7 +334,7 @@ async fn proposing_without_a_partition_manager_is_refused() {
 /// observe it would make this slower and flakier without making it stronger.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_constructor_hands_partition_zero_the_authorization_cache() {
-    use prkdb::raft::{ClusterConfig, StateMachine};
+    use prkdb::raft::ClusterConfig;
     use prkdb::PrkDb;
 
     let dir = tempfile::tempdir().unwrap();
