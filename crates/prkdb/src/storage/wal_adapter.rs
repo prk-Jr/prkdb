@@ -3462,4 +3462,49 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    /// Dropping an adapter stops its background tasks *promptly*, not eventually.
+    ///
+    /// Mutation run 31539366718 missed `replace <impl Drop for WalStorageInner>::drop with
+    /// ()`. Deleting that body does not break correctness — both tasks hold a
+    /// `Weak<WalStorageInner>` and exit on their own once `inner` is gone — so the mutant
+    /// changes only *when* they stop. That is still worth asserting: without the abort a
+    /// dropped adapter leaves a task parked on the flush loop's one-second idle sleep, and
+    /// a process that opens and drops collections steadily accumulates them.
+    ///
+    /// Observed through `Arc::strong_count` on `flush_notify`, which `run_flush_loop`
+    /// clones once and holds for its whole life, so the count falls exactly when the task
+    /// ends. No production code exists for this test to look at, which is the evidence that
+    /// `Drop` here is an optimisation rather than a load-bearing invariant.
+    ///
+    /// Twenty adapters rather than one, deliberately. A single task's remaining sleep is
+    /// uniform in 0..1s, so one adapter would pass under the mutant whenever its sleep
+    /// happened to be nearly over. The *maximum* across twenty sits near the full second,
+    /// which puts the mutant reliably outside the bound below.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropping_an_adapter_stops_its_background_tasks_promptly() {
+        let mut notifies = Vec::new();
+        let mut dirs = Vec::new();
+
+        for i in 0..20 {
+            let dir = liveness_dir(&format!("drop_teardown_{i}"));
+            let adapter = WalStorageAdapter::new_with_config(liveness_config(&dir, 50, 65_536))
+                .expect("adapter opens");
+            notifies.push(adapter.inner.flush_notify.clone());
+            dirs.push(dir);
+            drop(adapter);
+        }
+
+        // Each `Arc` is held by the test and, until the task ends, by the flush loop.
+        wait_until(
+            "every dropped adapter's flush loop to end",
+            Duration::from_millis(300),
+            || notifies.iter().all(|notify| Arc::strong_count(notify) == 1),
+        )
+        .await;
+
+        for dir in &dirs {
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
 }
