@@ -164,6 +164,21 @@ jobs:
     # Shard indices are 0-based and k must be < n.
     strategy:
       fail-fast: false
+      # Four at a time, not twenty.
+      #
+      # Twenty concurrent shards consume the whole account allowance, so every other
+      # workflow queues behind them — pull requests, the push run on main, everything. Run
+      # 31471456982 did exactly that and had to be cancelled to unblock CI.
+      #
+      # It also starved itself. Each shard runs the full unmutated suite as its baseline,
+      # and with twenty competing for the same pool that baseline exceeded the per-run
+      # timeout: "TIMEOUT Unmutated baseline in 169s build + 300s test". A shard whose
+      # baseline times out tests no mutants at all, so the contention cost real coverage,
+      # not just wall time.
+      #
+      # max-parallel keeps the twenty-way split — the shards still partition the mutant set
+      # exactly — while capping how many run at once. Slower end to end, and it finishes.
+      max-parallel: 4
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
     timeout-minutes: 90
@@ -185,7 +200,10 @@ jobs:
       # separate commands would each shard their own list and the split would be uneven.
       - name: Mutate the authorization model and storage engine
         run: |
-          cargo mutants --no-shuffle --timeout 300 \
+          # 600s, not 300: the baseline runs the whole suite, and the cluster tests in it
+          # are slow enough under any contention that 300 was not a mutant-hang threshold
+          # but a coin flip on the baseline itself.
+          cargo mutants --no-shuffle --timeout 600 \
             --shard ${{ matrix.shard }}/20 \
             --package prkdb --package prkdb-cli \
             --file 'crates/prkdb/src/authz/*.rs' \
