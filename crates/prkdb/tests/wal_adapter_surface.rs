@@ -484,3 +484,148 @@ async fn a_raft_batch_returns_one_result_per_entry() {
         .expect("an empty batch is not an error")
         .is_empty());
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Compressed and batch record types
+//
+// `WalConfig::test_config()` sets `CompressionConfig::none()`, so every test in this file
+// and in property_tests.rs writes uncompressed records. The WAL's compressed and
+// batch-delete operations — `CompressedPutBatch`, `DeleteBatch`, `CompressedDeleteBatch` —
+// were therefore never produced, and the match arms handling them never ran.
+//
+// Mutation run 31475126643 reported exactly that. Nine survivors in
+// `flush_accumulator_inner` and eight in `get`, most of them `delete match arm
+// LogOperation::CompressedPutBatch{..}` and its siblings, in both the index-publication
+// path and the read path.
+//
+// Deleting one of those arms means records of that type stop updating the index, or stop
+// being read back. A database that compresses its WAL — which is the default
+// configuration, `CompressionConfig::default()` is LZ4 — would lose reads for every
+// batched write. The tests never noticed because the tests never compressed anything.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The same round trip, with the WAL compressing.
+///
+/// Not a duplicate of the tests above: it produces different `LogOperation` variants, and
+/// those variants have their own match arms in both the write and read paths.
+fn compressing_adapter(dir: &std::path::Path) -> WalStorageAdapter {
+    let config = WalConfig {
+        log_dir: dir.to_path_buf(),
+        // Default is LZ4, and min_compress_bytes decides whether a record is actually
+        // compressed — so the payloads below are comfortably above any sane threshold.
+        compression: prkdb_core::wal::compression::CompressionConfig::default(),
+        ..WalConfig::test_config()
+    };
+    WalStorageAdapter::new(config).expect("open a compressing WAL adapter")
+}
+
+/// Batched writes survive compression, individually and in bulk, warm and cold.
+#[tokio::test(flavor = "multi_thread")]
+async fn compressed_batches_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Payloads large enough to be worth compressing, and distinct enough that returning
+    // the wrong one is visible.
+    let pairs: Vec<(Vec<u8>, Vec<u8>)> = (0..8)
+        .map(|i| {
+            (
+                format!("z{i:03}").into_bytes(),
+                format!("{}-{i}", "payload".repeat(64)).into_bytes(),
+            )
+        })
+        .collect();
+
+    {
+        let a = compressing_adapter(dir.path());
+        a.put_many(pairs.clone()).await.expect("compressed batch write");
+        a.flush().await.unwrap();
+
+        for (k, v) in &pairs {
+            assert_eq!(
+                a.get(k).await.unwrap().as_deref(),
+                Some(v.as_slice()),
+                "compressed key {} unreadable while warm",
+                String::from_utf8_lossy(k)
+            );
+        }
+    }
+
+    // Cold: the index is rebuilt and reads go through the WAL, which is where the
+    // CompressedPutBatch arms live.
+    let a = compressing_adapter(dir.path());
+    for (k, v) in &pairs {
+        assert_eq!(
+            a.get(k).await.unwrap().as_deref(),
+            Some(v.as_slice()),
+            "compressed key {} did not survive a reopen; a deleted CompressedPutBatch arm \
+             loses every batched write on a database that compresses its WAL",
+            String::from_utf8_lossy(k)
+        );
+    }
+
+    let keys: Vec<Vec<u8>> = pairs.iter().map(|(k, _)| k.clone()).collect();
+    let got = a.get_many(keys).await.unwrap();
+    for (i, (_, v)) in pairs.iter().enumerate() {
+        assert_eq!(got[i].as_deref(), Some(v.as_slice()), "batch read differs at {i}");
+    }
+
+    // And the prefix scan, which has its own arm per record type.
+    let scanned = a.scan_prefix(b"z").await.unwrap();
+    assert_eq!(scanned.len(), pairs.len(), "scan_prefix missed compressed records");
+}
+
+/// Batch deletes are applied and stay applied, compressed and not.
+///
+/// `DeleteBatch` and `CompressedDeleteBatch` each have their own arm in the
+/// index-publication path. Deleting one leaves the key readable after it was removed —
+/// a delete that reports success and does not delete, which is the shape this file
+/// already found once in `delete_many`.
+#[tokio::test(flavor = "multi_thread")]
+async fn compressed_batch_deletes_are_applied() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let pairs: Vec<(Vec<u8>, Vec<u8>)> = (0..6)
+        .map(|i| {
+            (
+                format!("d{i:03}").into_bytes(),
+                format!("{}-{i}", "body".repeat(64)).into_bytes(),
+            )
+        })
+        .collect();
+
+    {
+        let a = compressing_adapter(dir.path());
+        a.put_many(pairs.clone()).await.unwrap();
+        a.delete_many(pairs.iter().take(4).map(|(k, _)| k.clone()).collect())
+            .await
+            .expect("compressed batch delete");
+        a.flush().await.unwrap();
+
+        for (k, _) in pairs.iter().take(4) {
+            assert_eq!(
+                a.get(k).await.unwrap(),
+                None,
+                "{} survived a compressed batch delete",
+                String::from_utf8_lossy(k)
+            );
+        }
+        for (k, v) in pairs.iter().skip(4) {
+            assert_eq!(a.get(k).await.unwrap().as_deref(), Some(v.as_slice()));
+        }
+    }
+
+    // The deletion must still hold after a reopen: an unapplied DeleteBatch arm
+    // resurrects every key the caller was told had gone.
+    let a = compressing_adapter(dir.path());
+    for (k, _) in pairs.iter().take(4) {
+        assert_eq!(
+            a.get(k).await.unwrap(),
+            None,
+            "{} came back after a reopen; the delete was reported and not recorded",
+            String::from_utf8_lossy(k)
+        );
+    }
+    for (k, v) in pairs.iter().skip(4) {
+        assert_eq!(a.get(k).await.unwrap().as_deref(), Some(v.as_slice()));
+    }
+}
