@@ -221,3 +221,100 @@ async fn an_undecodable_principal_is_refused() {
     );
     assert!(store.resolve("anything").is_none());
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The routing predicates
+//
+// Diff-scoped mutation on this pull request found six survivors in the code it adds — the
+// check working on its author, which is what it was turned on for. Three were the routing
+// predicates, which the tests above never touch because they drive the state machine
+// directly:
+//
+//   replicates_authz -> true     every instance proposes, including embedded ones with no
+//                                Raft to propose to
+//   replicates_authz -> false    no instance proposes; every write is local again, which
+//                                is the divergence this change removes
+//   propose_authz    -> Ok(())   a proposal that proposes nothing and reports success
+//
+// The last is the same shape as `delete_many -> Ok(())`: an operation that does nothing
+// and tells the caller it worked. On that path an operator is told a credential was
+// revoked and it was revoked nowhere.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// An embedded instance has no Raft, so it must not claim to replicate.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_embedded_instance_does_not_claim_to_replicate() {
+    use prkdb::storage::InMemoryAdapter;
+    use prkdb::PrkDb;
+
+    let db = PrkDb::builder()
+        .with_storage(InMemoryAdapter::new())
+        .build()
+        .expect("an embedded database builds");
+
+    assert!(
+        !db.replicates_authz(),
+        "an instance with no partition manager has no Raft to propose to; claiming \
+         otherwise makes every principal write fail"
+    );
+}
+
+/// A clustered instance must claim to replicate — the other direction.
+///
+/// Asserting only the embedded case leaves `replicates_authz -> false` alive, because the
+/// mutant agrees there. Both directions are needed: forced `false`, a cluster silently
+/// returns to per-node principal writes, and no other test would notice.
+///
+/// Constructing the instance is enough; Raft is not started, because the predicate asks
+/// whether a partition manager exists, not whether it has a leader.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clustered_instance_claims_to_replicate() {
+    use prkdb::raft::ClusterConfig;
+    use prkdb::PrkDb;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = ClusterConfig {
+        local_node_id: 1,
+        listen_addr: "127.0.0.1:0".parse().unwrap(),
+        nodes: vec![(1, "127.0.0.1:0".parse().unwrap())],
+        ..Default::default()
+    };
+
+    let db = PrkDb::new_multi_raft_with_authz(
+        1,
+        config,
+        dir.path().to_path_buf(),
+        Some(PrincipalStore::new()),
+    )
+    .expect("a clustered instance builds");
+
+    assert!(
+        db.replicates_authz(),
+        "an instance with a partition manager must route principal writes through Raft; \
+         claiming otherwise silently restores per-node writes"
+    );
+}
+
+/// Proposing on an instance with no Raft is an error, not a silent success.
+#[tokio::test(flavor = "multi_thread")]
+async fn proposing_without_a_partition_manager_is_refused() {
+    use prkdb::storage::InMemoryAdapter;
+    use prkdb::PrkDb;
+
+    let db = PrkDb::builder()
+        .with_storage(InMemoryAdapter::new())
+        .build()
+        .unwrap();
+
+    let outcome = db
+        .propose_authz(Command::RevokePrincipal {
+            name: "anyone".into(),
+        })
+        .await;
+
+    assert!(
+        outcome.is_err(),
+        "propose_authz reported success with no Raft to propose to; a revoke that \
+         replicated nowhere must not be reported as done"
+    );
+}
