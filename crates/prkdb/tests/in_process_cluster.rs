@@ -31,11 +31,34 @@ async fn in_process_cluster_elects_a_leader() {
         cluster.node_ids()
     );
 
-    assert_eq!(
-        cluster.leaders_in_current_term().await.len(),
-        1,
-        "exactly one leader in the current term"
-    );
+    // Poll rather than sample once.
+    //
+    // "At most one leader per term" is the safety property and holds at every instant.
+    // "Exactly one" is liveness and does not: a single sample can land between terms, when
+    // the previous leader has stepped down and the next election has not finished, and see
+    // zero. Under load that window widens — this assertion failed in the Coverage job,
+    // which runs the whole workspace under llvm-cov instrumentation, and in a mutation
+    // baseline, both of which are the heaviest way the suite runs.
+    //
+    // So safety is checked on every sample and liveness is given a deadline. Asserting the
+    // conjunction at one instant tests neither reliably.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let leaders = cluster.leaders_in_current_term().await;
+        assert!(
+            leaders.len() <= 1,
+            "two nodes claimed leadership in the same term: {leaders:?} — this is an \
+             election-safety violation, not a timing artefact"
+        );
+        if leaders.len() == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no node held leadership in the current term within 15s of one being elected"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// A committed write reaches every node. Without this the election test alone would pass
