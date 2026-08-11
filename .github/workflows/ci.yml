@@ -356,6 +356,14 @@ jobs:
       - name: Chaos-gated tests are run
         run: bash scripts/check_chaos_tests_run.sh
 
+      # The published guide against the shipped binary. Every other check here verifies
+      # code against code; the documentation is the one artefact users read and the only
+      # one nothing covered. `serve` was changed to refuse starting without authorization
+      # while getting-started.md went on telling readers to run it without any — the first
+      # command in the docs failed, and every check was green.
+      - name: Docs cover the CLI
+        run: bash scripts/check_docs_cover_cli.sh
+
   nightly-slow-tests:
     name: Nightly Slow Tests
     runs-on: ubuntu-latest

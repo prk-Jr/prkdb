@@ -26,10 +26,10 @@ Before a client can interact with a collection, the schema must be registered wi
 
 ### Registering via CLI
 
-`register` and `list` are admin operations, so set `PRKDB_ADMIN_TOKEN` first:
+`register` and `list` require `Admin`, so set a credential first:
 
 ```bash
-export PRKDB_ADMIN_TOKEN=change-me
+export PRKDB_CREDENTIAL=change-me   # or PRKDB_ADMIN_TOKEN, deprecated
 prkdb schema register --server http://127.0.0.1:8080 --collection Product --proto ./schemas/product.bin
 ```
 
