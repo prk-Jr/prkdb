@@ -1815,9 +1815,15 @@ impl StorageAdapter for WalStorageAdapter {
         let mut latest_values: HashMap<Vec<u8>, Option<Vec<u8>>> = HashMap::with_capacity(256);
 
         for (_segment_id, record) in records {
+            // Exhaustive on purpose: no `_` arm. The compressed variants were missing here
+            // while `get` handled them, and a wildcard is what let that pass review — a
+            // record type nobody wrote an arm for was silently skipped. With every variant
+            // named, adding a seventh stops compiling until this scan decides what it means.
             match record.operation {
-                LogOperation::Put { id, data, .. } if id.starts_with(prefix) => {
-                    latest_values.insert(id, Some(data));
+                LogOperation::Put { id, data, .. } => {
+                    if id.starts_with(prefix) {
+                        latest_values.insert(id, Some(data));
+                    }
                 }
                 LogOperation::PutBatch { items, .. } => {
                     for (id, data) in items {
@@ -1826,8 +1832,30 @@ impl StorageAdapter for WalStorageAdapter {
                         }
                     }
                 }
-                LogOperation::Delete { id, .. } if id.starts_with(prefix) => {
-                    latest_values.insert(id, None); // Mark as deleted
+                LogOperation::CompressedPutBatch { data, .. } => {
+                    // Same decompress-then-decode as `get`. `WalConfig::default()` enables
+                    // LZ4, so on a default database *every* batched put lands here.
+                    if let Ok(decompressed) =
+                        prkdb_core::wal::compression::decompress(&data, record.compression)
+                    {
+                        let config = bincode::config::standard();
+                        if let Ok((items, _)) = bincode::decode_from_slice::<
+                            Vec<(Vec<u8>, Vec<u8>)>,
+                            _,
+                        >(&decompressed, config)
+                        {
+                            for (id, item_data) in items {
+                                if id.starts_with(prefix) {
+                                    latest_values.insert(id, Some(item_data));
+                                }
+                            }
+                        }
+                    }
+                }
+                LogOperation::Delete { id, .. } => {
+                    if id.starts_with(prefix) {
+                        latest_values.insert(id, None); // Mark as deleted
+                    }
                 }
                 LogOperation::DeleteBatch { ids, .. } => {
                     for id in ids {
@@ -1836,7 +1864,22 @@ impl StorageAdapter for WalStorageAdapter {
                         }
                     }
                 }
-                _ => {}
+                LogOperation::CompressedDeleteBatch { data, .. } => {
+                    if let Ok(decompressed) =
+                        prkdb_core::wal::compression::decompress(&data, record.compression)
+                    {
+                        let config = bincode::config::standard();
+                        if let Ok((ids, _)) =
+                            bincode::decode_from_slice::<Vec<Vec<u8>>, _>(&decompressed, config)
+                        {
+                            for id in ids {
+                                if id.starts_with(prefix) {
+                                    latest_values.insert(id, None);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 

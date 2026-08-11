@@ -32,6 +32,7 @@
 
 use prkdb::storage::WalStorageAdapter;
 use prkdb_core::wal::WalConfig;
+use prkdb_types::replication::Change;
 use prkdb_types::storage::StorageAdapter;
 
 fn adapter(dir: &std::path::Path) -> WalStorageAdapter {
@@ -537,7 +538,9 @@ async fn compressed_batches_round_trip() {
 
     {
         let a = compressing_adapter(dir.path());
-        a.put_many(pairs.clone()).await.expect("compressed batch write");
+        a.put_many(pairs.clone())
+            .await
+            .expect("compressed batch write");
         a.flush().await.unwrap();
 
         for (k, v) in &pairs {
@@ -566,12 +569,20 @@ async fn compressed_batches_round_trip() {
     let keys: Vec<Vec<u8>> = pairs.iter().map(|(k, _)| k.clone()).collect();
     let got = a.get_many(keys).await.unwrap();
     for (i, (_, v)) in pairs.iter().enumerate() {
-        assert_eq!(got[i].as_deref(), Some(v.as_slice()), "batch read differs at {i}");
+        assert_eq!(
+            got[i].as_deref(),
+            Some(v.as_slice()),
+            "batch read differs at {i}"
+        );
     }
 
     // And the prefix scan, which has its own arm per record type.
     let scanned = a.scan_prefix(b"z").await.unwrap();
-    assert_eq!(scanned.len(), pairs.len(), "scan_prefix missed compressed records");
+    assert_eq!(
+        scanned.len(),
+        pairs.len(),
+        "scan_prefix missed compressed records"
+    );
 }
 
 /// Batch deletes are applied and stay applied, compressed and not.
@@ -628,4 +639,199 @@ async fn compressed_batch_deletes_are_applied() {
     for (k, v) in pairs.iter().skip(4) {
         assert_eq!(a.get(k).await.unwrap().as_deref(), Some(v.as_slice()));
     }
+}
+
+/// `scan_range` reads compressed batches, without owning a match arm for them.
+///
+/// Worth stating why this test exists rather than a fix. `scan_range` does not match on
+/// `LogOperation` at all: it walks the index and calls `get` per key, and `get` decompresses.
+/// So it inherits the compressed paths instead of duplicating them, and adding arms here
+/// would be adding code no record ever reaches.
+///
+/// That is a claim about behaviour, so it is asserted rather than asserted-in-a-comment. It
+/// also pins the other half: the index must *contain* the batched keys, which it only does
+/// because `flush_accumulator_inner` publishes `CompressedPutBatch` ids and
+/// `rebuild_index_async` decompresses them back on reopen.
+#[tokio::test(flavor = "multi_thread")]
+async fn scan_range_reads_compressed_batches() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let pairs: Vec<(Vec<u8>, Vec<u8>)> = (0..8)
+        .map(|i| {
+            (
+                format!("r{i:03}").into_bytes(),
+                format!("{}-{i}", "range".repeat(64)).into_bytes(),
+            )
+        })
+        .collect();
+
+    {
+        let a = compressing_adapter(dir.path());
+        a.put_many(pairs.clone()).await.unwrap();
+        a.flush().await.unwrap();
+    }
+
+    // Cold: index rebuilt from compressed records, values read back through them.
+    let a = compressing_adapter(dir.path());
+    let got = a
+        .scan_range(b"r002", b"r005")
+        .await
+        .expect("scan_range succeeds over compressed records");
+
+    let expected: Vec<(Vec<u8>, Vec<u8>)> = pairs[2..5].to_vec();
+    assert_eq!(
+        got, expected,
+        "scan_range is [start, end) over compressed records: r002..r004 with their own values"
+    );
+}
+
+/// `get_changes_since` expands a compressed batch into one change per key.
+///
+/// It already had both compressed arms — this is the test that was missing, not the code.
+/// Replication reads the WAL through this method, so a dropped `CompressedPutBatch` arm
+/// means a follower silently never receives any batched write on a compressing primary.
+/// Every existing caller of this method ran with `CompressionConfig::none()`.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_changes_since_expands_compressed_batches() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = compressing_adapter(dir.path());
+
+    let pairs: Vec<(Vec<u8>, Vec<u8>)> = (0..8)
+        .map(|i| {
+            (
+                format!("c{i:03}").into_bytes(),
+                format!("{}-{i}", "change".repeat(64)).into_bytes(),
+            )
+        })
+        .collect();
+    a.put_many(pairs.clone()).await.unwrap();
+    a.flush().await.unwrap();
+
+    let changes = a
+        .get_changes_since(0)
+        .await
+        .expect("get_changes_since succeeds");
+
+    let mut puts: Vec<(Vec<u8>, Vec<u8>)> = changes
+        .iter()
+        .filter_map(|c| match c {
+            Change::Put { key, value, .. } => Some((key.clone(), value.clone())),
+            Change::Delete { .. } => None,
+        })
+        .collect();
+    puts.sort();
+
+    let mut expected = pairs.clone();
+    expected.sort();
+    assert_eq!(
+        puts, expected,
+        "a compressed batch must expand into one change per key with its own value; an \
+         un-decompressed batch replicates as nothing at all"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A compressed batch delete, written directly to the WAL
+//
+// `CompressedDeleteBatch` has an arm in `flush_accumulator_inner`, `rebuild_index_async`,
+// `get_many` and `get_changes_since` — and now in `scan_prefix`. No public method reaches
+// it: `delete` and `delete_many` both go straight to `delete_many_impl`, which writes one
+// uncompressed `Delete` per key, and only `put_many` and the raft appends feed the
+// accumulator that produces batch records. So the record type is *writable by the format
+// and by live code in `flush_accumulator_inner`*, but not reachable from the adapter's own
+// API today.
+//
+// That is exactly the situation where an arm rots unnoticed, so the record is written
+// through `MmapParallelWal` directly — the same WAL the adapter opens — and the adapter is
+// then pointed at the resulting directory. This is what recovering a log written by a
+// future version, or by the delete-accumulation path once anything feeds it, looks like.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// `scan_prefix` must honour a `CompressedDeleteBatch`, not just a `DeleteBatch`.
+#[tokio::test(flavor = "multi_thread")]
+async fn scan_prefix_honours_a_compressed_batch_delete() {
+    use prkdb_core::wal::compression::CompressionConfig;
+    use prkdb_core::wal::mmap_parallel_wal::MmapParallelWal;
+    use prkdb_core::wal::{LogOperation, LogRecord};
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = WalConfig {
+        log_dir: dir.path().to_path_buf(),
+        compression: CompressionConfig::default(),
+        ..WalConfig::test_config()
+    };
+
+    // 120 keys under the `w:` prefix; the first 100 are then deleted in one batch. The
+    // count and the key length are not arbitrary: the serialised id list has to clear
+    // `min_compress_bytes` (256) and then actually shrink, or the record stays a plain
+    // `DeleteBatch`. The assertions below check that it did.
+    let items: Vec<(Vec<u8>, Vec<u8>)> = (0..120)
+        .map(|i| {
+            (
+                format!("w:key-{i:04}").into_bytes(),
+                format!("{}-{i}", "stored".repeat(32)).into_bytes(),
+            )
+        })
+        .collect();
+    let deleted: Vec<Vec<u8>> = items.iter().take(100).map(|(k, _)| k.clone()).collect();
+
+    {
+        let wal = MmapParallelWal::open_or_create(config.clone(), config.segment_count)
+            .await
+            .expect("open the WAL directly");
+
+        let compression = CompressionConfig::default();
+        let put = LogRecord::new_with_compression(
+            LogOperation::PutBatch {
+                collection: String::new(),
+                items: items.clone(),
+            },
+            &compression,
+        )
+        .expect("build a put batch record");
+        let del = LogRecord::new_with_compression(
+            LogOperation::DeleteBatch {
+                collection: String::new(),
+                ids: deleted.clone(),
+            },
+            &compression,
+        )
+        .expect("build a delete batch record");
+
+        // Assert the compression actually happened. If either payload fell below
+        // `min_compress_bytes` or failed to shrink, `new_with_compression` hands back the
+        // *uncompressed* variant and this test would silently exercise the arms that
+        // already worked — passing while proving nothing.
+        assert!(
+            matches!(put.operation, LogOperation::CompressedPutBatch { .. }),
+            "the put batch was not compressed, so this test would not reach the compressed arm"
+        );
+        assert!(
+            matches!(del.operation, LogOperation::CompressedDeleteBatch { .. }),
+            "the delete batch was not compressed, so this test would not reach the compressed arm"
+        );
+
+        // In order, and into the same segment: both records carry the same collection, and
+        // routing is by collection, so the delete lands after the put.
+        wal.append(put).await.expect("append the put batch");
+        wal.append(del).await.expect("append the delete batch");
+        wal.sync().await.expect("sync the WAL");
+    }
+
+    let a = WalStorageAdapter::new(config).expect("open an adapter over the prepared WAL");
+    let scanned: Vec<Vec<u8>> = a
+        .scan_prefix(b"w:")
+        .await
+        .expect("scan_prefix succeeds")
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect();
+
+    let survivors: Vec<Vec<u8>> = items.iter().skip(100).map(|(k, _)| k.clone()).collect();
+    assert_eq!(
+        scanned, survivors,
+        "scan_prefix returned keys removed by a compressed batch delete; without the \
+         CompressedDeleteBatch arm the tombstones are invisible and every deleted key \
+         reappears in the scan"
+    );
 }
