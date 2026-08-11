@@ -396,3 +396,91 @@ async fn a_large_cold_batch_read_returns_the_right_values() {
     assert_eq!(small[0].as_deref(), Some(b"val0000".as_slice()));
     assert_eq!(small[1].as_deref(), Some(b"val0149".as_slice()));
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Raft log appends
+//
+// `append_raft_entry -> Ok(0)` / `Ok(1)` and `append_raft_entries_batch -> Ok(vec![])` /
+// `Ok(vec![0])` / `Ok(vec![1])` all survived. These functions return the WAL offsets the
+// entries were written at, and Raft uses those offsets as log indices — a constant means
+// every entry claims the same index, which is a log that cannot be replayed or matched
+// against a follower's.
+//
+// Nothing asserted the offsets were distinct, or that a batch returned one per entry.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Each appended entry gets its own offset, and they advance.
+#[tokio::test(flavor = "multi_thread")]
+async fn raft_entry_offsets_are_distinct_and_advance() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = adapter(dir.path());
+
+    let mut offsets = Vec::new();
+    for i in 0..5u8 {
+        offsets.push(
+            a.append_raft_entry(&[i, i, i])
+                .await
+                .expect("appending a raft entry succeeds"),
+        );
+    }
+
+    let mut sorted = offsets.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        offsets.len(),
+        "two raft entries were given the same offset ({offsets:?}); Raft uses these as log \
+         indices, so duplicates are a log that cannot be matched against a follower's"
+    );
+    assert!(
+        offsets.windows(2).all(|w| w[1] > w[0]),
+        "raft offsets must advance, got {offsets:?}"
+    );
+}
+
+/// A batch append returns one result per entry.
+///
+/// # What it does *not* guarantee, and why this test says so
+///
+/// The offsets are **not distinct**. Writes to the same collection are merged into a
+/// single `PutBatch` WAL record, and every waiter merged into it receives that record's
+/// offset — so four raft entries come back as `[1, 1, 1, 1]`. My first version of this test
+/// asserted distinctness and failed.
+///
+/// That is not a live bug: the only caller, `raft/proposal_loop.rs:113`, matches on
+/// `Ok(_offsets)` and discards them, taking the Raft log index from its own `senders`
+/// instead. But it is a trap — the signature promises `Vec<u64>` of offsets, and a future
+/// caller using them as identities would get silent duplicates.
+///
+/// Asserted here as the real contract rather than the desirable one, because a test that
+/// asserts a guarantee the code does not make is the kind of green this repository has
+/// spent a release removing. Tracked for a follow-up: either return distinct offsets or
+/// change the signature to stop implying them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_raft_batch_returns_one_result_per_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = adapter(dir.path());
+
+    let entries: Vec<Vec<u8>> = (0..4u8).map(|i| vec![i; 3]).collect();
+    let offsets = a
+        .append_raft_entries_batch(&entries)
+        .await
+        .expect("batch append succeeds");
+
+    assert_eq!(
+        offsets.len(),
+        entries.len(),
+        "a batch of {} returned {} results; a short or empty result loses entries the \
+         caller believes are durable",
+        entries.len(),
+        offsets.len()
+    );
+
+    // An empty batch is legitimately empty rather than an error.
+    assert!(a
+        .append_raft_entries_batch(&[])
+        .await
+        .expect("an empty batch is not an error")
+        .is_empty());
+}

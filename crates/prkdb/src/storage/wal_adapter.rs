@@ -23,142 +23,30 @@ use tokio::sync::{oneshot, Mutex, Notify, OwnedRwLockWriteGuard, RwLock};
 use tracing::{info, instrument, warn};
 
 // Phase 2: Dedicated Sync Writer Thread
-use super::write_queue::WriteRequest;
-use crossbeam_channel::Receiver;
-use std::thread;
-use std::time::Instant;
 
 /// Configuration for the dedicated writer thread
 #[derive(Debug, Clone)]
-struct WriterConfig {
-    max_batch_entries: usize,
-    _max_batch_bytes: usize,
-    linger_ms: u64,
-    /// How often to fsync (0 = never, 1 = every batch, N = every N batches)
-    sync_interval: usize,
-}
-
-impl Default for WriterConfig {
-    fn default() -> Self {
-        Self {
-            // Phase 23: Increased from 1000 to 10000 to match Kafka batching
-            max_batch_entries: 10_000,
-            _max_batch_bytes: 4 * 1024 * 1024, // 4MB (increased from 1MB)
-            // Phase 23: Increased from 10ms to 50ms for better batching
-            linger_ms: 50,
-            // Phase 23: Sync every 10 batches (not every batch) for throughput
-            sync_interval: 10,
-        }
-    }
-}
-
-/// Spawn a dedicated writer thread for batched WAL writes
-///
-/// This thread runs blocking I/O without Tokio overhead
-fn spawn_dedicated_writer(
-    rx: Receiver<WriteRequest>,
-    wal: Arc<MmapParallelWal>,
-    config: WriterConfig,
-) -> thread::JoinHandle<()> {
-    thread::Builder::new()
-        .name("prkdb-wal-writer".to_string())
-        .spawn(move || {
-            run_writer_loop(rx, wal, config);
-        })
-        .expect("Failed to spawn writer thread")
-}
-
-/// Main writer loop - runs on dedicated OS thread
-fn run_writer_loop(rx: Receiver<WriteRequest>, wal: Arc<MmapParallelWal>, config: WriterConfig) {
-    let mut batch = Vec::with_capacity(config.max_batch_entries);
-    // Phase 23: Track batch count for deferred sync
-    let mut batch_count: usize = 0;
-
-    loop {
-        // Block until first request
-        let first_req = match rx.recv() {
-            Ok(req) => req,
-            Err(_) => {
-                info!("Writer thread shutting down (channel closed)");
-                // Final sync before shutdown
-                if config.sync_interval > 0 {
-                    let _ = tokio::runtime::Handle::try_current().map(|h| h.block_on(wal.sync()));
-                }
-                break;
-            }
-        };
-
-        batch.push(first_req);
-        let batch_start = Instant::now();
-
-        // Collect more requests up to limits
-        loop {
-            // Check if we've hit batch size limit
-            if batch.len() >= config.max_batch_entries {
-                break;
-            }
-
-            // Check if we've exceeded linger time
-            let elapsed = batch_start.elapsed();
-            if elapsed.as_millis() >= config.linger_ms as u128 {
-                break;
-            }
-
-            // Try to receive more (with timeout for remaining linger)
-            let remaining = Duration::from_millis(config.linger_ms).saturating_sub(elapsed);
-
-            match rx.recv_timeout(remaining) {
-                Ok(req) => batch.push(req),
-                Err(_) => break, // Timeout or closed
-            }
-        }
-
-        // Write batch to WAL (blocking I/O - no Tokio overhead!)
-        write_batch(&wal, &mut batch);
-
-        // Phase 23: Deferred sync - only sync every N batches
-        batch_count += 1;
-        if config.sync_interval > 0 && batch_count.is_multiple_of(config.sync_interval) {
-            let _ = tokio::runtime::Handle::try_current().map(|h| h.block_on(wal.sync()));
-        }
-    }
-}
-
-/// Write a batch of records to the WAL
-fn write_batch(wal: &Arc<MmapParallelWal>, batch: &mut Vec<WriteRequest>) {
-    if batch.is_empty() {
-        return;
-    }
-
-    // Extract records
-    let records: Vec<LogRecord> = batch.iter().map(|req| req.record.clone()).collect();
-
-    // Write to WAL using Tokio runtime for async WAL API
-    // (WAL is async but we're calling from sync thread)
-    let result = tokio::runtime::Handle::try_current()
-        .map(|handle| handle.block_on(wal.append_batch(records)))
-        .unwrap_or_else(|_| {
-            // No runtime available, create temporary one
-            tokio::runtime::Runtime::new()
-                .expect("building a tokio runtime fails only if the OS refuses a thread")
-                .block_on(wal.append_batch(batch.iter().map(|req| req.record.clone()).collect()))
-        });
-
-    // Send acknowledgments
-    match result {
-        Ok(offsets) => {
-            for (req, (_, offset)) in batch.drain(..).zip(offsets) {
-                let _ = req.ack.send(Ok(offset));
-            }
-        }
-        Err(e) => {
-            let error = StorageError::Internal(format!("WAL write failed: {}", e));
-            for req in batch.drain(..) {
-                let _ = req.ack.send(Err(error.clone()));
-            }
-        }
-    }
-}
+// The dedicated writer thread was removed here.
+//
+// `spawn_dedicated_writer`, `run_writer_loop` and `write_batch` implemented a batching
+// writer fed by a `crossbeam_channel`. Nothing ever sent on that channel: the sender was
+// held as `_write_tx` — underscore-prefixed, and commented "Phase 2: Writer queue
+// (disabled for now)" — and no call site anywhere constructed a `WriteRequest` for it.
+// `write_queue.rs` has its own separate channel and is unrelated.
+//
+// So the loop blocked on `rx.recv()` for the life of every adapter and its body never ran.
+// Mutation run 31411280726 reported 11 survivors inside it, which is what unreachable code
+// looks like from the outside: `batch_count -= 1` on a `usize` would panic on the first
+// iteration of a debug build, and it survived, because there is no first iteration.
+//
+// It was not free. Each constructor spawned one OS thread that then blocked forever, and
+// `CollectionPartitionedAdapter` builds one `WalStorageAdapter` per collection — so a
+// database with N collections carried N idle threads. That is the same thread pressure
+// that made the cluster suite starve itself and produce failures wearing the costume of
+// consensus bugs.
+//
+// Deleted rather than tested. Writing tests for code nothing calls would have turned the
+// mutation report green while changing nothing about the program.
 
 /// Builder for WalStorageAdapter
 pub struct WalStorageAdapterBuilder {
@@ -264,7 +152,6 @@ pub(crate) mod fault_injection {
 pub struct WalStorageAdapter {
     inner: Arc<WalStorageInner>,
     // Phase 2: Dedicated sync writer
-    _write_tx: Option<crossbeam_channel::Sender<WriteRequest>>,
 }
 
 struct PendingWrite {
@@ -301,7 +188,6 @@ struct WalStorageInner {
     // Phase 9: Checkpoint path for fast recovery
     checkpoint_path: PathBuf,
     // Phase 2: Writer thread handle (stored here for Drop)
-    _writer_handle: Option<Arc<Mutex<Option<thread::JoinHandle<()>>>>>,
 }
 
 impl Drop for WalStorageInner {
@@ -490,16 +376,6 @@ impl WalStorageAdapter {
 
         let metrics = Arc::new(StorageMetrics::new());
 
-        // Phase 2: Feature flag for dedicated sync writer
-        // Set to true to enable sync writer (testing), false for production (old path)
-        const _USE_SYNC_WRITER: bool = true; // ✅ ENABLED - Phase 2 Active!
-        let (write_tx, write_rx) = super::write_queue::WriteQueue::new();
-        let writer_handle = Arc::new(Mutex::new(Some(spawn_dedicated_writer(
-            write_rx,
-            wal.clone(),
-            WriterConfig::default(),
-        ))));
-
         let inner = Arc::new(WalStorageInner {
             _config: config.clone(),
             wal,
@@ -519,12 +395,10 @@ impl WalStorageAdapter {
             publish_barrier: Arc::new(RwLock::new(())),
             max_offset: AtomicU64::new(0),
             checkpoint_path: config.wal.log_dir.join("checkpoint.json"),
-            _writer_handle: Some(writer_handle),
         });
 
         let adapter = Self {
             inner: inner.clone(),
-            _write_tx: Some(write_tx), // Phase 2: Writer queue (disabled for now)
         };
 
         // Rebuild the index from the WAL. Without this the log is recovered but every key
@@ -580,14 +454,6 @@ impl WalStorageAdapter {
 
         let metrics = Arc::new(StorageMetrics::new());
 
-        // Phase 2: Spawn dedicated writer thread
-        let (write_tx, write_rx) = super::write_queue::WriteQueue::new();
-        let writer_handle = Arc::new(Mutex::new(Some(spawn_dedicated_writer(
-            write_rx,
-            wal.clone(),
-            WriterConfig::default(),
-        ))));
-
         let inner = Arc::new(WalStorageInner {
             _config: storage_config.clone(),
             wal,
@@ -609,12 +475,10 @@ impl WalStorageAdapter {
             publish_barrier: Arc::new(RwLock::new(())),
             max_offset: AtomicU64::new(0),
             checkpoint_path: storage_config.wal.log_dir.join("checkpoint.json"),
-            _writer_handle: Some(writer_handle),
         });
 
         let adapter = Self {
             inner: inner.clone(),
-            _write_tx: Some(write_tx),
         };
 
         // Same index rebuild as every other open path.
@@ -665,14 +529,6 @@ impl WalStorageAdapter {
 
         let metrics = Arc::new(StorageMetrics::new());
 
-        // Phase 2: Spawn dedicated writer thread
-        let (write_tx, write_rx) = super::write_queue::WriteQueue::new();
-        let writer_handle = Arc::new(Mutex::new(Some(spawn_dedicated_writer(
-            write_rx,
-            wal.clone(),
-            WriterConfig::default(),
-        ))));
-
         let inner = Arc::new(WalStorageInner {
             _config: storage_config.clone(),
             wal: wal.clone(),
@@ -694,12 +550,10 @@ impl WalStorageAdapter {
             publish_barrier: Arc::new(RwLock::new(())),
             max_offset: AtomicU64::new(0),
             checkpoint_path: storage_config.wal.log_dir.join("checkpoint.json"),
-            _writer_handle: Some(writer_handle),
         });
 
         let adapter = Self {
             inner: inner.clone(),
-            _write_tx: Some(write_tx),
         };
 
         // Rebuild index from WAL
@@ -750,14 +604,6 @@ impl WalStorageAdapter {
 
         let metrics = Arc::new(StorageMetrics::new());
 
-        // Phase 2: Spawn dedicated writer thread
-        let (write_tx, write_rx) = super::write_queue::WriteQueue::new();
-        let writer_handle = Arc::new(Mutex::new(Some(spawn_dedicated_writer(
-            write_rx,
-            wal.clone(),
-            WriterConfig::default(),
-        ))));
-
         let inner = Arc::new(WalStorageInner {
             _config: storage_config.clone(),
             wal: wal.clone(),
@@ -779,12 +625,10 @@ impl WalStorageAdapter {
             publish_barrier: Arc::new(RwLock::new(())),
             max_offset: AtomicU64::new(0),
             checkpoint_path: storage_config.wal.log_dir.join("checkpoint.json"),
-            _writer_handle: Some(writer_handle),
         });
 
         let adapter = Self {
             inner: inner.clone(),
-            _write_tx: Some(write_tx),
         };
 
         // Rebuild index from WAL

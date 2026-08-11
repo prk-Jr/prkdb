@@ -570,6 +570,7 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         db.start_multi_raft(rpc_pool, &[0]);
 
         let grpc_tls = tls.clone();
+        let grpc_rate_limit = args.rate_limit;
         tokio::spawn(async move {
             use prkdb::raft::grpc_service::PrkDbGrpcService;
             use prkdb::raft::rpc::prk_db_service_server::PrkDbServiceServer;
@@ -600,9 +601,20 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
             // interceptor sees Request<()> and cannot read the method name, so it could
             // not tell `Health` from `FetchSegment`. This closes spec S-01 on the gRPC
             // side — `fetch_segment` streams raw WAL segments and required no credential.
-            let mut builder = Server::builder().layer(
-                prkdb::raft::authz_interceptor::AuthzGrpcLayer::new(grpc_authz_store),
-            );
+            // Rate limiting outside authorization: a shed request should cost a token
+            // bucket check, not a credential comparison against every principal.
+            //
+            // Until now --rate-limit guarded the HTTP surface only, so the gRPC data
+            // plane — including FetchSegment, which streams raw WAL — had no limit and no
+            // in-flight bound. An operator passing the flag had every reason to think
+            // otherwise.
+            let mut builder = Server::builder()
+                .layer(tower::util::option_layer(grpc_rate_limit.map(
+                    prkdb::raft::grpc_rate_limit::GrpcRateLimitLayer::per_second,
+                )))
+                .layer(prkdb::raft::authz_interceptor::AuthzGrpcLayer::new(
+                    grpc_authz_store,
+                ));
             if let Some(t) = &grpc_tls {
                 match t.tonic_config() {
                     Ok(cfg) => match builder.tls_config(cfg) {
