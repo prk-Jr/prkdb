@@ -1221,7 +1221,19 @@ impl WalStorageAdapter {
                         current_deletes.push(id);
                         current_delete_txs.push(write.tx);
                     }
-                    _ => {} // Ignore others for now
+                    // Listed rather than wildcarded. The accumulator only ever holds
+                    // single Put and Delete records — `put_many` and the raft appends build
+                    // them inline, and compression is applied later when the batch record is
+                    // assembled — so these four cannot occur here today.
+                    //
+                    // Spelling them out costs nothing and means a seventh variant stops the
+                    // build instead of being dropped. `_ => {}` in a sibling match is what
+                    // let `scan_prefix` skip every compressed record silently; the wildcard,
+                    // not the missing arm, is what made it invisible.
+                    LogOperation::PutBatch { .. }
+                    | LogOperation::CompressedPutBatch { .. }
+                    | LogOperation::DeleteBatch { .. }
+                    | LogOperation::CompressedDeleteBatch { .. } => {}
                 }
             }
 
@@ -1303,7 +1315,10 @@ impl WalStorageAdapter {
                                     }
                                 }
                             }
-                            _ => {}
+                            // Single Put and Delete are published by the batch record that
+                            // carries them, so there is nothing to do for them here. Named
+                            // rather than wildcarded, for the reason above.
+                            LogOperation::Put { .. } | LogOperation::Delete { .. } => {}
                         }
                     }
                 }
