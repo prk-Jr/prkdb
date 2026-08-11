@@ -125,10 +125,59 @@ rather than failing the handshake.
 | endpoint | meaning |
 |---|---|
 | `/livez` | the process is up. Touches nothing. |
-| `/readyz` | WAL replay finished and a leader is known. Names the unmet condition on `503`. |
-| `/health` | legacy combined check; public so orchestrators can probe before any credential exists |
+| `/readyz` | WAL replay finished, a leader is known, **and the write path is confirming writes**. Names the unmet condition on `503`. |
+| `/health` | legacy combined check; public so orchestrators can probe before any credential exists. `503` when the write path is unhealthy. |
 
 Kubernetes needs both: without `/readyz`, traffic routes to nodes that will fail.
+
+#### Write-path health
+
+The WAL writer publishes queued writes in the background. If it exits or stops making
+progress, writes are accepted and never confirmed — the process stays up and answers HTTP
+while every client write hangs. `/livez` will keep saying the process is alive, correctly,
+which is why liveness alone is not enough to route on.
+
+`/readyz` returns `503` in that state. It is a *stop routing here* condition, not a restart
+condition: restarting loses the queued writes.
+
+```json
+// GET /readyz — 503
+{
+  "status": "not_ready",
+  "reason": "the storage write path is not confirming writes",
+  "detail": "WAL writer stalled: 3 write(s) queued, oldest unpublished for 800ms with no publication progress (threshold 800ms)",
+  "queue_depth": 3,
+  "oldest_unpublished_age_ms": 800
+}
+```
+
+`/health` carries the same facts as a `write_path` block on every response, healthy or not,
+so it can be scraped for a trend rather than only alerted on:
+
+```json
+// GET /health — 200 when healthy, 503 when not
+{
+  "status": "healthy",
+  "write_path": {
+    "healthy": true,
+    "reason": null,
+    "queue_depth": 0,
+    "oldest_unpublished_age_ms": 0,
+    "last_publish_age_ms": 12
+  }
+}
+```
+
+A rising `queue_depth` with a rising `oldest_unpublished_age_ms` is a writer falling behind.
+A `last_publish_age_ms` that keeps growing while `queue_depth` is non-zero is a writer that
+has stopped publishing altogether — that is what trips `healthy: false`.
+
+The stall threshold derives from the configured flush interval, so a deployment that
+batches less aggressively is not flagged for it.
+
+These counters are **not** on `/metrics`. `/metrics` exports Raft, partition, and consumer
+series; storage write-path health is only on the probe endpoints today. Alert on `/health`
+returning `503`, not on a Prometheus series that does not exist.
 
 ### Rate limiting
 
@@ -204,9 +253,9 @@ Global flags, before the subcommand:
 
 | route | auth | notes |
 |---|---|---|
-| `GET /health` | public | orchestrators probe before any credential exists |
+| `GET /health` | public | orchestrators probe before any credential exists; `503` when the write path is unhealthy |
 | `GET /livez` | public | process liveness only |
-| `GET /readyz` | public | WAL replayed and a leader known; `503` names the unmet condition |
+| `GET /readyz` | public | WAL replayed, leader known, write path confirming; `503` names the unmet condition |
 | `GET /metrics` | credential | Prometheus format, with `--prometheus` |
 | `GET /collections` | `Read` | narrowed to what the caller's grants permit |
 | `GET /collections/:name` | `Read` | |
