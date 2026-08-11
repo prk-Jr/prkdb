@@ -318,3 +318,186 @@ async fn proposing_without_a_partition_manager_is_refused() {
          replicated nowhere must not be reported as done"
     );
 }
+
+/// Partition 0 is the one that gets the authorization cache.
+///
+/// # What survived without this
+///
+/// `delete match arm (0, Some(store))` in `new_multi_raft_with_authz`. With that arm gone
+/// no partition receives the cache, so every replicated principal change reaches storage
+/// on each node and none of their `resolve` calls — the exact half-replication this whole
+/// change exists to prevent, and the earlier tests could not see it because they construct
+/// the state machine directly with `.with_authz(..)` rather than through the constructor.
+///
+/// Applying through the partition's state machine rather than proposing: whether partition
+/// 0 was handed the cache is a property of construction, so requiring a live election to
+/// observe it would make this slower and flakier without making it stronger.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_constructor_hands_partition_zero_the_authorization_cache() {
+    use prkdb::raft::{ClusterConfig, StateMachine};
+    use prkdb::PrkDb;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = ClusterConfig {
+        local_node_id: 1,
+        listen_addr: "127.0.0.1:0".parse().unwrap(),
+        nodes: vec![(1, "127.0.0.1:0".parse().unwrap())],
+        ..Default::default()
+    };
+
+    let store = PrincipalStore::new();
+    let db =
+        PrkDb::new_multi_raft_with_authz(2, config, dir.path().to_path_buf(), Some(store.clone()))
+            .expect("a clustered instance builds");
+
+    let pm = db
+        .partition_manager
+        .as_ref()
+        .expect("a multi-raft instance has a partition manager");
+
+    let principal = Principal::new(
+        "wired",
+        "wired-credential",
+        vec![Grant::new("*", Permission::Read)],
+    );
+    let upsert = Command::UpsertPrincipal {
+        name: "wired".into(),
+        encoded: serde_json::to_vec(&principal).unwrap(),
+    }
+    .serialize();
+
+    pm.get_state_machine(0)
+        .expect("partition 0 exists")
+        .apply(&upsert)
+        .await
+        .expect("applying through partition 0 succeeds");
+
+    assert!(
+        store.resolve("wired-credential").is_some(),
+        "partition 0's state machine did not receive the authorization cache, so a \
+         replicated principal reached storage and no node's resolve"
+    );
+
+    // And only partition 0: another partition applying the same command must not also
+    // touch the cache, or every upsert would be applied N times.
+    let store2 = PrincipalStore::new();
+    let dir2 = tempfile::tempdir().unwrap();
+    let config2 = ClusterConfig {
+        local_node_id: 1,
+        listen_addr: "127.0.0.1:0".parse().unwrap(),
+        nodes: vec![(1, "127.0.0.1:0".parse().unwrap())],
+        ..Default::default()
+    };
+    let db2 = PrkDb::new_multi_raft_with_authz(
+        2,
+        config2,
+        dir2.path().to_path_buf(),
+        Some(store2.clone()),
+    )
+    .unwrap();
+    db2.partition_manager
+        .as_ref()
+        .unwrap()
+        .get_state_machine(1)
+        .expect("partition 1 exists")
+        .apply(&upsert)
+        .await
+        .expect("applying through partition 1 succeeds");
+    assert!(
+        store2.resolve("wired-credential").is_none(),
+        "a partition other than 0 updated the authorization cache; only partition 0 owns \
+         the authz keyspace"
+    );
+}
+
+/// The revoke warning fires when a follower did not have the principal, and not otherwise.
+///
+/// # Why a log line is worth a test
+///
+/// `delete !` on `if !store.apply_replicated_revoke(&name)` survived. Inverted, the warning
+/// fires on every *successful* revoke and stays silent on the one case it exists to report:
+/// a node revoking a principal it never had, which means it had diverged from the leader.
+///
+/// That is a diagnostic which is wrong exactly when it matters. An operator reading these
+/// logs during an incident would see noise on healthy revokes and nothing on the divergent
+/// one — worse than no warning, because it is trusted.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_revoke_warning_reports_divergence_and_not_success() {
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::SubscriberExt;
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<String>>>);
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() != tracing::Level::WARN {
+                return;
+            }
+            struct V<'a>(&'a mut String);
+            impl tracing::field::Visit for V<'_> {
+                fn record_debug(&mut self, _: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                    self.0.push_str(&format!("{value:?} "));
+                }
+            }
+            let mut line = String::new();
+            event.record(&mut V(&mut line));
+            self.0.lock().unwrap().push(line);
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = PrincipalStore::new();
+    let (sm, _storage) = machine(dir.path(), &store);
+
+    let capture = Capture::default();
+    let warnings = capture.0.clone();
+    let subscriber = tracing_subscriber::registry().with(capture);
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    // A principal this node has: revoking it is a success, and must be silent.
+    sm.apply(
+        &Command::UpsertPrincipal {
+            name: "present".into(),
+            encoded: serde_json::to_vec(&Principal::admin("present", "present-cred")).unwrap(),
+        }
+        .serialize(),
+    )
+    .await
+    .unwrap();
+    sm.apply(
+        &Command::RevokePrincipal {
+            name: "present".into(),
+        }
+        .serialize(),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        warnings.lock().unwrap().is_empty(),
+        "a successful revoke warned; inverted, this diagnostic is noise on every healthy \
+         revoke: {:?}",
+        warnings.lock().unwrap()
+    );
+
+    // A principal this node never had: divergence, and it must say so.
+    sm.apply(
+        &Command::RevokePrincipal {
+            name: "absent".into(),
+        }
+        .serialize(),
+    )
+    .await
+    .unwrap();
+
+    let captured = warnings.lock().unwrap().join("\n");
+    assert!(
+        captured.contains("absent"),
+        "revoking a principal this node never had did not warn; that is the one case the \
+         warning exists for, because it means this node had diverged from the leader"
+    );
+}
