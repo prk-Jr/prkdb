@@ -114,6 +114,7 @@ pub async fn list(State(admin): State<PrincipalAdmin>) -> Response {
 
 /// Create or replace a principal.
 pub async fn upsert(
+    axum::Extension(actor): axum::Extension<Principal>,
     State(admin): State<PrincipalAdmin>,
     Json(body): Json<CreatePrincipal>,
 ) -> Response {
@@ -158,6 +159,7 @@ pub async fn upsert(
             encoded,
         };
         if let Err(e) = db.propose_authz(command).await {
+            audit(Some(&actor), "upsert", &body.name, "failed: not replicated");
             // Refused rather than written locally (decision E2). A local write here is
             // the bug this replaces: it succeeds on one node and leaves every other node
             // disagreeing about who may do what.
@@ -167,16 +169,22 @@ pub async fn upsert(
             ));
         }
     } else if let Err(e) = admin.store.persist(db.storage().as_ref(), principal).await {
+        audit(Some(&actor), "upsert", &body.name, "failed: not persisted");
         // Storage before cache: a principal the cache admits but storage never recorded
         // disappears on restart, and someone will have already been told it was created.
         return server_error(&format!("failed to persist principal: {e}"));
     }
 
+    audit(Some(&actor), "upsert", &body.name, "created");
     (StatusCode::CREATED, Json(json!({ "created": body.name }))).into_response()
 }
 
 /// Revoke a principal.
-pub async fn revoke(State(admin): State<PrincipalAdmin>, Path(name): Path<String>) -> Response {
+pub async fn revoke(
+    axum::Extension(actor): axum::Extension<Principal>,
+    State(admin): State<PrincipalAdmin>,
+    Path(name): Path<String>,
+) -> Response {
     if admin.store.resolve_by_name(&name).is_none() {
         return (
             StatusCode::NOT_FOUND,
@@ -209,6 +217,7 @@ pub async fn revoke(State(admin): State<PrincipalAdmin>, Path(name): Path<String
     if db.replicates_authz() {
         let command = prkdb::raft::command::Command::RevokePrincipal { name: name.clone() };
         if let Err(e) = db.propose_authz(command).await {
+            audit(Some(&actor), "revoke", &name, "failed: not replicated");
             // Refusing matters more here than on create: reporting a revoke that did not
             // replicate tells an operator a credential is dead while it still works on
             // every other node.
@@ -218,10 +227,39 @@ pub async fn revoke(State(admin): State<PrincipalAdmin>, Path(name): Path<String
             ));
         }
     } else if let Err(e) = admin.store.forget(db.storage().as_ref(), &name).await {
+        audit(Some(&actor), "revoke", &name, "failed: not persisted");
         return server_error(&format!("failed to revoke principal: {e}"));
     }
 
+    audit(Some(&actor), "revoke", &name, "revoked");
     (StatusCode::OK, Json(json!({ "revoked": name }))).into_response()
+}
+
+/// Record an administrative mutation.
+///
+/// # Why this exists and what it must never contain
+///
+/// `/admin/principals` mints and revokes credentials. Until now nothing recorded who used
+/// it, so "who granted this principal Admin on `*`?" had no answer — the spec lists audit
+/// logging as a production gap, and it got cheaper and more valuable once principals had
+/// names.
+///
+/// Denied attempts are logged as well as permitted ones. A rejected mutation is the more
+/// interesting record: one refusal is a typo, a hundred is someone trying credentials.
+///
+/// **The credential and its digest are never logged.** `Principal`'s `Debug` is not used
+/// here for that reason — only the actor's name, the operation, the target, and the
+/// outcome. A log that leaks the thing it is auditing is worse than no log, because it
+/// ships the secret to wherever logs are shipped.
+fn audit(actor: Option<&Principal>, operation: &str, target: &str, outcome: &str) {
+    tracing::info!(
+        target: "prkdb::audit",
+        actor = actor.map(|p| p.name()).unwrap_or("<unauthenticated>"),
+        operation,
+        target_principal = target,
+        outcome,
+        "admin principal mutation"
+    );
 }
 
 fn bad_request(message: &str) -> Response {
