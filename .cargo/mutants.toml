@@ -72,4 +72,32 @@ exclude_re = [
     # Run 31362753534, shard 7.
     'outbox_list .* with Ok\(vec!\[\]\)$',
 
+    # NEITHER category. This is a tracked to-do with a stated exit condition, and it is the
+    # only entry here that is not equivalent or unreachable. It is written out rather than
+    # dressed up as one of the two, because the difference is the whole point of this file.
+    #
+    # The mutant is CAUGHT. The tests notice it — they notice it by hanging, because
+    # deleting this function means queued writes are never published and every caller
+    # awaiting a oneshot blocks forever. cargo-mutants classifies that as TIMEOUT rather
+    # than caught, and the job fails on a full 300s budget spent per run.
+    #
+    # The hang is not a testing artifact. It is the symptom a user would get, and it comes
+    # from a real defect: every queued write is a promise to the caller, and nothing in the
+    # system is responsible for keeping it. run_writer_loop is spawned fire-and-forget
+    # through a Weak with no JoinHandle retained, and the `oneshot canceled` handler at the
+    # await sites is dead code — RecvError fires on sender *drop*, and no path guarantees a
+    # queued PendingWrite is ever dropped or fired.
+    #
+    # No test can remove this entry. The violated property is liveness — "the write is
+    # eventually published" — and there is no non-temporal observation of *never*. A test
+    # can only ever observe "not yet". The fix is structural: supervise the writer, account
+    # for progress, and give the client bound an honest not-confirmed error.
+    #
+    # EXIT CONDITION: acceptance criterion 5 of
+    # docs/superpowers/specs/2026-08-11-wal-writer-liveness.md — the mutant reports CAUGHT
+    # within one watchdog interval instead of TIMEOUT. Delete this entry then.
+    #
+    # Run 31505589348, mutants-diff on PR #53.
+    'replace WalStorageAdapter::flush_accumulator_inner with \(\)',
+
 ]
