@@ -50,7 +50,10 @@ while IFS= read -r line; do
     echo "      workflow, or one blocked by a numbered spec finding."
     fail=1
   fi
-done < <(grep -rn '#\[ignore' crates/ --include='*.rs' 2>/dev/null | grep -v '///\|//!')
+# PRKDB_SCAN_ROOT exists so scripts/check_guards_fail.sh can point this at a fixture
+# tree containing a known-bad #[ignore] and confirm this script rejects it. Defaults
+# to the real crates, so normal runs are unchanged.
+done < <(grep -rn '#\[ignore' "${PRKDB_SCAN_ROOT:-crates/}" --include='*.rs' 2>/dev/null | grep -v '///\|//!')
 
 if [[ $fail -eq 0 ]]; then
   echo "  ✓ every #[ignore] gives a reason from an allowed category"

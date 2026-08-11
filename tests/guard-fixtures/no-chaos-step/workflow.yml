@@ -1,0 +1,9 @@
+# A workflow that runs the fixture's test binary WITHOUT --features chaos, which is
+# exactly the state that left two acceptance tests never executing.
+name: fixture
+on: push
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: cargo test --test gated -- --nocapture
