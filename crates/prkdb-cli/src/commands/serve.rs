@@ -649,6 +649,28 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         // axum-server terminates TLS in front of the same tower service axum builds.
         // Its own graceful-shutdown handle differs from axum::serve's, so the flush runs
         // after the server returns rather than inside a shutdown future.
+        // Choose the crypto backend before rustls is asked to.
+        //
+        // Without this the listener binds, `serve` prints "TLS enabled" and "Server
+        // started successfully", and then **every HTTPS connection panics a worker
+        // thread**:
+        //
+        //     Could not automatically determine the process-level CryptoProvider
+        //     from Rustls crate features.
+        //
+        // rustls refuses to guess when it cannot see exactly one backend feature, and the
+        // dependency graph here exposes more than one. The process stays alive, so the
+        // operator sees a healthy-looking server that serves nothing over HTTPS — the
+        // S-02 shape again: a capability that is reachable, reports success, and does not
+        // work.
+        //
+        // The fix existed only in `prkdb/tests/peer_mtls.rs`, never in a shipped binary,
+        // because no test had ever made an HTTPS request to this listener.
+        //
+        // The error is ignored deliberately: a provider already installed is the desired
+        // state, and `install_default` fails precisely when one is.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
         let rustls = axum_server::tls_rustls::RustlsConfig::from_pem(t.read_cert()?, t.read_key()?)
             .await
             .context("building the HTTPS listener from --tls-cert/--tls-key")?;

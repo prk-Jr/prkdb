@@ -9,10 +9,27 @@
 //!
 //! [`PrincipalStore::load`] and [`PrincipalStore::persist`] read and write principals
 //! through the storage adapter, under the reserved `__prkdb_metadata:` prefix that the
-//! data plane already treats as internal. Going through the adapter rather than a side
-//! file means principals inherit everything the database already guarantees: they are
-//! written to the WAL, replicated by Raft when the node is clustered, captured by
-//! `take_snapshot`, and restored by `restore`.
+//! data plane already treats as internal. Each node therefore writes its principals to
+//! its own WAL and reloads them on restart — which `tests/authz_persistence.rs` proves.
+//!
+//! # Not replicated (yet)
+//!
+//! **Principals are per node.** They do not go through Raft, are not in the state machine,
+//! and are not carried by `install_snapshot`. `raft/state_machine.rs` contains no mention
+//! of them, and both binaries write them with a plain `put` on `db.storage()` rather than
+//! by proposing a command.
+//!
+//! On a cluster that means: a principal created through `PUT /admin/principals` exists only
+//! on the node that served the request, and **a revoke on one node leaves the credential
+//! live on the others**. The failure mode is divergence between nodes, not credential loss
+//! — each node keeps and reloads what it was told.
+//!
+//! An earlier version of this comment claimed principals were "replicated by Raft when the
+//! node is clustered, captured by `take_snapshot`". Neither was ever true on the path both
+//! binaries use. It is recorded here because a doc comment asserting a property the code
+//! lacks is worse than silence: it is what a reviewer checks instead of the code.
+//!
+//! Tracked as Task 5 of `docs/superpowers/plans/2026-08-10-post-hardening-gaps.md`.
 //!
 //! Only the SHA-256 of a credential is stored — see [`Principal`].
 //!
@@ -421,11 +438,21 @@ mod tests {
         assert!(store.permits("cred-a", "users", Permission::Read));
     }
 
-    /// An authorization store that does not survive install_snapshot is a cluster that
-    /// loses its own credentials during recovery — and the only way back in is an
-    /// --allow-anonymous restart. Spec section 10, implementation question 1.
+    /// Principals survive being serialised and deserialised.
+    ///
+    /// # What this does *not* test
+    ///
+    /// It is a serde round-trip over an in-memory `Vec`. It never touches
+    /// `handle_install_snapshot`, and principals are not in the Raft state machine at all —
+    /// see the module documentation.
+    ///
+    /// It was previously named `principals_round_trip_through_a_snapshot`, with a comment
+    /// citing the spec's abort criterion for exactly that property. The name and the
+    /// citation together read as coverage of snapshot recovery, which nothing here
+    /// provides. Renamed rather than deleted: the serialisation format is worth pinning,
+    /// and it is a prerequisite for the real thing once Task 5 lands.
     #[test]
-    fn principals_round_trip_through_a_snapshot() {
+    fn principals_survive_a_serde_round_trip() {
         let store = PrincipalStore::new();
         store.insert(Principal::admin("root", "root-cred"));
         store.insert(Principal::new(

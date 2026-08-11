@@ -101,11 +101,16 @@ allow = [
 confidence-threshold = 0.8
 
 [bans]
-# Warn rather than deny. The workspace currently resolves two major versions of
-# reqwest (0.12 in prkdb, 0.11 in prkdb-cli) plus ~40 other duplicate pairs, mostly
-# windows-* and transitive http/tower stacks. Consolidating reqwest is a real fix;
-# the rest are largely outside our control. Tighten to "deny" once reqwest is
-# unified in [workspace.dependencies].
+# Warn rather than deny. reqwest is now unified: it is declared once in
+# [workspace.dependencies] at 0.12 and both crates take it with `workspace = true`,
+# so `cargo tree -d` shows a single reqwest v0.12 with prkdb and prkdb-cli beneath
+# it. That was the one duplicate we controlled.
+#
+# The remaining ~40 pairs are windows-* and transitive http/tower stacks, which no
+# change here can resolve — they are decided by our dependencies' own requirements.
+# So this stays "warn": switching to "deny" would fail the build for duplicates
+# nobody in this repository can fix, which is a check that gets disabled rather
+# than obeyed.
 multiple-versions = "warn"
 # A wildcard version requirement means "whatever resolves today", which is not a
 # dependency declaration. Currently "warn" because the workspace path dependencies

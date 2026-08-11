@@ -45,7 +45,7 @@ uuid = { workspace = true }
 mimalloc = { workspace = true }                                        # Fast allocator
 lz4 = { workspace = true }                                             # Compression
 axum = { workspace = true }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { workspace = true }
 pin-project = "1.1"
 # Layer/Service traits for the gRPC authorization layer. These are the same crates
 # tonic itself builds on, so the traits unify with tonic's tower stack.

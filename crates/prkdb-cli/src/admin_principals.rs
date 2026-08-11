@@ -236,4 +236,37 @@ mod tests {
         assert!(!rendered.contains(principal.credential_hash()));
         assert!(rendered.contains("alice") && rendered.contains("users"));
     }
+
+    /// The error helpers must carry their status codes.
+    ///
+    /// # What this catches
+    ///
+    /// Mutation run 31411280726, shard 18, replaced both `bad_request` and `server_error`
+    /// with `Default::default()` and no test noticed. A `Response` defaults to `200 OK`
+    /// with an empty body, so under those mutants every rejected admin request — an empty
+    /// name, an unparseable permission, a storage failure — answered **200 OK**.
+    ///
+    /// A client cannot distinguish that from success. It is the worst shape an error path
+    /// can take: the caller believes a principal was created when none was, or that a
+    /// revoke succeeded while the credential stays live.
+    ///
+    /// This surface was only mutated at all because #43 brought `prkdb-cli`'s
+    /// authorization files into scope; before that it had never been checked.
+    #[test]
+    fn the_error_helpers_carry_their_status_codes() {
+        assert_eq!(
+            bad_request("nope").status(),
+            StatusCode::BAD_REQUEST,
+            "a rejected request must not answer 200; a client cannot tell that from success"
+        );
+        assert_eq!(
+            server_error("boom").status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a failed operation must not answer 200"
+        );
+
+        // And they are distinguishable from each other: a caller retries a 500 and fixes
+        // its input on a 400.
+        assert_ne!(bad_request("a").status(), server_error("b").status());
+    }
 }
