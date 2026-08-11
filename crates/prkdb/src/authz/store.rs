@@ -9,10 +9,33 @@
 //!
 //! [`PrincipalStore::load`] and [`PrincipalStore::persist`] read and write principals
 //! through the storage adapter, under the reserved `__prkdb_metadata:` prefix that the
-//! data plane already treats as internal. Going through the adapter rather than a side
-//! file means principals inherit everything the database already guarantees: they are
-//! written to the WAL, replicated by Raft when the node is clustered, captured by
-//! `take_snapshot`, and restored by `restore`.
+//! data plane already treats as internal. Each node therefore writes its principals to
+//! its own WAL and reloads them on restart — which `tests/authz_persistence.rs` proves.
+//!
+//! # Replication
+//!
+//! On a cluster, principal changes go through Raft as `Command::UpsertPrincipal` and
+//! `Command::RevokePrincipal`, proposed to **partition 0**, which owns the authz keyspace.
+//! Applying one writes the durable copy *and* updates this store's in-memory map, on every
+//! node, in log order.
+//!
+//! Both halves are necessary. `resolve` walks the in-memory map, so replicating only the
+//! storage write would leave every follower authenticating from the map it loaded at
+//! startup — a revoke that reports success and revokes nothing. `tests/authz_replication.rs`
+//! fails if either half is removed.
+//!
+//! Snapshots need no special handling: the state machine writes principals into partition
+//! 0's storage, and `PrkDbStateMachine::snapshot` serialises every key in that storage.
+//!
+//! Without a partition manager — embedded use, or `serve` without `--peers` — there is no
+//! Raft to propose to, and the local write is the only path. `PrkDb::replicates_authz`
+//! is the condition both write paths branch on.
+//!
+//! An earlier version of this comment claimed principals were "replicated by Raft when the
+//! node is clustered, captured by `take_snapshot`" while neither was true of any path the
+//! binaries used. That is recorded because a doc comment asserting a property the code
+//! lacks is worse than silence — it is what a reviewer checks instead of the code — and
+//! because this paragraph is now making the same kind of claim. The difference is the test.
 //!
 //! Only the SHA-256 of a credential is stored — see [`Principal`].
 //!
@@ -38,7 +61,7 @@ use super::model::{Grant, Permission, Principal};
 /// appear as user data.
 pub const PRINCIPAL_KEY_PREFIX: &str = "__prkdb_metadata:authz:principal:";
 
-fn principal_key(name: &str) -> Vec<u8> {
+pub fn principal_key(name: &str) -> Vec<u8> {
     format!("{PRINCIPAL_KEY_PREFIX}{name}").into_bytes()
 }
 
@@ -170,6 +193,23 @@ impl PrincipalStore {
             .write()
             .expect("the principal store lock is only poisoned if a holder panicked")
             .insert(principal.name().to_string(), principal);
+    }
+
+    /// Apply a replicated upsert: update the in-memory map only.
+    ///
+    /// The state machine has already written the durable copy through the partition's
+    /// storage, so this is the other half — without it, `resolve` on every follower keeps
+    /// answering from the map it loaded at startup.
+    pub fn apply_replicated_upsert(&self, principal: Principal) {
+        self.insert(principal);
+    }
+
+    /// Apply a replicated revoke: drop it from the in-memory map only.
+    ///
+    /// Returns whether anything was removed, which the caller logs — a revoke that matched
+    /// nothing on a follower means the two nodes disagreed about who existed.
+    pub fn apply_replicated_revoke(&self, name: &str) -> bool {
+        self.remove(name).is_some()
     }
 
     /// Look a principal up by name rather than by credential.
@@ -421,11 +461,21 @@ mod tests {
         assert!(store.permits("cred-a", "users", Permission::Read));
     }
 
-    /// An authorization store that does not survive install_snapshot is a cluster that
-    /// loses its own credentials during recovery — and the only way back in is an
-    /// --allow-anonymous restart. Spec section 10, implementation question 1.
+    /// Principals survive being serialised and deserialised.
+    ///
+    /// # What this does *not* test
+    ///
+    /// It is a serde round-trip over an in-memory `Vec`. It never touches
+    /// `handle_install_snapshot`, and principals are not in the Raft state machine at all —
+    /// see the module documentation.
+    ///
+    /// It was previously named `principals_round_trip_through_a_snapshot`, with a comment
+    /// citing the spec's abort criterion for exactly that property. The name and the
+    /// citation together read as coverage of snapshot recovery, which nothing here
+    /// provides. Renamed rather than deleted: the serialisation format is worth pinning,
+    /// and it is a prerequisite for the real thing once Task 5 lands.
     #[test]
-    fn principals_round_trip_through_a_snapshot() {
+    fn principals_survive_a_serde_round_trip() {
         let store = PrincipalStore::new();
         store.insert(Principal::admin("root", "root-cred"));
         store.insert(Principal::new(

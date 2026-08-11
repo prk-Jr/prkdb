@@ -353,7 +353,7 @@ async fn without_a_client_ca_mtls_admits_nobody() {
 ///
 /// Every other test in this file drives a *client* against a TLS server. Only this one
 /// exercises the pool, which is where the gap was.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn peers_dial_each_other_over_mtls() {
     use prkdb::raft::rpc_client::PeerTls;
 
@@ -407,7 +407,7 @@ async fn peers_dial_each_other_over_mtls() {
 ///
 /// The CHANGELOG carried this as a known gap — "a cluster with mTLS active end to end is
 /// not exercised" — which is now closed.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cluster_elects_and_replicates_over_mtls() {
     install_crypto_provider();
 

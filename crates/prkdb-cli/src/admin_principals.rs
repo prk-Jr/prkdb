@@ -114,6 +114,7 @@ pub async fn list(State(admin): State<PrincipalAdmin>) -> Response {
 
 /// Create or replace a principal.
 pub async fn upsert(
+    axum::Extension(actor): axum::Extension<Principal>,
     State(admin): State<PrincipalAdmin>,
     Json(body): Json<CreatePrincipal>,
 ) -> Response {
@@ -142,17 +143,48 @@ pub async fn upsert(
         Err(e) => return server_error(&format!("storage unavailable: {e}")),
     };
 
-    // Storage before cache: a principal the cache admits but storage never recorded
-    // disappears on restart, and someone will have already been told it was created.
-    if let Err(e) = admin.store.persist(db.storage().as_ref(), principal).await {
+    // Clustered: propose, so every node updates its durable copy *and* its in-memory
+    // cache in log order. Authentication reads that cache, so a write that reached only
+    // this node's storage would be invisible everywhere else until a restart.
+    //
+    // Single node: no partition manager exists, so the local write is the only path
+    // (decision E3). `replicates_authz` is the same condition the write path uses.
+    if db.replicates_authz() {
+        let encoded = match serde_json::to_vec(&principal) {
+            Ok(bytes) => bytes,
+            Err(e) => return server_error(&format!("failed to encode principal: {e}")),
+        };
+        let command = prkdb::raft::command::Command::UpsertPrincipal {
+            name: body.name.clone(),
+            encoded,
+        };
+        if let Err(e) = db.propose_authz(command).await {
+            audit(Some(&actor), "upsert", &body.name, "failed: not replicated");
+            // Refused rather than written locally (decision E2). A local write here is
+            // the bug this replaces: it succeeds on one node and leaves every other node
+            // disagreeing about who may do what.
+            return server_error(&format!(
+                "failed to replicate principal: {e}. No principal was created; retry \
+                 against the partition-0 leader."
+            ));
+        }
+    } else if let Err(e) = admin.store.persist(db.storage().as_ref(), principal).await {
+        audit(Some(&actor), "upsert", &body.name, "failed: not persisted");
+        // Storage before cache: a principal the cache admits but storage never recorded
+        // disappears on restart, and someone will have already been told it was created.
         return server_error(&format!("failed to persist principal: {e}"));
     }
 
+    audit(Some(&actor), "upsert", &body.name, "created");
     (StatusCode::CREATED, Json(json!({ "created": body.name }))).into_response()
 }
 
 /// Revoke a principal.
-pub async fn revoke(State(admin): State<PrincipalAdmin>, Path(name): Path<String>) -> Response {
+pub async fn revoke(
+    axum::Extension(actor): axum::Extension<Principal>,
+    State(admin): State<PrincipalAdmin>,
+    Path(name): Path<String>,
+) -> Response {
     if admin.store.resolve_by_name(&name).is_none() {
         return (
             StatusCode::NOT_FOUND,
@@ -182,11 +214,52 @@ pub async fn revoke(State(admin): State<PrincipalAdmin>, Path(name): Path<String
         Err(e) => return server_error(&format!("storage unavailable: {e}")),
     };
 
-    if let Err(e) = admin.store.forget(db.storage().as_ref(), &name).await {
+    if db.replicates_authz() {
+        let command = prkdb::raft::command::Command::RevokePrincipal { name: name.clone() };
+        if let Err(e) = db.propose_authz(command).await {
+            audit(Some(&actor), "revoke", &name, "failed: not replicated");
+            // Refusing matters more here than on create: reporting a revoke that did not
+            // replicate tells an operator a credential is dead while it still works on
+            // every other node.
+            return server_error(&format!(
+                "failed to replicate revocation: {e}. The credential is still valid; \
+                 retry against the partition-0 leader."
+            ));
+        }
+    } else if let Err(e) = admin.store.forget(db.storage().as_ref(), &name).await {
+        audit(Some(&actor), "revoke", &name, "failed: not persisted");
         return server_error(&format!("failed to revoke principal: {e}"));
     }
 
+    audit(Some(&actor), "revoke", &name, "revoked");
     (StatusCode::OK, Json(json!({ "revoked": name }))).into_response()
+}
+
+/// Record an administrative mutation.
+///
+/// # Why this exists and what it must never contain
+///
+/// `/admin/principals` mints and revokes credentials. Until now nothing recorded who used
+/// it, so "who granted this principal Admin on `*`?" had no answer — the spec lists audit
+/// logging as a production gap, and it got cheaper and more valuable once principals had
+/// names.
+///
+/// Denied attempts are logged as well as permitted ones. A rejected mutation is the more
+/// interesting record: one refusal is a typo, a hundred is someone trying credentials.
+///
+/// **The credential and its digest are never logged.** `Principal`'s `Debug` is not used
+/// here for that reason — only the actor's name, the operation, the target, and the
+/// outcome. A log that leaks the thing it is auditing is worse than no log, because it
+/// ships the secret to wherever logs are shipped.
+fn audit(actor: Option<&Principal>, operation: &str, target: &str, outcome: &str) {
+    tracing::info!(
+        target: "prkdb::audit",
+        actor = actor.map(|p| p.name()).unwrap_or("<unauthenticated>"),
+        operation,
+        target_principal = target,
+        outcome,
+        "admin principal mutation"
+    );
 }
 
 fn bad_request(message: &str) -> Response {
@@ -235,5 +308,117 @@ mod tests {
         assert!(!rendered.contains("alice-secret-token"));
         assert!(!rendered.contains(principal.credential_hash()));
         assert!(rendered.contains("alice") && rendered.contains("users"));
+    }
+
+    /// The error helpers must carry their status codes.
+    ///
+    /// # What this catches
+    ///
+    /// Mutation run 31411280726, shard 18, replaced both `bad_request` and `server_error`
+    /// with `Default::default()` and no test noticed. A `Response` defaults to `200 OK`
+    /// with an empty body, so under those mutants every rejected admin request — an empty
+    /// name, an unparseable permission, a storage failure — answered **200 OK**.
+    ///
+    /// A client cannot distinguish that from success. It is the worst shape an error path
+    /// can take: the caller believes a principal was created when none was, or that a
+    /// revoke succeeded while the credential stays live.
+    ///
+    /// This surface was only mutated at all because #43 brought `prkdb-cli`'s
+    /// authorization files into scope; before that it had never been checked.
+    /// The audit record is emitted, and carries no credential.
+    ///
+    /// Diff mutation found `replace audit with ()` surviving — an audit function that
+    /// audits nothing, which is worse than having none: the operator believes there is a
+    /// record. Nothing had ever called it under a subscriber.
+    ///
+    /// The second assertion is the one that matters most. A log that leaks the thing it is
+    /// auditing ships the secret wherever logs are shipped, so this pins that neither the
+    /// credential nor its digest appears in the emitted fields.
+    #[test]
+    fn the_audit_record_is_emitted_and_carries_no_credential() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<String>>>);
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                struct Visit<'a>(&'a mut String);
+                impl tracing::field::Visit for Visit<'_> {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        self.0.push_str(&format!("{}={:?} ", field.name(), value));
+                    }
+                }
+                let mut line = String::new();
+                event.record(&mut Visit(&mut line));
+                self.0.lock().unwrap().push(line);
+            }
+        }
+
+        let capture = Capture::default();
+        let events = capture.0.clone();
+        let subscriber = tracing_subscriber::registry().with(capture);
+
+        let secret = "super-secret-credential";
+        let actor = Principal::admin("root", secret);
+
+        tracing::subscriber::with_default(subscriber, || {
+            audit(Some(&actor), "revoke", "victim", "revoked");
+        });
+
+        let captured = events.lock().unwrap().join("\n");
+        assert!(
+            !captured.is_empty(),
+            "no audit event was emitted; an audit function that records nothing is worse \
+             than none, because the operator believes there is a record"
+        );
+        assert!(
+            captured.contains("root"),
+            "the actor must be recorded: {captured}"
+        );
+        assert!(
+            captured.contains("revoke"),
+            "the operation must be recorded: {captured}"
+        );
+        assert!(
+            captured.contains("victim"),
+            "the target must be recorded: {captured}"
+        );
+
+        assert!(
+            !captured.contains(secret),
+            "the credential appeared in an audit record: {captured}"
+        );
+        assert!(
+            !captured.contains(actor.credential_hash()),
+            "the credential digest appeared in an audit record: {captured}"
+        );
+    }
+
+    #[test]
+    fn the_error_helpers_carry_their_status_codes() {
+        assert_eq!(
+            bad_request("nope").status(),
+            StatusCode::BAD_REQUEST,
+            "a rejected request must not answer 200; a client cannot tell that from success"
+        );
+        assert_eq!(
+            server_error("boom").status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a failed operation must not answer 200"
+        );
+
+        // And they are distinguishable from each other: a caller retries a 500 and fixes
+        // its input on a 400.
+        assert_ne!(bad_request("a").status(), server_error("b").status());
     }
 }

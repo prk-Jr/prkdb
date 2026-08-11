@@ -824,7 +824,7 @@ async fn test_snapshot_recovery() {
 /// 4. Verifies data integrity after stabilization
 ///
 /// This test simulates real production chaos scenarios.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs a built prkdb-server binary; runs in the gating chaos-tests workflow via --ignored. These drive process-level behaviour — crash, restart, log inspection via read_node_log — which is what TestCluster is for; the in-process harness deliberately cannot do it"]
 async fn test_chaos_monkey_continuous_load() {
     use rand::Rng;

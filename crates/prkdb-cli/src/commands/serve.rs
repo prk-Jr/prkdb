@@ -217,6 +217,11 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     // anyone who could reach the port.
     let store = prkdb::authz::PrincipalStore::new();
 
+    // Before the database is first opened: partition 0's state machine needs this exact
+    // cache, or a replicated principal reaches every node's storage and none of their
+    // `resolve` calls.
+    crate::database_manager::set_authz_store(store.clone());
+
     // Load first. Principals are persisted through the storage layer, so a restarted node
     // must recover the ones it already had — otherwise every restart would silently
     // revoke every credential and PRKDB_BOOTSTRAP_TOKEN would be required forever.
@@ -565,6 +570,7 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         db.start_multi_raft(rpc_pool, &[0]);
 
         let grpc_tls = tls.clone();
+        let grpc_rate_limit = args.rate_limit;
         tokio::spawn(async move {
             use prkdb::raft::grpc_service::PrkDbGrpcService;
             use prkdb::raft::rpc::prk_db_service_server::PrkDbServiceServer;
@@ -595,9 +601,20 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
             // interceptor sees Request<()> and cannot read the method name, so it could
             // not tell `Health` from `FetchSegment`. This closes spec S-01 on the gRPC
             // side — `fetch_segment` streams raw WAL segments and required no credential.
-            let mut builder = Server::builder().layer(
-                prkdb::raft::authz_interceptor::AuthzGrpcLayer::new(grpc_authz_store),
-            );
+            // Rate limiting outside authorization: a shed request should cost a token
+            // bucket check, not a credential comparison against every principal.
+            //
+            // Until now --rate-limit guarded the HTTP surface only, so the gRPC data
+            // plane — including FetchSegment, which streams raw WAL — had no limit and no
+            // in-flight bound. An operator passing the flag had every reason to think
+            // otherwise.
+            let mut builder = Server::builder()
+                .layer(tower::util::option_layer(grpc_rate_limit.map(
+                    prkdb::raft::grpc_rate_limit::GrpcRateLimitLayer::per_second,
+                )))
+                .layer(prkdb::raft::authz_interceptor::AuthzGrpcLayer::new(
+                    grpc_authz_store,
+                ));
             if let Some(t) = &grpc_tls {
                 match t.tonic_config() {
                     Ok(cfg) => match builder.tls_config(cfg) {
@@ -649,6 +666,28 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         // axum-server terminates TLS in front of the same tower service axum builds.
         // Its own graceful-shutdown handle differs from axum::serve's, so the flush runs
         // after the server returns rather than inside a shutdown future.
+        // Choose the crypto backend before rustls is asked to.
+        //
+        // Without this the listener binds, `serve` prints "TLS enabled" and "Server
+        // started successfully", and then **every HTTPS connection panics a worker
+        // thread**:
+        //
+        //     Could not automatically determine the process-level CryptoProvider
+        //     from Rustls crate features.
+        //
+        // rustls refuses to guess when it cannot see exactly one backend feature, and the
+        // dependency graph here exposes more than one. The process stays alive, so the
+        // operator sees a healthy-looking server that serves nothing over HTTPS — the
+        // S-02 shape again: a capability that is reachable, reports success, and does not
+        // work.
+        //
+        // The fix existed only in `prkdb/tests/peer_mtls.rs`, never in a shipped binary,
+        // because no test had ever made an HTTPS request to this listener.
+        //
+        // The error is ignored deliberately: a provider already installed is the desired
+        // state, and `install_default` fails precisely when one is.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
         let rustls = axum_server::tls_rustls::RustlsConfig::from_pem(t.read_cert()?, t.read_key()?)
             .await
             .context("building the HTTPS listener from --tls-cert/--tls-key")?;

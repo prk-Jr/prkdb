@@ -2,6 +2,7 @@ pub mod authz_interceptor;
 pub mod batch_config;
 pub mod command;
 pub mod config;
+pub mod grpc_rate_limit;
 pub mod grpc_service; // NEW: gRPC service for client data operations
 pub mod node;
 pub mod partition_manager;

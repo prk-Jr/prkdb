@@ -60,7 +60,7 @@ fn record_read(history: &OperationHistory, key: &[u8], value: Option<Vec<u8>>, s
 
 /// Acceptance 1: a history of linearizable reads interleaved with writes passes the
 /// checker.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn linearizable_reads_produce_a_linearizable_history() {
     let cluster = InProcessCluster::new(3).await.expect("cluster starts");
     cluster
@@ -100,7 +100,7 @@ async fn linearizable_reads_produce_a_linearizable_history() {
 /// A linearizable read must never return a value older than a write that has already been
 /// acknowledged to the client. This is read-your-writes, stated directly rather than via
 /// the checker, so a failure names the values involved.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_linearizable_read_never_precedes_an_acknowledged_write() {
     let cluster = InProcessCluster::new(3).await.expect("cluster starts");
     cluster
@@ -137,7 +137,7 @@ async fn a_linearizable_read_never_precedes_an_acknowledged_write() {
 /// which, because a stale read of the *pre-write* value is required, not merely a
 /// difference.
 #[cfg(feature = "chaos")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stale_read_can_lag_a_linearizable_one() {
     let cluster = InProcessCluster::new(3).await.expect("cluster starts");
     let leader = cluster
@@ -217,7 +217,7 @@ async fn a_stale_read_can_lag_a_linearizable_one() {
 /// leaves the impression that a stale read is permanently wrong rather than temporarily
 /// behind.
 #[cfg(feature = "chaos")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_isolated_node_catches_up_after_healing() {
     let cluster = InProcessCluster::new(3).await.expect("cluster starts");
     let leader = cluster
@@ -280,7 +280,7 @@ async fn an_isolated_node_catches_up_after_healing() {
 /// linearizability violation on roughly two runs in five. This test pins the specific
 /// mechanism so a regression names itself instead of showing up as a flaky checker.
 #[cfg(feature = "chaos")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_isolated_leader_refuses_a_linearizable_read() {
     let cluster = InProcessCluster::new(3).await.expect("cluster starts");
     let leader = cluster

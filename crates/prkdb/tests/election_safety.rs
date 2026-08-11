@@ -100,7 +100,7 @@ fn assert_no_violation(seen: &Observations) {
 }
 
 /// Baseline: a quiescent cluster settles on one leader and stays there.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn election_safety_holds_in_a_quiescent_cluster() {
     let cluster = Arc::new(InProcessCluster::new(3).await.expect("cluster starts"));
     cluster
@@ -127,7 +127,7 @@ async fn election_safety_holds_in_a_quiescent_cluster() {
 /// Requires `chaos`: `stop_node` simulates a crash by cutting the node off in both
 /// directions, and the fault injection that does so is compiled only under that feature.
 #[cfg(feature = "chaos")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn election_safety_holds_when_the_leader_is_lost() {
     let cluster = Arc::new(InProcessCluster::new(3).await.expect("cluster starts"));
     let first = cluster
@@ -172,7 +172,7 @@ async fn election_safety_holds_when_the_leader_is_lost() {
 /// This must **not** assert that only one leader exists at a time — that is legal and
 /// expected here. It asserts the terms differ.
 #[cfg(feature = "chaos")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn election_safety_holds_across_a_partition_and_heal() {
     let cluster = Arc::new(InProcessCluster::new(3).await.expect("cluster starts"));
     let old_leader = cluster
