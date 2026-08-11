@@ -4,6 +4,29 @@
 > what must be *observed*, not merely written — a task is done when the check it installs has
 > been seen to fail for the right reason and then pass.
 
+> **Status, 2026-08-11: Tasks 1–9 shipped.** Merged as #45, #46, #47, #48, #49 and #50.
+> Two items remain unticked in Task 10, and the "not in this plan" section below is
+> unchanged. This header exists because a plan whose boxes no longer match the repository
+> is the same defect the plan was written to expose — a document asserting a state the code
+> does not have.
+>
+> **Three of the four E1–E4 decisions were not decisions.** Reading the code answered them:
+> single-node already takes the local path because `main.rs` builds Raft options only with
+> `--peers`; bootstrap must stay local because it runs ~320 lines before Raft starts; and
+> `propose` already returned `NotLeader` immediately. Only E1 was open, and researching it
+> surfaced a fourth option the plan had not listed — letting principals hash like any other
+> key — which was rejected because availability would then depend on which partition a
+> *name* hashes to.
+>
+> **What the plan missed.** Task 5 said "principals in the state machine". That alone would
+> have shipped a revoke that reports success and revokes nothing, because `resolve` reads an
+> in-memory map loaded at startup. Replicating the durable write is half the job.
+>
+> **What following it turned up.** Task 7's HTTPS test found `--tls-cert` panicking a worker
+> on every connection while reporting success. Task 1's investigation found the cluster
+> suite starving itself on threads. The Task 10 mutation work found 11 survivors that were
+> unreachable code — a writer thread nothing ever sent to, spawned once per adapter.
+
 **Goal:** Close the gaps a verified audit found after the correctness-hardening effort shipped,
 without destabilising what that effort made trustworthy.
 
@@ -77,14 +100,14 @@ repository has spent a release removing — a red signal made to go away rather 
 The difference between a flaky test and a rare correctness bug is exactly what a linearizability
 suite exists to tell you.
 
-- [ ] Assert the partition is in force before the read, rather than assuming it: query the chaos
+- [x] Assert the partition is in force before the read, rather than assuming it: query the chaos
       rules and fail with a distinct message if the expected rules are absent
-- [ ] On failure, report the leader's term, whether it still believes itself leader, and how many
+- [x] On failure, report the leader's term, whether it still believes itself leader, and how many
       peer acks `confirm_leadership` collected — so the next occurrence distinguishes (1) from (2)
       without a re-run
-- [ ] Run the test 50× locally and 3× in CI; record the observed failure rate in the test's doc
+- [x] Run the test 50× locally and 3× in CI; record the observed failure rate in the test's doc
       comment, even if it is 0
-- [ ] If a failure reproduces, follow it to a root cause before closing this task
+- [x] If a failure reproduces, follow it to a root cause before closing this task
 
 **Acceptance:** a future failure of this test is diagnosable from its own output alone.
 
@@ -118,11 +141,11 @@ spec says "would otherwise be found in production."
 The neighbouring steps at `chaos-tests.yml:117,120,123` *do* pass `--features chaos`. This was a
 miss, not a decision.
 
-- [ ] Add `--features chaos` to the `jepsen_consistency_tests` step
-- [ ] Add a step running `peer_authz` with `--features chaos`
-- [ ] **Run each 10× before merging.** A test executing for the first time in its life may fail,
+- [x] Add `--features chaos` to the `jepsen_consistency_tests` step
+- [x] Add a step running `peer_authz` with `--features chaos`
+- [x] **Run each 10× before merging.** A test executing for the first time in its life may fail,
       and it must not first do so as a required check blocking an unrelated PR
-- [ ] If either fails, treat it as a finding and fix the cause — do not disable it again
+- [x] If either fails, treat it as a finding and fix the cause — do not disable it again
 
 **Acceptance:** both tests appear in CI output and have been observed to pass repeatedly.
 
@@ -142,10 +165,10 @@ reports `55/55 complete` while two named acceptance tests have never executed.
 There are eight chaos-gated tests across six files. Six are named by a workflow step. Two are not,
 and nothing in the repository would tell you which.
 
-- [ ] Add a check enumerating every test function under `#[cfg(feature = "chaos")]`
-- [ ] Assert each containing file is named by a workflow step that passes `--features chaos`
-- [ ] Fail with the specific file and test name, not a count
-- [ ] Verify it fails when the `--features chaos` is removed from one step, then passes
+- [x] Add a check enumerating every test function under `#[cfg(feature = "chaos")]`
+- [x] Assert each containing file is named by a workflow step that passes `--features chaos`
+- [x] Fail with the specific file and test name, not a count
+- [x] Verify it fails when the `--features chaos` is removed from one step, then passes
 
 **Acceptance:** removing `--features chaos` from any step turns the check red.
 
@@ -164,11 +187,11 @@ instead of the code.
   round-trip over an in-memory `Vec`. It never touches `handle_install_snapshot`, yet its doc
   comment cites the spec's §6 abort criterion, which makes it read as coverage it does not provide.
 
-- [ ] Rewrite the module doc to state what is actually true: each node persists its own principals
+- [x] Rewrite the module doc to state what is actually true: each node persists its own principals
       locally and reloads them on restart; there is no cross-node replication yet
-- [ ] Rename the test to describe what it tests (serde round-trip), or extend it to genuinely
+- [x] Rename the test to describe what it tests (serde round-trip), or extend it to genuinely
       exercise `handle_install_snapshot`
-- [ ] Cross-reference Task 5 so the limitation is discoverable
+- [x] Cross-reference Task 5 so the limitation is discoverable
 
 **Acceptance:** no doc comment or test name in `authz/` asserts replication that does not exist.
 
@@ -194,15 +217,15 @@ cross-node divergence, not credential loss. That is materially less bad than the
 
 Requires **E1–E4** answered first.
 
-- [ ] `Command::UpsertPrincipal` / `Command::RevokePrincipal` in the state machine
-- [ ] Route admin writes through the proposal path when clustered; keep the local path for
+- [x] `Command::UpsertPrincipal` / `Command::RevokePrincipal` in the state machine
+- [x] Route admin writes through the proposal path when clustered; keep the local path for
       single-node (E3)
-- [ ] Include the authz keyspace in `snapshot` and `handle_install_snapshot`
-- [ ] **A cross-node test**: create a principal on node 1, authenticate with it on node 2; revoke
+- [x] Include the authz keyspace in `snapshot` and `handle_install_snapshot`
+- [x] **A cross-node test**: create a principal on node 1, authenticate with it on node 2; revoke
       on node 1, confirm node 2 refuses it. No such test exists — `grep principal
       crates/prkdb/tests/*.rs` returns nothing cluster-scoped
-- [ ] A snapshot test that installs a snapshot and confirms principals arrive with it
-- [ ] Verify by reverting the replication and observing both new tests fail
+- [x] A snapshot test that installs a snapshot and confirms principals arrive with it
+- [x] Verify by reverting the replication and observing both new tests fail
 
 **Acceptance:** a credential revoked on one node is refused on every node.
 
@@ -220,10 +243,10 @@ Neither existing check catches it: `scripts/plan_status.sh:117-122` scans only `
 comments and matches only the literal `ops/sec`, so "queries/sec" in a README passes both filters.
 `xtask/src/repo_status/collectors/docs.rs:33-63` only checks the Kafka caveat string.
 
-- [ ] Link every README performance figure to the methodology page, or delete it
-- [ ] Extend the drift collector to fail on an unlinked performance claim in `README.md` (R15.3,
+- [x] Link every README performance figure to the methodology page, or delete it
+- [x] Extend the drift collector to fail on an unlinked performance claim in `README.md` (R15.3,
       currently NOT STARTED)
-- [ ] Verify the collector fails on a planted unlinked claim
+- [x] Verify the collector fails on a planted unlinked claim
 
 **Effort:** 2–4 hours. **Independent.**
 
@@ -240,8 +263,8 @@ The Raft half **is** covered — `crates/prkdb/tests/peer_mtls.rs` drives `RpcCl
 a plaintext pool fails against a TLS listener. The HTTP half has no equivalent. This is the
 S-02/S-10 shape the spec warns about twice: a capability exercised on the side that works.
 
-- [ ] Serve over HTTPS, complete a real request, assert plaintext is refused
-- [ ] Verify by pointing the client at `http://` and observing the failure
+- [x] Serve over HTTPS, complete a real request, assert plaintext is refused
+- [x] Verify by pointing the client at `http://` and observing the failure
 
 **Effort:** 3–6 hours. **Independent.**
 
@@ -254,9 +277,9 @@ S-02/S-10 shape the spec warns about twice: a capability exercised on the side t
 "suppress rather than fix" outcome R10's note said not to take. Two HTTP stacks, two TLS
 configurations, two CVE surfaces.
 
-- [ ] Hoist reqwest into `[workspace.dependencies]` at 0.12
-- [ ] Fix the CLI's `blocking` feature usage
-- [ ] Tighten `deny.toml` once the duplicate is gone
+- [x] Hoist reqwest into `[workspace.dependencies]` at 0.12
+- [x] Fix the CLI's `blocking` feature usage
+- [x] Tighten `deny.toml` once the duplicate is gone
 
 **Effort:** 2–4 hours. **Independent.**
 
@@ -268,9 +291,9 @@ No record of who performed which admin operation. This got cheaper and more valu
 spec: there are now named principals, and `crates/prkdb-cli/src/admin_principals.rs` is a live
 credential-minting surface with no log of who used it.
 
-- [ ] Log principal name, operation, target, and outcome for every admin mutation
-- [ ] Never log the credential or its digest
-- [ ] Test that a denied attempt is logged as well as a permitted one
+- [x] Log principal name, operation, target, and outcome for every admin mutation
+- [x] Never log the credential or its digest
+- [x] Test that a denied attempt is logged as well as a permitted one
 
 **Effort:** 0.5–1 day. **Independent.**
 
@@ -278,13 +301,13 @@ credential-minting surface with no log of who used it.
 
 ## Task 10: Smaller items
 
-- [ ] **gRPC backpressure (P11).** `RateLimiter` is wired only as an axum layer
+- [x] **gRPC backpressure (P11).** `RateLimiter` is wired only as an axum layer
       (`crates/prkdb-cli/src/probes.rs:113`). The gRPC data plane — including `fetch_segment`,
       which streams raw WAL — has no rate limit and no in-flight bound.
 - [ ] **Upgrade path (P10).** The prerequisite landed (`log_segment.rs:13,17` define
       `PRKDB_WAL_MAGIC` and `FORMAT_VERSION`, and refuse a future version), but no rolling-upgrade
       procedure or compatibility policy exists in `docs/`.
-- [ ] **Stale exemption.** `scripts/check_wrapper_completeness.sh:56` still exempts
+- [x] **Stale exemption.** `scripts/check_wrapper_completeness.sh:56` still exempts
       `get_changes_since`, which `collection_partitioned_adapter.rs:702` now implements. The check
       silently skips a method it would pass, weakening what it attests.
 - [ ] **`plan_status.sh` file-existence checks.** Nine checks are `test -f <path>`. The script's
