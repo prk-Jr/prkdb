@@ -30,11 +30,30 @@ pub trait StateMachine: Send + Sync {
 /// PrkDB implementation of the State Machine
 pub struct PrkDbStateMachine {
     storage: Arc<WalStorageAdapter>,
+    /// The node's live authorization cache, when this partition owns the authz keyspace.
+    ///
+    /// `None` for every other partition, and for embedded use where no server is
+    /// authenticating anyone.
+    authz: Option<crate::authz::PrincipalStore>,
 }
 
 impl PrkDbStateMachine {
     pub fn new(storage: Arc<WalStorageAdapter>) -> Self {
-        Self { storage }
+        Self {
+            storage,
+            authz: None,
+        }
+    }
+
+    /// Give this partition the authorization cache to keep coherent.
+    ///
+    /// Set only on the partition that owns the authz keyspace. Authentication reads
+    /// `PrincipalStore`'s in-memory map, so replicating the durable write alone would
+    /// leave every follower answering from the map it loaded at startup — a revoke on one
+    /// node would not revoke anything anywhere else.
+    pub fn with_authz(mut self, store: crate::authz::PrincipalStore) -> Self {
+        self.authz = Some(store);
+        self
     }
 }
 
@@ -91,6 +110,52 @@ impl StateMachine for PrkDbStateMachine {
                         .put(&metadata_key, &metadata_value)
                         .await
                         .map_err(StateMachineError::Storage)?;
+                }
+                Command::UpsertPrincipal { name, encoded } => {
+                    tracing::info!("Applying UpsertPrincipal: name={}", name);
+
+                    // Durable copy first, under the same key `PrincipalStore::persist`
+                    // uses, so a node that reloads from storage sees exactly this.
+                    let key = crate::authz::principal_key(&name);
+                    self.storage
+                        .put(&key, &encoded)
+                        .await
+                        .map_err(StateMachineError::Storage)?;
+
+                    // Then the live cache, which is what `resolve` actually reads.
+                    if let Some(store) = &self.authz {
+                        match serde_json::from_slice::<crate::authz::Principal>(&encoded) {
+                            Ok(principal) => store.apply_replicated_upsert(principal),
+                            Err(e) => {
+                                // Refuse rather than continue: a principal whose grants
+                                // cannot be read is one whose authority is unknown, and
+                                // applying half of it diverges this node from the log.
+                                return Err(StateMachineError::Serialization(format!(
+                                    "replicated principal {name} is unreadable: {e}"
+                                )));
+                            }
+                        }
+                    }
+                }
+                Command::RevokePrincipal { name } => {
+                    tracing::info!("Applying RevokePrincipal: name={}", name);
+
+                    let key = crate::authz::principal_key(&name);
+                    self.storage
+                        .delete(&key)
+                        .await
+                        .map_err(StateMachineError::Storage)?;
+
+                    if let Some(store) = &self.authz {
+                        if !store.apply_replicated_revoke(&name) {
+                            // Not an error: the log is authoritative and the end state is
+                            // the same. Logged because it means this node did not have the
+                            // principal the leader did.
+                            tracing::warn!(
+                                "RevokePrincipal {name} matched nothing in the local cache"
+                            );
+                        }
+                    }
                 }
                 Command::DropCollection { name } => {
                     tracing::info!("Applying DropCollection command: name={}", name);

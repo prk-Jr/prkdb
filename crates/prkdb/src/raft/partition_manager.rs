@@ -22,7 +22,6 @@ pub struct PartitionManager {
     storage_adapters: HashMap<u64, Arc<WalStorageAdapter>>,
 
     /// State machine per partition
-    #[allow(dead_code)]
     state_machines: HashMap<u64, Arc<dyn StateMachine>>,
 
     /// Leader status per partition
@@ -251,6 +250,17 @@ impl PartitionManager {
     /// Get a specific partition's storage adapter by ID
     pub fn get_partition_storage(&self, partition_id: u64) -> Option<Arc<WalStorageAdapter>> {
         self.storage_adapters.get(&partition_id).cloned()
+    }
+
+    /// The state machine driving a partition.
+    ///
+    /// Exposed so a test can apply a command to a partition directly, without electing a
+    /// leader first. That distinction matters for the authorization wiring: whether
+    /// partition 0 was handed the principal cache is a property of construction, and
+    /// requiring a live election to observe it would make the check slower and flakier
+    /// without making it stronger.
+    pub fn get_state_machine(&self, partition_id: u64) -> Option<Arc<dyn StateMachine>> {
+        self.state_machines.get(&partition_id).cloned()
     }
 
     /// Get total number of partitions

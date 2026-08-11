@@ -91,10 +91,11 @@ impl DatabaseManager {
                     ..Default::default()
                 };
 
-                let db = PrkDb::new_multi_raft(
+                let db = PrkDb::new_multi_raft_with_authz(
                     raft_opts.num_partitions,
                     config,
                     std::path::PathBuf::from(&self.database_path),
+                    AUTHZ_STORE.get().cloned(),
                 )?;
 
                 *conn_guard = Some(db);
@@ -171,6 +172,22 @@ impl DatabaseManager {
 static DB_MANAGER: OnceLock<DatabaseManager> = OnceLock::new();
 
 /// Initialize the global database manager
+/// The authorization cache partition 0's state machine keeps coherent.
+///
+/// Set by `serve` before the database is first opened. It exists as a static because the
+/// database is built lazily on first use, after the store has been created — threading it
+/// through `init_database_manager` would mean constructing the store in `main` before
+/// anything knows whether this is a server at all.
+static AUTHZ_STORE: std::sync::OnceLock<prkdb::authz::PrincipalStore> = std::sync::OnceLock::new();
+
+/// Hand the authorization cache to the database that is about to be opened.
+///
+/// Must be called before the first `get_db_instance()`. A later call is ignored, which is
+/// the safe direction: the cache in use stays the one the state machine holds.
+pub fn set_authz_store(store: prkdb::authz::PrincipalStore) {
+    let _ = AUTHZ_STORE.set(store);
+}
+
 pub fn init_database_manager(database_path: impl AsRef<Path>, raft_options: Option<RaftOptions>) {
     let _ = DB_MANAGER.set(DatabaseManager::new(database_path, raft_options));
 }
@@ -198,4 +215,43 @@ pub async fn scan_storage() -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
 /// Helper function to get database instance directly
 pub async fn get_db_instance() -> Result<PrkDb> {
     try_get_database_manager()?.get_db_instance().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `set_authz_store` actually stores something.
+    ///
+    /// `replace set_authz_store with ()` survived: a setter that sets nothing. The
+    /// database would then be built with `AUTHZ_STORE.get()` returning `None`, partition 0
+    /// would get no cache, and every replicated principal change would reach storage and
+    /// no node's `resolve` — silently, because nothing else reads this static.
+    ///
+    /// The first-call-wins behaviour is asserted too. It is deliberate: the cache in use
+    /// must stay the one the state machine was handed, so a later call cannot swap it out
+    /// from under a running node.
+    #[test]
+    fn set_authz_store_stores_the_first_cache_it_is_given() {
+        let first = prkdb::authz::PrincipalStore::new();
+        first.insert(prkdb::authz::Principal::admin("first", "first-cred"));
+        set_authz_store(first);
+
+        let stored = AUTHZ_STORE
+            .get()
+            .expect("set_authz_store must actually store the cache");
+        assert!(
+            stored.resolve("first-cred").is_some(),
+            "the stored cache is not the one that was handed over"
+        );
+
+        // A later call is ignored rather than replacing it.
+        let second = prkdb::authz::PrincipalStore::new();
+        second.insert(prkdb::authz::Principal::admin("second", "second-cred"));
+        set_authz_store(second);
+        assert!(
+            AUTHZ_STORE.get().unwrap().resolve("second-cred").is_none(),
+            "a later call replaced the cache the state machine already holds"
+        );
+    }
 }
