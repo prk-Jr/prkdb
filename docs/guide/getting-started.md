@@ -18,20 +18,53 @@ cargo build --release
 
 ## Start a Local Server
 
-For a single-node development setup with the HTTP API, start `prkdb-cli serve` on port `8080` and its companion gRPC endpoint on `50051`:
+PrkDB refuses to serve without authorization. You must either create an admin
+credential or opt out explicitly — starting with neither is an error, not a default:
 
-```bash
-cargo run -p prkdb-cli -- serve --host 127.0.0.1 --port 8080 --grpc-port 50051
+```
+No principals are configured. Set PRKDB_BOOTSTRAP_TOKEN to create an admin
+principal, or pass --allow-anonymous to serve without authorization
+(development only).
 ```
 
-For a production-style single-node server, run the canonical `prkdb-server` binary on one gRPC port:
+That is deliberate. Every `/collections` route reads and writes your data, so a server
+that starts unauthenticated by default is one that ships that way by accident.
+
+### Development: no authorization
+
+```bash
+cargo run -p prkdb-cli -- serve --host 127.0.0.1 --port 8080 --grpc-port 50051 \
+  --allow-anonymous
+```
+
+`--allow-anonymous` makes every collection readable and writable by anyone who can reach
+the port, and the server says so loudly at startup. Use it on a loopback interface, never
+on a routable one.
+
+### With a credential
+
+```bash
+PRKDB_BOOTSTRAP_TOKEN=choose-a-strong-secret \
+  cargo run -p prkdb-cli -- serve --host 127.0.0.1 --port 8080 --grpc-port 50051
+```
+
+That mints a single admin principal on first start. It is ignored once any principal
+exists, so a restart cannot quietly create a second way in. Pass the same value as
+`--credential` to the CLI, or `Authorization: Bearer <token>` over HTTP.
+
+See [Authorization](./security.md) for principals, roles, and per-collection grants.
+
+For a production-style single-node server, run the canonical `prkdb-server` binary:
 
 ```bash
 NODE_ID=1 \
 CLUSTER_NODES=1@127.0.0.1:8080 \
 STORAGE_PATH=/tmp/prkdb-node1 \
+PRKDB_BOOTSTRAP_TOKEN=choose-a-strong-secret \
 cargo run -p prkdb --bin prkdb-server
 ```
+
+`prkdb-server` applies the same rule, with `PRKDB_ALLOW_ANONYMOUS=1` as its opt-out.
 
 You can also start the example 3-node Raft cluster with:
 
@@ -53,6 +86,11 @@ curl http://127.0.0.1:8080/health
 
 ```bash
 # `prkdb-cli serve` exposes gRPC on --grpc-port (50051 by default)
+#
+# Against a server started with a bootstrap token, pass the credential. Without it the
+# call fails while fetching cluster metadata, which needs Read like any other request:
+#     PRKDB_CREDENTIAL=choose-a-strong-secret
+
 # Write a value
 cargo run -p prkdb-cli -- put my-key "Hello PrkDB" --server http://127.0.0.1:50051
 
@@ -123,7 +161,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Schema Registry
 
-Schema registration and schema listing are admin operations. Set `PRKDB_ADMIN_TOKEN` before using.
+Schema registration and listing require `Admin`. Set `PRKDB_CREDENTIAL` (or the deprecated
+`PRKDB_ADMIN_TOKEN`) before using — see [Security & Operations](./security.md).
 
 Use `http://127.0.0.1:8080` when talking to `prkdb-server`, or `http://127.0.0.1:50051` when talking to the gRPC endpoint that `prkdb-cli serve` exposes locally.
 

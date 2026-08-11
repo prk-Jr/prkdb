@@ -57,8 +57,12 @@ impl TestServer {
             if client.get(&health_url).send().await.is_ok() {
                 break;
             }
-            if attempts > 30 {
-                panic!("Server failed to start after 3 seconds");
+            // 30s, not 3. Three seconds is enough on a developer machine and not under
+            // llvm-cov instrumentation on a shared runner, which is where this failed —
+            // the Coverage job runs the whole workspace instrumented. The other harnesses
+            // in this repository allow 15-30s for the same reason.
+            if attempts > 300 {
+                panic!("Server failed to start after 30 seconds");
             }
             sleep(Duration::from_millis(100)).await;
             attempts += 1;
@@ -74,8 +78,8 @@ impl TestServer {
                 break;
             }
 
-            if grpc_attempts > 30 {
-                panic!("gRPC server failed to start after 3 seconds");
+            if grpc_attempts > 300 {
+                panic!("gRPC server failed to start after 30 seconds");
             }
 
             sleep(Duration::from_millis(100)).await;

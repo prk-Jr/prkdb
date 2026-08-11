@@ -6,12 +6,12 @@ PrkDB can generate TypeScript, Python, and Go client code from schemas stored in
 
 - A running PrkDB gRPC endpoint
 - Registered schemas in the schema registry
-- `PRKDB_ADMIN_TOKEN` if the server protects schema listing
+- `PRKDB_CREDENTIAL` if the server enforces authorization (`PRKDB_ADMIN_TOKEN` still works, deprecated)
 
 ## Generate Code
 
 ```bash
-export PRKDB_ADMIN_TOKEN=change-me
+export PRKDB_CREDENTIAL=change-me   # or PRKDB_ADMIN_TOKEN, deprecated
 
 # TypeScript
 prkdb codegen --server http://127.0.0.1:50051 --lang typescript --out ./generated/ts

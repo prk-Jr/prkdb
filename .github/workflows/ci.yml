@@ -356,6 +356,7 @@ jobs:
       - name: Chaos-gated tests are run
         run: bash scripts/check_chaos_tests_run.sh
 
+
   nightly-slow-tests:
     name: Nightly Slow Tests
     runs-on: ubuntu-latest
@@ -434,6 +435,32 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace
+
+      # Needs the binary, so it lives here rather than with the other discipline checks:
+      # `ignore-discipline` installs no protoc, and building prkdb-cli there failed with
+      # "Could not find `protoc`". This job already has it and a warm workspace.
+      #
+      # The guide against the shipped binary. Every other check verifies code against code;
+      # the documentation is the one artefact users read and the only one nothing covered.
+      # `serve` was changed to refuse starting without authorization while
+      # getting-started.md went on telling readers to run it without any — the first command
+      # in the docs failed, and every check stayed green.
+      # Every discipline check must be shown to fail before its pass is believed.
+      #
+      # A check that cannot fail is indistinguishable from one that passes, and this
+      # repository has shipped several: a linearizability checker that accepted any
+      # history, five property tests that discarded the Err signalling failure, a required
+      # status check that could never report. `scripts/check_*.sh` are the same kind of
+      # artefact and were held to a weaker standard than the tests they police.
+      #
+      # This points each guard at a known-bad fixture and fails if the guard is content,
+      # then confirms each still accepts the real repository — a guard that always fails
+      # would otherwise "reject" every fixture and look correct.
+      - name: Guards can fail
+        run: bash scripts/check_guards_fail.sh
+
+      - name: Docs cover the CLI
+        run: bash scripts/check_docs_cover_cli.sh
 
   fmt:
     name: Format

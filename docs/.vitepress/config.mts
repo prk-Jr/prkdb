@@ -22,6 +22,7 @@ export default defineConfig({
         text: 'Introduction',
         items: [
           { text: 'Getting Started', link: '/guide/getting-started' },
+          { text: 'Security & Operations', link: '/guide/security' },
           { text: 'Roadmap', link: '/guide/roadmap' },
           { text: 'Deployment', link: '/guide/deployment' },
         ],

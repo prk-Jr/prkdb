@@ -31,7 +31,10 @@ R=$'\e[31m'; G=$'\e[32m'; D=$'\e[2m'; N=$'\e[0m'
 failed=0
 
 # Files that contain at least one chaos-gated test function.
-mapfile -t gated < <(grep -rl '#\[cfg(feature = "chaos")\]' crates/*/tests/*.rs 2>/dev/null | sort)
+# PRKDB_TEST_GLOB / PRKDB_WORKFLOW_GLOB let check_guards_fail.sh point this at a fixture
+# and confirm it rejects a chaos-gated test no workflow runs. Both default to the real
+# paths.
+mapfile -t gated < <(grep -rl '#\[cfg(feature = "chaos")\]' ${PRKDB_TEST_GLOB:-crates/*/tests/*.rs} 2>/dev/null | sort)
 
 if [[ ${#gated[@]} -eq 0 ]]; then
   echo "  ${R}✗${N} no chaos-gated tests found at all — this check has lost its target"
@@ -45,7 +48,7 @@ for path in "${gated[@]}"; do
   # A workflow must run this test binary *with* the feature. Matching the binary name
   # rather than the file path, because that is how cargo is invoked.
   if grep -rqE -- "--features chaos[^|&]*--test $base\b|--test $base\b[^|&]*--features chaos" \
-      .github/workflows/*.yml; then
+      ${PRKDB_WORKFLOW_GLOB:-.github/workflows/*.yml}; then
     printf '  %s✓%s %-32s %s%s gated test(s), run with --features chaos%s\n' \
       "$G" "$N" "$base" "$D" "$count" "$N"
   else
