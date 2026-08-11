@@ -330,6 +330,14 @@ jobs:
       - name: Ignore reasons
         run: bash scripts/check_ignore_reasons.sh
 
+      # The same rule for feature-gated tests, which hide more thoroughly than #[ignore]
+      # does: an ignored test still appears in `cargo test -- --list` as `ignored`, while a
+      # cfg-gated one is not in the binary at all. Two acceptance tests named in the spec —
+      # the partition register test that found S-06, and the peer-auth cluster test — were
+      # correct, committed, and had never executed, while plan_status.sh reported 55/55.
+      - name: Chaos-gated tests are run
+        run: bash scripts/check_chaos_tests_run.sh
+
   nightly-slow-tests:
     name: Nightly Slow Tests
     runs-on: ubuntu-latest
