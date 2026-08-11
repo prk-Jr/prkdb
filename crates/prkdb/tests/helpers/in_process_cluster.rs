@@ -28,6 +28,26 @@
 //! Each cluster therefore takes a disjoint block of node ids from a process-wide counter,
 //! and all clusters share one rules file that each filters by its own ids. `RpcClientPool`
 //! matches rules against its own `local_node_id`, so the sharing is safe.
+//!
+//! # Thread pressure
+//!
+//! Cluster tests run `#[tokio::test(worker_threads = 4)]`, not 8. A test binary runs its
+//! tests concurrently, so sixteen cluster tests at eight workers each asks one process for
+//! well over a hundred threads to drive forty-eight Raft nodes. Commits then miss
+//! `wait_commit`'s ten-second deadline and the test reports "write did not commit after 3
+//! attempts" — a resource failure wearing the costume of a consensus bug.
+//!
+//! Measured on `read_consistency_modes` (sixteen tests):
+//!
+//! | configuration | failures |
+//! |---|---|
+//! | 8 workers, default parallelism | 2 / 12 |
+//! | 8 workers, `--test-threads=4` | 0 / 18 |
+//! | 4 workers, default parallelism | 0 / 12 |
+//!
+//! Four is chosen over capping `--test-threads` because it is a property of the tests
+//! rather than of how they happen to be invoked, so it holds locally too. A three-node
+//! in-process cluster does not need eight.
 
 #![allow(dead_code)]
 
@@ -93,7 +113,26 @@ impl ChaosControl {
         }
         let flat: Vec<&serde_json::Value> = guard.values().flatten().collect();
         let json = serde_json::to_vec(&flat).expect("chaos rules serialize");
-        std::fs::write(&self.path, json).expect("write chaos rules");
+
+        // Write-then-rename, because `fs::write` truncates before it writes and
+        // `check_chaos` reads this file on **every** peer RPC.
+        //
+        // A reader landing inside that window saw an empty or partial file,
+        // `serde_json::from_str` failed, and `check_chaos`'s `if let Ok(..)` swallowed the
+        // error — so no rules applied and the partition silently ceased to exist for that
+        // RPC. An isolated leader then collected a majority of heartbeat acks, confirmed
+        // leadership, and served a ReadIndex it had no right to serve.
+        //
+        // That is how a *harness* bug presents as a linearizability violation. It failed
+        // roughly one run in six with this file's sixteen tests running concurrently, and
+        // zero times in twenty runs of the single test alone — concurrency is required,
+        // because it needs one thread writing while another reads.
+        //
+        // `rename` within a directory is atomic on POSIX, so a reader now sees either the
+        // complete old file or the complete new one.
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, json).expect("write chaos rules");
+        std::fs::rename(&tmp, &self.path).expect("publish chaos rules atomically");
     }
 }
 

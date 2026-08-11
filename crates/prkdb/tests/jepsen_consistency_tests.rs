@@ -30,7 +30,7 @@ use tokio::time::sleep;
 /// `a_replicated_register_is_linearizable` below for that.
 ///
 /// Kept because it still covers something real: the adapter's own read/write concurrency.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_single_adapter_serves_a_linearizable_register() {
     let dir = tempfile::tempdir().unwrap();
     let config = WalConfig {
@@ -171,7 +171,7 @@ async fn a_single_adapter_serves_a_linearizable_register() {
 /// 2. Spawn concurrent transfer workers
 /// 3. Periodically check total balance invariant
 /// 4. Verify final total matches initial total
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_bank_transfer_invariant() {
     let num_accounts = 10;
     let initial_balance = 1000i64;
@@ -364,7 +364,7 @@ async fn test_monotonic_reads() {
 /// 2. N workers each increment counter M times through serializable transactions
 /// 3. Conflicting increments retry until they commit
 /// 4. Final value should equal N * M
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_lost_update_detection() {
     let dir = tempfile::tempdir().unwrap();
     let config = WalConfig {
@@ -697,7 +697,7 @@ async fn drive_register(cluster: &InProcessCluster, rounds: u32, rec: &Recorder)
 }
 
 /// The register is linearizable when replicated across three nodes.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_replicated_register_is_linearizable() {
     let cluster = InProcessCluster::new(3).await.expect("cluster starts");
     cluster
@@ -731,7 +731,7 @@ async fn a_replicated_register_is_linearizable() {
 /// recorded as errors, which the checker treats as indeterminate — they may or may not
 /// have committed, and a history is linearizable if *some* choice for each works out.
 #[cfg(feature = "chaos")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_replicated_register_is_linearizable_across_a_partition() {
     let cluster = InProcessCluster::new(3).await.expect("cluster starts");
     let old_leader = cluster

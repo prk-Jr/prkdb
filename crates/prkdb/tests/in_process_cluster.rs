@@ -16,7 +16,7 @@ use helpers::in_process_cluster::{InProcessCluster, ReadConsistency};
 use std::time::Duration;
 
 /// The whole point: a working cluster with no child processes and no prebuilt binary.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn in_process_cluster_elects_a_leader() {
     let cluster = InProcessCluster::new(3).await.expect("cluster starts");
 
@@ -40,7 +40,7 @@ async fn in_process_cluster_elects_a_leader() {
 
 /// A committed write reaches every node. Without this the election test alone would pass
 /// against a cluster that elects a leader and then replicates nothing.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_committed_write_replicates_to_every_node() {
     let cluster = InProcessCluster::new(3).await.expect("cluster starts");
     cluster
@@ -67,7 +67,7 @@ async fn a_committed_write_replicates_to_every_node() {
 /// Two clusters in one process must not interfere. This is the property that makes the
 /// per-cluster node-id blocks worth their complexity: the shared `CHAOS_CONFIG_PATH` would
 /// otherwise let one cluster's partition rules sever the other's links.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_clusters_coexist_in_one_process() {
     let a = InProcessCluster::new(3)
         .await
@@ -96,7 +96,7 @@ async fn two_clusters_coexist_in_one_process() {
 }
 
 /// A stale read is served without coordination, so it must work with no leader at all.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stale_read_needs_no_leader() {
     let cluster = InProcessCluster::new(3).await.expect("cluster starts");
     cluster
@@ -126,7 +126,7 @@ mod partitions {
     /// arbitrary node leaves the leader on the majority side about two thirds of the time,
     /// and then `leader_among(majority)` is already satisfied before any re-election
     /// happens — the test passes in milliseconds having exercised nothing.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_partition_leaves_the_majority_with_a_leader() {
         let cluster = InProcessCluster::new(3).await.expect("cluster starts");
         let old_leader = cluster

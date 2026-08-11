@@ -21,7 +21,7 @@ use helpers::in_process_cluster::InProcessCluster;
 use std::time::Duration;
 
 /// Exactly one leader, in exactly one term.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_three_node_cluster_elects_exactly_one_leader() {
     let cluster = InProcessCluster::new(3).await.expect("cluster starts");
 
@@ -47,7 +47,7 @@ async fn a_three_node_cluster_elects_exactly_one_leader() {
 /// The previous version treated a failed `propose` as acceptable and printed it. Commit is
 /// the property that matters: a proposal that is appended locally and never replicated is
 /// indistinguishable from a lost write.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_proposal_commits_and_replicates() {
     let cluster = InProcessCluster::new(3).await.expect("cluster starts");
     cluster
@@ -73,7 +73,7 @@ async fn a_proposal_commits_and_replicates() {
 
 /// Writes to different keys all commit and are all visible. Guards against a routing bug
 /// that would silently drop everything but the first key.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn many_keys_all_commit() {
     let cluster = InProcessCluster::new(3).await.expect("cluster starts");
     cluster

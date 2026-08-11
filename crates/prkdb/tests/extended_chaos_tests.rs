@@ -81,7 +81,7 @@ async fn test_asymmetric_partition() {
 /// 1. Start continuous write workload
 /// 2. Simulate "restart" by recreating storage adapter
 /// 3. Verify all acknowledged writes are durable
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_rolling_restart_no_data_loss() {
     let base_dir = tempfile::tempdir().unwrap();
     let config = WalConfig {
@@ -163,7 +163,7 @@ async fn test_rolling_restart_no_data_loss() {
 /// 1. Add reordering rule with high variance
 /// 2. Write sequential data from multiple threads
 /// 3. Verify final state is consistent
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_message_reordering() {
     let sim = NetworkSimulator::new(None);
 
