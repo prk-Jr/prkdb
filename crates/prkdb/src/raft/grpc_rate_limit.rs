@@ -149,6 +149,79 @@ mod tests {
         }
     }
 
+    /// Drive `call` itself, not just its two ingredients.
+    ///
+    /// Diff mutation found `sheddable && !acquired` surviving both `&&` -> `||` and a
+    /// deleted `!`. The unit tests above check `is_sheddable` and the limiter separately,
+    /// and neither notices how they are combined:
+    ///
+    ///   `||`         sheds a client call whenever a token *is* available, and sheds
+    ///                Health once the bucket empties — the exemption is gone
+    ///   deleted `!`  sheds only while tokens remain and passes everything once the
+    ///                bucket is empty, which is the limiter backwards
+    ///
+    /// Only exercising the composed path distinguishes them.
+    #[tokio::test]
+    async fn call_sheds_client_traffic_and_never_health() {
+        use tower_service::Service;
+
+        // An inner service that records how many requests reached it.
+        #[derive(Clone)]
+        struct Inner(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl Service<http::Request<()>> for Inner {
+            type Response = http::Response<tonic::body::BoxBody>;
+            type Error = std::convert::Infallible;
+            type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+            fn poll_ready(
+                &mut self,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Result<(), Self::Error>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+            fn call(&mut self, _: http::Request<()>) -> Self::Future {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::future::ready(Ok(tonic::Status::ok("").into_http()))
+            }
+        }
+
+        let reached = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut svc = GrpcRateLimitService {
+            inner: Inner(reached.clone()),
+            limiter: Arc::new(RateLimiter::per_second(2)),
+        };
+
+        let req = |path: &str| {
+            http::Request::builder()
+                .uri(format!("http://x{path}"))
+                .body(())
+                .unwrap()
+        };
+        let put = format!("{CLIENT_SERVICE_PREFIX}Put");
+
+        // Two client calls fit in the bucket and reach the inner service.
+        svc.call(req(&put)).await.unwrap();
+        svc.call(req(&put)).await.unwrap();
+        assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        // The third is shed, and never reaches the inner service.
+        svc.call(req(&put)).await.unwrap();
+        assert_eq!(
+            reached.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a call past the limit reached the inner service; nothing is being shed"
+        );
+
+        // Health still passes with an empty bucket — the exemption that keeps an
+        // overloaded node from being killed by its own orchestrator.
+        svc.call(req(HEALTH_METHOD)).await.unwrap();
+        assert_eq!(
+            reached.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "Health was shed once the bucket emptied; that gets the node killed under \
+             exactly the load where it most needs to stay up"
+        );
+    }
+
     #[tokio::test]
     async fn the_limiter_actually_runs_out() {
         let limiter = RateLimiter::per_second(2);

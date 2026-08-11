@@ -325,6 +325,85 @@ mod tests {
     ///
     /// This surface was only mutated at all because #43 brought `prkdb-cli`'s
     /// authorization files into scope; before that it had never been checked.
+    /// The audit record is emitted, and carries no credential.
+    ///
+    /// Diff mutation found `replace audit with ()` surviving — an audit function that
+    /// audits nothing, which is worse than having none: the operator believes there is a
+    /// record. Nothing had ever called it under a subscriber.
+    ///
+    /// The second assertion is the one that matters most. A log that leaks the thing it is
+    /// auditing ships the secret wherever logs are shipped, so this pins that neither the
+    /// credential nor its digest appears in the emitted fields.
+    #[test]
+    fn the_audit_record_is_emitted_and_carries_no_credential() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<String>>>);
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                struct Visit<'a>(&'a mut String);
+                impl tracing::field::Visit for Visit<'_> {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        self.0.push_str(&format!("{}={:?} ", field.name(), value));
+                    }
+                }
+                let mut line = String::new();
+                event.record(&mut Visit(&mut line));
+                self.0.lock().unwrap().push(line);
+            }
+        }
+
+        let capture = Capture::default();
+        let events = capture.0.clone();
+        let subscriber = tracing_subscriber::registry().with(capture);
+
+        let secret = "super-secret-credential";
+        let actor = Principal::admin("root", secret);
+
+        tracing::subscriber::with_default(subscriber, || {
+            audit(Some(&actor), "revoke", "victim", "revoked");
+        });
+
+        let captured = events.lock().unwrap().join("\n");
+        assert!(
+            !captured.is_empty(),
+            "no audit event was emitted; an audit function that records nothing is worse \
+             than none, because the operator believes there is a record"
+        );
+        assert!(
+            captured.contains("root"),
+            "the actor must be recorded: {captured}"
+        );
+        assert!(
+            captured.contains("revoke"),
+            "the operation must be recorded: {captured}"
+        );
+        assert!(
+            captured.contains("victim"),
+            "the target must be recorded: {captured}"
+        );
+
+        assert!(
+            !captured.contains(secret),
+            "the credential appeared in an audit record: {captured}"
+        );
+        assert!(
+            !captured.contains(actor.credential_hash()),
+            "the credential digest appeared in an audit record: {captured}"
+        );
+    }
+
     #[test]
     fn the_error_helpers_carry_their_status_codes() {
         assert_eq!(
