@@ -446,7 +446,22 @@ jobs:
       # getting-started.md went on telling readers to run it without any — the first command
       # in the docs failed, and every check stayed green.
       - name: Docs cover the CLI
-        run: bash scripts/check_docs_cover_cli.sh
+        run: |
+          # Prove the guard fails closed before trusting it to pass.
+          #
+          # This step already failed once by being placed in a job with no protoc: it could
+          # not build the binary and exited 1, loudly. Had it caught that and exited 0
+          # instead, it would have sat green while checking nothing — which is the failure
+          # mode this repository has spent a release removing, and a docs guard is no more
+          # exempt from it than the tests were.
+          #
+          # So the negative case runs first. With no readable binary there are no flags to
+          # compare, and a guard that reports success there is comparing nothing.
+          if PRKDB_BIN=/nonexistent/prkdb-cli bash scripts/check_docs_cover_cli.sh >/dev/null 2>&1; then
+            echo "::error::the docs guard passed with no binary to read; it is checking nothing"
+            exit 1
+          fi
+          bash scripts/check_docs_cover_cli.sh
 
   fmt:
     name: Format
