@@ -847,6 +847,56 @@ impl StorageAdapter for CollectionPartitionedAdapter {
 
         Ok(max_offset)
     }
+
+    /// Worst write-path health across every open collection.
+    ///
+    /// # Why the wrapper cannot inherit the default here
+    ///
+    /// The trait's default answers "not applicable", which is right for an adapter with no
+    /// background writer and wrong for this one — it owns one `WalStorageAdapter`, and
+    /// therefore one writer, per collection. Inheriting it would have a database with a
+    /// stalled writer report itself perfectly healthy, which is the same silently-inherited
+    /// default that produced S-04, S-05, S-07 and S-08 (see
+    /// `scripts/check_wrapper_completeness.sh`).
+    ///
+    /// Worst-across-all, not an average: one stalled collection means writes to it are not
+    /// being confirmed, and a probe that dilutes that against nine healthy collections is
+    /// reporting a number nobody can act on. Depths sum, because the memory they represent
+    /// does.
+    ///
+    /// Reads only collections already open in the map, deliberately: a probe must not open
+    /// files, and a collection that has never been touched has no writer to be stalled.
+    fn write_path_health(&self) -> prkdb_types::storage::WritePathHealth {
+        let mut worst = prkdb_types::storage::WritePathHealth::not_applicable();
+        let mut unhealthy: Vec<String> = Vec::new();
+
+        for entry in self.collections.iter() {
+            let health = entry.value().write_path_health();
+
+            worst.queue_depth += health.queue_depth;
+            worst.oldest_unpublished_age_ms = worst
+                .oldest_unpublished_age_ms
+                .max(health.oldest_unpublished_age_ms);
+            // The oldest last-publish wins: the collection that has gone longest without
+            // writing anything is the one worth reporting.
+            worst.last_publish_age_ms =
+                match (worst.last_publish_age_ms, health.last_publish_age_ms) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (a, b) => a.or(b),
+                };
+
+            if let Some(reason) = health.reason {
+                unhealthy.push(format!("{}: {}", entry.key(), reason));
+            }
+        }
+
+        if !unhealthy.is_empty() {
+            worst.healthy = false;
+            worst.reason = Some(unhealthy.join("; "));
+        }
+
+        worst
+    }
 }
 
 #[cfg(test)]

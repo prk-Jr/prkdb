@@ -1294,7 +1294,25 @@ impl RaftNode {
                 match handle.await {
                     Ok(Ok(_)) => {}
                     Ok(Err(e)) => {
-                        tracing::error!("Failed to append entry to WAL: {}", e);
+                        // A *not confirmed* WAL append is not a failed one — the entry may
+                        // still be published (see `StorageError::WriteNotConfirmed`). The
+                        // answer to the leader is `success: false` either way, and that is
+                        // not this call site mapping the variant to a failure: this
+                        // follower cannot claim durability it does not have, and refusing
+                        // is safe precisely because Raft retries by index, so an entry that
+                        // does land is overwritten with the same value rather than
+                        // duplicated. What changes is the wording, because "failed" would
+                        // send whoever reads this log line looking for a disk error that
+                        // never happened.
+                        if e.is_write_unconfirmed() {
+                            tracing::warn!(
+                                "WAL append not confirmed, refusing AppendEntries so the \
+                                 leader retries: {}",
+                                e
+                            );
+                        } else {
+                            tracing::error!("Failed to append entry to WAL: {}", e);
+                        }
                         return AppendEntriesResult {
                             term: *current_term,
                             success: false,
@@ -1759,6 +1777,10 @@ impl RaftNode {
                         let _ = tx.send(Ok(index));
                     }
                     Ok(Err(e)) => {
+                        // Propagated whole, variant intact. `RaftError::Storage` carries
+                        // the `StorageError`, so a `WriteNotConfirmed` reaches the client
+                        // still saying the proposal may yet commit — which is the only
+                        // honest thing to tell a caller deciding whether to retry.
                         let _ = tx.send(Err(RaftError::Storage(e)));
                     }
                     Err(_) => {

@@ -782,17 +782,35 @@ async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
                 (1, 1)
             };
 
-            Json(json!({
-                "status": "healthy",
+            // A node whose WAL writer has stopped publishing is not healthy, however
+            // cheerfully it answers HTTP. Before this it reported "healthy" while every
+            // write queued behind it blocked forever, which is the worst combination
+            // available: an operator watching this endpoint sees nothing wrong while the
+            // clients see nothing at all.
+            let write_path = db.storage().write_path_health();
+            let body = json!({
+                "status": if write_path.healthy { "healthy" } else { "unhealthy" },
                 "database": "connected",
                 "node_id": state.node_id,
                 "websockets": state.websocket_enabled,
                 "metrics": state.prometheus_enabled,
                 "partitions": partitions,
                 "leaders_ready": leaders_ready,
+                "write_path": {
+                    "healthy": write_path.healthy,
+                    "reason": write_path.reason,
+                    "queue_depth": write_path.queue_depth,
+                    "oldest_unpublished_age_ms": write_path.oldest_unpublished_age_ms,
+                    "last_publish_age_ms": write_path.last_publish_age_ms,
+                },
                 "timestamp": chrono::Utc::now().to_rfc3339()
-            }))
-            .into_response()
+            });
+
+            if write_path.healthy {
+                Json(body).into_response()
+            } else {
+                (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response()
+            }
         }
         Err(e) => (
             StatusCode::SERVICE_UNAVAILABLE,

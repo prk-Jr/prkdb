@@ -62,6 +62,55 @@ pub enum StorageError {
     #[error("Internal error: {0}")]
     Internal(String),
 
+    /// The write was accepted for publication and its outcome is **unknown**.
+    ///
+    /// # This is not a failure
+    ///
+    /// The write may still be published after this error is returned. Nothing about it has
+    /// been rolled back, because there is nothing to roll back: the storage layer stopped
+    /// being able to *say* whether the record reached the log, not the record from
+    /// reaching it.
+    ///
+    /// A caller that reads this as "failed" and retries will double-write every request
+    /// that was in flight when the writer stalled — trading a hang for silent duplication,
+    /// which is the strictly worse bug. Retry only if the operation is idempotent, or read
+    /// back and decide.
+    ///
+    /// # When it is returned
+    ///
+    /// Three places, all in the WAL write path (`docs/superpowers/specs/2026-08-11-wal-writer-liveness.md`):
+    ///
+    /// - the writer task exited — cleanly, by panic, or by cancellation — while writes
+    ///   were queued (Part 1),
+    /// - the stall watchdog observed no publication progress for longer than its bound and
+    ///   discharged the queue (Part 2),
+    /// - the caller's own bound on `rx.await` expired (Part 3).
+    ///
+    /// The third case is the one where "may still be published" is literally true: the
+    /// batch is already with the writer and may land a moment later. The first two are
+    /// reported the same way on purpose. Over-reporting uncertainty is safe; claiming a
+    /// write failed when it committed is not, so the distinction is not worth the risk of
+    /// getting it wrong at the one call site that matters.
+    ///
+    /// Deliberately **not** [`StorageError::Internal`]: `Internal` reads as a failure at
+    /// every call site that already handles it, which is exactly the meaning this must not
+    /// carry.
+    #[error("Write not confirmed: {0} (the write may still be published — do not treat this as a failed write)")]
+    WriteNotConfirmed(String),
+
+    /// The write was **refused** before being queued, because the write path is at
+    /// capacity.
+    ///
+    /// Unlike [`StorageError::WriteNotConfirmed`] this one is definite: nothing was
+    /// enqueued, nothing will be published, and retrying after a delay is both safe and
+    /// the intended response.
+    ///
+    /// It exists so that a stalled writer degrades into rejection rather than into
+    /// unbounded buffering. Without it, Parts 1–3 of the liveness spec report the stall
+    /// accurately right up until the process is killed for memory.
+    #[error("Write rejected: {0}")]
+    WriteBackpressure(String),
+
     #[error("Data corruption detected: {0}")]
     Corruption(String),
 
@@ -146,6 +195,15 @@ impl From<&str> for Error {
 
 // Allow converting StorageError variants to Error::Serialization/Deserialization
 impl StorageError {
+    /// True when the write's outcome is unknown rather than known-bad.
+    ///
+    /// Call sites use this to keep the distinction rather than rediscovering it by
+    /// matching: an unconfirmed write must not be retried non-idempotently, and must not
+    /// be logged or reported with the word "failed".
+    pub fn is_write_unconfirmed(&self) -> bool {
+        matches!(self, StorageError::WriteNotConfirmed(_))
+    }
+
     pub fn into_error(self) -> Error {
         match self {
             StorageError::Serialization(s) => Error::Serialization(s),
@@ -195,5 +253,59 @@ mod tests {
             err.to_string(),
             "Failed to access underlying store: connection failed"
         );
+    }
+
+    /// Acceptance 3 of the WAL writer liveness spec, first half: the not-confirmed error
+    /// is its own variant and says what it means.
+    ///
+    /// The assertion on the message is not decoration. This error crosses process
+    /// boundaries as a string — logs, gRPC status messages, HTTP error bodies — and on the
+    /// far side of that boundary the wording *is* the contract. A message that reads like
+    /// a failure will be handled like one.
+    #[test]
+    fn write_not_confirmed_is_distinct_and_says_the_write_may_still_land() {
+        let err = StorageError::WriteNotConfirmed("writer stalled".to_string());
+
+        // Distinct from Internal, which every existing handler already reads as a failure.
+        assert_ne!(err, StorageError::Internal("writer stalled".to_string()));
+        assert!(!matches!(err, StorageError::Internal(_)));
+
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("may still be published"),
+            "message must state the write can still land, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("failed") || rendered.contains("do not treat this as a failed"),
+            "message must not read as a definite failure, got: {rendered}"
+        );
+
+        assert!(err.is_write_unconfirmed());
+    }
+
+    /// The other direction: nothing else is unconfirmed. A predicate that answers `true`
+    /// for everything would pass the test above while telling call sites nothing.
+    #[test]
+    fn only_write_not_confirmed_is_unconfirmed() {
+        for err in [
+            StorageError::Internal("x".into()),
+            StorageError::BackendError("x".into()),
+            StorageError::WriteBackpressure("x".into()),
+            StorageError::NotFound,
+        ] {
+            assert!(
+                !err.is_write_unconfirmed(),
+                "{err} must not be reported as unconfirmed"
+            );
+        }
+    }
+
+    /// Backpressure is the opposite claim to not-confirmed and must not be confusable with
+    /// it: the write was refused, so retrying is safe.
+    #[test]
+    fn backpressure_is_a_definite_refusal() {
+        let err = StorageError::WriteBackpressure("write queue full".to_string());
+        assert!(!err.is_write_unconfirmed());
+        assert!(err.to_string().contains("rejected"));
     }
 }

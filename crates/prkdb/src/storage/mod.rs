@@ -9,6 +9,7 @@ pub mod snapshot;
 pub mod streaming_adapter; // Phase 24: High-throughput streaming (2x+ Kafka performance)
 pub mod wal_adapter;
 pub mod write_queue; // Phase 2: Dedicated sync writer
+pub mod writer_liveness; // Progress accounting and stall detection for the WAL write path
 
 mod in_memory;
 pub use in_memory::InMemoryAdapter;

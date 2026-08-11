@@ -7,6 +7,50 @@ use crate::error::StorageError;
 use crate::replication::Change;
 use async_trait::async_trait;
 
+/// Whether an adapter's write path is still keeping the promises it has accepted.
+///
+/// # Why this is not just a `bool`
+///
+/// "Unhealthy" on its own gets an operator no further than the alert did. The three
+/// numbers below are what distinguishes the two states that look identical from outside —
+/// a database under load with a deep-but-draining queue, and a database whose writer has
+/// stopped publishing entirely. The first has a young oldest-write and a moving
+/// `last_publish_age_ms`; the second has an oldest-write that only grows.
+///
+/// Reported by health and readiness probes, so it must be cheap and must never block:
+/// every field is read from an atomic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WritePathHealth {
+    /// False once the writer has exited or been declared stalled.
+    pub healthy: bool,
+    /// Names the cause when `healthy` is false. `None` when healthy.
+    pub reason: Option<String>,
+    /// Writes enqueued but not yet published.
+    pub queue_depth: u64,
+    /// How long the oldest unpublished write has been waiting. `0` when the queue is empty.
+    pub oldest_unpublished_age_ms: u64,
+    /// Time since the last successful publication. `None` if nothing has ever published.
+    pub last_publish_age_ms: Option<u64>,
+}
+
+impl WritePathHealth {
+    /// The answer for an adapter with no background writer to supervise.
+    ///
+    /// Adapters that publish synchronously inside `put` have no window in which a write is
+    /// accepted but unpublished, so there is nothing for a watchdog to observe and nothing
+    /// that can stall. Saying so explicitly is more useful than making every such adapter
+    /// invent an answer.
+    pub fn not_applicable() -> Self {
+        Self {
+            healthy: true,
+            reason: None,
+            queue_depth: 0,
+            oldest_unpublished_age_ms: 0,
+            last_publish_age_ms: None,
+        }
+    }
+}
+
 /// Async storage adapter port for the hexagonal architecture.
 ///
 /// Implement this trait to plug-in any storage backend (SQLite, Postgres, RocksDB, sled, in-memory, ...).
@@ -212,6 +256,17 @@ pub trait StorageAdapter: Send + Sync + 'static {
         Err(StorageError::BackendError(
             "take_snapshot not supported".into(),
         ))
+    }
+
+    /// State of the adapter's asynchronous write path, for health and readiness probes.
+    ///
+    /// Synchronous by design and must stay so. A probe that can block is worse than no
+    /// probe: it turns a stalled writer into a stalled *health check*, and the orchestrator
+    /// reading it cannot tell the difference between "the answer is bad" and "there is no
+    /// answer", so it restarts on timeout — which is the one action guaranteed to lose the
+    /// queued writes this is trying to report on.
+    fn write_path_health(&self) -> WritePathHealth {
+        WritePathHealth::not_applicable()
     }
 }
 

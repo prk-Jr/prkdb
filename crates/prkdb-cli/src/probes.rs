@@ -53,6 +53,25 @@ pub async fn readyz_handler() -> Response {
         }
     };
 
+    // A node whose WAL writer has stopped publishing cannot serve writes, so it must not
+    // be sent traffic — even though the process is alive and `/livez` will keep saying so.
+    // This is exactly the split the module doc describes: not a restart condition (a
+    // restart loses the queued writes), a "stop routing here" condition.
+    let write_path = db.storage().write_path_health();
+    if !write_path.healthy {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "not_ready",
+                "reason": "the storage write path is not confirming writes",
+                "detail": write_path.reason,
+                "queue_depth": write_path.queue_depth,
+                "oldest_unpublished_age_ms": write_path.oldest_unpublished_age_ms,
+            })),
+        )
+            .into_response();
+    }
+
     // In cluster mode a node with no known leader cannot serve a linearizable read, so it
     // is not ready however healthy the process is.
     if let Some(pm) = &db.partition_manager {

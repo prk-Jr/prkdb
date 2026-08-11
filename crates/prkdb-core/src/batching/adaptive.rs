@@ -22,6 +22,21 @@ pub struct AdaptiveBatchConfig {
     pub adjustment_step_size: f64,
     /// Number of latency samples to keep (default: 100)
     pub latency_window_size: usize,
+    /// Hard ceiling on buffered items, independent of `max_batch_size` (default: 65536).
+    ///
+    /// `max_batch_size` bounds how much goes out in one flush; it does not bound how much
+    /// comes *in* while nothing is going out. If the consumer of this accumulator stalls,
+    /// `add` will happily grow the buffer until the process is killed for memory — so a
+    /// stall becomes an OOM, and every mechanism that reports the stall accurately reports
+    /// it right up until the process dies.
+    ///
+    /// [`try_add`](AdaptiveBatchAccumulator::try_add) refuses past this point instead. Set
+    /// it from the memory you are willing to spend on unpublished writes, not from
+    /// throughput: it is a bulkhead, not a tuning knob.
+    ///
+    /// Clamped up to `max_batch_size` at construction — a ceiling below the batch size
+    /// would make it impossible to ever fill a batch.
+    pub max_pending: usize,
 }
 
 impl Default for AdaptiveBatchConfig {
@@ -36,6 +51,10 @@ impl Default for AdaptiveBatchConfig {
             adjustment_interval: Duration::from_secs(1),
             adjustment_step_size: 1.2,
             latency_window_size: 100,
+            // ~6.5 batches of headroom at the default 10K max batch size. Large enough
+            // that backpressure is not reachable by ordinary bursts, small enough that a
+            // stalled writer is capped rather than unbounded.
+            max_pending: 65_536,
         }
     }
 }
@@ -143,6 +162,9 @@ pub struct AdaptiveBatchAccumulator<T> {
     // Stats
     total_items_flushed: u64,
     total_flushes: u64,
+
+    /// Resolved ceiling on `buffer.len()`. See [`AdaptiveBatchConfig::max_pending`].
+    max_pending: usize,
 }
 
 impl<T> AdaptiveBatchAccumulator<T> {
@@ -157,6 +179,7 @@ impl<T> AdaptiveBatchAccumulator<T> {
         let initial_batch_size = (config.min_batch_size + config.max_batch_size) / 2;
         let initial_flush_interval =
             Duration::from_millis((config.min_flush_ms + config.max_flush_ms) / 2);
+        let max_pending = config.max_pending.max(config.max_batch_size);
 
         Self {
             buffer: Vec::with_capacity(initial_batch_size),
@@ -168,14 +191,41 @@ impl<T> AdaptiveBatchAccumulator<T> {
             last_adjustment: Instant::now(),
             total_items_flushed: 0,
             total_flushes: 0,
+            max_pending,
         }
     }
 
     /// Add an item to the batch
     /// Returns true if the batch should be flushed
+    ///
+    /// Unbounded: the buffer grows for as long as the caller keeps adding. Prefer
+    /// [`try_add`](Self::try_add) anywhere the consumer can stall.
     pub fn add(&mut self, item: T) -> bool {
         self.buffer.push(item);
         self.buffer.len() >= self.batch_size
+    }
+
+    /// Add an item unless the buffer is already holding [`max_pending`](Self::max_pending).
+    ///
+    /// `Ok(should_flush)` on success, matching [`add`](Self::add). `Err(item)` when full —
+    /// the item comes back rather than being dropped, because the caller owns whatever is
+    /// attached to it (in PrkDB's write path, the `oneshot::Sender` the client is waiting
+    /// on) and dropping it here would fire that channel with the wrong answer.
+    pub fn try_add(&mut self, item: T) -> Result<bool, T> {
+        if self.buffer.len() >= self.max_pending {
+            return Err(item);
+        }
+        Ok(self.add(item))
+    }
+
+    /// Number of items currently buffered.
+    pub fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    /// The ceiling `try_add` refuses at.
+    pub fn max_pending(&self) -> usize {
+        self.max_pending
     }
 
     /// Check if the batch should be flushed based on timeout
@@ -380,5 +430,65 @@ mod tests {
         }
 
         assert!(should_flush);
+    }
+
+    /// Part 4 of the WAL writer liveness spec, at the level it is implemented: the buffer
+    /// refuses rather than grows.
+    #[test]
+    fn try_add_refuses_at_capacity_and_hands_the_item_back() {
+        let config = AdaptiveBatchConfig {
+            min_batch_size: 2,
+            max_batch_size: 4,
+            max_pending: 4,
+            ..Default::default()
+        };
+        let mut acc = AdaptiveBatchAccumulator::new(config);
+
+        for i in 0..4 {
+            assert!(acc.try_add(i).is_ok(), "item {i} should fit");
+        }
+        assert_eq!(acc.len(), 4);
+
+        // Refused, and the item is returned rather than dropped.
+        assert_eq!(acc.try_add(99), Err(99));
+        assert_eq!(acc.len(), 4, "a refused item must not be buffered");
+
+        // Both directions: draining restores capacity, so this is a bulkhead and not a
+        // permanent wall.
+        let drained = acc.flush();
+        assert_eq!(drained.len(), 4);
+        assert!(acc.try_add(99).is_ok());
+    }
+
+    /// A ceiling below `max_batch_size` would make a full batch unreachable, so it is
+    /// clamped up rather than honoured literally.
+    #[test]
+    fn max_pending_is_clamped_up_to_the_batch_size() {
+        let config = AdaptiveBatchConfig {
+            min_batch_size: 10,
+            max_batch_size: 100,
+            max_pending: 1,
+            ..Default::default()
+        };
+        let acc: AdaptiveBatchAccumulator<u8> = AdaptiveBatchAccumulator::new(config);
+        assert_eq!(acc.max_pending(), 100);
+    }
+
+    /// The unbounded `add` is still unbounded. Asserted so that a future change which
+    /// quietly gives `add` a limit has to come here and say so — the two entry points mean
+    /// different things and the write path picks between them deliberately.
+    #[test]
+    fn add_stays_unbounded() {
+        let config = AdaptiveBatchConfig {
+            min_batch_size: 1,
+            max_batch_size: 2,
+            max_pending: 2,
+            ..Default::default()
+        };
+        let mut acc = AdaptiveBatchAccumulator::new(config);
+        for i in 0..10 {
+            acc.add(i);
+        }
+        assert_eq!(acc.len(), 10);
     }
 }
