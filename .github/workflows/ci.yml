@@ -240,18 +240,46 @@ jobs:
   # modules where a silent wrong answer costs most; this one should look at whatever the
   # author actually wrote, which is the code least likely to be covered yet.
   mutants-diff:
-    name: "🧬 Mutation Testing (diff)"
+    name: "🧬 Mutation Testing (diff) shard"
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # Generous relative to the measured cost, because the bound scales with the size of
-    # the diff and a large refactor should still get an answer rather than a timeout.
+    # Every run on PR #55 timed out. Run 31566656408 measured 134 mutants at 78s build +
+    # 59s test each -- 5.1 hours of work in a 45-minute job, which got through 19 of them
+    # and was killed. The four MISSED results it printed were the front of an alphabetical
+    # list, not a finished sweep.
+    #
+    # The cost is not inherent to mutation testing. This workspace has 68 integration test
+    # binaries (62 in prkdb, 6 in prkdb-cli), and every mutant relinks all 68 and then
+    # launches all 68 processes. That is what the 78s and the 59s are.
+    #
+    # So reduce the cost before spreading it:
+    #
+    #   --test-tool nextest   one process supervising the binaries with real scheduling,
+    #                         instead of cargo running each in series
+    #   --jobs 3              mutants tested concurrently. The runner has 4 cores and was
+    #                         using one; 3 leaves headroom for each cargo build's own
+    #                         parallelism rather than oversubscribing.
+    #
+    # Only then shard, and only four ways rather than ten, because the remaining work is
+    # much smaller. Four also fits max-parallel in a single wave, so wall-clock is one
+    # shard rather than a queue.
+    #
+    # These multipliers are estimates until a run measures them. If a shard still times
+    # out, the next lever is the 68 test binaries themselves -- consolidating them cuts
+    # every mutant, and every ordinary CI run with it.
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       # fetch-depth: 0 — the diff is computed against the merge base, which a shallow
       # clone does not contain.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - uses: taiki-e/install-action@nextest
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       - uses: dtolnay/rust-toolchain@1.95.0
@@ -299,12 +327,14 @@ jobs:
         run: |
           set -o pipefail
           cargo mutants --no-shuffle --timeout 300 \
+            --test-tool nextest --jobs 3 \
+            --shard ${{ matrix.shard }}/4 \
             --in-diff /tmp/pr.diff \
             --package prkdb --package prkdb-cli 2>&1 | tee /tmp/mutants.log
           status=$?
 
           {
-            echo "### 🧬 Mutation testing (diff-scoped)"
+            echo "### 🧬 Mutation testing (diff-scoped) — shard ${{ matrix.shard }}/4"
             echo
             if grep -q "no Rust source files" /tmp/mutants.log; then
               echo "**No mutants generated.** The diff touches no mutable Rust in"
@@ -325,9 +355,34 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: mutants-diff-${{ github.run_number }}
+          name: mutants-diff-${{ github.run_number }}-shard-${{ matrix.shard }}
           path: mutants.out/
           if-no-files-found: warn
+
+  # Keeps the required status check reporting under a fixed name.
+  #
+  # `🧬 Mutation Testing (diff)` is a required context on the main ruleset. Sharding the job
+  # above renames its checks to "… (diff) shard (0)", "(1)" and so on, so the required
+  # context would never report and every PR would sit unmergeable with nothing to click.
+  # That is what happened on PR #20, and it is worth more than the sharding is.
+  #
+  # `if: always()` so a failed or cancelled shard produces a red aggregate rather than a
+  # skipped one — a required check that skips is indistinguishable from one that passed.
+  mutants-diff-result:
+    name: "🧬 Mutation Testing (diff)"
+    if: always() && github.event_name == 'pull_request'
+    needs: [mutants-diff]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report the sharded result
+        run: |
+          result="${{ needs.mutants-diff.result }}"
+          echo "shards: $result"
+          if [ "$result" != "success" ]; then
+            echo "::error::mutation testing (diff) did not pass: $result"
+            exit 1
+          fi
 
   ignore-discipline:
     name: Ignore Discipline

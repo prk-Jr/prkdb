@@ -1308,12 +1308,23 @@ impl WalStorageAdapter {
                 .unwrap_or(0),
         );
 
-        // Both conditions from the spec. The age bound alone would very nearly do, since a
-        // publication resets the clock — but stating the "no progress" half explicitly is
-        // what makes this a progress check rather than a latency check, and the difference
-        // matters for a queue that is deep because it is busy.
-        let stalled = depth > 0
-            && published == *last_published
+        // Both conditions from the spec: no progress, and something old waiting. Stating
+        // the "no progress" half explicitly is what makes this a progress check rather than
+        // a latency check, and the difference matters for a queue that is deep because it
+        // is busy.
+        //
+        // A third clause, `depth > 0`, used to lead this and has been removed. It could
+        // never change the answer: `resolve` stores 0 into the oldest-unpublished clock
+        // whenever the queue empties, so `oldest` is already `None` for an empty queue and
+        // `is_some_and` is already false. Mutation run 31566656408 found it — `> with >=`
+        // survived (on a u64 that comparison is always true) while `> with ==` and
+        // `> with <` were caught, which is the signature of a guard that matters in one
+        // direction only.
+        //
+        // Deleted rather than excluded as an equivalent mutant. The invariant it restated
+        // is enforced in `resolve`, and one place enforcing it is better than two that can
+        // drift apart.
+        let stalled = published == *last_published
             && oldest.is_some_and(|age| age >= inner.bounds.stall_threshold);
 
         *last_published = published;
