@@ -847,11 +847,62 @@ impl StorageAdapter for CollectionPartitionedAdapter {
 
         Ok(max_offset)
     }
+
+    /// Worst write-path health across every open collection.
+    ///
+    /// # Why the wrapper cannot inherit the default here
+    ///
+    /// The trait's default answers "not applicable", which is right for an adapter with no
+    /// background writer and wrong for this one — it owns one `WalStorageAdapter`, and
+    /// therefore one writer, per collection. Inheriting it would have a database with a
+    /// stalled writer report itself perfectly healthy, which is the same silently-inherited
+    /// default that produced S-04, S-05, S-07 and S-08 (see
+    /// `scripts/check_wrapper_completeness.sh`).
+    ///
+    /// Worst-across-all, not an average: one stalled collection means writes to it are not
+    /// being confirmed, and a probe that dilutes that against nine healthy collections is
+    /// reporting a number nobody can act on. Depths sum, because the memory they represent
+    /// does.
+    ///
+    /// Reads only collections already open in the map, deliberately: a probe must not open
+    /// files, and a collection that has never been touched has no writer to be stalled.
+    fn write_path_health(&self) -> prkdb_types::storage::WritePathHealth {
+        let mut worst = prkdb_types::storage::WritePathHealth::not_applicable();
+        let mut unhealthy: Vec<String> = Vec::new();
+
+        for entry in self.collections.iter() {
+            let health = entry.value().write_path_health();
+
+            worst.queue_depth += health.queue_depth;
+            worst.oldest_unpublished_age_ms = worst
+                .oldest_unpublished_age_ms
+                .max(health.oldest_unpublished_age_ms);
+            // The oldest last-publish wins: the collection that has gone longest without
+            // writing anything is the one worth reporting.
+            worst.last_publish_age_ms =
+                match (worst.last_publish_age_ms, health.last_publish_age_ms) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (a, b) => a.or(b),
+                };
+
+            if let Some(reason) = health.reason {
+                unhealthy.push(format!("{}: {}", entry.key(), reason));
+            }
+        }
+
+        if !unhealthy.is_empty() {
+            worst.healthy = false;
+            worst.reason = Some(unhealthy.join("; "));
+        }
+
+        worst
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_collection_partitioned_basic() {
@@ -1414,5 +1465,164 @@ mod tests {
             .flush()
             .await
             .expect("flush succeeds again once the injected fault is cleared");
+    }
+
+    /// Poll until `check` holds, so a test observes a transient window without racing it.
+    async fn wait_until(what: &str, limit: Duration, mut check: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + limit;
+        while std::time::Instant::now() < deadline {
+            if check() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    /// Queue depths **sum** across collections, because the memory they represent does.
+    ///
+    /// Mutation run 31539366718 missed `+=` -> `-=` and `+=` -> `*=` here: nothing asserted
+    /// the arithmetic, only that a number came back. `*=` reports 0 for any number of
+    /// stalled collections — a probe that says "nothing queued" while two writers are stuck
+    /// is worse than no probe, because it actively argues against the operator's suspicion.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn queue_depths_sum_across_collections() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            log_dir: temp_dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        };
+        let adapter = Arc::new(CollectionPartitionedAdapter::new(config).unwrap());
+
+        // Open both collections with a write that succeeds, so the stall below acts on a
+        // live writer rather than on collection creation.
+        for name in ["users", "orders"] {
+            adapter
+                .put_to_collection(name, b"seed", b"v")
+                .await
+                .unwrap();
+        }
+
+        let collections = temp_dir.path().join("collections");
+        crate::storage::wal_adapter::fault_injection::stall_writer_at(collections.join("users"));
+        crate::storage::wal_adapter::fault_injection::stall_writer_at(collections.join("orders"));
+
+        // `put_to_collection` calls `put`, which routes to `put_batch_impl` and bypasses
+        // the accumulator entirely — nothing to stall. `put_many` is the accumulator path,
+        // so drive the per-collection adapters directly.
+        let mut queued = Vec::new();
+        for name in ["users", "orders"] {
+            let collection = adapter
+                .collections
+                .get(name)
+                .expect("the collection was opened above")
+                .clone();
+            queued.push(tokio::spawn(async move {
+                collection
+                    .put_many(vec![(b"queued".to_vec(), b"v".to_vec())])
+                    .await
+            }));
+        }
+
+        let probe = adapter.clone();
+        wait_until(
+            "both stalled collections to report their queued write",
+            Duration::from_secs(10),
+            move || probe.write_path_health().queue_depth == 2,
+        )
+        .await;
+
+        // One write per collection, so the total is the sum and not either operand: 2 is
+        // unreachable by `-=` (which underflows from 0) and by `*=` (which stays 0).
+        assert_eq!(
+            adapter.write_path_health().queue_depth,
+            2,
+            "two stalled collections holding one write each must report two"
+        );
+
+        crate::storage::wal_adapter::fault_injection::clear_writer_stall(
+            &collections.join("users"),
+        );
+        crate::storage::wal_adapter::fault_injection::clear_writer_stall(
+            &collections.join("orders"),
+        );
+        for task in queued {
+            let _ = tokio::time::timeout(Duration::from_secs(20), task).await;
+        }
+    }
+
+    /// One unhealthy collection makes the whole adapter unhealthy — worst-across-all, not
+    /// an average.
+    ///
+    /// Mutation run 31539366718 missed `delete !` on the `unhealthy.is_empty()` guard.
+    /// Without the negation the adapter reports healthy precisely when a collection has
+    /// reported a reason, so `/readyz` keeps routing traffic to the node whose writes are
+    /// not being confirmed. That is the exact failure the liveness work exists to end.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_stalled_collection_makes_the_adapter_unhealthy() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            log_dir: temp_dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        };
+        let adapter = Arc::new(CollectionPartitionedAdapter::new(config).unwrap());
+
+        for name in ["users", "orders"] {
+            adapter
+                .put_to_collection(name, b"seed", b"v")
+                .await
+                .unwrap();
+        }
+        assert!(
+            adapter.write_path_health().healthy,
+            "a freshly opened adapter must be healthy, or the assertion below proves nothing"
+        );
+
+        let collections = temp_dir.path().join("collections");
+        crate::storage::wal_adapter::fault_injection::stall_writer_at(collections.join("orders"));
+
+        // The accumulator path, not `put` — see the note in the sibling test.
+        let stalled = {
+            let collection = adapter
+                .collections
+                .get("orders")
+                .expect("the collection was opened above")
+                .clone();
+            tokio::spawn(async move {
+                collection
+                    .put_many(vec![(b"queued".to_vec(), b"v".to_vec())])
+                    .await
+            })
+        };
+
+        let probe = adapter.clone();
+        wait_until(
+            "the stalled collection to be declared unhealthy",
+            Duration::from_secs(15),
+            move || !probe.write_path_health().healthy,
+        )
+        .await;
+
+        let health = adapter.write_path_health();
+        assert!(
+            !health.healthy,
+            "one stalled collection means the node is not ready"
+        );
+        let reason = health
+            .reason
+            .expect("an unhealthy adapter must name the cause");
+        assert!(
+            reason.contains("orders"),
+            "the reason must name the collection an operator has to look at, got: {reason}"
+        );
+        assert!(
+            !reason.contains("users"),
+            "a healthy collection must not be blamed, got: {reason}"
+        );
+
+        crate::storage::wal_adapter::fault_injection::clear_writer_stall(
+            &collections.join("orders"),
+        );
+        let _ = tokio::time::timeout(Duration::from_secs(20), stalled).await;
     }
 }

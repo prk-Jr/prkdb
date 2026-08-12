@@ -118,7 +118,12 @@ async fn run_proposal_loop(
                 }
             }
             Err(e) => {
-                // All failed, notify all clients
+                // Propagated whole, variant intact — not flattened into a generic failure.
+                // `append_raft_entries_batch` can answer `WriteNotConfirmed`, meaning the
+                // batch may still reach the log; a client told "failed" would retry, and a
+                // retried proposal that also commits is a duplicate entry. `RaftError::
+                // Storage` carries the variant through so the caller can tell the two
+                // apart.
                 for (tx, _) in senders {
                     let _ = tx.send(Err(RaftError::Storage(e.clone())));
                 }

@@ -39,4 +39,4 @@ pub use error::{ComputeError, ConsumerError, Error, StorageError};
 pub use index::{IndexDef, Indexed, IndexedStorage};
 pub use replication::{AckLevel, Change, ReplicationConfig};
 pub use schema::{FieldDef, ProtoSchema, ProtoType};
-pub use storage::{StorageAdapter, TransactionalStorageAdapter};
+pub use storage::{StorageAdapter, TransactionalStorageAdapter, WritePathHealth};

@@ -4,6 +4,9 @@ use super::checkpoint;
 use super::config::{StorageConfig, SyncMode};
 use super::recovery::RecoveryManager;
 use super::snapshot::SnapshotWriter;
+use super::writer_liveness::{
+    unix_millis, LivenessBounds, SharedProgress, WritePathProgress, WriterFailure,
+};
 use prkdb_types::snapshot::{CompressionType, SnapshotHeader};
 
 use papaya::HashMap as LockFreeHashMap; // Phase 5: Lock-free index
@@ -14,12 +17,13 @@ use prkdb_core::wal::mmap_parallel_wal::MmapParallelWal;
 use prkdb_core::wal::{LogOperation, LogRecord, WalConfig};
 use prkdb_metrics::storage::StorageMetrics;
 use prkdb_types::error::StorageError;
-use prkdb_types::storage::StorageAdapter;
+use prkdb_types::storage::{StorageAdapter, WritePathHealth};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 use tokio::sync::{oneshot, Mutex, Notify, OwnedRwLockWriteGuard, RwLock};
+use tokio::task::{AbortHandle, JoinHandle};
 use tracing::{info, instrument, warn};
 
 // Phase 2: Dedicated Sync Writer Thread
@@ -115,30 +119,115 @@ pub(crate) mod fault_injection {
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, OnceLock};
 
-    fn registry() -> &'static Mutex<HashSet<PathBuf>> {
-        static REGISTRY: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-        REGISTRY.get_or_init(|| Mutex::new(HashSet::new()))
+    fn registry(kind: Fault) -> &'static Mutex<HashSet<PathBuf>> {
+        static FLUSH_FAILURE: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+        static WRITER_STALL: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+        static WRITER_PANIC: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+        static APPEND_FAILURE: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+        let slot = match kind {
+            Fault::FlushFailure => &FLUSH_FAILURE,
+            Fault::WriterStall => &WRITER_STALL,
+            Fault::WriterPanic => &WRITER_PANIC,
+            Fault::AppendFailure => &APPEND_FAILURE,
+        };
+        slot.get_or_init(|| Mutex::new(HashSet::new()))
     }
 
-    /// Make `flush` fail for the adapter whose WAL lives at `dir`.
-    pub fn fail_flush_at(dir: impl Into<PathBuf>) {
-        registry()
+    #[derive(Clone, Copy)]
+    enum Fault {
+        FlushFailure,
+        WriterStall,
+        WriterPanic,
+        AppendFailure,
+    }
+
+    fn arm(kind: Fault, dir: impl Into<PathBuf>) {
+        registry(kind)
             .lock()
             .expect("fault registry lock")
             .insert(dir.into());
     }
 
-    /// Stop failing `flush` for `dir`. Call it when the assertion is done, so a later
-    /// flush in the same test — including one during teardown — is not affected.
-    pub fn clear_flush_failure(dir: &Path) {
-        registry().lock().expect("fault registry lock").remove(dir);
+    fn disarm(kind: Fault, dir: &Path) {
+        registry(kind)
+            .lock()
+            .expect("fault registry lock")
+            .remove(dir);
     }
 
-    pub(super) fn flush_should_fail(dir: &Path) -> bool {
-        registry()
+    fn armed(kind: Fault, dir: &Path) -> bool {
+        registry(kind)
             .lock()
             .expect("fault registry lock")
             .contains(dir)
+    }
+
+    /// Make `flush` fail for the adapter whose WAL lives at `dir`.
+    pub fn fail_flush_at(dir: impl Into<PathBuf>) {
+        arm(Fault::FlushFailure, dir);
+    }
+
+    /// Stop failing `flush` for `dir`. Call it when the assertion is done, so a later
+    /// flush in the same test — including one during teardown — is not affected.
+    pub fn clear_flush_failure(dir: &Path) {
+        disarm(Fault::FlushFailure, dir);
+    }
+
+    pub(super) fn flush_should_fail(dir: &Path) -> bool {
+        armed(Fault::FlushFailure, dir)
+    }
+
+    /// Make the WAL append *inside the writer* fail for the adapter whose WAL lives at
+    /// `dir`.
+    ///
+    /// Distinct from `fail_flush_at`, which fails the caller-facing `flush` and never
+    /// reaches the flush loop. This one reaches the branch where a batch was taken out of
+    /// the accumulator and none of it got to the log: the waiters are answered with an
+    /// error, the queue accounting still has to balance, and nothing may be reported as
+    /// published. Real causes are a full disk or a failing fsync, neither of which a test
+    /// can arrange portably.
+    pub fn fail_append_at(dir: impl Into<PathBuf>) {
+        arm(Fault::AppendFailure, dir);
+    }
+
+    pub fn clear_append_failure(dir: &Path) {
+        disarm(Fault::AppendFailure, dir);
+    }
+
+    pub(super) fn append_should_fail(dir: &Path) -> bool {
+        armed(Fault::AppendFailure, dir)
+    }
+
+    /// Make the flush loop stop publishing while staying alive and looping.
+    ///
+    /// This is the failure the liveness spec exists for, and it is the one that cannot be
+    /// reached any other way: the task runs, its `JoinHandle` never resolves, and the only
+    /// evidence anything is wrong is that the queue stops moving. It reproduces exactly
+    /// what cargo-mutants produced by replacing `flush_accumulator_inner` with `()`.
+    pub fn stall_writer_at(dir: impl Into<PathBuf>) {
+        arm(Fault::WriterStall, dir);
+    }
+
+    pub fn clear_writer_stall(dir: &Path) {
+        disarm(Fault::WriterStall, dir);
+    }
+
+    pub(super) fn writer_should_stall(dir: &Path) -> bool {
+        armed(Fault::WriterStall, dir)
+    }
+
+    /// Make the flush loop panic on its next iteration.
+    pub fn panic_writer_at(dir: impl Into<PathBuf>) {
+        arm(Fault::WriterPanic, dir);
+    }
+
+    pub fn clear_writer_panic(dir: &Path) {
+        disarm(Fault::WriterPanic, dir);
+    }
+
+    pub(super) fn writer_should_panic(dir: &Path) -> bool {
+        armed(Fault::WriterPanic, dir)
     }
 }
 
@@ -154,9 +243,99 @@ pub struct WalStorageAdapter {
     // Phase 2: Dedicated sync writer
 }
 
+/// One client write waiting for the flush loop to publish it.
+///
+/// # Why both fields are `Option`
+///
+/// So that `Drop` can answer the caller. A `PendingWrite` destroyed without a result used
+/// to close its `oneshot` silently; the call sites did handle `RecvError`, but nothing in
+/// the program guaranteed a queued write was ever dropped *or* fired, so that handler was
+/// unreachable — written, correct, and dead. Firing the channel from `Drop` makes the
+/// obligation structural: there is no way to destroy a queued write without its caller
+/// learning something.
+///
+/// `Drop` types cannot be moved out of or destructured, hence
+/// [`into_parts`](PendingWrite::into_parts) and the `Option`s rather than a `mem::replace`
+/// with a synthetic `LogRecord` — building one costs a serialization pass, and this is the
+/// per-write hot path.
 struct PendingWrite {
-    record: LogRecord,
-    tx: oneshot::Sender<Result<u64, StorageError>>,
+    record: Option<LogRecord>,
+    tx: Option<oneshot::Sender<Result<u64, StorageError>>>,
+}
+
+impl PendingWrite {
+    fn new(record: LogRecord) -> (Self, oneshot::Receiver<Result<u64, StorageError>>) {
+        let (tx, rx) = oneshot::channel();
+        (
+            Self {
+                record: Some(record),
+                tx: Some(tx),
+            },
+            rx,
+        )
+    }
+
+    /// The collection this write belongs to, for the flush loop's grouping pass.
+    fn operation(&self) -> &LogOperation {
+        &self
+            .record
+            .as_ref()
+            .expect("PendingWrite still holds its record until into_parts")
+            .operation
+    }
+
+    /// Split into the record to write and the sender to answer, disarming the drop guard.
+    ///
+    /// The sender is an `Option` on the way out too: the accumulator can hold a write whose
+    /// caller has already been answered — a backpressure refusal disarms one on the spot —
+    /// and the publish path must not care which.
+    fn into_parts(
+        mut self,
+    ) -> (
+        LogRecord,
+        Option<oneshot::Sender<Result<u64, StorageError>>>,
+    ) {
+        let record = self
+            .record
+            .take()
+            .expect("PendingWrite::into_parts called once");
+        (record, self.tx.take())
+    }
+}
+
+impl Drop for PendingWrite {
+    fn drop(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            // Deliberately *not confirmed* rather than an error naming a failure. A write
+            // can be dropped after its batch has already reached the log — a panic partway
+            // through publication is exactly that — so this cannot honestly claim the
+            // record did not land.
+            let _ = tx.send(Err(StorageError::WriteNotConfirmed(
+                "the queued write was discarded before its outcome was known".to_string(),
+            )));
+        }
+    }
+}
+
+/// Handles for the flush loop and the task that supervises it.
+///
+/// Retained rather than discarded. All four constructors used to end with
+/// `tokio::spawn(async move { Self::run_flush_loop(weak).await; });` and throw the
+/// `JoinHandle` away — the struct below even carried the comment
+/// "Phase 2: Writer thread handle (stored here for Drop)" with no field under it. That
+/// hole is why a writer that panicked was indistinguishable from one that was idle:
+/// nothing observed the task, so nothing discharged the writes it was holding.
+///
+/// Both tasks hold a `Weak<WalStorageInner>`, so keeping their handles on the strong side
+/// creates no cycle.
+struct WriterTasks {
+    /// Stops the flush loop when the adapter goes away.
+    ///
+    /// An `AbortHandle` and not the `JoinHandle`, because the supervisor owns that one:
+    /// learning *how* the writer exited means `await`ing it, and a handle cannot be both
+    /// awaited there and kept here.
+    flush_loop: AbortHandle,
+    supervisor: AbortHandle,
 }
 
 struct WalStorageInner {
@@ -187,12 +366,33 @@ struct WalStorageInner {
     max_offset: AtomicU64,
     // Phase 9: Checkpoint path for fast recovery
     checkpoint_path: PathBuf,
-    // Phase 2: Writer thread handle (stored here for Drop)
+    /// Monotonic accounting for writes between the accumulator and the log.
+    ///
+    /// The only thing in the process that can tell a writer which is alive and publishing
+    /// from one which is alive and publishing nothing. See `storage::writer_liveness`.
+    progress: SharedProgress,
+    /// Stall and client-wait bounds, derived once from the configured flush interval.
+    bounds: LivenessBounds,
+    /// Phase 2: writer task handles, stored here for `Drop` — the field the original
+    /// comment promised and never had.
+    ///
+    /// `OnceLock` because both tasks need a `Weak<WalStorageInner>` and so cannot be
+    /// spawned until this struct exists. Set once, immediately after construction.
+    writer: OnceLock<WriterTasks>,
 }
 
 impl Drop for WalStorageInner {
     fn drop(&mut self) {
         self.flush_notify.notify_one();
+
+        // Stop the background tasks rather than leaving them to notice on their next tick
+        // that `Weak::upgrade` fails. Both already exit on their own once this struct is
+        // gone; aborting makes it immediate, which matters most in tests, where hundreds of
+        // adapters are opened and dropped inside one runtime.
+        if let Some(tasks) = self.writer.get() {
+            tasks.flush_loop.abort();
+            tasks.supervisor.abort();
+        }
     }
 }
 
@@ -395,6 +595,9 @@ impl WalStorageAdapter {
             publish_barrier: Arc::new(RwLock::new(())),
             max_offset: AtomicU64::new(0),
             checkpoint_path: config.wal.log_dir.join("checkpoint.json"),
+            progress: Arc::new(WritePathProgress::new()),
+            bounds: LivenessBounds::from_max_flush_ms(config.batching.max_flush_ms),
+            writer: OnceLock::new(),
         });
 
         let adapter = Self {
@@ -412,11 +615,8 @@ impl WalStorageAdapter {
         })?;
         info!("Index rebuild complete in {:?}", start.elapsed());
 
-        // Spawn background flush task
-        let weak_inner = Arc::downgrade(&inner);
-        tokio::spawn(async move {
-            Self::run_flush_loop(weak_inner).await;
-        });
+        // Spawn the background flush task and its supervisor.
+        Self::spawn_writer(&inner);
 
         info!("WalStorageAdapter initialized successfully");
         Ok(adapter)
@@ -475,6 +675,9 @@ impl WalStorageAdapter {
             publish_barrier: Arc::new(RwLock::new(())),
             max_offset: AtomicU64::new(0),
             checkpoint_path: storage_config.wal.log_dir.join("checkpoint.json"),
+            progress: Arc::new(WritePathProgress::new()),
+            bounds: LivenessBounds::from_max_flush_ms(storage_config.batching.max_flush_ms),
+            writer: OnceLock::new(),
         });
 
         let adapter = Self {
@@ -485,11 +688,8 @@ impl WalStorageAdapter {
         info!("Rebuilding index from WAL...");
         adapter.rebuild_index_async().await?;
 
-        // Spawn background flush task
-        let weak_inner = Arc::downgrade(&inner);
-        tokio::spawn(async move {
-            Self::run_flush_loop(weak_inner).await;
-        });
+        // Spawn the background flush task and its supervisor.
+        Self::spawn_writer(&inner);
 
         info!("WalStorageAdapter with replication initialized successfully");
         Ok(adapter)
@@ -550,6 +750,9 @@ impl WalStorageAdapter {
             publish_barrier: Arc::new(RwLock::new(())),
             max_offset: AtomicU64::new(0),
             checkpoint_path: storage_config.wal.log_dir.join("checkpoint.json"),
+            progress: Arc::new(WritePathProgress::new()),
+            bounds: LivenessBounds::from_max_flush_ms(storage_config.batching.max_flush_ms),
+            writer: OnceLock::new(),
         });
 
         let adapter = Self {
@@ -564,11 +767,8 @@ impl WalStorageAdapter {
         })?;
         info!("Index rebuild complete in {:?}", start.elapsed());
 
-        // Spawn background flush task
-        let weak_inner = Arc::downgrade(&inner);
-        tokio::spawn(async move {
-            Self::run_flush_loop(weak_inner).await;
-        });
+        // Spawn the background flush task and its supervisor.
+        Self::spawn_writer(&inner);
 
         Ok(adapter)
     }
@@ -625,6 +825,9 @@ impl WalStorageAdapter {
             publish_barrier: Arc::new(RwLock::new(())),
             max_offset: AtomicU64::new(0),
             checkpoint_path: storage_config.wal.log_dir.join("checkpoint.json"),
+            progress: Arc::new(WritePathProgress::new()),
+            bounds: LivenessBounds::from_max_flush_ms(storage_config.batching.max_flush_ms),
+            writer: OnceLock::new(),
         });
 
         let adapter = Self {
@@ -637,11 +840,8 @@ impl WalStorageAdapter {
         adapter.rebuild_index_async().await?;
         info!("Index rebuild complete in {:?}", start.elapsed());
 
-        // Spawn background flush task
-        let weak_inner = Arc::downgrade(&inner);
-        tokio::spawn(async move {
-            Self::run_flush_loop(weak_inner).await;
-        });
+        // Spawn the background flush task and its supervisor.
+        Self::spawn_writer(&inner);
 
         Ok(adapter)
     }
@@ -711,20 +911,8 @@ impl WalStorageAdapter {
             data: data.to_vec(),
         });
 
-        let (tx, rx) = oneshot::channel();
-
-        // Add to accumulator
-        {
-            let mut acc = self.inner.accumulator.lock().await;
-            acc.add(PendingWrite { record, tx });
-        }
-
-        // Notify flush loop
-        self.inner.flush_notify.notify_one();
-
-        // Wait for persistence
-        rx.await
-            .map_err(|_| StorageError::Internal("oneshot canceled".into()))?
+        let rx = self.enqueue_write(record).await?;
+        Self::await_write(rx, self.inner.bounds.client_bound).await
     }
 
     /// Append multiple Raft entries in a single batch (PERFORMANCE OPTIMIZED)
@@ -747,40 +935,26 @@ impl WalStorageAdapter {
             return Ok(Vec::new());
         }
 
-        // Convert all entries to LogRecords and create channels
-        let mut receivers = Vec::with_capacity(entries.len());
+        let records: Vec<LogRecord> = entries
+            .iter()
+            .map(|data| {
+                LogRecord::new(LogOperation::Put {
+                    collection: "__raft_log".to_string(),
+                    id: uuid::Uuid::new_v4().as_bytes().to_vec(),
+                    data: data.clone(),
+                })
+            })
+            .collect();
 
-        for data in entries {
-            let record = LogRecord::new(LogOperation::Put {
-                collection: "__raft_log".to_string(),
-                id: uuid::Uuid::new_v4().as_bytes().to_vec(),
-                data: data.clone(),
-            });
+        // One lock acquisition and one notification for the whole batch, and all-or-nothing
+        // against the queue ceiling: a partial accept would hand this caller an error with
+        // some of its entries already on their way to the log.
+        let receivers = self.enqueue_writes(records).await?;
 
-            let (tx, rx) = oneshot::channel();
-
-            // Add to accumulator
-            {
-                let mut acc = self.inner.accumulator.lock().await;
-                acc.add(PendingWrite {
-                    record: record.clone(),
-                    tx,
-                });
-            }
-
-            receivers.push(rx);
-        }
-
-        // Single flush notification for all entries
-        self.inner.flush_notify.notify_one();
-
-        // Wait for all to persist
+        let bound = self.inner.bounds.client_bound;
         let mut offsets = Vec::with_capacity(entries.len());
         for rx in receivers {
-            let offset = rx
-                .await
-                .map_err(|_| StorageError::Internal("oneshot canceled".into()))??;
-            offsets.push(offset);
+            offsets.push(Self::await_write(rx, bound).await?);
         }
 
         Ok(offsets)
@@ -1033,6 +1207,358 @@ impl WalStorageAdapter {
         Ok(max_offset)
     }
 
+    /// Start the flush loop and the task that supervises it, retaining both handles.
+    ///
+    /// Replaces four identical copies of a `tokio::spawn` whose `JoinHandle` was dropped on
+    /// the spot. Keeping it is Part 1 of the liveness spec: the writer's exit — clean,
+    /// panicking, or cancelled — is now something the process can observe rather than
+    /// something callers infer from never being answered.
+    fn spawn_writer(inner: &Arc<WalStorageInner>) {
+        let weak_for_loop = Arc::downgrade(inner);
+        let flush_loop = tokio::spawn(async move {
+            Self::run_flush_loop(weak_for_loop).await;
+        });
+        let flush_abort = flush_loop.abort_handle();
+
+        let weak_for_supervisor = Arc::downgrade(inner);
+        let supervisor = tokio::spawn(async move {
+            Self::run_writer_supervisor(weak_for_supervisor, flush_loop).await;
+        });
+
+        // `set` fails only if called twice, which would mean two writers for one adapter.
+        // Nothing does that; the handles from a second one would simply be dropped, which
+        // is the pre-existing behaviour rather than a new failure.
+        let _ = inner.writer.set(WriterTasks {
+            flush_loop: flush_abort,
+            supervisor: supervisor.abort_handle(),
+        });
+    }
+
+    /// Watch the flush loop, and watch the queue it is supposed to be draining.
+    ///
+    /// Two failure modes, and the second is why the first is not sufficient:
+    ///
+    /// - **The task ends** — panic, early return, cancellation, runtime shutdown. Observed
+    ///   by `await`ing its `JoinHandle` (Part 1).
+    /// - **The task is alive and looping but publishes nothing.** Its `JoinHandle` never
+    ///   resolves, so nothing about the task reveals this. Only the queue does — hence the
+    ///   progress accounting (Part 2). This is the failure cargo-mutants reproduced by
+    ///   replacing `flush_accumulator_inner` with `()`, and the one that made the whole
+    ///   workspace suite hang for 300s instead of failing.
+    ///
+    /// Holds only a `Weak`, and upgrades for the duration of a single check. Holding a
+    /// strong reference would keep the adapter alive forever and suppress the flush its
+    /// `Drop` performs.
+    async fn run_writer_supervisor(
+        weak_inner: Weak<WalStorageInner>,
+        mut flush_loop: JoinHandle<()>,
+    ) {
+        let bounds = match weak_inner.upgrade() {
+            Some(inner) => inner.bounds,
+            None => return,
+        };
+
+        let mut last_published = 0u64;
+        // Two speeds, decided at the end of each check from what the queue actually holds —
+        // the same idle/busy split `run_flush_loop` makes, and for the same reason: one of
+        // these tasks exists per collection adapter, so an idle one must be nearly free.
+        let mut tick = bounds.idle_tick();
+
+        loop {
+            tokio::select! {
+                joined = &mut flush_loop => {
+                    let cause = match joined {
+                        Ok(()) => "returned".to_string(),
+                        Err(error) if error.is_cancelled() => "cancelled".to_string(),
+                        Err(error) if error.is_panic() => {
+                            format!("panicked: {}", Self::panic_message(error.into_panic()))
+                        }
+                        Err(error) => format!("join failed: {error}"),
+                    };
+
+                    // No upgrade means the adapter is already gone, so the writer exiting
+                    // is the ordinary end of its life and there is nobody left to tell.
+                    if let Some(inner) = weak_inner.upgrade() {
+                        Self::fail_write_path(&inner, WriterFailure::Exited(cause)).await;
+                    }
+                    return;
+                }
+                _ = tokio::time::sleep(tick) => {}
+            }
+
+            let Some(inner) = weak_inner.upgrade() else {
+                return;
+            };
+            tick = Self::observe_write_path(&inner, &mut last_published).await;
+        }
+    }
+
+    /// Render whatever a panicking task carried into something loggable.
+    ///
+    /// `JoinError::into_panic` hands back the `Box<dyn Any>` from `panic!`, which is a
+    /// `&str` for a literal message and a `String` for a formatted one. Anything else is a
+    /// custom payload; naming it as unknown beats dropping the fact that a panic happened.
+    fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+        if let Some(message) = payload.downcast_ref::<&'static str>() {
+            return (*message).to_string();
+        }
+        if let Some(message) = payload.downcast_ref::<String>() {
+            return message.clone();
+        }
+        "unknown panic payload".to_string()
+    }
+
+    /// One watchdog tick: publish the write-path gauges, then decide whether the writer is
+    /// stalled.
+    ///
+    /// Metrics are updated on every tick, healthy or not. A dashboard that only receives
+    /// numbers during an incident cannot show what normal looked like, which is most of
+    /// what makes the numbers worth having.
+    ///
+    /// Returns how long to wait before the next check.
+    async fn observe_write_path(
+        inner: &Arc<WalStorageInner>,
+        last_published: &mut u64,
+    ) -> Duration {
+        let progress = &inner.progress;
+        let published = progress.published_total();
+        let depth = progress.queue_depth();
+        let oldest = progress.oldest_unpublished_age();
+
+        inner.metrics.set_write_queue(
+            depth,
+            oldest
+                .map(|age| age.as_millis().min(u128::from(u64::MAX)) as u64)
+                .unwrap_or(0),
+        );
+
+        // Both conditions from the spec: no progress, and something old waiting. Stating
+        // the "no progress" half explicitly is what makes this a progress check rather than
+        // a latency check, and the difference matters for a queue that is deep because it
+        // is busy.
+        //
+        // A third clause, `depth > 0`, used to lead this and has been removed. It could
+        // never change the answer: `resolve` stores 0 into the oldest-unpublished clock
+        // whenever the queue empties, so `oldest` is already `None` for an empty queue and
+        // `is_some_and` is already false. Mutation run 31566656408 found it — `> with >=`
+        // survived (on a u64 that comparison is always true) while `> with ==` and
+        // `> with <` were caught, which is the signature of a guard that matters in one
+        // direction only.
+        //
+        // Deleted rather than excluded as an equivalent mutant. The invariant it restated
+        // is enforced in `resolve`, and one place enforcing it is better than two that can
+        // drift apart.
+        let stalled = published == *last_published
+            && oldest.is_some_and(|age| age >= inner.bounds.stall_threshold);
+
+        *last_published = published;
+
+        let next_tick = if depth > 0 {
+            inner.bounds.active_tick()
+        } else {
+            inner.bounds.idle_tick()
+        };
+
+        if !stalled {
+            return next_tick;
+        }
+
+        let failure = WriterFailure::Stalled {
+            queue_depth: depth,
+            oldest_age_ms: oldest
+                .map(|age| age.as_millis().min(u128::from(u64::MAX)) as u64)
+                .unwrap_or(0),
+            threshold_ms: inner
+                .bounds
+                .stall_threshold
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64,
+        };
+        Self::fail_write_path(inner, failure).await;
+        next_tick
+    }
+
+    /// Move the write path to a failed state and hand every waiter behind it an answer.
+    ///
+    /// The two halves are separate on purpose. Marking the state is idempotent and happens
+    /// once; discharging runs every time, because a stalled writer keeps accepting new
+    /// writes (see `WritePathProgress::refuse_if_failed` for why refusing them would be
+    /// worse) and each watchdog tick must clear whatever has accumulated since the last.
+    async fn fail_write_path(inner: &WalStorageInner, failure: WriterFailure) {
+        if inner.progress.fail(failure.clone()) {
+            warn!("{failure}");
+            inner.metrics.set_writer_healthy(false);
+            inner.metrics.record_error();
+        }
+        if matches!(failure, WriterFailure::Stalled { .. }) {
+            inner.metrics.record_writer_stall();
+        }
+
+        let discharged = Self::discharge_pending(inner, failure.to_error()).await;
+        if let Some(report) = Self::discharge_report(discharged, &failure) {
+            warn!("{report}");
+        }
+    }
+
+    /// What to log about a discharge, or `None` when there is nothing worth saying.
+    ///
+    /// Returning the line rather than logging it inline is what makes the condition
+    /// testable: `fail_write_path` runs on every watchdog tick for as long as a stall
+    /// lasts, so a stall that has already handed back everything it had would otherwise
+    /// repeat "Discharged 0" at the tick rate and bury the one line that named the cause.
+    /// That is a real requirement with no observable other than the log itself, and a
+    /// condition whose only effect is a side effect is a condition no test can pin —
+    /// mutation run 31575909551 missed `> with ==` here for exactly that reason.
+    fn discharge_report(discharged: u64, failure: &WriterFailure) -> Option<String> {
+        (discharged > 0).then(|| {
+            format!(
+                "Discharged {} unpublished write(s) with a not-confirmed result: {}",
+                discharged, failure
+            )
+        })
+    }
+
+    /// Hand every write still sitting in the accumulator its result, and report how many.
+    ///
+    /// This is the step that makes the whole thing observable from outside. The senders
+    /// live inside the accumulator until someone takes the batch out; if nothing ever does,
+    /// they sit there alive and unfired and the caller waits forever.
+    async fn discharge_pending(inner: &WalStorageInner, error: StorageError) -> u64 {
+        let pending = {
+            let mut acc = inner.accumulator.lock().await;
+            acc.flush()
+        };
+
+        let count = pending.len() as u64;
+        for write in pending {
+            let (_record, tx) = write.into_parts();
+            if let Some(tx) = tx {
+                let _ = tx.send(Err(error.clone()));
+            }
+        }
+
+        // Resolved, but explicitly not *published*: giving up on a write is not evidence
+        // the writer recovered, and must not clear the unhealthy state.
+        inner.progress.record_discharged(count);
+        count
+    }
+
+    /// Queue one write for the flush loop, or decline to.
+    ///
+    /// The single place the adapter takes on a write obligation, and therefore the only
+    /// place that can decline one. Two reasons to decline:
+    ///
+    /// - the writer has **exited**, so nothing will ever drain the queue,
+    /// - the queue is **at capacity**, so buffering more would turn a stall into an OOM
+    ///   (Part 4). Without this, Parts 1–3 report the stall accurately right up until the
+    ///   process is killed for memory.
+    async fn enqueue_write(
+        &self,
+        record: LogRecord,
+    ) -> Result<oneshot::Receiver<Result<u64, StorageError>>, StorageError> {
+        let mut rxs = self.enqueue_writes(vec![record]).await?;
+        Ok(rxs.pop().expect("one record in, one receiver out"))
+    }
+
+    /// Queue a whole batch, all or nothing.
+    ///
+    /// All-or-nothing because the alternative — accept what fits, refuse the rest — returns
+    /// an error to a caller some of whose writes are on their way to the log. There is no
+    /// honest thing such a caller can do with that.
+    async fn enqueue_writes(
+        &self,
+        records: Vec<LogRecord>,
+    ) -> Result<Vec<oneshot::Receiver<Result<u64, StorageError>>>, StorageError> {
+        if records.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        if let Some(error) = self.inner.progress.refuse_if_failed() {
+            return Err(error);
+        }
+
+        let wanted = records.len();
+        let mut receivers = Vec::with_capacity(wanted);
+
+        {
+            let mut acc = self.inner.accumulator.lock().await;
+
+            if acc.len() + wanted > acc.max_pending() {
+                return Err(StorageError::WriteBackpressure(format!(
+                    "WAL write queue is at capacity ({} of {} slots used, {} requested); \
+                     the writer is not draining fast enough",
+                    acc.len(),
+                    acc.max_pending(),
+                    wanted
+                )));
+            }
+
+            for record in records {
+                let (pending, rx) = PendingWrite::new(record);
+                // Cannot fail: the capacity check above reserved room for the whole batch,
+                // and the accumulator lock has not been released since.
+                if acc.try_add(pending).is_err() {
+                    unreachable!("capacity was checked while holding the accumulator lock");
+                }
+                receivers.push(rx);
+            }
+
+            // Counted while the lock is held, so the flush loop — which needs the same lock
+            // to take the batch — cannot publish a write before it has been counted as
+            // enqueued and make the queue momentarily look empty.
+            self.inner.progress.record_enqueued(wanted as u64);
+        }
+
+        self.inner.flush_notify.notify_one();
+        Ok(receivers)
+    }
+
+    /// Wait for a queued write's result, bounded (Part 3).
+    ///
+    /// # Why there is a bound at all, and why it is not the fix
+    ///
+    /// Parts 1 and 2 discharge these receivers with a named cause, and under the failure
+    /// this spec is about they do so long before this expires. What the bound covers is the
+    /// gap the supervisor cannot reach: a batch already taken out of the accumulator, whose
+    /// senders the writer alone holds. A blanket timeout here *as* the fix was considered
+    /// and rejected — it changes the durability contract to make a CI signal pass.
+    ///
+    /// # Why the error is never "failed"
+    ///
+    /// The write is with the writer and may be published a moment after this returns. A
+    /// caller told "failed" will retry, and a retry of a write that later commits is a
+    /// double write — silent data corruption, which is strictly worse than the hang it
+    /// replaces. So the answer is [`StorageError::WriteNotConfirmed`], whose documentation
+    /// says exactly that.
+    async fn await_write(
+        rx: oneshot::Receiver<Result<u64, StorageError>>,
+        bound: Duration,
+    ) -> Result<u64, StorageError> {
+        match tokio::time::timeout(bound, rx).await {
+            Ok(Ok(result)) => result,
+            // The sender was dropped without sending. Unreachable while `PendingWrite`
+            // carries its drop guard — which is the point of the guard — and kept as the
+            // belt to that braces.
+            Ok(Err(_)) => Err(StorageError::WriteNotConfirmed(
+                "the queued write was dropped before its outcome was known".to_string(),
+            )),
+            Err(_) => Err(StorageError::WriteNotConfirmed(format!(
+                "no result from the WAL writer within {}ms",
+                bound.as_millis()
+            ))),
+        }
+    }
+
+    /// State of the write path, for health and readiness probes.
+    ///
+    /// Synchronous and lock-free apart from one uncontended read lock. A probe that can
+    /// block turns a stalled writer into a stalled health check, and an orchestrator that
+    /// times out on a probe restarts the node — the one action guaranteed to lose the
+    /// queued writes this is reporting on.
+    pub fn write_path_health(&self) -> WritePathHealth {
+        self.inner.progress.health()
+    }
+
     /// Background task to flush accumulator
     async fn run_flush_loop(weak_inner: Weak<WalStorageInner>) {
         // We need the notify to wait on. We can get it from the inner if it's alive.
@@ -1068,6 +1594,11 @@ impl WalStorageAdapter {
             }
 
             if let Some(inner) = weak_inner.upgrade() {
+                #[cfg(test)]
+                if fault_injection::writer_should_panic(&inner._config.wal.log_dir) {
+                    panic!("injected writer panic");
+                }
+
                 Self::flush_accumulator_inner(&inner).await;
 
                 // Update cache size metrics periodically
@@ -1115,7 +1646,23 @@ impl WalStorageAdapter {
     }
 
     /// Flush the accumulator to WAL (static helper for inner)
+    ///
+    /// # Why the accounting lives here and not inside `publish_batch`
+    ///
+    /// Everything this takes out of the accumulator is now the writer's obligation, and it
+    /// is discharged one way or another before this returns: sent a result, sent an error,
+    /// or dropped — and dropping a `PendingWrite` sends a result too. Recording the count
+    /// here, on every path out, is what keeps `queue_depth` honest. Leaving any of it
+    /// uncounted would park the depth above zero forever and have the watchdog report a
+    /// stall on a writer that is working perfectly.
     async fn flush_accumulator_inner(inner: &WalStorageInner) {
+        // Simulates a flush loop that is alive but no longer publishing — the failure this
+        // whole mechanism exists for, and the one no other seam can produce.
+        #[cfg(test)]
+        if fault_injection::writer_should_stall(&inner._config.wal.log_dir) {
+            return;
+        }
+
         let batch = {
             let mut acc = inner.accumulator.lock().await;
             acc.flush()
@@ -1124,7 +1671,24 @@ impl WalStorageAdapter {
         if batch.is_empty() {
             return;
         }
+        let taken = batch.len() as u64;
 
+        let published = Self::publish_batch(inner, batch).await;
+
+        inner.progress.record_published(taken);
+        if published > 0 {
+            inner
+                .metrics
+                .record_writer_publish(published, unix_millis());
+        }
+    }
+
+    /// Write one drained batch to the WAL, update the index, and answer its waiters.
+    ///
+    /// Returns how many writes actually reached the log, which is zero if the append
+    /// failed. The caller distinguishes that from "how many were taken", because for
+    /// liveness they are both progress and for the publish-rate gauge only the first is.
+    async fn publish_batch(inner: &WalStorageInner, batch: Vec<PendingWrite>) -> u64 {
         let _transaction_barrier = inner.transaction_barrier.read().await;
 
         // Group by collection to create batches
@@ -1136,7 +1700,7 @@ impl WalStorageAdapter {
         // (Record, Waiters, Optional IDs for index update)
         type BatchGroup = (
             LogRecord,
-            Vec<oneshot::Sender<Result<u64, StorageError>>>,
+            Vec<Option<oneshot::Sender<Result<u64, StorageError>>>>,
             Option<Vec<Vec<u8>>>,
         );
         let mut batched_writes: Vec<BatchGroup> = Vec::new();
@@ -1149,7 +1713,7 @@ impl WalStorageAdapter {
             std::collections::HashMap::new();
 
         for write in batch {
-            let collection = match &write.record.operation {
+            let collection = match write.operation() {
                 LogOperation::Put { collection, .. } => collection.clone(),
                 LogOperation::Delete { collection, .. } => collection.clone(),
                 _ => String::new(), // Should not happen with current put/delete impl
@@ -1170,7 +1734,10 @@ impl WalStorageAdapter {
             let mut current_delete_txs = Vec::with_capacity(256);
 
             for write in writes {
-                match write.record.operation {
+                // Takes the record and the sender out together, disarming the drop guard:
+                // from here on this batch's answers are `publish_batch`'s responsibility.
+                let (record, write_tx) = write.into_parts();
+                match record.operation {
                     LogOperation::Put { id, data, .. } => {
                         // Flush pending deletes if any
                         if !current_deletes.is_empty() {
@@ -1196,7 +1763,7 @@ impl WalStorageAdapter {
                         }
                         current_put_ids.push(id.clone());
                         current_puts.push((id, data));
-                        current_put_txs.push(write.tx);
+                        current_put_txs.push(write_tx);
                     }
                     LogOperation::Delete { id, .. } => {
                         // Flush pending puts if any
@@ -1219,7 +1786,7 @@ impl WalStorageAdapter {
                             }
                         }
                         current_deletes.push(id);
-                        current_delete_txs.push(write.tx);
+                        current_delete_txs.push(write_tx);
                     }
                     // Listed rather than wildcarded. The accumulator only ever holds
                     // single Put and Delete records — `put_many` and the raft appends build
@@ -1262,7 +1829,10 @@ impl WalStorageAdapter {
         }
 
         if batched_writes.is_empty() {
-            return;
+            // Every sender was dropped with the groups above, so every caller has already
+            // been answered by the drop guard. Reachable when `new_with_compression` fails
+            // for a record, which is why the guard exists rather than an `expect`.
+            return 0;
         }
 
         let (records, rest): (Vec<_>, Vec<_>) = batched_writes
@@ -1272,7 +1842,22 @@ impl WalStorageAdapter {
         let (tx_groups, id_groups): (Vec<_>, Vec<_>) = rest.into_iter().unzip();
 
         // Write to WAL (async, returns Vec<(segment_id, offset)>)
-        match inner.wal.append_batch(records.clone()).await {
+        //
+        // Simulates the append failing under the writer — a full disk, a failing fsync.
+        // The batch has already left the accumulator at this point, so this is the only
+        // seam that reaches "taken but not published".
+        #[cfg(test)]
+        let appended = if fault_injection::append_should_fail(&inner._config.wal.log_dir) {
+            Err(prkdb_core::wal::WalError::Io(std::io::Error::other(
+                "fault injection: WAL append failed",
+            )))
+        } else {
+            inner.wal.append_batch(records.clone()).await
+        };
+        #[cfg(not(test))]
+        let appended = inner.wal.append_batch(records.clone()).await;
+
+        match appended {
             Ok(locations) => {
                 // Pin the index for the duration of the batch update
                 // Note: Guard is not Send, so we must drop it before any await point
@@ -1339,18 +1924,26 @@ impl WalStorageAdapter {
                 }
 
                 // Notify waiters with encoded location
+                let mut published = 0u64;
                 for (tx, (_seg_id, off)) in tx_groups.into_iter().zip(locations.iter()) {
-                    for sender in tx {
+                    for sender in tx.into_iter().flatten() {
                         let _ = sender.send(Ok(*off));
+                        published += 1;
                     }
                 }
+                published
             }
             Err(e) => {
                 for tx_group in tx_groups {
-                    for tx in tx_group {
+                    for tx in tx_group.into_iter().flatten() {
                         let _ = tx.send(Err(StorageError::Internal(e.to_string())));
                     }
                 }
+                // Nothing reached the log, so nothing counts towards the publish rate. The
+                // callers were still answered, which is what `flush_accumulator_inner`
+                // records separately — a writer that returns errors is broken, but it is
+                // not stalled, and reporting it as stalled would name the wrong problem.
+                0
             }
         }
     }
@@ -1503,32 +2096,22 @@ impl StorageAdapter for WalStorageAdapter {
             .metrics
             .record_write_batch(items.len() as u64, total_bytes);
 
-        let mut rxs = Vec::with_capacity(items.len());
-        let mut should_flush = false;
-
-        {
-            let mut acc = self.inner.accumulator.lock().await;
-            for (key, value) in items {
-                let record = LogRecord::new(LogOperation::Put {
+        let records: Vec<LogRecord> = items
+            .into_iter()
+            .map(|(key, value)| {
+                LogRecord::new(LogOperation::Put {
                     collection: String::new(),
                     id: key,
                     data: value,
-                });
-                let (tx, rx) = oneshot::channel();
-                rxs.push(rx);
-                acc.add(PendingWrite { record, tx });
-                should_flush = true;
-            }
-        }
+                })
+            })
+            .collect();
 
-        if should_flush {
-            self.inner.flush_notify.notify_one();
-        }
+        let rxs = self.enqueue_writes(records).await?;
 
-        // Wait for all
+        let bound = self.inner.bounds.client_bound;
         for rx in rxs {
-            rx.await
-                .map_err(|_| StorageError::Internal("Channel closed".to_string()))??;
+            Self::await_write(rx, bound).await?;
         }
         Ok(())
     }
@@ -2028,6 +2611,10 @@ impl StorageAdapter for WalStorageAdapter {
     ) -> Result<u64, StorageError> {
         self.take_snapshot(&path, compression).await
     }
+
+    fn write_path_health(&self) -> WritePathHealth {
+        WalStorageAdapter::write_path_health(self)
+    }
 }
 
 #[cfg(test)]
@@ -2035,6 +2622,7 @@ mod tests {
     use super::*;
     use std::env;
     use std::fs;
+    use std::time::Instant;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_wal_adapter_put_get() {
@@ -2606,5 +3194,616 @@ mod tests {
 
         // Verify earlier keys might be evicted (optional, depends on LRU behavior)
         // For now, just ensuring builder works and adapter is functional is enough.
+    }
+
+    // ------------------------------------------------------------------------------
+    // WAL writer liveness — docs/superpowers/specs/2026-08-11-wal-writer-liveness.md
+    //
+    // Every test below observes the write path from the *caller's* side, because that is
+    // where the defect lived: a queued write is a promise, and the failure mode was that
+    // nothing kept it and nothing said so. The property is liveness — "the write is
+    // eventually published" — which has no non-temporal observation, so each of these
+    // bounds the wait and asserts the caller was answered rather than left hanging.
+    //
+    // Every one of them hung indefinitely before this work.
+    // ------------------------------------------------------------------------------
+
+    /// A config whose stall bound is short enough to observe inside a test.
+    ///
+    /// `max_flush_ms` is the knob the bounds derive from, so setting it here is the same
+    /// lever an operator has — the test is not reaching past the mechanism to a private
+    /// constant.
+    fn liveness_config(dir: &Path, max_flush_ms: u64, max_pending: usize) -> StorageConfig {
+        StorageConfig {
+            wal: WalConfig {
+                log_dir: dir.to_path_buf(),
+                ..WalConfig::test_config()
+            },
+            batching: AdaptiveBatchConfig {
+                max_flush_ms,
+                max_pending,
+                // The accumulator clamps `max_pending` up to `max_batch_size`, since a
+                // ceiling below the batch size would make a full batch unreachable. Tests
+                // that want a small queue must therefore say so on both, or the requested
+                // ceiling is silently replaced by the 10K default.
+                min_batch_size: 1,
+                max_batch_size: max_pending,
+                ..AdaptiveBatchConfig::default()
+            },
+            ..StorageConfig::default()
+        }
+    }
+
+    fn liveness_dir(name: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!("prkdb_liveness_{name}"));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// Poll until `check` holds, or fail naming what was being waited for. Used instead of
+    /// a fixed sleep so a slow machine takes longer rather than failing.
+    async fn wait_until(what: &str, limit: Duration, mut check: impl FnMut() -> bool) {
+        let deadline = Instant::now() + limit;
+        while Instant::now() < deadline {
+            if check() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("timed out after {limit:?} waiting for {what}");
+    }
+
+    /// The drop guard, in isolation. This is what makes the `oneshot canceled` handler
+    /// reachable for the first time: before it, a queued write destroyed without a result
+    /// closed its channel silently and no path in the program guaranteed even that.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropping_a_queued_write_answers_its_caller() {
+        let (pending, rx) = PendingWrite::new(LogRecord::new(LogOperation::Delete {
+            collection: String::new(),
+            id: b"k".to_vec(),
+        }));
+
+        drop(pending);
+
+        let result = rx
+            .await
+            .expect("the drop guard must send a result, not close the channel");
+        let error = result.expect_err("a dropped write cannot report an offset");
+        assert!(
+            error.is_write_unconfirmed(),
+            "a dropped write may already have reached the log, got: {error}"
+        );
+    }
+
+    /// The other direction: a write the publisher has taken responsibility for must not
+    /// also be answered by the guard, or every successful write would race its own
+    /// destructor.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn taking_a_write_apart_disarms_the_drop_guard() {
+        let (pending, rx) = PendingWrite::new(LogRecord::new(LogOperation::Delete {
+            collection: String::new(),
+            id: b"k".to_vec(),
+        }));
+
+        let (_record, tx) = pending.into_parts();
+        let tx = tx.expect("into_parts hands the sender to the publisher");
+        drop(tx);
+
+        assert!(
+            rx.await.is_err(),
+            "into_parts must transfer the obligation, not duplicate it"
+        );
+    }
+
+    /// Acceptance 1: a writer task that panics discharges every pending waiter with an
+    /// error naming the panic, and no caller blocks.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_panicking_writer_discharges_its_waiters_with_the_panic() {
+        let dir = liveness_dir("writer_panic");
+        let adapter = WalStorageAdapter::new_with_config(liveness_config(&dir, 25, 65_536))
+            .expect("adapter opens");
+
+        fault_injection::panic_writer_at(&dir);
+
+        let started = Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            adapter.put_many(vec![(b"k".to_vec(), b"v".to_vec())]),
+        )
+        .await;
+        fault_injection::clear_writer_panic(&dir);
+
+        let result = outcome.expect("the caller must be answered, not left waiting");
+        let error = result.expect_err("a panicking writer cannot have published the write");
+
+        assert!(
+            error.is_write_unconfirmed(),
+            "a panic can happen after the WAL append returned, so the answer must be \
+             not-confirmed rather than failed; got: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("panicked") && message.contains("injected writer panic"),
+            "the error must name the panic that caused it, got: {message}"
+        );
+
+        let health = adapter.write_path_health();
+        assert!(!health.healthy);
+        assert!(health
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("panicked")));
+
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the waiter was discharged by supervision, not by a timeout"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Acceptance 2, and the part that catches the actual defect: a writer that is alive
+    /// and looping but publishes nothing.
+    ///
+    /// Part 1 cannot substitute for this. Under this failure the task is running normally
+    /// and its `JoinHandle` never resolves — there is nothing wrong with the *task*. Only
+    /// the queue shows it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_writer_that_publishes_nothing_is_detected_and_reported_unhealthy() {
+        let dir = liveness_dir("writer_stall");
+        // max_flush_ms 25 => stall threshold 400ms, watchdog tick 100ms, client bound 3.2s.
+        let adapter = WalStorageAdapter::new_with_config(liveness_config(&dir, 25, 65_536))
+            .expect("adapter opens");
+
+        fault_injection::stall_writer_at(&dir);
+
+        let started = Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(20),
+            adapter.put_many(vec![(b"k".to_vec(), b"v".to_vec())]),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        fault_injection::clear_writer_stall(&dir);
+
+        let result = outcome.expect("the caller must be answered, not left waiting");
+        let error = result.expect_err("a stalled writer published nothing");
+
+        assert!(error.is_write_unconfirmed(), "got: {error}");
+        let message = error.to_string();
+        assert!(
+            message.contains("stalled") && message.contains("no publication progress"),
+            "the watchdog, not the client's own bound, must be what answered this caller; \
+             got: {message}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "detection must happen within a small multiple of the flush interval \
+             (threshold 400ms), took {elapsed:?}"
+        );
+
+        let health = adapter.write_path_health();
+        assert!(!health.healthy, "the health endpoint must report the stall");
+        assert!(health
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("stalled")));
+        assert_eq!(adapter.metrics().writer_stalls_total, 1);
+        assert!(!adapter.metrics().writer_healthy);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The other direction for the watchdog: a healthy adapter under the same bounds must
+    /// not be reported as stalled. A detector that fires on everything would pass the test
+    /// above while making the database unusable.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_working_writer_is_never_reported_as_stalled() {
+        let dir = liveness_dir("writer_healthy");
+        let adapter = WalStorageAdapter::new_with_config(liveness_config(&dir, 25, 65_536))
+            .expect("adapter opens");
+
+        // Several watchdog intervals' worth of ordinary writes.
+        for round in 0..12 {
+            adapter
+                .put_many(vec![(format!("k{round}").into_bytes(), b"v".to_vec())])
+                .await
+                .expect("an ordinary write must succeed");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let health = adapter.write_path_health();
+        assert!(health.healthy, "healthy writer reported as {health:?}");
+        assert_eq!(health.queue_depth, 0);
+        assert_eq!(adapter.metrics().writer_stalls_total, 0);
+        assert!(adapter.metrics().writer_publishes_total >= 12);
+        assert!(adapter.metrics().writer_last_publish_unix_ms.is_some());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Acceptance 3, at the boundary that matters: the variant survives the trait object
+    /// every caller in the codebase actually holds. `PrkDb` stores an
+    /// `Arc<dyn StorageAdapter>`, so a variant that were flattened on the way through it
+    /// would make the distinction unobservable however carefully it is defined.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_not_confirmed_variant_survives_the_storage_adapter_boundary() {
+        let dir = liveness_dir("not_confirmed_boundary");
+        let adapter = WalStorageAdapter::new_with_config(liveness_config(&dir, 25, 65_536))
+            .expect("adapter opens");
+        let storage: Arc<dyn StorageAdapter> = Arc::new(adapter);
+
+        fault_injection::stall_writer_at(&dir);
+        let result = tokio::time::timeout(
+            Duration::from_secs(20),
+            storage.put_many(vec![(b"k".to_vec(), b"v".to_vec())]),
+        )
+        .await
+        .expect("the caller must be answered");
+        fault_injection::clear_writer_stall(&dir);
+
+        let error = result.expect_err("a stalled writer published nothing");
+        assert!(
+            matches!(error, StorageError::WriteNotConfirmed(_)),
+            "the variant must arrive intact rather than as Internal; got: {error:?}"
+        );
+        assert!(!storage.write_path_health().healthy);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Acceptance 4: with the queue at capacity and the writer stalled, new writes are
+    /// refused rather than buffered, and memory stays bounded.
+    ///
+    /// The stall threshold is set far out of reach here on purpose. The watchdog would
+    /// otherwise discharge the queue and empty it, and the thing under test is what happens
+    /// while it is still full.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_full_queue_refuses_new_writes_instead_of_growing() {
+        let dir = liveness_dir("backpressure");
+        let capacity = 8;
+        // max_flush_ms 5000 => stall threshold 80s, well beyond this test.
+        let adapter = Arc::new(
+            WalStorageAdapter::new_with_config(liveness_config(&dir, 5_000, capacity))
+                .expect("adapter opens"),
+        );
+
+        fault_injection::stall_writer_at(&dir);
+
+        let filler = {
+            let adapter = adapter.clone();
+            tokio::spawn(async move {
+                let items: Vec<_> = (0..capacity)
+                    .map(|i| (format!("k{i}").into_bytes(), b"v".to_vec()))
+                    .collect();
+                adapter.put_many(items).await
+            })
+        };
+
+        let queue = adapter.clone();
+        wait_until("the queue to fill", Duration::from_secs(10), move || {
+            queue.write_path_health().queue_depth == capacity as u64
+        })
+        .await;
+
+        // Repeated attempts must all be refused, and none of them may grow the queue.
+        for attempt in 0..200 {
+            let error = adapter
+                .put_many(vec![(
+                    format!("overflow{attempt}").into_bytes(),
+                    b"v".to_vec(),
+                )])
+                .await
+                .expect_err("the queue is full");
+            assert!(
+                matches!(error, StorageError::WriteBackpressure(_)),
+                "a refused write must say so definitely, so retrying is safe; got: {error:?}"
+            );
+            assert_eq!(
+                adapter.write_path_health().queue_depth,
+                capacity as u64,
+                "a refused write must not be buffered"
+            );
+        }
+
+        // Both directions: the bulkhead lifts once the writer drains, so this is
+        // backpressure and not a permanent wall.
+        fault_injection::clear_writer_stall(&dir);
+        let filled = tokio::time::timeout(Duration::from_secs(20), filler)
+            .await
+            .expect("the queued batch must resolve once the writer resumes")
+            .expect("the filler task must not panic");
+        assert!(filled.is_ok(), "queued writes should publish: {filled:?}");
+
+        adapter
+            .put_many(vec![(b"after".to_vec(), b"v".to_vec())])
+            .await
+            .expect("writes are accepted again once the queue drains");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The observability the spec asks for, asserted where it is read rather than where it
+    /// is written: queue depth, age of the oldest unpublished write, publish count and the
+    /// timestamp of the last successful publish.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_write_path_publishes_the_numbers_that_show_a_stall_forming() {
+        let dir = liveness_dir("observability");
+        let adapter = Arc::new(
+            WalStorageAdapter::new_with_config(liveness_config(&dir, 5_000, 65_536))
+                .expect("adapter opens"),
+        );
+
+        fault_injection::stall_writer_at(&dir);
+
+        let filler = {
+            let adapter = adapter.clone();
+            tokio::spawn(
+                async move { adapter.put_many(vec![(b"k".to_vec(), b"v".to_vec())]).await },
+            )
+        };
+
+        let probe = adapter.clone();
+        wait_until(
+            "the queue gauges to reflect the stalled write",
+            Duration::from_secs(10),
+            move || {
+                let metrics = probe.metrics();
+                metrics.write_queue_depth == 1 && metrics.write_queue_oldest_age_ms > 0
+            },
+        )
+        .await;
+
+        fault_injection::clear_writer_stall(&dir);
+        tokio::time::timeout(Duration::from_secs(20), filler)
+            .await
+            .expect("the write resolves once the writer resumes")
+            .expect("the filler task must not panic")
+            .expect("the write publishes");
+
+        let probe = adapter.clone();
+        wait_until(
+            "the gauges to return to idle after the publish",
+            Duration::from_secs(10),
+            move || probe.metrics().write_queue_depth == 0,
+        )
+        .await;
+
+        let metrics = adapter.metrics();
+        assert!(metrics.writer_publishes_total >= 1);
+        assert!(metrics.writer_last_publish_unix_ms.is_some());
+        assert!(metrics.writer_healthy);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The watchdog polls fast while writes are queued and slow while idle.
+    ///
+    /// Mutation run 31573318483 missed all three comparisons at this site (`> with ==`,
+    /// `<`, `>=`). They survived because every liveness test bounds detection at seconds
+    /// while the two tick values are 100ms and 400ms apart — the mutants change how quickly
+    /// a stall is noticed, not whether it is, so nothing that only asserts "eventually"
+    /// can see them.
+    ///
+    /// Asserting the returned tick directly is what catches them, and is possible because
+    /// `observe_write_path` returns it. All three mutants collapse the choice: `>=` always
+    /// polls fast (busy-waking an idle database), `<` always polls slow (a stall waits an
+    /// extra idle interval to be noticed), and `==` inverts the two.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_watchdog_polls_fast_only_while_writes_are_queued() {
+        let dir = liveness_dir("tick_selection");
+        // max_flush_ms 25 => stall threshold 400ms => active 100ms, idle 400ms.
+        let adapter = WalStorageAdapter::new_with_config(liveness_config(&dir, 25, 65_536))
+            .expect("adapter opens");
+        let bounds = adapter.inner.bounds;
+        assert_ne!(
+            bounds.active_tick(),
+            bounds.idle_tick(),
+            "the two ticks must differ, or this test cannot distinguish them"
+        );
+
+        let mut last_published = 0u64;
+
+        let idle = WalStorageAdapter::observe_write_path(&adapter.inner, &mut last_published).await;
+        assert_eq!(
+            idle,
+            bounds.idle_tick(),
+            "an empty queue must be polled at the idle interval; waking at the active rate \
+             busy-polls a database nobody is writing to"
+        );
+
+        // Queue a write the stalled writer cannot publish, so the depth stays above zero.
+        fault_injection::stall_writer_at(&dir);
+        let adapter = Arc::new(adapter);
+        let queued = {
+            let adapter = adapter.clone();
+            tokio::spawn(
+                async move { adapter.put_many(vec![(b"k".to_vec(), b"v".to_vec())]).await },
+            )
+        };
+        wait_until(
+            "the queued write to reach the accumulator",
+            Duration::from_secs(10),
+            || adapter.inner.progress.queue_depth() > 0,
+        )
+        .await;
+
+        let active =
+            WalStorageAdapter::observe_write_path(&adapter.inner, &mut last_published).await;
+        assert_eq!(
+            active,
+            bounds.active_tick(),
+            "a non-empty queue must be polled at the active interval, or a stall waits an \
+             extra idle interval to be noticed"
+        );
+
+        fault_injection::clear_writer_stall(&dir);
+        let _ = tokio::time::timeout(Duration::from_secs(20), queued).await;
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A batch that never reached the log is not a publish.
+    ///
+    /// Mutation run 31575909551 missed `> with >=` on the `published > 0` guard around
+    /// `record_writer_publish`. That guard is not cosmetic: `record_writer_publish` stores
+    /// `unix_millis()` into `writer_last_publish_unix_ms` unconditionally, so calling it
+    /// with a count of zero moves the "last successful publish" clock forward on a batch
+    /// that failed. A dashboard would then show a writer publishing normally while every
+    /// caller behind it is receiving errors — the gauge answers "when did it last *try*"
+    /// instead of "when did it last succeed", which is the one question it exists for.
+    ///
+    /// Nothing could see this before because no test could make the append fail;
+    /// `fail_append_at` is that seam.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_append_does_not_count_as_a_publish() {
+        let dir = liveness_dir("append_failure");
+        let adapter = WalStorageAdapter::new_with_config(liveness_config(&dir, 5000, 65_536))
+            .expect("adapter opens");
+
+        assert!(
+            adapter.metrics().writer_last_publish_unix_ms.is_none(),
+            "a fresh adapter has not published anything yet"
+        );
+
+        fault_injection::fail_append_at(&dir);
+        let refused = adapter.put_many(vec![(b"k".to_vec(), b"v".to_vec())]).await;
+        assert!(
+            refused.is_err(),
+            "a write whose append failed must be reported to its caller, not swallowed"
+        );
+
+        // A caller's answer is sent from inside `publish_batch`, and the metrics are
+        // recorded by `flush_accumulator_inner` after it returns — so `refused` arriving
+        // proves nothing about what has been recorded yet. Reading here would race the
+        // writer, and race in the mutant's favour: a mutant that does stamp the clock
+        // stamps it a moment later, and an assertion that got there first would call that
+        // a pass.
+        //
+        // A second failed write closes the gap without a sleep. The flush loop is one
+        // task handling one batch at a time, and this write was not enqueued until the
+        // first had been answered, so it is a separate cycle; receiving its answer
+        // therefore happens after every store the first cycle made.
+        let also_refused = adapter
+            .put_many(vec![(b"k1".to_vec(), b"v1".to_vec())])
+            .await;
+        assert!(also_refused.is_err(), "the fault is still armed");
+
+        fault_injection::clear_append_failure(&dir);
+
+        let after_failure = adapter.metrics();
+        assert_eq!(
+            after_failure.writer_publishes_total, 0,
+            "nothing reached the log, so nothing counts towards the publish total"
+        );
+        assert!(
+            after_failure.writer_last_publish_unix_ms.is_none(),
+            "a failed append must not advance the last-successful-publish clock, or a \
+             broken writer reads as a healthy one"
+        );
+
+        // And the same gauge must still move when a write genuinely lands, or the
+        // assertion above would be satisfied by a writer that never records anything.
+        adapter
+            .put_many(vec![(b"k2".to_vec(), b"v2".to_vec())])
+            .await
+            .expect("the append succeeds once the fault is cleared");
+
+        // Same ordering problem in the other direction: the caller is answered before the
+        // publish is recorded, so this waits for the record rather than assuming it.
+        wait_until(
+            "the successful publish to reach the metrics",
+            Duration::from_secs(10),
+            || adapter.metrics().writer_publishes_total == 1,
+        )
+        .await;
+
+        assert!(
+            adapter.metrics().writer_last_publish_unix_ms.is_some(),
+            "a real publish must stamp the clock"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Discharging nothing says nothing; discharging something names the count and cause.
+    ///
+    /// Mutation run 31575909551 missed `> with ==` on what was then an inline
+    /// `if discharged > 0` around a `warn!`. It survived because the condition's only
+    /// effect was the log, and no test could see a log. `discharge_report` exists to give
+    /// that decision a return value; this pins both of its answers.
+    ///
+    /// Not a correctness property — `record_discharged` runs either way, so the count
+    /// reaches the metrics regardless. It is noise control, and it matters because
+    /// `fail_write_path` runs once per watchdog tick for the whole duration of a stall.
+    #[test]
+    fn a_discharge_of_nothing_is_silent() {
+        let failure = WriterFailure::Stalled {
+            queue_depth: 7,
+            oldest_age_ms: 900,
+            threshold_ms: 400,
+        };
+
+        assert_eq!(
+            WalStorageAdapter::discharge_report(0, &failure),
+            None,
+            "a stall that had nothing left to hand back must log nothing, or it repeats \
+             itself once per tick until the writer recovers"
+        );
+
+        let report = WalStorageAdapter::discharge_report(3, &failure)
+            .expect("a discharge that answered waiters is worth a line");
+        assert!(
+            report.contains("Discharged 3 unpublished write(s)"),
+            "the line must name how many writes were given up on; got: {report}"
+        );
+        assert!(
+            report.contains("stalled"),
+            "and why, or an operator sees a count with no cause; got: {report}"
+        );
+    }
+
+    /// Dropping an adapter stops its background tasks *promptly*, not eventually.
+    ///
+    /// Mutation run 31539366718 missed `replace <impl Drop for WalStorageInner>::drop with
+    /// ()`. Deleting that body does not break correctness — both tasks hold a
+    /// `Weak<WalStorageInner>` and exit on their own once `inner` is gone — so the mutant
+    /// changes only *when* they stop. That is still worth asserting: without the abort a
+    /// dropped adapter leaves a task parked on the flush loop's one-second idle sleep, and
+    /// a process that opens and drops collections steadily accumulates them.
+    ///
+    /// Observed through `Arc::strong_count` on `flush_notify`, which `run_flush_loop`
+    /// clones once and holds for its whole life, so the count falls exactly when the task
+    /// ends. No production code exists for this test to look at, which is the evidence that
+    /// `Drop` here is an optimisation rather than a load-bearing invariant.
+    ///
+    /// Twenty adapters rather than one, deliberately. A single task's remaining sleep is
+    /// uniform in 0..1s, so one adapter would pass under the mutant whenever its sleep
+    /// happened to be nearly over. The *maximum* across twenty sits near the full second,
+    /// which puts the mutant reliably outside the bound below.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropping_an_adapter_stops_its_background_tasks_promptly() {
+        let mut notifies = Vec::new();
+        let mut dirs = Vec::new();
+
+        for i in 0..20 {
+            let dir = liveness_dir(&format!("drop_teardown_{i}"));
+            let adapter = WalStorageAdapter::new_with_config(liveness_config(&dir, 50, 65_536))
+                .expect("adapter opens");
+            notifies.push(adapter.inner.flush_notify.clone());
+            dirs.push(dir);
+            drop(adapter);
+        }
+
+        // Each `Arc` is held by the test and, until the task ends, by the flush loop.
+        wait_until(
+            "every dropped adapter's flush loop to end",
+            Duration::from_millis(300),
+            || notifies.iter().all(|notify| Arc::strong_count(notify) == 1),
+        )
+        .await;
+
+        for dir in &dirs {
+            let _ = fs::remove_dir_all(dir);
+        }
     }
 }

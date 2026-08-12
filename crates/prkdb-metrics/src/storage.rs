@@ -37,6 +37,23 @@ struct StorageMetricsInner {
 
     // Error metrics
     errors_total: AtomicU64,
+
+    // Write-path liveness metrics.
+    //
+    // A stalled writer used to have no external symptom at all: callers blocked, and
+    // nothing counted, gauged or logged it (spec 2026-08-11-wal-writer-liveness). These
+    // four exist so the stall is visible on a dashboard before a client feels it. Queue
+    // depth alone is not enough — a deep queue that is draining is healthy — so the age of
+    // the oldest unpublished write and the time of the last publish are carried alongside
+    // it, and those are what distinguish "busy" from "stuck".
+    write_queue_depth: AtomicU64,
+    write_queue_oldest_age_ms: AtomicU64,
+    writer_publishes_total: AtomicU64,
+    /// Unix milliseconds of the last successful publish; 0 if nothing has published yet.
+    writer_last_publish_unix_ms: AtomicU64,
+    writer_stalls_total: AtomicU64,
+    /// 1 while the write path is healthy, 0 once the writer has exited or stalled.
+    writer_healthy: AtomicU64,
 }
 
 impl Default for StorageMetrics {
@@ -66,6 +83,14 @@ impl StorageMetrics {
                 index_updates_total: AtomicU64::new(0),
                 index_queries_total: AtomicU64::new(0),
                 errors_total: AtomicU64::new(0),
+                write_queue_depth: AtomicU64::new(0),
+                write_queue_oldest_age_ms: AtomicU64::new(0),
+                writer_publishes_total: AtomicU64::new(0),
+                writer_last_publish_unix_ms: AtomicU64::new(0),
+                writer_stalls_total: AtomicU64::new(0),
+                // Healthy until something says otherwise. Starting at 0 would make every
+                // freshly opened adapter report a stalled writer until its first publish.
+                writer_healthy: AtomicU64::new(1),
             }),
         }
     }
@@ -232,6 +257,77 @@ impl StorageMetrics {
         self.inner.errors_total.load(Ordering::Relaxed)
     }
 
+    // Write-path liveness metrics
+
+    /// Publish the current queue depth and the age of the oldest write still in it.
+    ///
+    /// Set together because either alone is misleading: depth without age cannot tell a
+    /// draining backlog from a frozen one, and age without depth has no scale.
+    pub fn set_write_queue(&self, depth: u64, oldest_age_ms: u64) {
+        self.inner.write_queue_depth.store(depth, Ordering::Relaxed);
+        self.inner
+            .write_queue_oldest_age_ms
+            .store(oldest_age_ms, Ordering::Relaxed);
+    }
+
+    /// Record `count` writes reaching the log, at `unix_ms`.
+    pub fn record_writer_publish(&self, count: u64, unix_ms: u64) {
+        self.inner
+            .writer_publishes_total
+            .fetch_add(count, Ordering::Relaxed);
+        self.inner
+            .writer_last_publish_unix_ms
+            .store(unix_ms, Ordering::Relaxed);
+    }
+
+    /// Mark the write path healthy or not. `reason` is for the log, not the gauge.
+    pub fn set_writer_healthy(&self, healthy: bool) {
+        self.inner
+            .writer_healthy
+            .store(u64::from(healthy), Ordering::Relaxed);
+    }
+
+    /// Count one stall detection. Monotonic, so a writer that recovers still leaves a
+    /// trace an operator can find after the fact.
+    pub fn record_writer_stall(&self) {
+        self.inner
+            .writer_stalls_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn write_queue_depth(&self) -> u64 {
+        self.inner.write_queue_depth.load(Ordering::Relaxed)
+    }
+
+    pub fn write_queue_oldest_age_ms(&self) -> u64 {
+        self.inner.write_queue_oldest_age_ms.load(Ordering::Relaxed)
+    }
+
+    pub fn writer_publishes_total(&self) -> u64 {
+        self.inner.writer_publishes_total.load(Ordering::Relaxed)
+    }
+
+    /// Unix milliseconds of the last successful publish, or `None` if nothing has ever
+    /// published through this adapter.
+    pub fn writer_last_publish_unix_ms(&self) -> Option<u64> {
+        match self
+            .inner
+            .writer_last_publish_unix_ms
+            .load(Ordering::Relaxed)
+        {
+            0 => None,
+            ms => Some(ms),
+        }
+    }
+
+    pub fn writer_stalls_total(&self) -> u64 {
+        self.inner.writer_stalls_total.load(Ordering::Relaxed)
+    }
+
+    pub fn writer_healthy(&self) -> bool {
+        self.inner.writer_healthy.load(Ordering::Relaxed) != 0
+    }
+
     /// Get a snapshot of all metrics
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
@@ -251,6 +347,12 @@ impl StorageMetrics {
             index_updates_total: self.index_updates_total(),
             index_queries_total: self.index_queries_total(),
             errors_total: self.errors_total(),
+            write_queue_depth: self.write_queue_depth(),
+            write_queue_oldest_age_ms: self.write_queue_oldest_age_ms(),
+            writer_publishes_total: self.writer_publishes_total(),
+            writer_last_publish_unix_ms: self.writer_last_publish_unix_ms(),
+            writer_stalls_total: self.writer_stalls_total(),
+            writer_healthy: self.writer_healthy(),
         }
     }
 }
@@ -274,6 +376,12 @@ pub struct MetricsSnapshot {
     pub index_updates_total: u64,
     pub index_queries_total: u64,
     pub errors_total: u64,
+    pub write_queue_depth: u64,
+    pub write_queue_oldest_age_ms: u64,
+    pub writer_publishes_total: u64,
+    pub writer_last_publish_unix_ms: Option<u64>,
+    pub writer_stalls_total: u64,
+    pub writer_healthy: bool,
 }
 
 #[cfg(test)]
@@ -317,5 +425,40 @@ mod tests {
         assert_eq!(snapshot.cache_hits, 1);
         assert_eq!(snapshot.writes_total, 1);
         assert_eq!(snapshot.compaction_cycles, 1);
+    }
+
+    #[test]
+    fn write_path_starts_healthy_and_idle() {
+        let metrics = StorageMetrics::new();
+
+        assert!(metrics.writer_healthy());
+        assert_eq!(metrics.write_queue_depth(), 0);
+        assert_eq!(metrics.writer_stalls_total(), 0);
+        assert_eq!(
+            metrics.writer_last_publish_unix_ms(),
+            None,
+            "an adapter that has published nothing must say so rather than report the epoch"
+        );
+    }
+
+    #[test]
+    fn write_path_metrics_round_trip_through_the_snapshot() {
+        let metrics = StorageMetrics::new();
+
+        metrics.set_write_queue(42, 1_500);
+        metrics.record_writer_publish(7, 1_700_000_000_000);
+        metrics.record_writer_stall();
+        metrics.set_writer_healthy(false);
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.write_queue_depth, 42);
+        assert_eq!(snapshot.write_queue_oldest_age_ms, 1_500);
+        assert_eq!(snapshot.writer_publishes_total, 7);
+        assert_eq!(
+            snapshot.writer_last_publish_unix_ms,
+            Some(1_700_000_000_000)
+        );
+        assert_eq!(snapshot.writer_stalls_total, 1);
+        assert!(!snapshot.writer_healthy);
     }
 }
