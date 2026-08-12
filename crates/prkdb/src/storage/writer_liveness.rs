@@ -366,6 +366,7 @@ impl WritePathProgress {
             last_publish_age_ms: self
                 .since_last_publish()
                 .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64),
+            publishes_total: self.published_total(),
         }
     }
 }

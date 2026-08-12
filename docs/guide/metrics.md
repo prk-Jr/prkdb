@@ -111,6 +111,7 @@ nothing is being written at all. `prkdb_up` stays at 1 for the whole outage.
 | `prkdb_write_queue_depth` | Gauge | Writes queued and not yet published |
 | `prkdb_write_queue_oldest_age_ms` | Gauge | Age of the oldest unpublished write |
 | `prkdb_writer_last_publish_age_ms` | Gauge | Milliseconds since the last publish; `-1` if it never has |
+| `prkdb_writer_publishes_total` | Counter | Batches published since start |
 
 Read them together:
 
@@ -125,6 +126,15 @@ also has an old last-publish time, and flagging that would make the alert useles
 
 `-1` for "never published" rather than `0`, because `0` reads as "published just now" — the
 opposite of the truth, and the reassuring direction to be wrong in.
+
+Publish throughput is derived by the scraper rather than exported pre-computed:
+
+```promql
+rate(prkdb_writer_publishes_total[5m])
+```
+
+A rate computed inside the process and exported as a gauge cannot handle windowing or
+survive a restart, which is why the in-process one was removed rather than kept.
 
 The same facts are on `/health` under `write_path`, for orchestrators that probe rather than
 scrape.

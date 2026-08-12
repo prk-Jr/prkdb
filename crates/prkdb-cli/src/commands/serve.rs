@@ -1571,6 +1571,7 @@ async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
             health.queue_depth,
             health.oldest_unpublished_age_ms,
             health.last_publish_age_ms,
+            health.publishes_total,
         );
     }
 

@@ -262,6 +262,16 @@ lazy_static! {
         &["node_id"]
     ).unwrap();
 
+    /// Batches the WAL writer has published, monotonic.
+    ///
+    /// A counter rather than a rate. `rate(prkdb_writer_publishes_total[5m])` handles the
+    /// windowing and survives a process restart; a rate computed in-process and exported as
+    /// a gauge does neither, which is why the in-process one was deleted rather than tested.
+    pub static ref WRITER_PUBLISHES_TOTAL: GaugeVec = GaugeVec::new(
+        opts!("prkdb_writer_publishes_total", "Batches published by the WAL writer since start"),
+        &["node_id"]
+    ).unwrap();
+
     /// Milliseconds since the writer last published. `-1` when it never has.
     pub static ref WRITER_LAST_PUBLISH_AGE_MS: GaugeVec = GaugeVec::new(
         opts!("prkdb_writer_last_publish_age_ms", "Milliseconds since the WAL writer last published a batch (-1 if it never has)"),
@@ -310,6 +320,7 @@ lazy_static! {
         r.register(Box::new(WRITER_HEALTHY.clone())).unwrap();
         r.register(Box::new(WRITE_QUEUE_DEPTH.clone())).unwrap();
         r.register(Box::new(WRITE_QUEUE_OLDEST_AGE_MS.clone())).unwrap();
+        r.register(Box::new(WRITER_PUBLISHES_TOTAL.clone())).unwrap();
         r.register(Box::new(WRITER_LAST_PUBLISH_AGE_MS.clone()))
             .unwrap();
 
@@ -334,7 +345,11 @@ pub fn set_write_path_metrics(
     queue_depth: u64,
     oldest_unpublished_age_ms: u64,
     last_publish_age_ms: Option<u64>,
+    publishes_total: u64,
 ) {
+    WRITER_PUBLISHES_TOTAL
+        .with_label_values(&[node_id])
+        .set(publishes_total as f64);
     WRITER_HEALTHY
         .with_label_values(&[node_id])
         .set(if healthy { 1.0 } else { 0.0 });
@@ -403,7 +418,7 @@ mod tests {
     /// path the endpoint uses. A test that only called the setter would have passed.
     #[test]
     fn the_write_path_series_appear_in_an_export() {
-        set_write_path_metrics("node-a", false, 7, 1234, Some(56));
+        set_write_path_metrics("node-a", false, 7, 1234, Some(56), 99);
         let output = export_metrics();
 
         for series in [
@@ -411,6 +426,7 @@ mod tests {
             "prkdb_write_queue_depth",
             "prkdb_write_queue_oldest_age_ms",
             "prkdb_writer_last_publish_age_ms",
+            "prkdb_writer_publishes_total",
         ] {
             assert!(
                 output.contains(series),
@@ -423,6 +439,7 @@ mod tests {
         assert!(output.contains(r#"prkdb_write_queue_depth{node_id="node-a"} 7"#));
         assert!(output.contains(r#"prkdb_write_queue_oldest_age_ms{node_id="node-a"} 1234"#));
         assert!(output.contains(r#"prkdb_writer_last_publish_age_ms{node_id="node-a"} 56"#));
+        assert!(output.contains(r#"prkdb_writer_publishes_total{node_id="node-a"} 99"#));
     }
 
     /// A writer that has never published reports -1, not 0.
@@ -431,7 +448,7 @@ mod tests {
     /// direction to be wrong in.
     #[test]
     fn never_having_published_is_minus_one_not_zero() {
-        set_write_path_metrics("node-b", true, 0, 0, None);
+        set_write_path_metrics("node-b", true, 0, 0, None, 0);
         let output = export_metrics();
         assert!(
             output.contains(r#"prkdb_writer_last_publish_age_ms{node_id="node-b"} -1"#),
