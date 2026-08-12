@@ -1558,7 +1558,22 @@ async fn websocket_connection(
     );
 }
 
-async fn metrics_handler() -> impl IntoResponse {
+async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
+    // Sample the write path here rather than on a timer. These series exist to report a
+    // background task that has stopped; putting a second background task in charge of
+    // reporting it means the reporter can stop the same way, and a stalled reporter for a
+    // stall detector publishes "healthy" forever.
+    if let Ok(db) = crate::database_manager::get_db_instance().await {
+        let health = db.storage().write_path_health();
+        prkdb::prometheus_metrics::set_write_path_metrics(
+            &state.node_id.to_string(),
+            health.healthy,
+            health.queue_depth,
+            health.oldest_unpublished_age_ms,
+            health.last_publish_age_ms,
+        );
+    }
+
     let metrics = prkdb::prometheus_metrics::export_metrics();
 
     (

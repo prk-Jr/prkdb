@@ -238,6 +238,36 @@ lazy_static! {
     ).unwrap();
 
     /// Global Prometheus registry
+    // ===== Storage Write Path =====
+
+    /// `1` while the WAL writer is confirming writes, `0` once it has exited or stalled.
+    ///
+    /// The series to alert on. A stalled writer leaves the process up and answering HTTP
+    /// while every client write goes unconfirmed, so uptime and request-rate series both
+    /// look healthy for the whole outage.
+    pub static ref WRITER_HEALTHY: GaugeVec = GaugeVec::new(
+        opts!("prkdb_writer_healthy", "1 when the WAL write path is confirming writes, 0 when it has exited or stalled"),
+        &["node_id"]
+    ).unwrap();
+
+    /// Writes accepted into the WAL accumulator but not yet published.
+    pub static ref WRITE_QUEUE_DEPTH: GaugeVec = GaugeVec::new(
+        opts!("prkdb_write_queue_depth", "Writes queued in the WAL accumulator and not yet published"),
+        &["node_id"]
+    ).unwrap();
+
+    /// Age of the oldest write still waiting to be published.
+    pub static ref WRITE_QUEUE_OLDEST_AGE_MS: GaugeVec = GaugeVec::new(
+        opts!("prkdb_write_queue_oldest_age_ms", "Age in milliseconds of the oldest unpublished write"),
+        &["node_id"]
+    ).unwrap();
+
+    /// Milliseconds since the writer last published. `-1` when it never has.
+    pub static ref WRITER_LAST_PUBLISH_AGE_MS: GaugeVec = GaugeVec::new(
+        opts!("prkdb_writer_last_publish_age_ms", "Milliseconds since the WAL writer last published a batch (-1 if it never has)"),
+        &["node_id"]
+    ).unwrap();
+
     pub static ref PROMETHEUS_REGISTRY: Registry = {
         let r = Registry::new();
 
@@ -277,6 +307,11 @@ lazy_static! {
         r.register(Box::new(CACHE_HITS_TOTAL.clone())).unwrap();
         r.register(Box::new(CACHE_MISSES_TOTAL.clone())).unwrap();
         r.register(Box::new(CACHE_HIT_RATIO.clone())).unwrap();
+        r.register(Box::new(WRITER_HEALTHY.clone())).unwrap();
+        r.register(Box::new(WRITE_QUEUE_DEPTH.clone())).unwrap();
+        r.register(Box::new(WRITE_QUEUE_OLDEST_AGE_MS.clone())).unwrap();
+        r.register(Box::new(WRITER_LAST_PUBLISH_AGE_MS.clone()))
+            .unwrap();
 
         r
     };
@@ -286,6 +321,34 @@ lazy_static! {
 pub fn init_prometheus_metrics() {
     // Metrics are automatically registered via lazy_static
     tracing::info!("Prometheus metrics initialized");
+}
+
+/// Publish the storage write path's state.
+///
+/// Called at scrape time rather than on a timer. A timer would be a second background task
+/// that can stop without anyone noticing, which is the exact failure these series report
+/// on — and a stalled reporter for a stall detector reports healthy forever.
+pub fn set_write_path_metrics(
+    node_id: &str,
+    healthy: bool,
+    queue_depth: u64,
+    oldest_unpublished_age_ms: u64,
+    last_publish_age_ms: Option<u64>,
+) {
+    WRITER_HEALTHY
+        .with_label_values(&[node_id])
+        .set(if healthy { 1.0 } else { 0.0 });
+    WRITE_QUEUE_DEPTH
+        .with_label_values(&[node_id])
+        .set(queue_depth as f64);
+    WRITE_QUEUE_OLDEST_AGE_MS
+        .with_label_values(&[node_id])
+        .set(oldest_unpublished_age_ms as f64);
+    // -1 rather than 0 for "never published": 0 reads as "published just now", the
+    // opposite of what it means and the more reassuring direction to get wrong.
+    WRITER_LAST_PUBLISH_AGE_MS
+        .with_label_values(&[node_id])
+        .set(last_publish_age_ms.map_or(-1.0, |ms| ms as f64));
 }
 
 /// Export metrics in Prometheus text format
@@ -326,5 +389,58 @@ mod tests {
         RAFT_STATE.with_label_values(&["1", "0"]).set(1.0); // Leader
         let output = export_metrics();
         assert!(output.contains("prkdb_raft_state"));
+    }
+
+    /// The write-path series must reach a scrape, not merely exist.
+    ///
+    /// This crate serves `PROMETHEUS_REGISTRY`, a registry of its own, while
+    /// `prkdb-metrics::exporter` uses the *default* registry via `prometheus::gather()`.
+    /// The first attempt at these series used `register_gauge_vec!`, which registers into
+    /// the default one — so they were defined, set on every scrape, and served to nobody.
+    /// Nothing failed; `/metrics` simply never mentioned them.
+    ///
+    /// Asserting on `export_metrics()` output is what catches that, because it is the same
+    /// path the endpoint uses. A test that only called the setter would have passed.
+    #[test]
+    fn the_write_path_series_appear_in_an_export() {
+        set_write_path_metrics("node-a", false, 7, 1234, Some(56));
+        let output = export_metrics();
+
+        for series in [
+            "prkdb_writer_healthy",
+            "prkdb_write_queue_depth",
+            "prkdb_write_queue_oldest_age_ms",
+            "prkdb_writer_last_publish_age_ms",
+        ] {
+            assert!(
+                output.contains(series),
+                "{series} is missing from the scrape — check it is registered on \
+                 PROMETHEUS_REGISTRY and not the default registry"
+            );
+        }
+
+        assert!(output.contains(r#"prkdb_writer_healthy{node_id="node-a"} 0"#));
+        assert!(output.contains(r#"prkdb_write_queue_depth{node_id="node-a"} 7"#));
+        assert!(output.contains(r#"prkdb_write_queue_oldest_age_ms{node_id="node-a"} 1234"#));
+        assert!(output.contains(r#"prkdb_writer_last_publish_age_ms{node_id="node-a"} 56"#));
+    }
+
+    /// A writer that has never published reports -1, not 0.
+    ///
+    /// 0 reads as "published just now" — the opposite of the truth, and the reassuring
+    /// direction to be wrong in.
+    #[test]
+    fn never_having_published_is_minus_one_not_zero() {
+        set_write_path_metrics("node-b", true, 0, 0, None);
+        let output = export_metrics();
+        assert!(
+            output.contains(r#"prkdb_writer_last_publish_age_ms{node_id="node-b"} -1"#),
+            "got: {}",
+            output
+                .lines()
+                .filter(|l| l.contains("node-b"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
     }
 }

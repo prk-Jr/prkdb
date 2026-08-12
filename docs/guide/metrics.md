@@ -95,39 +95,36 @@ histogram_quantile(0.99, sum by (le) (rate(prkdb_write_duration_seconds_bucket[5
 
 ### Write path not confirming writes
 
-There is no PromQL for this one, and that is worth saying plainly rather than leaving you
-to search for a series that does not exist. Storage write-path health is exposed on the
-probe endpoints, not on `/metrics`.
-
-```bash
-curl -fsS http://node-1:8080/health | jq .write_path
+```promql
+prkdb_writer_healthy == 0
 ```
-
-```json
-{
-  "healthy": true,
-  "reason": null,
-  "queue_depth": 0,
-  "oldest_unpublished_age_ms": 0,
-  "last_publish_age_ms": 12
-}
-```
-
-Alert on `/health` returning `503`, or on `healthy` being `false`.
 
 The failure this catches: the WAL writer accepts writes into a queue and publishes them in
 the background. If it exits or stops making progress, the process stays up and answers HTTP
 normally while every client write hangs unconfirmed. Latency histograms do not catch it,
 because a write that never completes never records a duration — the p99 stays flat while
-nothing is being written at all.
+nothing is being written at all. `prkdb_up` stays at 1 for the whole outage.
 
-Read the three counters together:
+| Metric | Type | Description |
+| --- | --- | --- |
+| `prkdb_writer_healthy` | Gauge | `1` while the write path confirms writes, `0` once it has exited or stalled |
+| `prkdb_write_queue_depth` | Gauge | Writes queued and not yet published |
+| `prkdb_write_queue_oldest_age_ms` | Gauge | Age of the oldest unpublished write |
+| `prkdb_writer_last_publish_age_ms` | Gauge | Milliseconds since the last publish; `-1` if it never has |
+
+Read them together:
 
 | pattern | meaning |
 |---|---|
-| `queue_depth` rising, `oldest_unpublished_age_ms` rising | writer falling behind — a capacity problem |
-| `queue_depth` non-zero, `last_publish_age_ms` growing | writer has stopped publishing — trips `healthy: false` |
+| `queue_depth` rising, `oldest_age_ms` rising | writer falling behind — a capacity problem |
+| `queue_depth` non-zero, `last_publish_age_ms` growing | writer has stopped publishing — trips `healthy` to 0 |
 | `queue_depth` 0, `last_publish_age_ms` growing | idle, not stalled. Normal. |
 
 The third row is why the check requires a non-empty queue: a database nobody is writing to
 also has an old last-publish time, and flagging that would make the alert useless.
+
+`-1` for "never published" rather than `0`, because `0` reads as "published just now" — the
+opposite of the truth, and the reassuring direction to be wrong in.
+
+The same facts are on `/health` under `write_path`, for orchestrators that probe rather than
+scrape.
