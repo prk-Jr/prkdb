@@ -49,7 +49,6 @@ struct StorageMetricsInner {
     write_queue_depth: AtomicU64,
     write_queue_oldest_age_ms: AtomicU64,
     writer_publishes_total: AtomicU64,
-    writer_publishes_per_sec_milli: AtomicU64,
     /// Unix milliseconds of the last successful publish; 0 if nothing has published yet.
     writer_last_publish_unix_ms: AtomicU64,
     writer_stalls_total: AtomicU64,
@@ -87,7 +86,6 @@ impl StorageMetrics {
                 write_queue_depth: AtomicU64::new(0),
                 write_queue_oldest_age_ms: AtomicU64::new(0),
                 writer_publishes_total: AtomicU64::new(0),
-                writer_publishes_per_sec_milli: AtomicU64::new(0),
                 writer_last_publish_unix_ms: AtomicU64::new(0),
                 writer_stalls_total: AtomicU64::new(0),
                 // Healthy until something says otherwise. Starting at 0 would make every
@@ -287,13 +285,6 @@ impl StorageMetrics {
     /// Stored as thousandths so the gauge stays an integer atomic; a lifetime average
     /// would be the easier thing to compute and the useless one — it cannot fall to zero
     /// after a busy period, which is exactly the transition worth alerting on.
-    pub fn set_writer_publishes_per_second(&self, rate: f64) {
-        let scaled = (rate * 1000.0).clamp(0.0, u64::MAX as f64) as u64;
-        self.inner
-            .writer_publishes_per_sec_milli
-            .store(scaled, Ordering::Relaxed);
-    }
-
     /// Mark the write path healthy or not. `reason` is for the log, not the gauge.
     pub fn set_writer_healthy(&self, healthy: bool) {
         self.inner
@@ -319,13 +310,6 @@ impl StorageMetrics {
 
     pub fn writer_publishes_total(&self) -> u64 {
         self.inner.writer_publishes_total.load(Ordering::Relaxed)
-    }
-
-    pub fn writer_publishes_per_second(&self) -> f64 {
-        self.inner
-            .writer_publishes_per_sec_milli
-            .load(Ordering::Relaxed) as f64
-            / 1000.0
     }
 
     /// Unix milliseconds of the last successful publish, or `None` if nothing has ever
@@ -371,7 +355,6 @@ impl StorageMetrics {
             write_queue_depth: self.write_queue_depth(),
             write_queue_oldest_age_ms: self.write_queue_oldest_age_ms(),
             writer_publishes_total: self.writer_publishes_total(),
-            writer_publishes_per_second: self.writer_publishes_per_second(),
             writer_last_publish_unix_ms: self.writer_last_publish_unix_ms(),
             writer_stalls_total: self.writer_stalls_total(),
             writer_healthy: self.writer_healthy(),
@@ -401,7 +384,6 @@ pub struct MetricsSnapshot {
     pub write_queue_depth: u64,
     pub write_queue_oldest_age_ms: u64,
     pub writer_publishes_total: u64,
-    pub writer_publishes_per_second: f64,
     pub writer_last_publish_unix_ms: Option<u64>,
     pub writer_stalls_total: u64,
     pub writer_healthy: bool,
@@ -470,7 +452,6 @@ mod tests {
 
         metrics.set_write_queue(42, 1_500);
         metrics.record_writer_publish(7, 1_700_000_000_000);
-        metrics.set_writer_publishes_per_second(12.5);
         metrics.record_writer_stall();
         metrics.set_writer_healthy(false);
 
@@ -478,7 +459,6 @@ mod tests {
         assert_eq!(snapshot.write_queue_depth, 42);
         assert_eq!(snapshot.write_queue_oldest_age_ms, 1_500);
         assert_eq!(snapshot.writer_publishes_total, 7);
-        assert!((snapshot.writer_publishes_per_second - 12.5).abs() < 1e-9);
         assert_eq!(
             snapshot.writer_last_publish_unix_ms,
             Some(1_700_000_000_000)
