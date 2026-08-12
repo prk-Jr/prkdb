@@ -3317,9 +3317,12 @@ mod tests {
         let error = result.expect_err("a panicking writer cannot have published the write");
 
         assert!(
-            error.is_write_unconfirmed(),
-            "a panic can happen after the WAL append returned, so the answer must be \
-             not-confirmed rather than failed; got: {error}"
+            error.is_write_abandoned(),
+            "this write was still in the accumulator when the panic was noticed, so it was \
+             never handed to the writer and provably did not land — abandoned, not merely \
+             unconfirmed. A write the writer had already taken goes out through \
+             PendingWrite's drop guard instead, which does say not-confirmed because a \
+             panic partway through publication may well have appended it; got: {error}"
         );
         let message = error.to_string();
         assert!(
@@ -3369,7 +3372,11 @@ mod tests {
         let result = outcome.expect("the caller must be answered, not left waiting");
         let error = result.expect_err("a stalled writer published nothing");
 
-        assert!(error.is_write_unconfirmed(), "got: {error}");
+        assert!(
+            error.is_write_abandoned(),
+            "the watchdog discharges what is still queued, and queued means never \
+             appended; got: {error}"
+        );
         let message = error.to_string();
         assert!(
             message.contains("stalled") && message.contains("no publication progress"),
@@ -3444,7 +3451,7 @@ mod tests {
 
         let error = result.expect_err("a stalled writer published nothing");
         assert!(
-            matches!(error, StorageError::WriteNotConfirmed(_)),
+            matches!(error, StorageError::WriteAbandoned(_)),
             "the variant must arrive intact rather than as Internal; got: {error:?}"
         );
         assert!(!storage.write_path_health().healthy);

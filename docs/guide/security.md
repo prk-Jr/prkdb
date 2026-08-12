@@ -175,9 +175,10 @@ has stopped publishing altogether — that is what trips `healthy: false`.
 The stall threshold derives from the configured flush interval, so a deployment that
 batches less aggressively is not flagged for it.
 
-These counters are **not** on `/metrics`. `/metrics` exports Raft, partition, and consumer
-series; storage write-path health is only on the probe endpoints today. Alert on `/health`
-returning `503`, not on a Prometheus series that does not exist.
+The same facts are exported for scraping as `prkdb_writer_healthy`,
+`prkdb_write_queue_depth`, `prkdb_write_queue_oldest_age_ms` and
+`prkdb_writer_last_publish_age_ms`. Alert on `prkdb_writer_healthy == 0`, or on `/health`
+returning `503` where probing is easier than scraping. See [Metrics](./metrics.md).
 
 ### Rate limiting
 

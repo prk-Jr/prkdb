@@ -111,6 +111,22 @@ pub enum StorageError {
     #[error("Write rejected: {0}")]
     WriteBackpressure(String),
 
+    /// The write was queued and then **discarded unwritten**, because the writer stopped.
+    ///
+    /// Definite, unlike [`StorageError::WriteNotConfirmed`]: these are writes still sitting
+    /// in the accumulator when the watchdog fired, or refused outright once the writer had
+    /// exited. Either way they were never handed to the writer, so nothing was appended to
+    /// the WAL and nothing will be.
+    ///
+    /// **Retrying is safe and is the correct response.** That is the whole reason this is
+    /// separate. Reporting these as `WriteNotConfirmed` would tell a caller the write "may
+    /// still be published", and a caller who believes that will not retry — losing a write
+    /// that is known to be lost. For keyed puts a retry is idempotent, so the risk here
+    /// runs opposite to the double-write risk `WriteNotConfirmed` exists to avoid: there,
+    /// over-reporting uncertainty is the safe direction; here, it is the lossy one.
+    #[error("Write abandoned: {0} (the write was not persisted — retry it)")]
+    WriteAbandoned(String),
+
     #[error("Data corruption detected: {0}")]
     Corruption(String),
 
@@ -202,6 +218,24 @@ impl StorageError {
     /// be logged or reported with the word "failed".
     pub fn is_write_unconfirmed(&self) -> bool {
         matches!(self, StorageError::WriteNotConfirmed(_))
+    }
+
+    /// True when the write is **known** not to have been persisted.
+    ///
+    /// Distinct from [`Self::is_write_unconfirmed`] because the correct caller response
+    /// differs: an abandoned write must be retried to avoid losing it, where an
+    /// unconfirmed one may already have landed.
+    pub fn is_write_abandoned(&self) -> bool {
+        matches!(self, StorageError::WriteAbandoned(_))
+    }
+
+    /// True when the caller must not treat the write as durable — unknown *or* known-lost.
+    ///
+    /// The check for anything that would otherwise claim durability on the strength of "no
+    /// error I recognise". Both variants deny it, for opposite reasons, and a call site
+    /// that tests only one of them silently regains the bug when the other is returned.
+    pub fn denies_durability(&self) -> bool {
+        self.is_write_unconfirmed() || self.is_write_abandoned()
     }
 
     pub fn into_error(self) -> Error {

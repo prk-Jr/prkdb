@@ -31,6 +31,9 @@ pub struct WritePathHealth {
     pub oldest_unpublished_age_ms: u64,
     /// Time since the last successful publication. `None` if nothing has ever published.
     pub last_publish_age_ms: Option<u64>,
+    /// Batches published since start, monotonic. Exported as a counter so the publish rate
+    /// is derived by the scraper rather than computed in-process.
+    pub publishes_total: u64,
 }
 
 impl WritePathHealth {
@@ -47,6 +50,7 @@ impl WritePathHealth {
             queue_depth: 0,
             oldest_unpublished_age_ms: 0,
             last_publish_age_ms: None,
+            publishes_total: 0,
         }
     }
 }
