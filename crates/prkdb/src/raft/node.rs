@@ -909,7 +909,24 @@ impl RaftNode {
             voted_for = self.voted_for.write().await;
             // state = self.state.write().await; // Unused
 
+            // The `voted_for.is_none()` test above was made before those locks were
+            // released, so by itself it says nothing about now. A second candidate's
+            // RequestVote for this same term runs this whole window concurrently and
+            // reaches this point too: both saw no vote cast, and both would assign
+            // `voted_for` and be told yes. One vote, two candidates — and in a three-node
+            // cluster that is a majority each, so both lead the same term. At most one
+            // vote per term is exactly what makes at most one leader per term possible.
+            //
+            // The term is re-checked for the same reason: it can advance while the locks
+            // are down, and a vote cast for a term this node has already left is a vote
+            // it never should have given.
+            //
+            // Re-testing here rather than holding the locks across `get_last_log_info`
+            // keeps the existing lock order — every RPC handler takes `current_term`
+            // first and the log after — so the two cannot deadlock against each other.
             log_ok
+                && *current_term == term
+                && (voted_for.is_none() || *voted_for == Some(candidate_id))
         } else {
             false
         };
@@ -1565,6 +1582,62 @@ impl RaftNode {
     }
 
     /// Start a leader election
+    /// Take leadership of `campaign_term`, unless this node has already moved on.
+    ///
+    /// Counting ballots in `start_election` spans a network round-trip per peer and holds
+    /// no locks. A `RequestVote`, `AppendEntries`, or `InstallSnapshot` carrying a term at
+    /// least as large arrives in that window, raises `current_term`, and returns this node
+    /// to `Follower` — at which point Raft §5.2 says the election is over and lost. The
+    /// ballots still arrive afterwards, and acting on them would install a *second* leader
+    /// in a term this node never won.
+    ///
+    /// That is not a transient cosmetic disagreement. Having adopted the newer term, the
+    /// stale leader's `AppendEntries` are no longer rejected on term grounds, so two nodes
+    /// can drive the same term — election safety, which every other Raft guarantee is
+    /// built on top of. `tests/election_safety.rs` caught it as "term N had leaders [A, B]".
+    ///
+    /// Returns whether leadership was taken. The two facts are re-checked together under
+    /// the locks, acquired `current_term` before `state` to match the order every RPC
+    /// handler uses, so the two paths cannot deadlock against each other.
+    /// Recording the promotion here rather than at the call site is deliberate: a caller
+    /// that branches on the return value to update the gauges can get the two out of step,
+    /// and mutation testing demonstrated it — deleting one `!` produced a node that leads
+    /// without ever reporting itself leader, and one that reports leadership it does not
+    /// hold. The transition and the record of it are the same event, so they live together.
+    async fn claim_leadership(&self, campaign_term: u64, votes: usize) -> bool {
+        let current_term = self.current_term.read().await;
+        let mut state = self.state.write().await;
+
+        if *current_term != campaign_term || *state != RaftState::Candidate {
+            tracing::info!(
+                "Node {} won term {} but had already moved on; election abandoned",
+                self.config.local_node_id,
+                campaign_term
+            );
+            return false;
+        }
+
+        *state = RaftState::Leader;
+
+        crate::prometheus_metrics::RAFT_STATE
+            .with_label_values(&[&self.config.local_node_id.to_string(), "0"])
+            .set(1.0); // Leader
+        crate::prometheus_metrics::RAFT_LEADER_ELECTIONS_TOTAL
+            .with_label_values(&[&self.config.local_node_id.to_string(), "0"])
+            .inc();
+        crate::prometheus_metrics::RAFT_TERM
+            .with_label_values(&[&self.config.local_node_id.to_string(), "0"])
+            .set(campaign_term as f64);
+        tracing::info!(
+            "Node {} became LEADER in term {} with {} votes",
+            self.config.local_node_id,
+            campaign_term,
+            votes
+        );
+
+        true
+    }
+
     async fn start_election(self: Arc<Self>, rpc_pool: Arc<super::rpc_client::RpcClientPool>) {
         // Transition to Candidate
         {
@@ -1638,24 +1711,7 @@ impl RaftNode {
         // Check if we won
         let majority = (self.config.nodes.len() / 2) + 1;
         if votes >= majority {
-            let mut state = self.state.write().await;
-            *state = RaftState::Leader;
-            // Update Prometheus metrics
-            crate::prometheus_metrics::RAFT_STATE
-                .with_label_values(&[&self.config.local_node_id.to_string(), "0"])
-                .set(1.0); // Leader
-            crate::prometheus_metrics::RAFT_LEADER_ELECTIONS_TOTAL
-                .with_label_values(&[&self.config.local_node_id.to_string(), "0"])
-                .inc();
-            crate::prometheus_metrics::RAFT_TERM
-                .with_label_values(&[&self.config.local_node_id.to_string(), "0"])
-                .set(current_term as f64);
-            tracing::info!(
-                "Node {} became LEADER in term {} with {} votes",
-                self.config.local_node_id,
-                current_term,
-                votes
-            );
+            self.claim_leadership(current_term, votes).await;
         } else {
             tracing::debug!(
                 "Node {} failed election in term {} with {} votes (needed {})",
@@ -2320,5 +2376,176 @@ mod tests {
         assert!(!response.success);
         assert_eq!(response.conflict_index, 1);
         assert_eq!(response.conflict_term, 1);
+    }
+
+    /// A candidate whose term moved on must not claim the election it was running.
+    ///
+    /// `start_election` counts ballots across network round-trips holding no locks. In
+    /// that window a `RequestVote`, `AppendEntries`, or `InstallSnapshot` from a node in a
+    /// later term raises this node's term and returns it to `Follower`. Raft §5.2 says the
+    /// election is then abandoned: the candidate lost its claim the moment it learned of a
+    /// term at least as large as its own.
+    ///
+    /// Claiming it anyway installs a *second* leader in a term this node never won, and
+    /// because it has adopted that term, its `AppendEntries` are not rejected on term
+    /// grounds — the two leaders can both drive the same term. Election safety is the
+    /// property every other Raft guarantee rests on.
+    ///
+    /// Found by `tests/election_safety.rs`, which caught it roughly once in thirty runs
+    /// as "term N had leaders [A, B]".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_candidate_whose_term_moved_on_does_not_claim_its_election() {
+        let (storage, _temp) = create_test_storage();
+        let node = RaftNode::new(
+            ClusterConfig::default(),
+            storage,
+            Arc::new(MockStateMachine),
+        );
+
+        *node.state.write().await = RaftState::Candidate;
+        *node.current_term.write().await = 1;
+
+        // A leader for term 2 reaches this node while its term-1 ballots are in flight.
+        node.handle_append_entries(2, 99, 0, 0, 0, vec![]).await;
+        assert_eq!(
+            node.get_state().await,
+            RaftState::Follower,
+            "a higher term must have stepped this node down"
+        );
+
+        assert!(
+            !node.claim_leadership(1, 2).await,
+            "the term-1 election was abandoned when term 2 arrived; claiming it now puts \
+             a second leader in a term this node never won"
+        );
+        assert_eq!(node.get_state().await, RaftState::Follower);
+        assert_eq!(node.current_term().await, 2);
+    }
+
+    /// The same guard must still let a legitimate win through.
+    ///
+    /// Asserted because a guard that rejects everything satisfies the test above and
+    /// leaves the cluster leaderless, which is the failure mode of over-correcting here.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_candidate_still_in_its_own_term_claims_the_election() {
+        let (storage, _temp) = create_test_storage();
+        let node = RaftNode::new(
+            ClusterConfig::default(),
+            storage,
+            Arc::new(MockStateMachine),
+        );
+
+        *node.state.write().await = RaftState::Candidate;
+        *node.current_term.write().await = 4;
+
+        assert!(
+            node.claim_leadership(4, 2).await,
+            "a candidate that is still in the term it campaigned for won that election"
+        );
+        assert_eq!(node.get_state().await, RaftState::Leader);
+    }
+
+    /// One vote per term, however the requests interleave.
+    ///
+    /// Raft grants at most one vote per term; that is what makes at most one leader per
+    /// term possible. `handle_request_vote` decided `voted_for.is_none()`, released the
+    /// locks to read the log, then re-took them and assigned `voted_for` without
+    /// re-checking. Two candidates arriving together in the same term both passed the
+    /// check and both were granted — enough for each to reach a majority in a three-node
+    /// cluster and lead the same term.
+    ///
+    /// Concurrency, so the assertion needs repetition to hit the window rather than a
+    /// single pass. `tests/election_safety.rs` sees the consequence roughly once in
+    /// thirty runs; this reaches the same defect directly.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_node_grants_at_most_one_vote_per_term() {
+        for attempt in 0..50 {
+            let (storage, _temp) = create_test_storage();
+            let node = Arc::new(RaftNode::new(
+                ClusterConfig::default(),
+                storage,
+                Arc::new(MockStateMachine),
+            ));
+
+            let to_two = {
+                let node = node.clone();
+                tokio::spawn(async move { node.handle_request_vote(1, 2, 0, 0).await })
+            };
+            let to_three = {
+                let node = node.clone();
+                tokio::spawn(async move { node.handle_request_vote(1, 3, 0, 0).await })
+            };
+
+            let (_, granted_two) = to_two.await.expect("vote task joins");
+            let (_, granted_three) = to_three.await.expect("vote task joins");
+
+            assert!(
+                !(granted_two && granted_three),
+                "attempt {attempt}: granted the term-1 vote to candidate 2 and candidate 3 \
+                 both; each then reaches a majority and leads term 1"
+            );
+        }
+    }
+
+    /// A candidate that learned of a leader *in its own term* does not claim the election.
+    ///
+    /// The guard rejects on either fact — wrong term, or no longer a candidate — and this
+    /// is the case where only the second holds. `AppendEntries` from a leader of the same
+    /// term steps a candidate down without moving the term, so a guard that required both
+    /// would promote this node on ballots that arrive afterwards, putting it alongside the
+    /// leader whose message just deposed it. Mutation found the gap: `|| with &&` survived
+    /// because both existing tests moved the term and the state together.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_candidate_that_learned_of_a_leader_in_its_term_does_not_claim_it() {
+        let (storage, _temp) = create_test_storage();
+        let node = RaftNode::new(
+            ClusterConfig::default(),
+            storage,
+            Arc::new(MockStateMachine),
+        );
+
+        *node.state.write().await = RaftState::Candidate;
+        *node.current_term.write().await = 4;
+
+        // A leader for term 4 — this node's own term — announces itself.
+        node.handle_append_entries(4, 99, 0, 0, 0, vec![]).await;
+        assert_eq!(node.get_state().await, RaftState::Follower);
+        assert_eq!(
+            node.current_term().await,
+            4,
+            "a same-term leader steps a candidate down without advancing the term, which \
+             is what makes this case distinct from the higher-term one"
+        );
+
+        assert!(
+            !node.claim_leadership(4, 2).await,
+            "term 4 already has a leader; claiming it here seats a second one"
+        );
+        assert_eq!(node.get_state().await, RaftState::Follower);
+    }
+
+    /// A candidate that has moved on to a later election does not claim the earlier one.
+    ///
+    /// The other single-fact case: still a candidate, but campaigning in a newer term.
+    /// Ballots for the abandoned term must not seat it as leader of a term it has left.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_candidate_in_a_later_election_does_not_claim_the_earlier_one() {
+        let (storage, _temp) = create_test_storage();
+        let node = RaftNode::new(
+            ClusterConfig::default(),
+            storage,
+            Arc::new(MockStateMachine),
+        );
+
+        // Campaigning in term 5; the ballots arriving are from the term-4 election.
+        *node.state.write().await = RaftState::Candidate;
+        *node.current_term.write().await = 5;
+
+        assert!(
+            !node.claim_leadership(4, 2).await,
+            "these votes elected it in term 4, a term it has already left"
+        );
+        assert_eq!(node.get_state().await, RaftState::Candidate);
+        assert_eq!(node.current_term().await, 5);
     }
 }
