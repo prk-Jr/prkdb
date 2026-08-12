@@ -21,7 +21,7 @@ use prkdb_types::storage::{StorageAdapter, WritePathHealth};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::{oneshot, Mutex, Notify, OwnedRwLockWriteGuard, RwLock};
 use tokio::task::{AbortHandle, JoinHandle};
 use tracing::{info, instrument, warn};
@@ -1235,7 +1235,6 @@ impl WalStorageAdapter {
         };
 
         let mut last_published = 0u64;
-        let mut last_sample = Instant::now();
         // Two speeds, decided at the end of each check from what the queue actually holds —
         // the same idle/busy split `run_flush_loop` makes, and for the same reason: one of
         // these tasks exists per collection adapter, so an idle one must be nearly free.
@@ -1266,7 +1265,7 @@ impl WalStorageAdapter {
             let Some(inner) = weak_inner.upgrade() else {
                 return;
             };
-            tick = Self::observe_write_path(&inner, &mut last_published, &mut last_sample).await;
+            tick = Self::observe_write_path(&inner, &mut last_published).await;
         }
     }
 
@@ -1296,20 +1295,12 @@ impl WalStorageAdapter {
     async fn observe_write_path(
         inner: &Arc<WalStorageInner>,
         last_published: &mut u64,
-        last_sample: &mut Instant,
     ) -> Duration {
         let progress = &inner.progress;
         let published = progress.published_total();
         let depth = progress.queue_depth();
         let oldest = progress.oldest_unpublished_age();
 
-        let elapsed = last_sample.elapsed().as_secs_f64();
-        if elapsed > 0.0 {
-            let delta = published.saturating_sub(*last_published) as f64;
-            inner
-                .metrics
-                .set_writer_publishes_per_second(delta / elapsed);
-        }
         inner.metrics.set_write_queue(
             depth,
             oldest
@@ -1326,7 +1317,6 @@ impl WalStorageAdapter {
             && oldest.is_some_and(|age| age >= inner.bounds.stall_threshold);
 
         *last_published = published;
-        *last_sample = Instant::now();
 
         let next_tick = if depth > 0 {
             inner.bounds.active_tick()
@@ -2567,6 +2557,7 @@ mod tests {
     use super::*;
     use std::env;
     use std::fs;
+    use std::time::Instant;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_wal_adapter_put_get() {
