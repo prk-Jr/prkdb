@@ -874,6 +874,7 @@ impl StorageAdapter for CollectionPartitionedAdapter {
             let health = entry.value().write_path_health();
 
             worst.queue_depth += health.queue_depth;
+            worst.publishes_total += health.publishes_total;
             worst.oldest_unpublished_age_ms = worst
                 .oldest_unpublished_age_ms
                 .max(health.oldest_unpublished_age_ms);

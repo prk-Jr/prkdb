@@ -25,3 +25,6 @@
 
 # Local reference docs (not part of the project)
 /rust-guidelines.txt
+# cargo-mutants writes its working output here; regenerated on every run.
+mutants.out/
+mutants.out.old/

@@ -108,8 +108,20 @@ impl WriterFailure {
     /// that reads as "failed". A panic mid-`flush_accumulator_inner` can happen *after* the
     /// WAL append returned, so even the panic case cannot honestly claim the write did not
     /// land.
+    /// The error for a write this failure **discarded**, as opposed to one merely left
+    /// waiting.
+    ///
+    /// Definite, and deliberately not `WriteNotConfirmed`. Both call sites reach writes
+    /// that were never handed to the writer: the watchdog discharging what is still in the
+    /// accumulator, and `refuse_if_failed` declining a write once the writer has exited.
+    /// Nothing was appended for either, so "may still be published" would be false — and
+    /// false in the lossy direction, because a caller who believes a write may have landed
+    /// will not retry it.
+    ///
+    /// A write the writer already holds is a different case and keeps `WriteNotConfirmed`:
+    /// there the outcome is genuinely unknown, and `await_write`'s bound is what answers.
     pub fn to_error(&self) -> StorageError {
-        StorageError::WriteNotConfirmed(self.to_string())
+        StorageError::WriteAbandoned(self.to_string())
     }
 }
 
@@ -354,6 +366,7 @@ impl WritePathProgress {
             last_publish_age_ms: self
                 .since_last_publish()
                 .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64),
+            publishes_total: self.published_total(),
         }
     }
 }
@@ -578,7 +591,10 @@ mod tests {
         );
 
         let err = progress.refuse_if_failed().expect("failed path refuses");
-        assert!(err.is_write_unconfirmed());
+        assert!(
+            err.is_write_abandoned(),
+            "a refused write was never enqueued"
+        );
         assert!(err.to_string().contains("boom"));
         assert!(!progress.health().healthy);
     }
@@ -645,7 +661,14 @@ mod tests {
         let exited = WritePathProgress::new();
         exited.fail(WriterFailure::Exited("panicked: boom".into()));
         let err = exited.refuse_if_failed().expect("nobody is left to drain");
-        assert!(err.is_write_unconfirmed());
+        assert!(
+            err.is_write_abandoned(),
+            "a refused write was never enqueued"
+        );
+        assert!(
+            err.denies_durability(),
+            "both variants must deny durability"
+        );
     }
 
     /// A discharge is not a publication, so it must not move the "last successful publish"
