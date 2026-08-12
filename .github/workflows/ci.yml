@@ -256,23 +256,31 @@ jobs:
     #
     #   --test-tool nextest   one process supervising the binaries with real scheduling,
     #                         instead of cargo running each in series
-    #   --jobs 3              mutants tested concurrently. The runner has 4 cores and was
-    #                         using one; 3 leaves headroom for each cargo build's own
-    #                         parallelism rather than oversubscribing.
+    #   --jobs 2              mutants tested concurrently, on a 4-core runner that was
+    #                         using one.
     #
-    # Only then shard, and only four ways rather than ten, because the remaining work is
-    # much smaller. Four also fits max-parallel in a single wave, so wall-clock is one
-    # shard rather than a queue.
+    # Run 31573318483 measured the first attempt at this and it was mostly wrong, so the
+    # numbers here are that run's, not an estimate:
     #
-    # These multipliers are estimates until a run measures them. If a shard still times
-    # out, the next lever is the 68 test binaries themselves -- consolidating them cuts
-    # every mutant, and every ordinary CI run with it.
+    #   nextest cut the baseline test from 62s to 43s, a real 31% and kept.
+    #   --jobs 3 tripled the per-mutant BUILD, 78s to 209-360s, because three concurrent
+    #   cargo builds contend on four cores. Effective throughput went from 137s to only
+    #   115s per mutant -- a 1.2x for what looked like a 3x.
+    #
+    # Hence --jobs 2, leaving each build about two cores, and eight shards rather than
+    # four: 129 mutants over eight is ~32 minutes a shard against the 45-minute bound,
+    # where four shards was 65 minutes and would have timed out again.
+    #
+    # The --jobs 2 figure is still an estimate; the shard count is sized so that being
+    # wrong about it does not blow the bound. If a shard still times out, the next lever is
+    # the 68 test binaries themselves -- consolidating them cuts every mutant, and every
+    # ordinary CI run with it.
     timeout-minutes: 45
     strategy:
       fail-fast: false
       max-parallel: 4
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       # fetch-depth: 0 — the diff is computed against the merge base, which a shallow
       # clone does not contain.
@@ -327,14 +335,14 @@ jobs:
         run: |
           set -o pipefail
           cargo mutants --no-shuffle --timeout 300 \
-            --test-tool nextest --jobs 3 \
-            --shard ${{ matrix.shard }}/4 \
+            --test-tool nextest --jobs 2 \
+            --shard ${{ matrix.shard }}/8 \
             --in-diff /tmp/pr.diff \
             --package prkdb --package prkdb-cli 2>&1 | tee /tmp/mutants.log
           status=$?
 
           {
-            echo "### 🧬 Mutation testing (diff-scoped) — shard ${{ matrix.shard }}/4"
+            echo "### 🧬 Mutation testing (diff-scoped) — shard ${{ matrix.shard }}/8"
             echo
             if grep -q "no Rust source files" /tmp/mutants.log; then
               echo "**No mutants generated.** The diff touches no mutable Rust in"

@@ -3523,6 +3523,71 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// The watchdog polls fast while writes are queued and slow while idle.
+    ///
+    /// Mutation run 31573318483 missed all three comparisons at this site (`> with ==`,
+    /// `<`, `>=`). They survived because every liveness test bounds detection at seconds
+    /// while the two tick values are 100ms and 400ms apart — the mutants change how quickly
+    /// a stall is noticed, not whether it is, so nothing that only asserts "eventually"
+    /// can see them.
+    ///
+    /// Asserting the returned tick directly is what catches them, and is possible because
+    /// `observe_write_path` returns it. All three mutants collapse the choice: `>=` always
+    /// polls fast (busy-waking an idle database), `<` always polls slow (a stall waits an
+    /// extra idle interval to be noticed), and `==` inverts the two.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_watchdog_polls_fast_only_while_writes_are_queued() {
+        let dir = liveness_dir("tick_selection");
+        // max_flush_ms 25 => stall threshold 400ms => active 100ms, idle 400ms.
+        let adapter = WalStorageAdapter::new_with_config(liveness_config(&dir, 25, 65_536))
+            .expect("adapter opens");
+        let bounds = adapter.inner.bounds;
+        assert_ne!(
+            bounds.active_tick(),
+            bounds.idle_tick(),
+            "the two ticks must differ, or this test cannot distinguish them"
+        );
+
+        let mut last_published = 0u64;
+
+        let idle = WalStorageAdapter::observe_write_path(&adapter.inner, &mut last_published).await;
+        assert_eq!(
+            idle,
+            bounds.idle_tick(),
+            "an empty queue must be polled at the idle interval; waking at the active rate \
+             busy-polls a database nobody is writing to"
+        );
+
+        // Queue a write the stalled writer cannot publish, so the depth stays above zero.
+        fault_injection::stall_writer_at(&dir);
+        let adapter = Arc::new(adapter);
+        let queued = {
+            let adapter = adapter.clone();
+            tokio::spawn(
+                async move { adapter.put_many(vec![(b"k".to_vec(), b"v".to_vec())]).await },
+            )
+        };
+        wait_until(
+            "the queued write to reach the accumulator",
+            Duration::from_secs(10),
+            || adapter.inner.progress.queue_depth() > 0,
+        )
+        .await;
+
+        let active =
+            WalStorageAdapter::observe_write_path(&adapter.inner, &mut last_published).await;
+        assert_eq!(
+            active,
+            bounds.active_tick(),
+            "a non-empty queue must be polled at the active interval, or a stall waits an \
+             extra idle interval to be noticed"
+        );
+
+        fault_injection::clear_writer_stall(&dir);
+        let _ = tokio::time::timeout(Duration::from_secs(20), queued).await;
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// Dropping an adapter stops its background tasks *promptly*, not eventually.
     ///
     /// Mutation run 31539366718 missed `replace <impl Drop for WalStorageInner>::drop with
