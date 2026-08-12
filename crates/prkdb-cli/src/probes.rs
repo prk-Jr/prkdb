@@ -25,12 +25,82 @@ use serde_json::json;
 use std::sync::Arc;
 
 use prkdb::rate_limit::RateLimiter;
+use prkdb_types::storage::WritePathHealth;
 
 /// Liveness: the process is running and its event loop is turning.
 ///
 /// Deliberately touches nothing. If this can block, it is not a liveness probe.
 pub async fn livez_handler() -> impl IntoResponse {
     (StatusCode::OK, Json(json!({ "status": "alive" })))
+}
+
+/// The objection the storage write path raises to serving traffic, if it raises one.
+///
+/// A node whose WAL writer has stopped publishing cannot serve writes, so it must not be
+/// sent traffic — even though the process is alive and `/livez` will keep saying so. This
+/// is exactly the split the module doc describes: not a restart condition (a restart loses
+/// the queued writes), a "stop routing here" condition.
+///
+/// Split out of `readyz_handler` so the condition is testable at all. The handler reaches
+/// this through a process-global database, and no test can arrange for that database's
+/// writer to be stalled. Mutation run 31575909551 deleted the `!` from the inline version
+/// and nothing noticed — that mutant makes `/readyz` report every healthy node as
+/// unavailable and the one broken node as ready, which is worse than having no probe:
+/// traffic is drained from the nodes that work and routed to the one that cannot accept a
+/// write.
+fn write_path_objection(write_path: &WritePathHealth) -> Option<Response> {
+    if write_path.healthy {
+        return None;
+    }
+
+    Some(
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "not_ready",
+                "reason": "the storage write path is not confirming writes",
+                "detail": write_path.reason,
+                "queue_depth": write_path.queue_depth,
+                "oldest_unpublished_age_ms": write_path.oldest_unpublished_age_ms,
+            })),
+        )
+            .into_response(),
+    )
+}
+
+/// Readiness for a node running in cluster mode.
+///
+/// A node with no known leader cannot serve a linearizable read, so it is not ready
+/// however healthy the process is.
+///
+/// Takes the two counts rather than the statistics struct so it can be exercised without
+/// standing up a partition manager. Extracted for the same reason as
+/// `write_path_objection`, and after the same finding: `replace == with != in
+/// readyz_handler` survived here too, and inverted it reports a node that has elected
+/// leaders as having none, and a node with none as ready to serve.
+fn partition_readiness(total_partitions: usize, leaders_ready: usize) -> Response {
+    if leaders_ready == 0 {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "not_ready",
+                "reason": "no partition leader elected yet",
+                "partitions": total_partitions,
+                "leaders_ready": leaders_ready,
+            })),
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "ready",
+            "partitions": total_partitions,
+            "leaders_ready": leaders_ready,
+        })),
+    )
+        .into_response()
 }
 
 /// Readiness: this node can serve traffic.
@@ -53,51 +123,13 @@ pub async fn readyz_handler() -> Response {
         }
     };
 
-    // A node whose WAL writer has stopped publishing cannot serve writes, so it must not
-    // be sent traffic — even though the process is alive and `/livez` will keep saying so.
-    // This is exactly the split the module doc describes: not a restart condition (a
-    // restart loses the queued writes), a "stop routing here" condition.
-    let write_path = db.storage().write_path_health();
-    if !write_path.healthy {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "status": "not_ready",
-                "reason": "the storage write path is not confirming writes",
-                "detail": write_path.reason,
-                "queue_depth": write_path.queue_depth,
-                "oldest_unpublished_age_ms": write_path.oldest_unpublished_age_ms,
-            })),
-        )
-            .into_response();
+    if let Some(not_ready) = write_path_objection(&db.storage().write_path_health()) {
+        return not_ready;
     }
 
-    // In cluster mode a node with no known leader cannot serve a linearizable read, so it
-    // is not ready however healthy the process is.
     if let Some(pm) = &db.partition_manager {
         let stats = pm.get_statistics().await;
-        if stats.leaders_count == 0 {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({
-                    "status": "not_ready",
-                    "reason": "no partition leader elected yet",
-                    "partitions": stats.total_partitions,
-                    "leaders_ready": stats.leaders_count,
-                })),
-            )
-                .into_response();
-        }
-
-        return (
-            StatusCode::OK,
-            Json(json!({
-                "status": "ready",
-                "partitions": stats.total_partitions,
-                "leaders_ready": stats.leaders_count,
-            })),
-        )
-            .into_response();
+        return partition_readiness(stats.total_partitions, stats.leaders_count);
     }
 
     (StatusCode::OK, Json(json!({ "status": "ready" }))).into_response()
@@ -187,5 +219,78 @@ mod tests {
         // No database is initialised in this test; a liveness probe must still answer.
         let response = livez_handler().await.into_response();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Readiness answers 503 rather than panicking when there is no storage at all.
+    ///
+    /// `replace readyz_handler -> Response with Default::default()` survived mutation run
+    /// 31575909551 because nothing called the handler. `Response::default()` is a 200 with
+    /// an empty body, so the mutant is a readiness probe that reports every node ready
+    /// unconditionally — including one whose database never opened.
+    ///
+    /// Relies on no database manager being initialised in this test binary, the same
+    /// condition `livez_never_touches_storage` above depends on.
+    #[tokio::test]
+    async fn readyz_is_not_ready_before_storage_opens() {
+        let response = readyz_handler().await;
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a node whose storage is not open must not be routed traffic"
+        );
+    }
+
+    /// The write-path condition, in both directions.
+    ///
+    /// Only the false case can go wrong quietly: a probe that says 503 too often drains a
+    /// node and someone notices, while one that says 200 on a stalled writer routes writes
+    /// to a node that will not confirm them. Both are pinned because a single-direction
+    /// assertion is satisfied by a function that always answers the same way.
+    #[test]
+    fn a_write_path_that_is_not_confirming_writes_takes_the_node_out_of_rotation() {
+        let healthy = WritePathHealth {
+            healthy: true,
+            reason: None,
+            queue_depth: 0,
+            oldest_unpublished_age_ms: 0,
+            last_publish_age_ms: Some(5),
+        };
+        assert!(
+            write_path_objection(&healthy).is_none(),
+            "a working writer must not take its node out of rotation"
+        );
+
+        let stalled = WritePathHealth {
+            healthy: false,
+            reason: Some("WAL writer stalled".to_string()),
+            queue_depth: 12,
+            oldest_unpublished_age_ms: 900,
+            last_publish_age_ms: Some(900),
+        };
+        let objection = write_path_objection(&stalled)
+            .expect("a stalled writer must object to being sent traffic");
+        assert_eq!(objection.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// The cluster-mode condition, in both directions.
+    ///
+    /// Found by running the mutation job locally against the refactor above rather than by
+    /// CI, which mutates only the lines a pull request touches and had never reached this
+    /// one. It is the same inversion as `write_path_objection`'s, one branch further down:
+    /// a node with a leader reported as having none takes a working cluster out of
+    /// rotation, and a node with none reported ready is sent linearizable reads it cannot
+    /// answer.
+    #[test]
+    fn a_node_with_no_elected_leader_is_not_ready() {
+        assert_eq!(
+            partition_readiness(4, 0).status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no leader means no linearizable read, however healthy the process is"
+        );
+        assert_eq!(
+            partition_readiness(4, 4).status(),
+            StatusCode::OK,
+            "a cluster with leaders elected must be routed traffic"
+        );
     }
 }

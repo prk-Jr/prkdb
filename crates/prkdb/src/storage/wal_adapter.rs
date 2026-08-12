@@ -123,11 +123,13 @@ pub(crate) mod fault_injection {
         static FLUSH_FAILURE: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
         static WRITER_STALL: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
         static WRITER_PANIC: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+        static APPEND_FAILURE: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
         let slot = match kind {
             Fault::FlushFailure => &FLUSH_FAILURE,
             Fault::WriterStall => &WRITER_STALL,
             Fault::WriterPanic => &WRITER_PANIC,
+            Fault::AppendFailure => &APPEND_FAILURE,
         };
         slot.get_or_init(|| Mutex::new(HashSet::new()))
     }
@@ -137,6 +139,7 @@ pub(crate) mod fault_injection {
         FlushFailure,
         WriterStall,
         WriterPanic,
+        AppendFailure,
     }
 
     fn arm(kind: Fault, dir: impl Into<PathBuf>) {
@@ -173,6 +176,27 @@ pub(crate) mod fault_injection {
 
     pub(super) fn flush_should_fail(dir: &Path) -> bool {
         armed(Fault::FlushFailure, dir)
+    }
+
+    /// Make the WAL append *inside the writer* fail for the adapter whose WAL lives at
+    /// `dir`.
+    ///
+    /// Distinct from `fail_flush_at`, which fails the caller-facing `flush` and never
+    /// reaches the flush loop. This one reaches the branch where a batch was taken out of
+    /// the accumulator and none of it got to the log: the waiters are answered with an
+    /// error, the queue accounting still has to balance, and nothing may be reported as
+    /// published. Real causes are a full disk or a failing fsync, neither of which a test
+    /// can arrange portably.
+    pub fn fail_append_at(dir: impl Into<PathBuf>) {
+        arm(Fault::AppendFailure, dir);
+    }
+
+    pub fn clear_append_failure(dir: &Path) {
+        disarm(Fault::AppendFailure, dir);
+    }
+
+    pub(super) fn append_should_fail(dir: &Path) -> bool {
+        armed(Fault::AppendFailure, dir)
     }
 
     /// Make the flush loop stop publishing while staying alive and looping.
@@ -1371,12 +1395,27 @@ impl WalStorageAdapter {
         }
 
         let discharged = Self::discharge_pending(inner, failure.to_error()).await;
-        if discharged > 0 {
-            warn!(
+        if let Some(report) = Self::discharge_report(discharged, &failure) {
+            warn!("{report}");
+        }
+    }
+
+    /// What to log about a discharge, or `None` when there is nothing worth saying.
+    ///
+    /// Returning the line rather than logging it inline is what makes the condition
+    /// testable: `fail_write_path` runs on every watchdog tick for as long as a stall
+    /// lasts, so a stall that has already handed back everything it had would otherwise
+    /// repeat "Discharged 0" at the tick rate and bury the one line that named the cause.
+    /// That is a real requirement with no observable other than the log itself, and a
+    /// condition whose only effect is a side effect is a condition no test can pin —
+    /// mutation run 31575909551 missed `> with ==` here for exactly that reason.
+    fn discharge_report(discharged: u64, failure: &WriterFailure) -> Option<String> {
+        (discharged > 0).then(|| {
+            format!(
                 "Discharged {} unpublished write(s) with a not-confirmed result: {}",
                 discharged, failure
-            );
-        }
+            )
+        })
     }
 
     /// Hand every write still sitting in the accumulator its result, and report how many.
@@ -1803,7 +1842,22 @@ impl WalStorageAdapter {
         let (tx_groups, id_groups): (Vec<_>, Vec<_>) = rest.into_iter().unzip();
 
         // Write to WAL (async, returns Vec<(segment_id, offset)>)
-        match inner.wal.append_batch(records.clone()).await {
+        //
+        // Simulates the append failing under the writer — a full disk, a failing fsync.
+        // The batch has already left the accumulator at this point, so this is the only
+        // seam that reaches "taken but not published".
+        #[cfg(test)]
+        let appended = if fault_injection::append_should_fail(&inner._config.wal.log_dir) {
+            Err(prkdb_core::wal::WalError::Io(std::io::Error::other(
+                "fault injection: WAL append failed",
+            )))
+        } else {
+            inner.wal.append_batch(records.clone()).await
+        };
+        #[cfg(not(test))]
+        let appended = inner.wal.append_batch(records.clone()).await;
+
+        match appended {
             Ok(locations) => {
                 // Pin the index for the duration of the batch update
                 // Note: Guard is not Send, so we must drop it before any await point
@@ -3586,6 +3640,103 @@ mod tests {
         fault_injection::clear_writer_stall(&dir);
         let _ = tokio::time::timeout(Duration::from_secs(20), queued).await;
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A batch that never reached the log is not a publish.
+    ///
+    /// Mutation run 31575909551 missed `> with >=` on the `published > 0` guard around
+    /// `record_writer_publish`. That guard is not cosmetic: `record_writer_publish` stores
+    /// `unix_millis()` into `writer_last_publish_unix_ms` unconditionally, so calling it
+    /// with a count of zero moves the "last successful publish" clock forward on a batch
+    /// that failed. A dashboard would then show a writer publishing normally while every
+    /// caller behind it is receiving errors — the gauge answers "when did it last *try*"
+    /// instead of "when did it last succeed", which is the one question it exists for.
+    ///
+    /// Nothing could see this before because no test could make the append fail;
+    /// `fail_append_at` is that seam.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_append_does_not_count_as_a_publish() {
+        let dir = liveness_dir("append_failure");
+        let adapter = WalStorageAdapter::new_with_config(liveness_config(&dir, 5000, 65_536))
+            .expect("adapter opens");
+
+        assert!(
+            adapter.metrics().writer_last_publish_unix_ms.is_none(),
+            "a fresh adapter has not published anything yet"
+        );
+
+        fault_injection::fail_append_at(&dir);
+        let refused = adapter.put_many(vec![(b"k".to_vec(), b"v".to_vec())]).await;
+        fault_injection::clear_append_failure(&dir);
+
+        assert!(
+            refused.is_err(),
+            "a write whose append failed must be reported to its caller, not swallowed"
+        );
+
+        let after_failure = adapter.metrics();
+        assert_eq!(
+            after_failure.writer_publishes_total, 0,
+            "nothing reached the log, so nothing counts towards the publish total"
+        );
+        assert!(
+            after_failure.writer_last_publish_unix_ms.is_none(),
+            "a failed append must not advance the last-successful-publish clock, or a \
+             broken writer reads as a healthy one"
+        );
+
+        // And the same gauge must still move when a write genuinely lands, or the
+        // assertion above would be satisfied by a writer that never records anything.
+        adapter
+            .put_many(vec![(b"k2".to_vec(), b"v2".to_vec())])
+            .await
+            .expect("the append succeeds once the fault is cleared");
+
+        let after_success = adapter.metrics();
+        assert_eq!(after_success.writer_publishes_total, 1);
+        assert!(
+            after_success.writer_last_publish_unix_ms.is_some(),
+            "a real publish must stamp the clock"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Discharging nothing says nothing; discharging something names the count and cause.
+    ///
+    /// Mutation run 31575909551 missed `> with ==` on what was then an inline
+    /// `if discharged > 0` around a `warn!`. It survived because the condition's only
+    /// effect was the log, and no test could see a log. `discharge_report` exists to give
+    /// that decision a return value; this pins both of its answers.
+    ///
+    /// Not a correctness property — `record_discharged` runs either way, so the count
+    /// reaches the metrics regardless. It is noise control, and it matters because
+    /// `fail_write_path` runs once per watchdog tick for the whole duration of a stall.
+    #[test]
+    fn a_discharge_of_nothing_is_silent() {
+        let failure = WriterFailure::Stalled {
+            queue_depth: 7,
+            oldest_age_ms: 900,
+            threshold_ms: 400,
+        };
+
+        assert_eq!(
+            WalStorageAdapter::discharge_report(0, &failure),
+            None,
+            "a stall that had nothing left to hand back must log nothing, or it repeats \
+             itself once per tick until the writer recovers"
+        );
+
+        let report = WalStorageAdapter::discharge_report(3, &failure)
+            .expect("a discharge that answered waiters is worth a line");
+        assert!(
+            report.contains("Discharged 3 unpublished write(s)"),
+            "the line must name how many writes were given up on; got: {report}"
+        );
+        assert!(
+            report.contains("stalled"),
+            "and why, or an operator sees a count with no cause; got: {report}"
+        );
     }
 
     /// Dropping an adapter stops its background tasks *promptly*, not eventually.

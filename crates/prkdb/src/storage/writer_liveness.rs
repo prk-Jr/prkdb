@@ -451,6 +451,70 @@ mod tests {
         assert_eq!(progress.queue_depth(), 0);
     }
 
+    /// The running totals, not just the difference between them.
+    ///
+    /// Mutation run 31575909551 missed `published_total -> u64 with 1`. Every test here
+    /// asserted `queue_depth`, which is `enqueued - published` and so is unchanged by a
+    /// constant that both sides of the subtraction never see. But the watchdog does not
+    /// read the depth to decide whether the writer is stalled — it reads
+    /// `published_total` on consecutive ticks and asks whether it moved. A total stuck at
+    /// a constant reports "no progress" on every tick after the first, so a busy writer
+    /// working perfectly through a queue that never empties gets declared stalled and has
+    /// its pending writes discharged with errors.
+    /// `unix_millis` reports the wall clock, not a number.
+    ///
+    /// Mutation run 31575909551 missed `unix_millis -> u64 with 1`. The liveness tests
+    /// only ever asked whether `writer_last_publish_unix_ms` was `Some`, which any
+    /// constant satisfies. The gauge exists to be read against other wall-clock
+    /// timestamps on a dashboard, so a constant makes every publish look like it happened
+    /// in January 1970 and "time since last publish" unboundedly large — the alarm this
+    /// gauge feeds would fire permanently and mean nothing.
+    ///
+    /// Bracketed by two readings of the same clock rather than compared to a fixed date,
+    /// so the test does not acquire an expiry.
+    #[test]
+    fn unix_millis_reads_the_wall_clock() {
+        let millis_now = || {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("the system clock is after the Unix epoch")
+                .as_millis() as u64
+        };
+
+        let before = millis_now();
+        let stamped = unix_millis();
+        let after = millis_now();
+
+        assert!(
+            (before..=after).contains(&stamped),
+            "unix_millis returned {stamped}, which is not a wall-clock reading taken \
+             between {before} and {after}"
+        );
+    }
+
+    #[test]
+    fn the_running_totals_count_what_actually_happened() {
+        let progress = WritePathProgress::new();
+        assert_eq!(progress.enqueued_total(), 0);
+        assert_eq!(progress.published_total(), 0);
+
+        progress.record_enqueued(3);
+        assert_eq!(progress.enqueued_total(), 3);
+        assert_eq!(progress.published_total(), 0);
+
+        progress.record_published(2);
+        assert_eq!(progress.enqueued_total(), 3);
+        assert_eq!(
+            progress.published_total(),
+            2,
+            "the publish total must move with each publish; the watchdog reads it across \
+             ticks and treats a total that does not move as a stall"
+        );
+
+        progress.record_published(1);
+        assert_eq!(progress.published_total(), 3);
+    }
+
     #[test]
     fn the_oldest_write_clock_starts_on_the_first_enqueue_and_stops_when_the_queue_drains() {
         let progress = WritePathProgress::new();

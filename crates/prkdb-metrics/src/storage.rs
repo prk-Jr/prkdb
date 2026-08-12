@@ -280,11 +280,6 @@ impl StorageMetrics {
             .store(unix_ms, Ordering::Relaxed);
     }
 
-    /// Publish rate over the supervisor's last observation window.
-    ///
-    /// Stored as thousandths so the gauge stays an integer atomic; a lifetime average
-    /// would be the easier thing to compute and the useless one — it cannot fall to zero
-    /// after a busy period, which is exactly the transition worth alerting on.
     /// Mark the write path healthy or not. `reason` is for the log, not the gauge.
     pub fn set_writer_healthy(&self, healthy: bool) {
         self.inner
