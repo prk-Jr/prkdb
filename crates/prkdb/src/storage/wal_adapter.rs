@@ -3667,12 +3667,28 @@ mod tests {
 
         fault_injection::fail_append_at(&dir);
         let refused = adapter.put_many(vec![(b"k".to_vec(), b"v".to_vec())]).await;
-        fault_injection::clear_append_failure(&dir);
-
         assert!(
             refused.is_err(),
             "a write whose append failed must be reported to its caller, not swallowed"
         );
+
+        // A caller's answer is sent from inside `publish_batch`, and the metrics are
+        // recorded by `flush_accumulator_inner` after it returns — so `refused` arriving
+        // proves nothing about what has been recorded yet. Reading here would race the
+        // writer, and race in the mutant's favour: a mutant that does stamp the clock
+        // stamps it a moment later, and an assertion that got there first would call that
+        // a pass.
+        //
+        // A second failed write closes the gap without a sleep. The flush loop is one
+        // task handling one batch at a time, and this write was not enqueued until the
+        // first had been answered, so it is a separate cycle; receiving its answer
+        // therefore happens after every store the first cycle made.
+        let also_refused = adapter
+            .put_many(vec![(b"k1".to_vec(), b"v1".to_vec())])
+            .await;
+        assert!(also_refused.is_err(), "the fault is still armed");
+
+        fault_injection::clear_append_failure(&dir);
 
         let after_failure = adapter.metrics();
         assert_eq!(
@@ -3692,10 +3708,17 @@ mod tests {
             .await
             .expect("the append succeeds once the fault is cleared");
 
-        let after_success = adapter.metrics();
-        assert_eq!(after_success.writer_publishes_total, 1);
+        // Same ordering problem in the other direction: the caller is answered before the
+        // publish is recorded, so this waits for the record rather than assuming it.
+        wait_until(
+            "the successful publish to reach the metrics",
+            Duration::from_secs(10),
+            || adapter.metrics().writer_publishes_total == 1,
+        )
+        .await;
+
         assert!(
-            after_success.writer_last_publish_unix_ms.is_some(),
+            adapter.metrics().writer_last_publish_unix_ms.is_some(),
             "a real publish must stamp the clock"
         );
 
