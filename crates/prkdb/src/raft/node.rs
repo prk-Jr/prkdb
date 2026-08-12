@@ -1599,15 +1599,42 @@ impl RaftNode {
     /// Returns whether leadership was taken. The two facts are re-checked together under
     /// the locks, acquired `current_term` before `state` to match the order every RPC
     /// handler uses, so the two paths cannot deadlock against each other.
-    async fn claim_leadership(&self, campaign_term: u64) -> bool {
+    /// Recording the promotion here rather than at the call site is deliberate: a caller
+    /// that branches on the return value to update the gauges can get the two out of step,
+    /// and mutation testing demonstrated it — deleting one `!` produced a node that leads
+    /// without ever reporting itself leader, and one that reports leadership it does not
+    /// hold. The transition and the record of it are the same event, so they live together.
+    async fn claim_leadership(&self, campaign_term: u64, votes: usize) -> bool {
         let current_term = self.current_term.read().await;
         let mut state = self.state.write().await;
 
         if *current_term != campaign_term || *state != RaftState::Candidate {
+            tracing::info!(
+                "Node {} won term {} but had already moved on; election abandoned",
+                self.config.local_node_id,
+                campaign_term
+            );
             return false;
         }
 
         *state = RaftState::Leader;
+
+        crate::prometheus_metrics::RAFT_STATE
+            .with_label_values(&[&self.config.local_node_id.to_string(), "0"])
+            .set(1.0); // Leader
+        crate::prometheus_metrics::RAFT_LEADER_ELECTIONS_TOTAL
+            .with_label_values(&[&self.config.local_node_id.to_string(), "0"])
+            .inc();
+        crate::prometheus_metrics::RAFT_TERM
+            .with_label_values(&[&self.config.local_node_id.to_string(), "0"])
+            .set(campaign_term as f64);
+        tracing::info!(
+            "Node {} became LEADER in term {} with {} votes",
+            self.config.local_node_id,
+            campaign_term,
+            votes
+        );
+
         true
     }
 
@@ -1684,30 +1711,7 @@ impl RaftNode {
         // Check if we won
         let majority = (self.config.nodes.len() / 2) + 1;
         if votes >= majority {
-            if !self.claim_leadership(current_term).await {
-                tracing::info!(
-                    "Node {} won term {} but had already moved on; election abandoned",
-                    self.config.local_node_id,
-                    current_term
-                );
-                return;
-            }
-            // Update Prometheus metrics
-            crate::prometheus_metrics::RAFT_STATE
-                .with_label_values(&[&self.config.local_node_id.to_string(), "0"])
-                .set(1.0); // Leader
-            crate::prometheus_metrics::RAFT_LEADER_ELECTIONS_TOTAL
-                .with_label_values(&[&self.config.local_node_id.to_string(), "0"])
-                .inc();
-            crate::prometheus_metrics::RAFT_TERM
-                .with_label_values(&[&self.config.local_node_id.to_string(), "0"])
-                .set(current_term as f64);
-            tracing::info!(
-                "Node {} became LEADER in term {} with {} votes",
-                self.config.local_node_id,
-                current_term,
-                votes
-            );
+            self.claim_leadership(current_term, votes).await;
         } else {
             tracing::debug!(
                 "Node {} failed election in term {} with {} votes (needed {})",
@@ -2410,7 +2414,7 @@ mod tests {
         );
 
         assert!(
-            !node.claim_leadership(1).await,
+            !node.claim_leadership(1, 2).await,
             "the term-1 election was abandoned when term 2 arrived; claiming it now puts \
              a second leader in a term this node never won"
         );
@@ -2435,7 +2439,7 @@ mod tests {
         *node.current_term.write().await = 4;
 
         assert!(
-            node.claim_leadership(4).await,
+            node.claim_leadership(4, 2).await,
             "a candidate that is still in the term it campaigned for won that election"
         );
         assert_eq!(node.get_state().await, RaftState::Leader);
@@ -2481,5 +2485,67 @@ mod tests {
                  both; each then reaches a majority and leads term 1"
             );
         }
+    }
+
+    /// A candidate that learned of a leader *in its own term* does not claim the election.
+    ///
+    /// The guard rejects on either fact — wrong term, or no longer a candidate — and this
+    /// is the case where only the second holds. `AppendEntries` from a leader of the same
+    /// term steps a candidate down without moving the term, so a guard that required both
+    /// would promote this node on ballots that arrive afterwards, putting it alongside the
+    /// leader whose message just deposed it. Mutation found the gap: `|| with &&` survived
+    /// because both existing tests moved the term and the state together.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_candidate_that_learned_of_a_leader_in_its_term_does_not_claim_it() {
+        let (storage, _temp) = create_test_storage();
+        let node = RaftNode::new(
+            ClusterConfig::default(),
+            storage,
+            Arc::new(MockStateMachine),
+        );
+
+        *node.state.write().await = RaftState::Candidate;
+        *node.current_term.write().await = 4;
+
+        // A leader for term 4 — this node's own term — announces itself.
+        node.handle_append_entries(4, 99, 0, 0, 0, vec![]).await;
+        assert_eq!(node.get_state().await, RaftState::Follower);
+        assert_eq!(
+            node.current_term().await,
+            4,
+            "a same-term leader steps a candidate down without advancing the term, which \
+             is what makes this case distinct from the higher-term one"
+        );
+
+        assert!(
+            !node.claim_leadership(4, 2).await,
+            "term 4 already has a leader; claiming it here seats a second one"
+        );
+        assert_eq!(node.get_state().await, RaftState::Follower);
+    }
+
+    /// A candidate that has moved on to a later election does not claim the earlier one.
+    ///
+    /// The other single-fact case: still a candidate, but campaigning in a newer term.
+    /// Ballots for the abandoned term must not seat it as leader of a term it has left.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_candidate_in_a_later_election_does_not_claim_the_earlier_one() {
+        let (storage, _temp) = create_test_storage();
+        let node = RaftNode::new(
+            ClusterConfig::default(),
+            storage,
+            Arc::new(MockStateMachine),
+        );
+
+        // Campaigning in term 5; the ballots arriving are from the term-4 election.
+        *node.state.write().await = RaftState::Candidate;
+        *node.current_term.write().await = 5;
+
+        assert!(
+            !node.claim_leadership(4, 2).await,
+            "these votes elected it in term 4, a term it has already left"
+        );
+        assert_eq!(node.get_state().await, RaftState::Candidate);
+        assert_eq!(node.current_term().await, 5);
     }
 }
