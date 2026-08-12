@@ -1304,7 +1304,7 @@ impl RaftNode {
                         // duplicated. What changes is the wording, because "failed" would
                         // send whoever reads this log line looking for a disk error that
                         // never happened.
-                        if e.is_write_unconfirmed() {
+                        if e.denies_durability() {
                             tracing::warn!(
                                 "WAL append not confirmed, refusing AppendEntries so the \
                                  leader retries: {}",
