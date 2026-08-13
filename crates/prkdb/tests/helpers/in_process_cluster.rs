@@ -522,10 +522,22 @@ impl InProcessCluster {
         let mut last_error = None;
 
         for attempt in 1..=ATTEMPTS {
-            let leader_id = self
-                .leader()
-                .await
-                .ok_or_else(|| anyhow::anyhow!("no leader to accept a write"))?;
+            // Waited for, not read once. A leader can be absent for a moment at any
+            // point in a test — an election timeout fires, the old leader steps down —
+            // and reading `leader()` a single time turns that ordinary gap into a failed
+            // write. The retry loop below already tolerates a *rejected* proposal; this
+            // makes it tolerate a *missing* leader too, which is the same transient
+            // condition one step earlier.
+            //
+            // `many_keys_all_commit` failed as "no leader to accept a write" on a loaded
+            // machine for exactly this reason, twice taking a mutation baseline with it.
+            let leader_id = match self.await_leader(Duration::from_secs(10)).await {
+                Ok(id) => id,
+                Err(e) => {
+                    last_error = Some(format!("attempt {attempt}: {e}"));
+                    continue;
+                }
+            };
             let raft = self
                 .raft_of(leader_id)
                 .ok_or_else(|| anyhow::anyhow!("leader {leader_id} vanished"))?;
