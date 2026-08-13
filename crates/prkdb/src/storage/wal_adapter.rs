@@ -3266,6 +3266,76 @@ mod tests {
     // Every one of them hung indefinitely before this work.
     // ------------------------------------------------------------------------------
 
+    /// A stale index entry must not hand back another key's value.
+    ///
+    /// `get` resolves a key to an offset through the index, reads whatever record is at
+    /// that offset, and only then checks that the record's own id matches the key it was
+    /// asked for. The nightly sweep replaced that check with `true` and nothing noticed:
+    /// in every other test the index is correct, so the check is redundant and its removal
+    /// changes no answer.
+    ///
+    /// It is not redundant in the case it exists for. An index entry pointing at the wrong
+    /// record — stale after compaction, or corrupted — turns `get(alpha)` into beta's
+    /// value returned as alpha's. That is the silent wrong answer this file's whole
+    /// premise is about, and without the id check the key is decoration: the read returns
+    /// whatever the index happened to point at.
+    ///
+    /// Poking the index directly is the point rather than a shortcut. The guard's whole
+    /// job is to be right when the index is wrong, and no amount of ordinary writing makes
+    /// the index wrong.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stale_index_entry_does_not_return_another_keys_value() {
+        let dir = liveness_dir("stale_index");
+        let adapter = WalStorageAdapter::new(WalConfig {
+            log_dir: dir.clone(),
+            ..WalConfig::test_config()
+        })
+        .expect("adapter opens");
+
+        adapter
+            .put(b"alpha", b"value-for-alpha")
+            .await
+            .expect("write alpha");
+        adapter
+            .put(b"beta", b"value-for-beta")
+            .await
+            .expect("write beta");
+
+        assert_eq!(
+            adapter.get(b"alpha").await.expect("read alpha"),
+            Some(b"value-for-alpha".to_vec()),
+            "the honest read must work before the index is poisoned, or the assertion \
+             below would pass for the wrong reason"
+        );
+
+        // Point `alpha` at `beta`'s record. This is what a stale entry looks like.
+        let beta_offset = {
+            let pinned = adapter.inner.index.pin();
+            *pinned.get(&b"beta".to_vec()).expect("beta is indexed")
+        };
+        adapter
+            .inner
+            .index
+            .pin()
+            .insert(b"alpha".to_vec(), beta_offset);
+
+        // The cache would answer from the earlier read and never reach the WAL.
+        adapter.inner.cache.clear().await;
+
+        assert_eq!(
+            adapter
+                .get(b"alpha")
+                .await
+                .expect("read alpha through the stale entry"),
+            None,
+            "a record whose id is not the requested key must not be returned as that \
+             key's value; without the id check this is beta's value answering a read for \
+             alpha"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// A config whose stall bound is short enough to observe inside a test.
     ///
     /// `max_flush_ms` is the knob the bounds derive from, so setting it here is the same

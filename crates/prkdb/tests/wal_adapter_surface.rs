@@ -897,3 +897,89 @@ async fn scan_prefix_honours_a_compressed_batch_delete() {
     })
     .await;
 }
+
+/// `get_many` reads each key's own value out of a **compressed** batch.
+///
+/// Two survivors from the nightly sweep live on this path, and both are the same defect
+/// the `scan_prefix` fix (362271d) already found once in a neighbouring arm: compressed
+/// records handled by an arm no test reaches.
+///
+/// - deleting the `CompressedPutBatch` arm makes every key in the batch read as missing;
+/// - flipping `item_id == &key` to `!=` returns the *first other* key's value, which is a
+///   silent wrong answer rather than a visible absence.
+///
+/// A plain `PutBatch` exercises neither, so the assertion below that the record really was
+/// compressed is load-bearing — without it this test passes against both mutants while
+/// proving nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_many_reads_each_key_out_of_a_compressed_batch() {
+    bounded("get_many_reads_each_key_out_of_a_compressed_batch", async {
+        use prkdb_core::wal::compression::CompressionConfig;
+        use prkdb_core::wal::mmap_parallel_wal::MmapParallelWal;
+        use prkdb_core::wal::{LogOperation, LogRecord};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = WalConfig {
+            log_dir: dir.path().to_path_buf(),
+            compression: CompressionConfig::default(),
+            ..WalConfig::test_config()
+        };
+
+        // Sized to clear `min_compress_bytes` (256) and then actually shrink, as the
+        // delete-batch test above documents; the assertion after it checks that it did.
+        let items: Vec<(Vec<u8>, Vec<u8>)> = (0..120)
+            .map(|i| {
+                (
+                    format!("c:key-{i:04}").into_bytes(),
+                    format!("{}-{i}", "stored".repeat(32)).into_bytes(),
+                )
+            })
+            .collect();
+
+        {
+            let wal = MmapParallelWal::open_or_create(config.clone(), config.segment_count)
+                .await
+                .expect("open the WAL directly");
+            let put = LogRecord::new_with_compression(
+                LogOperation::PutBatch {
+                    collection: String::new(),
+                    items: items.clone(),
+                },
+                &CompressionConfig::default(),
+            )
+            .expect("build a put batch record");
+
+            assert!(
+                matches!(put.operation, LogOperation::CompressedPutBatch { .. }),
+                "the batch was not compressed, so this test would exercise the plain \
+                 PutBatch arm that already works and prove nothing about the compressed one"
+            );
+
+            wal.append(put).await.expect("append the compressed batch");
+            wal.sync().await.expect("sync the WAL");
+        }
+
+        let a = WalStorageAdapter::new(config).expect("open an adapter over the prepared WAL");
+
+        // Sixty of the hundred and twenty, deliberately: `get_many` sends more than 100
+        // cache misses down a scan-based path and fewer down an index-based one, and the
+        // compressed arm that the survivors live on is the *index* path. Reading all 120
+        // back exercises the other branch entirely and leaves both mutants alive — the
+        // first version of this test did exactly that and passed against `!=`.
+        let wanted: Vec<(Vec<u8>, Vec<u8>)> = items.iter().take(60).cloned().collect();
+        let keys: Vec<Vec<u8>> = wanted.iter().map(|(k, _)| k.clone()).collect();
+        let got = a.get_many(keys).await.expect("get_many succeeds");
+
+        assert_eq!(got.len(), wanted.len(), "one answer per key");
+        for (i, ((key, expected), actual)) in wanted.iter().zip(got.iter()).enumerate() {
+            assert_eq!(
+                actual.as_ref(),
+                Some(expected),
+                "key {} of the compressed batch read back wrong: {:?}",
+                i,
+                String::from_utf8_lossy(key)
+            );
+        }
+    })
+    .await;
+}
