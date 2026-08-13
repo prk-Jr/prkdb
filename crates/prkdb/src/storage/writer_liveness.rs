@@ -186,18 +186,27 @@ impl WritePathProgress {
     /// `compare_exchange` rather than a plain store: a second concurrent enqueue must not
     /// push the oldest write's timestamp forward, which would let a queue that never
     /// drains keep resetting its own age and never trip the watchdog.
-    pub fn record_enqueued(&self, count: u64) {
+    /// Returns whether this call took the queue from empty to non-empty.
+    ///
+    /// The answer costs nothing to produce: `oldest_unpublished_nanos` is zero exactly
+    /// while the queue is empty — `resolve` stores 0 whenever it drains — so the
+    /// compare-exchange below already distinguishes the two cases, and only reported
+    /// success by discarding it. The caller uses it to wake a supervisor that would
+    /// otherwise be asleep, which is the whole reason the supervisor no longer polls.
+    ///
+    /// Deliberately *this* transition and not every enqueue. A notify per write moves the
+    /// cost from once per second while idle to once per write while busy, on the hot path
+    /// of a database whose main job is writes — the wrong direction. This fires only when
+    /// a queue that was empty stops being empty, and there is nothing to wake otherwise.
+    pub fn record_enqueued(&self, count: u64) -> bool {
         if count == 0 {
-            return;
+            return false;
         }
         self.enqueued.fetch_add(count, Ordering::SeqCst);
         let now = self.now_nanos().max(1);
-        let _ = self.oldest_unpublished_nanos.compare_exchange(
-            0,
-            now,
-            Ordering::SeqCst,
-            Ordering::Relaxed,
-        );
+        self.oldest_unpublished_nanos
+            .compare_exchange(0, now, Ordering::SeqCst, Ordering::Relaxed)
+            .is_ok()
     }
 
     /// Record `count` writes resolved *by the writer*.
@@ -415,19 +424,13 @@ impl LivenessBounds {
     pub fn active_tick(&self) -> Duration {
         (self.stall_threshold / 4).clamp(Duration::from_millis(1), Duration::from_millis(250))
     }
-
-    /// How often to re-check when nothing is queued.
-    ///
-    /// With an empty queue there is no stall to detect and no gauge that is moving, so the
-    /// only thing a fast tick buys is wakeups. That matters: `CollectionPartitionedAdapter`
-    /// builds one adapter — and so one supervisor — per collection, and paying a busy
-    /// database's sampling rate on an idle one is the thread-pressure mistake the deleted
-    /// Phase 2 writer already made once.
-    pub fn idle_tick(&self) -> Duration {
-        self.stall_threshold
-            .clamp(Duration::from_millis(50), Duration::from_secs(1))
-    }
 }
+
+// `idle_tick` used to live here, answering "how often to re-check when nothing is queued".
+// The watchdog now waits for a write instead of re-checking on a timer, so the honest
+// answer became "never" and a function returning an interval had nothing left to say.
+// Deleted rather than left unused: the three mutants that survived on the branch choosing
+// between it and `active_tick` are gone with it.
 
 /// Milliseconds since the Unix epoch, for the "last successful publish" gauge.
 ///
@@ -708,7 +711,6 @@ mod tests {
         let bounds = LivenessBounds::from_max_flush_ms(0);
         assert!(bounds.stall_threshold > Duration::ZERO);
         assert!(bounds.active_tick() > Duration::ZERO);
-        assert!(bounds.idle_tick() > Duration::ZERO);
     }
 
     /// Sampling is bounded on both sides; the detection threshold is not. A very long
@@ -723,16 +725,9 @@ mod tests {
             Duration::from_millis(250),
             "a long stall bound must not mean a frozen queue-depth gauge"
         );
-        assert_eq!(
-            patient.idle_tick(),
-            Duration::from_secs(1),
-            "with nothing queued there is nothing to sample for"
-        );
-
         let brisk = LivenessBounds::from_max_flush_ms(4);
         assert_eq!(brisk.stall_threshold, Duration::from_millis(64));
         assert_eq!(brisk.active_tick(), Duration::from_millis(16));
-        assert!(brisk.idle_tick() >= Duration::from_millis(50));
     }
 
     #[test]
