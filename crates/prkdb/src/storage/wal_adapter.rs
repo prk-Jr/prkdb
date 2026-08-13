@@ -124,12 +124,14 @@ pub(crate) mod fault_injection {
         static WRITER_STALL: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
         static WRITER_PANIC: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
         static APPEND_FAILURE: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+        static NO_WRITER: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
         let slot = match kind {
             Fault::FlushFailure => &FLUSH_FAILURE,
             Fault::WriterStall => &WRITER_STALL,
             Fault::WriterPanic => &WRITER_PANIC,
             Fault::AppendFailure => &APPEND_FAILURE,
+            Fault::WriterNeverStarted => &NO_WRITER,
         };
         slot.get_or_init(|| Mutex::new(HashSet::new()))
     }
@@ -140,6 +142,7 @@ pub(crate) mod fault_injection {
         WriterStall,
         WriterPanic,
         AppendFailure,
+        WriterNeverStarted,
     }
 
     fn arm(kind: Fault, dir: impl Into<PathBuf>) {
@@ -197,6 +200,25 @@ pub(crate) mod fault_injection {
 
     pub(super) fn append_should_fail(dir: &Path) -> bool {
         armed(Fault::AppendFailure, dir)
+    }
+
+    /// Open an adapter whose writer subsystem never starts.
+    ///
+    /// Every constructor calls `spawn_writer`, so this state is not reachable by
+    /// configuration — but cargo-mutants reaches it by deleting `spawn_writer`, and the
+    /// result was every write in the suite waiting out its client bound and the mutation
+    /// run timing out at 600s rather than reporting anything. The seam exists so the
+    /// refusal that now covers that case can be asserted directly.
+    pub fn never_start_writer_at(dir: impl Into<PathBuf>) {
+        arm(Fault::WriterNeverStarted, dir);
+    }
+
+    pub fn clear_never_start_writer(dir: &Path) {
+        disarm(Fault::WriterNeverStarted, dir);
+    }
+
+    pub(super) fn writer_should_not_start(dir: &Path) -> bool {
+        armed(Fault::WriterNeverStarted, dir)
     }
 
     /// Make the flush loop stop publishing while staying alive and looping.
@@ -1239,6 +1261,11 @@ impl WalStorageAdapter {
     /// panicking, or cancelled — is now something the process can observe rather than
     /// something callers infer from never being answered.
     fn spawn_writer(inner: &Arc<WalStorageInner>) {
+        #[cfg(test)]
+        if fault_injection::writer_should_not_start(&inner._config.wal.log_dir) {
+            return;
+        }
+
         let weak_for_loop = Arc::downgrade(inner);
         let flush_loop = tokio::spawn(async move {
             Self::run_flush_loop(weak_for_loop).await;
@@ -1520,6 +1547,24 @@ impl WalStorageAdapter {
 
         if let Some(error) = self.inner.progress.refuse_if_failed() {
             return Err(error);
+        }
+
+        // No writer was ever started, so nothing will ever drain this queue. Queueing the
+        // write would be making a promise in the knowledge that it cannot be kept — the
+        // same reasoning `refuse_if_failed` uses for a writer that has exited, applied to
+        // one that never began.
+        //
+        // Unreachable by configuration: every constructor calls `spawn_writer` before it
+        // hands the adapter back. It is reachable by *defect*, and the cost of not
+        // checking is severe rather than merely wrong — each caller waits out its full
+        // client bound instead of being told, so a workload of a few hundred writes takes
+        // hours to fail. cargo-mutants demonstrated exactly that by deleting
+        // `spawn_writer`: the mutation run timed out at 600s having reported nothing.
+        if self.inner.writer.get().is_none() {
+            return Err(StorageError::WriteAbandoned(
+                "the WAL writer was never started, so nothing can drain the write queue"
+                    .to_string(),
+            ));
         }
 
         let wanted = records.len();
@@ -3265,6 +3310,51 @@ mod tests {
     //
     // Every one of them hung indefinitely before this work.
     // ------------------------------------------------------------------------------
+
+    /// With no writer, a write is refused rather than queued forever.
+    ///
+    /// `refuse_if_failed` already declines writes once the writer has *exited*, on the
+    /// grounds that there is provably nobody left to drain the queue. A writer that never
+    /// *started* is the same fact arriving earlier, and it was not covered.
+    ///
+    /// Not reachable by configuration — every constructor calls `spawn_writer` before
+    /// handing the adapter back — but reachable by defect, and cargo-mutants showed what
+    /// it costs: deleting `spawn_writer` left every write in the suite waiting out its
+    /// full client bound, so the mutation run hit its 600s ceiling having reported
+    /// nothing. A hang that expensive is not detection, it is a lost run.
+    ///
+    /// The bound below is the assertion. Six seconds is comfortably under the client bound
+    /// this adapter would otherwise wait, so a refusal that is merely *slower* fails here
+    /// too.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_write_is_refused_when_no_writer_was_started() {
+        let dir = liveness_dir("no_writer");
+        fault_injection::never_start_writer_at(&dir);
+
+        let adapter = WalStorageAdapter::new(WalConfig {
+            log_dir: dir.clone(),
+            ..WalConfig::test_config()
+        })
+        .expect("the adapter still opens; only its writer is missing");
+
+        let refused = tokio::time::timeout(
+            Duration::from_secs(6),
+            adapter.put_many(vec![(b"k".to_vec(), b"v".to_vec())]),
+        )
+        .await
+        .expect("a write with no writer must be refused promptly, not left to wait out its bound");
+
+        let error = refused.expect_err("a write nothing can publish must not report success");
+        assert!(
+            error.is_write_abandoned(),
+            "the refusal must be definite: nothing was appended and nothing ever will be, \
+             so a caller told 'not confirmed' would wrongly believe it might still land; \
+             got: {error}"
+        );
+
+        fault_injection::clear_never_start_writer(&dir);
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     /// A stale index entry must not hand back another key's value.
     ///
