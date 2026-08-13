@@ -1112,3 +1112,56 @@ async fn a_read_reports_the_bytes_it_moved() {
     })
     .await;
 }
+
+/// The three plain accessors report the adapter's real state, not a default.
+///
+/// `max_offset`, `get_log_dir` and `save_checkpoint` were each replaceable with a constant
+/// — `0`, an empty `PathBuf`, and a bare `Ok(())` — with the whole suite still green. They
+/// are small, but two of them are load-bearing: `get_log_dir` is what a caller uses to find
+/// the data directory, and `save_checkpoint` exists so the next startup can recover
+/// incrementally rather than rescanning the log. A `save_checkpoint` that reports success
+/// without writing anything is the same shape as every other defect in this file — it
+/// claims work it did not do, and the cost lands at the next restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_adapter_accessors_report_real_state() {
+    bounded("the_adapter_accessors_report_real_state", async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = adapter(dir.path());
+
+        assert_eq!(
+            a.get_log_dir(),
+            dir.path(),
+            "get_log_dir must name the directory this adapter was opened on; an empty \
+             path sends a caller looking for the data somewhere else entirely"
+        );
+
+        let before = a.max_offset();
+        a.put(b"offset-key", b"offset-value")
+            .await
+            .expect("write something to move the offset");
+        a.flush().await.expect("flush");
+        let after = a.max_offset();
+        assert!(
+            after > before,
+            "max_offset must advance as records are appended; it reported {after} after a \
+             write with {before} before it"
+        );
+
+        let checkpoint_path = dir.path().join("checkpoint.json");
+        assert!(
+            !checkpoint_path.exists(),
+            "no checkpoint should exist before one is saved, or the assertion below would \
+             pass without save_checkpoint doing anything"
+        );
+
+        a.save_checkpoint().expect("save a checkpoint");
+
+        assert!(
+            checkpoint_path.exists(),
+            "save_checkpoint returned Ok without writing {}; the next startup would find \
+             no checkpoint and rescan the whole log",
+            checkpoint_path.display()
+        );
+    })
+    .await;
+}
