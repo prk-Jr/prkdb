@@ -3676,6 +3676,53 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// And it goes back to sleep once the queue drains.
+    ///
+    /// The other half of acceptance 1, and the half that actually pins the comparison.
+    /// `an_idle_watchdog_does_not_wake_at_all` only shows the watchdog *starts* asleep:
+    /// `wait` begins as `None`, so on an adapter that never sees a write the line choosing
+    /// between waiting and polling is never reached at all. Mutation run on this branch
+    /// caught that — `> with >=` survived, because nothing exercised the decision.
+    ///
+    /// A database that served one write and then went quiet must cost nothing again. With
+    /// `>=` the watchdog would poll for the rest of the adapter's life after the very
+    /// first write, which is the cost this whole change exists to remove.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_watchdog_returns_to_waiting_once_the_queue_drains() {
+        let dir = liveness_dir("sleeps_again");
+        // max_flush_ms 25 => active tick 100ms, so two seconds of polling would be ~20
+        // observations. Anything above the handful this write itself causes is a failure.
+        let adapter = WalStorageAdapter::new_with_config(liveness_config(&dir, 25, 65_536))
+            .expect("adapter opens");
+
+        adapter
+            .put_many(vec![(b"k".to_vec(), b"v".to_vec())])
+            .await
+            .expect("the write is published");
+
+        wait_until(
+            "the queue to drain after the write",
+            Duration::from_secs(10),
+            || adapter.inner.progress.queue_depth() == 0,
+        )
+        .await;
+
+        // Let the watchdog observe the now-empty queue and decide to wait.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let settled = adapter.inner.supervisor_checks.load(Ordering::Relaxed);
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        assert_eq!(
+            adapter.inner.supervisor_checks.load(Ordering::Relaxed),
+            settled,
+            "once the queue drained the watchdog must wait for the next write, not keep \
+             polling; a database that served one write and went quiet pays nothing"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// A write into an empty queue wakes the watchdog promptly.
     ///
     /// Acceptance 2, and the other half of the property above: an idle watchdog is only
