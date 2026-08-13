@@ -199,49 +199,108 @@ fn search(
     false
 }
 
-/// Build a message naming the most likely culprit: a read whose observed value no write
-/// completing before it could have produced.
+/// The operations as the checker saw them, in the order they began.
+///
+/// Printed on every failure because the heuristic above is a guess and this is not. A
+/// linearizability failure that reaches CI once and never reproduces — which is exactly
+/// what happened here — leaves nothing to work from but the message, and a message that
+/// names the wrong operation is worse than no message. Timestamps are microseconds from
+/// the first operation, which is what makes the real-time ordering constraints readable:
+/// two operations that overlap can be linearized in either order, two that do not cannot.
+fn render_history(entries: &[Entry]) -> String {
+    let Some(origin) = entries.iter().map(|e| e.start).min() else {
+        return String::from("  (no operations)");
+    };
+
+    let mut ordered: Vec<&Entry> = entries.iter().collect();
+    ordered.sort_by_key(|e| (e.start, e.end));
+
+    let mut out = String::from("  history (microseconds from the first operation):\n");
+    for e in ordered {
+        let what = match &e.action {
+            Action::Write(v) => format!("write({})", String::from_utf8_lossy(v)),
+            Action::Read(Some(v)) => format!("read -> {}", String::from_utf8_lossy(v)),
+            Action::Read(None) => "read -> nothing".to_string(),
+        };
+        out.push_str(&format!(
+            "    #{:<3} [{:>8} .. {:>8}] {}{}\n",
+            e.id,
+            e.start.duration_since(origin).as_micros(),
+            e.end.duration_since(origin).as_micros(),
+            what,
+            if e.indeterminate {
+                "  (indeterminate: may or may not have taken effect)"
+            } else {
+                ""
+            }
+        ));
+    }
+    out
+}
+
+/// Explain why this key's sub-history could not be linearized, and show the history.
+///
+/// Two jobs, because the first one can only ever be a guess. The search knows a valid
+/// order does not exist; it does not know which operation is to blame, and naming one is a
+/// heuristic. So the heuristic is stated conservatively and the history is printed
+/// underneath it, which is the part that survives being wrong.
+///
+/// The previous version called a read stale whenever *any* write of a different value had
+/// completed before it began. On this file's own workload — write v0, read, write v1,
+/// read — that is true of every read after the first: the read of `v1` is preceded by the
+/// completed write of `v0`. So it reported a correct read as the culprit, stopped there,
+/// and hid whichever operation actually broke the history. It fired on the one CI failure
+/// this checker has ever produced, and sent the investigation at the wrong operation.
+///
+/// A read is only *definitely* stale when the value it returned had already been
+/// superseded in real time: some other write both completed before the read began and
+/// began after every write that could have produced the observed value had finished. Then
+/// no ordering can put the observed write last, and the read cannot be explained.
 fn describe_failure(key: &[u8], entries: &[Entry]) -> String {
     let key_str = String::from_utf8_lossy(key);
+    let history = render_history(entries);
 
     for entry in entries {
         let Action::Read(Some(observed)) = &entry.action else {
             continue;
         };
-        // Was some other value written by an operation that completed before this read
-        // began? If so, the read is stale.
-        let superseded = entries
-            .iter()
-            .any(|w| matches!(&w.action, Action::Write(v) if v != observed) && w.end < entry.start);
-        let produced_ever = entries
-            .iter()
-            .any(|w| matches!(&w.action, Action::Write(v) if v == observed));
 
-        if !produced_ever {
+        let producers: Vec<&Entry> = entries
+            .iter()
+            .filter(|w| matches!(&w.action, Action::Write(v) if v == observed))
+            .collect();
+
+        if producers.is_empty() {
             return format!(
-                "key {key_str:?}: read returned {:?}, which no write ever produced",
+                "key {key_str:?}: read returned {:?}, which no write ever produced\n{history}",
                 String::from_utf8_lossy(observed)
             );
         }
-        if superseded {
-            let newer: Vec<String> = entries
-                .iter()
-                .filter(|w| {
-                    matches!(&w.action, Action::Write(v) if v != observed) && w.end < entry.start
-                })
-                .filter_map(|w| match &w.action {
-                    Action::Write(v) => Some(String::from_utf8_lossy(v).into_owned()),
-                    _ => None,
-                })
-                .collect();
+
+        // Writes that finished before this read started *and* started after every possible
+        // producer of the observed value finished — so they are unambiguously later.
+        let superseding: Vec<String> = entries
+            .iter()
+            .filter(|w| matches!(&w.action, Action::Write(v) if v != observed))
+            .filter(|w| w.end < entry.start && producers.iter().all(|p| p.end < w.start))
+            .filter_map(|w| match &w.action {
+                Action::Write(v) => Some(String::from_utf8_lossy(v).into_owned()),
+                _ => None,
+            })
+            .collect();
+
+        if !superseding.is_empty() {
             return format!(
                 "key {key_str:?}: stale read returned {:?} after write(s) {:?} had already \
-                 completed in real time — no ordering of linearization points explains it",
+                 superseded it in real time — no ordering of linearization points explains \
+                 it\n{history}",
                 String::from_utf8_lossy(observed),
-                newer
+                superseding
             );
         }
     }
 
-    format!("key {key_str:?}: no assignment of linearization points satisfies the history")
+    format!(
+        "key {key_str:?}: no assignment of linearization points satisfies the history\n{history}"
+    )
 }

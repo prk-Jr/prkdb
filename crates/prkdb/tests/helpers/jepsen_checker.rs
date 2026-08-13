@@ -519,6 +519,55 @@ mod tests {
         }
     }
 
+    /// The reported culprit is the operation that actually broke the history.
+    ///
+    /// Naming one is a heuristic — the search knows no valid order exists, not which
+    /// operation is to blame — so the heuristic has to be conservative, and the history is
+    /// printed underneath it because that part cannot be wrong.
+    ///
+    /// The previous version called a read stale whenever *any* write of a different value
+    /// had completed before it began. On a sequential workload that is true of nearly
+    /// every read: the read of `v1` below is preceded by the completed write of `v0`. So
+    /// it named that read — which is perfectly correct — and stopped, hiding the read that
+    /// actually violates linearizability. It did exactly this on the one CI failure this
+    /// checker has produced, and sent the investigation at the wrong operation.
+    ///
+    /// Here the real violation is the final read: it returns `v1` after `v2` has completed,
+    /// and `v2` began after the only write that could have produced `v1` had finished.
+    #[test]
+    fn the_failure_message_names_the_operation_that_broke_the_history() {
+        let history = OperationHistory::new();
+        let t = |ms: u64| Instant::now() + Duration::from_millis(ms);
+
+        history.record(op(OpKind::Write, b"k", Some(b"v0"), None, t(0), t(1), 1));
+        history.record(op(OpKind::Read, b"k", None, Some(b"v0"), t(2), t(3), 2));
+        history.record(op(OpKind::Write, b"k", Some(b"v1"), None, t(4), t(5), 1));
+        // Correct: v1 is the latest completed write when this runs. The old heuristic
+        // flagged it anyway, because v0 had completed before it began.
+        history.record(op(OpKind::Read, b"k", None, Some(b"v1"), t(6), t(7), 2));
+        history.record(op(OpKind::Write, b"k", Some(b"v2"), None, t(8), t(9), 1));
+        // The actual violation: v2 completed at t9 and this read began at t10.
+        history.record(op(OpKind::Read, b"k", None, Some(b"v1"), t(10), t(11), 2));
+
+        let LinearizabilityResult::NotLinearizable { reason } = history.is_linearizable() else {
+            panic!("a read returning a value superseded in real time is not linearizable");
+        };
+
+        assert!(
+            reason.contains("\"v2\""),
+            "the message must name the write that superseded the stale value; got: {reason}"
+        );
+        assert!(
+            reason.contains("history (microseconds"),
+            "every failure must carry the history, because the culprit named above it is a \
+             heuristic and this is not; got: {reason}"
+        );
+        assert!(
+            reason.contains("write(v0)") && reason.contains("read -> v1"),
+            "the history must show every operation the checker saw; got: {reason}"
+        );
+    }
+
     /// The opposite failure: a checker that rejects everything is as useless as one that
     /// accepts everything. A read overlapping an in-flight write may legitimately return
     /// either value — concurrency is not a violation.
