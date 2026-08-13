@@ -28,7 +28,7 @@ jobs:
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
@@ -36,7 +36,7 @@ jobs:
       # Pinned, not @stable: @stable overrides rust-toolchain.toml, so these jobs built
       # with a different compiler than the repository declares. ci.yml was pinned for that
       # reason; this workflow was missed.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
 
       - uses: Swatinem/rust-cache@v2
 
@@ -66,7 +66,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: raft-chaos-logs
           path: |
@@ -95,7 +95,7 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
@@ -103,7 +103,7 @@ jobs:
       # Pinned, not @stable: @stable overrides rust-toolchain.toml, so these jobs built
       # with a different compiler than the repository declares. ci.yml was pinned for that
       # reason; this workflow was missed.
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.100.0
 
       - uses: Swatinem/rust-cache@v2
 
