@@ -3342,6 +3342,90 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A batch write reports the bytes it wrote, and `flush` publishes what is queued.
+    ///
+    /// Two more survivors, both in the same shape as the read-side ones: a number reported
+    /// to somebody outside the process, and a method whose whole body could be replaced
+    /// with `Ok(())`.
+    ///
+    /// `put_many` sums `key.len() + value.len()` across the batch for the write-bytes
+    /// counter; `*` there turns a sum into a product and inflates the figure an operator
+    /// sizes disks from. The lengths below are chosen so the two cannot coincide.
+    ///
+    /// `flush` returning a bare `Ok(())` is the more serious of the pair. Its job is to
+    /// publish whatever is still in the accumulator and push the WAL to disk, and every
+    /// existing test that calls it has already awaited its writes — so there is nothing
+    /// pending, and a `flush` that does nothing is indistinguishable from one that works.
+    /// A write still queued is the case it exists for, and a `flush` that reports success
+    /// without publishing it is this repository's recurring defect once more: work
+    /// claimed, not done.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_batch_reports_its_bytes_and_flush_publishes_what_is_queued() {
+        let dir = liveness_dir("batch_bytes_and_flush");
+        let adapter = WalStorageAdapter::new(WalConfig {
+            log_dir: dir.clone(),
+            ..WalConfig::test_config()
+        })
+        .expect("adapter opens");
+
+        // 3 + 5 and 4 + 6: sums 8 and 10 for 18 total, products 15 and 24 for 39.
+        let items = vec![
+            (b"abc".to_vec(), b"12345".to_vec()),
+            (b"defg".to_vec(), b"123456".to_vec()),
+        ];
+        let expected: u64 = items.iter().map(|(k, v)| (k.len() + v.len()) as u64).sum();
+
+        let before = adapter.metrics().write_bytes_total;
+        adapter.put_many(items).await.expect("batch written");
+        assert_eq!(
+            adapter.metrics().write_bytes_total - before,
+            expected,
+            "a batch must report the bytes it wrote, not the product of the lengths"
+        );
+
+        // Now a write the flush has to find. The writer tasks are stopped so nothing else
+        // can publish it — supervisor first, or it reads the flush loop's abort as the
+        // writer exiting and discharges the write itself.
+        {
+            let tasks = adapter.inner.writer.get().expect("the writer was spawned");
+            tasks.supervisor.abort();
+            tasks.flush_loop.abort();
+        }
+
+        let rx = adapter
+            .enqueue_write(LogRecord::new(LogOperation::Put {
+                collection: String::new(),
+                id: b"queued".to_vec(),
+                data: b"value".to_vec(),
+            }))
+            .await
+            .expect("the write is accepted");
+        assert!(
+            adapter.inner.progress.queue_depth() > 0,
+            "the write must be queued before the flush, or flush has nothing to publish"
+        );
+
+        // Through the trait, deliberately. `adapter.flush()` resolves to the inherent
+        // `WalStorageAdapter::flush`; the `StorageAdapter` impl is a separate function that
+        // delegates to it, and it is that delegation a caller holding a `dyn StorageAdapter`
+        // actually goes through. Calling the inherent method leaves the impl untested — the
+        // first version of this test did exactly that and passed against `flush -> Ok(())`.
+        StorageAdapter::flush(&adapter)
+            .await
+            .expect("flush succeeds");
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("flush must publish the queued write, not leave it waiting")
+            .expect("the sender must not be dropped without sending");
+        assert!(
+            outcome.is_ok(),
+            "flush reported success while the queued write went unpublished: {outcome:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// A stale index entry must not hand back another key's value.
     ///
     /// `get` resolves a key to an offset through the index, reads whatever record is at
