@@ -1555,6 +1555,86 @@ mod tests {
     /// One unhealthy collection makes the whole adapter unhealthy — worst-across-all, not
     /// an average.
     ///
+    /// The aggregate publish total is the sum across collections, not their product.
+    ///
+    /// `write_path_health` folds every open collection into one report so a probe can ask
+    /// a single question. `publishes_total` is a counter, so the fold is `+=`; the nightly
+    /// sweep replaced it with `*=` and nothing noticed, because no test read the aggregate
+    /// count at all.
+    ///
+    /// Two collections with one publish each is the case that separates them — 1 + 1 is 2
+    /// and 1 * 1 is 1 — so the counts here are made deliberately unequal as well, since a
+    /// scraper deriving a publish rate from a product would see it collapse rather than
+    /// grow as collections are added.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_aggregate_publish_total_sums_across_collections() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            log_dir: temp_dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        };
+        let adapter = CollectionPartitionedAdapter::new(config).unwrap();
+
+        // `put_many`, not `put`: only the accumulator path records a publish. `put` goes
+        // straight to `wal.append_batch`, so the progress accounting — and therefore
+        // `publishes_total` — never sees it. Opening the collections first, then writing
+        // through the accounted path.
+        for name in ["users", "orders"] {
+            adapter
+                .put_to_collection(name, b"seed", b"v")
+                .await
+                .unwrap();
+        }
+        for (name, batches) in [("users", 1), ("orders", 2)] {
+            let collection = adapter
+                .collections
+                .get(name)
+                .expect("the collection was opened above")
+                .clone();
+            // Unequal batch counts on purpose: one each would let `*=` pass, since 1*1 == 1.
+            for b in 0..batches {
+                collection
+                    .put_many(vec![(format!("{name}-{b}").into_bytes(), b"v".to_vec())])
+                    .await
+                    .unwrap();
+            }
+        }
+
+        // A caller is answered from inside `publish_batch`, and the publish is recorded
+        // by `flush_accumulator_inner` after it returns — so the writes completing above
+        // says nothing about the counter yet. Reading it here without waiting sees zeros.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let per_collection = loop {
+            let counts: Vec<u64> = adapter
+                .collections
+                .iter()
+                .map(|entry| entry.value().write_path_health().publishes_total)
+                .collect();
+            if counts.len() >= 2 && counts.iter().all(|c| *c > 0) {
+                break counts;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for both collections to record a publish; saw {counts:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        let expected: u64 = per_collection.iter().sum();
+
+        assert!(
+            per_collection.len() >= 2 && expected > 0,
+            "the fold needs at least two collections that have published something, or it \
+             is not being exercised; saw {per_collection:?}"
+        );
+
+        assert_eq!(
+            adapter.write_path_health().publishes_total,
+            expected,
+            "the aggregate must sum each collection's publish count; the parts were \
+             {per_collection:?}"
+        );
+    }
+
     /// Mutation run 31539366718 missed `delete !` on the `unhealthy.is_empty()` guard.
     /// Without the negation the adapter reports healthy precisely when a collection has
     /// reported a reason, so `/readyz` keeps routing traffic to the node whose writes are
