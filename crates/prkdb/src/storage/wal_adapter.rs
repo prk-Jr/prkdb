@@ -350,6 +350,19 @@ struct WalStorageInner {
     metrics: Arc<StorageMetrics>,
     accumulator: Mutex<AdaptiveBatchAccumulator<PendingWrite>>,
     flush_notify: Arc<Notify>,
+    /// Wakes the stall watchdog when a queue that was empty stops being empty.
+    ///
+    /// Separate from `flush_notify` because `notify_one` wakes exactly one waiter, and the
+    /// flush loop and the watchdog both need the signal — sharing one would have them
+    /// stealing wakeups from each other.
+    writer_notify: Arc<Notify>,
+    /// How many times the watchdog has looked at the write path.
+    ///
+    /// Test-only. Acceptance 1 of the liveness spec is that an idle adapter performs *no*
+    /// periodic wakeups, and "none" has no observable unless something counts them —
+    /// asserting it beats eyeballing a log.
+    #[cfg(test)]
+    supervisor_checks: AtomicU64,
     transaction_barrier: Arc<RwLock<()>>,
     /// Guards the moment a batch becomes *visible*, as opposed to the moment it is durable.
     ///
@@ -591,6 +604,9 @@ impl WalStorageAdapter {
             metrics,
             accumulator: Mutex::new(AdaptiveBatchAccumulator::new(config.batching.clone())),
             flush_notify: Arc::new(Notify::new()),
+            writer_notify: Arc::new(Notify::new()),
+            #[cfg(test)]
+            supervisor_checks: AtomicU64::new(0),
             transaction_barrier: Arc::new(RwLock::new(())),
             publish_barrier: Arc::new(RwLock::new(())),
             max_offset: AtomicU64::new(0),
@@ -671,6 +687,9 @@ impl WalStorageAdapter {
                 storage_config.batching.clone(),
             )),
             flush_notify: Arc::new(Notify::new()),
+            writer_notify: Arc::new(Notify::new()),
+            #[cfg(test)]
+            supervisor_checks: AtomicU64::new(0),
             transaction_barrier: Arc::new(RwLock::new(())),
             publish_barrier: Arc::new(RwLock::new(())),
             max_offset: AtomicU64::new(0),
@@ -746,6 +765,9 @@ impl WalStorageAdapter {
                 storage_config.batching.clone(),
             )),
             flush_notify: Arc::new(Notify::new()),
+            writer_notify: Arc::new(Notify::new()),
+            #[cfg(test)]
+            supervisor_checks: AtomicU64::new(0),
             transaction_barrier: Arc::new(RwLock::new(())),
             publish_barrier: Arc::new(RwLock::new(())),
             max_offset: AtomicU64::new(0),
@@ -821,6 +843,9 @@ impl WalStorageAdapter {
                 storage_config.batching.clone(),
             )),
             flush_notify: Arc::new(Notify::new()),
+            writer_notify: Arc::new(Notify::new()),
+            #[cfg(test)]
+            supervisor_checks: AtomicU64::new(0),
             transaction_barrier: Arc::new(RwLock::new(())),
             publish_barrier: Arc::new(RwLock::new(())),
             max_offset: AtomicU64::new(0),
@@ -1258,11 +1283,21 @@ impl WalStorageAdapter {
             None => return,
         };
 
+        let writer_notify = match weak_inner.upgrade() {
+            Some(inner) => inner.writer_notify.clone(),
+            None => return,
+        };
+
         let mut last_published = 0u64;
-        // Two speeds, decided at the end of each check from what the queue actually holds —
-        // the same idle/busy split `run_flush_loop` makes, and for the same reason: one of
-        // these tasks exists per collection adapter, so an idle one must be nearly free.
-        let mut tick = bounds.idle_tick();
+        // How long to wait before looking again, or `None` to wait for a write instead.
+        //
+        // There is nothing to watch while the queue is empty: a stall is a queue that
+        // stops draining, and an empty queue is not draining because there is nothing in
+        // it. Waking on a timer to observe that costs one wakeup per interval per
+        // collection adapter, forever, to learn nothing — fifty collections is fifty
+        // wakeups a second against an idle database. So the watchdog sleeps until a write
+        // makes the queue non-empty, and only then starts checking on a timer.
+        let mut wait = None;
 
         loop {
             tokio::select! {
@@ -1283,13 +1318,24 @@ impl WalStorageAdapter {
                     }
                     return;
                 }
-                _ = tokio::time::sleep(tick) => {}
+                // `Notify` holds a permit when nobody is waiting, so a write that lands
+                // between the check below and this await is not lost — it returns
+                // immediately rather than sleeping until the next one.
+                _ = async {
+                    match wait {
+                        Some(interval) => tokio::time::sleep(interval).await,
+                        None => writer_notify.notified().await,
+                    }
+                } => {}
             }
 
             let Some(inner) = weak_inner.upgrade() else {
                 return;
             };
-            tick = Self::observe_write_path(&inner, &mut last_published).await;
+            Self::observe_write_path(&inner, &mut last_published).await;
+
+            // Watch on a timer only while there is something queued to watch.
+            wait = (inner.progress.queue_depth() > 0).then(|| bounds.active_tick());
         }
     }
 
@@ -1308,18 +1354,24 @@ impl WalStorageAdapter {
         "unknown panic payload".to_string()
     }
 
-    /// One watchdog tick: publish the write-path gauges, then decide whether the writer is
+    /// One watchdog check: publish the write-path gauges, then decide whether the writer is
     /// stalled.
     ///
-    /// Metrics are updated on every tick, healthy or not. A dashboard that only receives
+    /// Metrics are updated on every check, healthy or not. A dashboard that only receives
     /// numbers during an incident cannot show what normal looked like, which is most of
-    /// what makes the numbers worth having.
+    /// what makes the numbers worth having. The watchdog no longer runs while the queue is
+    /// empty, so the gauges stop being rewritten then — they hold their last values, which
+    /// for an idle write path are the correct ones and are not changing.
     ///
-    /// Returns how long to wait before the next check.
-    async fn observe_write_path(
-        inner: &Arc<WalStorageInner>,
-        last_published: &mut u64,
-    ) -> Duration {
+    /// No longer returns a poll interval. It used to choose between an active and an idle
+    /// tick, and the caller now waits on a write instead of a timer whenever the queue is
+    /// empty, so there is no idle interval left to pick. Mutation run 31573318483 found
+    /// three survivors on that comparison; the branch they lived on is gone rather than
+    /// tested, which is the stronger outcome.
+    async fn observe_write_path(inner: &Arc<WalStorageInner>, last_published: &mut u64) {
+        #[cfg(test)]
+        inner.supervisor_checks.fetch_add(1, Ordering::Relaxed);
+
         let progress = &inner.progress;
         let published = progress.published_total();
         let depth = progress.queue_depth();
@@ -1353,14 +1405,8 @@ impl WalStorageAdapter {
 
         *last_published = published;
 
-        let next_tick = if depth > 0 {
-            inner.bounds.active_tick()
-        } else {
-            inner.bounds.idle_tick()
-        };
-
         if !stalled {
-            return next_tick;
+            return;
         }
 
         let failure = WriterFailure::Stalled {
@@ -1375,7 +1421,6 @@ impl WalStorageAdapter {
                 .min(u128::from(u64::MAX)) as u64,
         };
         Self::fail_write_path(inner, failure).await;
-        next_tick
     }
 
     /// Move the write path to a failed state and hand every waiter behind it an answer.
@@ -1480,7 +1525,7 @@ impl WalStorageAdapter {
         let wanted = records.len();
         let mut receivers = Vec::with_capacity(wanted);
 
-        {
+        let started_the_queue = {
             let mut acc = self.inner.accumulator.lock().await;
 
             if acc.len() + wanted > acc.max_pending() {
@@ -1506,10 +1551,23 @@ impl WalStorageAdapter {
             // Counted while the lock is held, so the flush loop — which needs the same lock
             // to take the batch — cannot publish a write before it has been counted as
             // enqueued and make the queue momentarily look empty.
-            self.inner.progress.record_enqueued(wanted as u64);
-        }
+            self.inner.progress.record_enqueued(wanted as u64)
+        };
 
         self.inner.flush_notify.notify_one();
+
+        // Only when this batch is what made the queue non-empty, and only *here* — after
+        // the accumulator lock has been released and the writes are counted and visible.
+        //
+        // The order is the whole correctness argument. Waking the watchdog before the
+        // write is visible lets it look, find an empty queue, and go back to sleep with a
+        // write sitting behind it and nothing scheduled to look again: the original
+        // hang this work exists to fix, wearing a different hat, and invisible to every
+        // test that is not watching for exactly it.
+        if started_the_queue {
+            self.inner.writer_notify.notify_one();
+        }
+
         Ok(receivers)
     }
 
@@ -3584,65 +3642,72 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// The watchdog polls fast while writes are queued and slow while idle.
+    /// An idle adapter wakes its watchdog **not at all**.
     ///
-    /// Mutation run 31573318483 missed all three comparisons at this site (`> with ==`,
-    /// `<`, `>=`). They survived because every liveness test bounds detection at seconds
-    /// while the two tick values are 100ms and 400ms apart — the mutants change how quickly
-    /// a stall is noticed, not whether it is, so nothing that only asserts "eventually"
-    /// can see them.
+    /// Acceptance 1 of the liveness spec. The watchdog used to sleep and re-check on a
+    /// timer, so an idle collection cost a wakeup per interval — up to one a second — to
+    /// observe a queue that was empty and would stay empty until someone wrote. One of
+    /// these tasks exists per collection adapter, so fifty idle collections were fifty
+    /// wakeups a second spent learning nothing.
     ///
-    /// Asserting the returned tick directly is what catches them, and is possible because
-    /// `observe_write_path` returns it. All three mutants collapse the choice: `>=` always
-    /// polls fast (busy-waking an idle database), `<` always polls slow (a stall waits an
-    /// extra idle interval to be noticed), and `==` inverts the two.
+    /// Asserted by counting rather than eyeballed, because "no periodic wakeups" is
+    /// exactly the kind of claim that quietly stops being true.
     #[tokio::test(flavor = "multi_thread")]
-    async fn the_watchdog_polls_fast_only_while_writes_are_queued() {
-        let dir = liveness_dir("tick_selection");
-        // max_flush_ms 25 => stall threshold 400ms => active 100ms, idle 400ms.
+    async fn an_idle_watchdog_does_not_wake_at_all() {
+        let dir = liveness_dir("idle_no_wakeups");
+        // max_flush_ms 25 => the old idle tick was 400ms, so the window below would have
+        // produced several wakeups under the polling design.
         let adapter = WalStorageAdapter::new_with_config(liveness_config(&dir, 25, 65_536))
             .expect("adapter opens");
-        let bounds = adapter.inner.bounds;
-        assert_ne!(
-            bounds.active_tick(),
-            bounds.idle_tick(),
-            "the two ticks must differ, or this test cannot distinguish them"
-        );
 
-        let mut last_published = 0u64;
+        // Let the supervisor reach its first wait.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let settled = adapter.inner.supervisor_checks.load(Ordering::Relaxed);
 
-        let idle = WalStorageAdapter::observe_write_path(&adapter.inner, &mut last_published).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
         assert_eq!(
-            idle,
-            bounds.idle_tick(),
-            "an empty queue must be polled at the idle interval; waking at the active rate \
-             busy-polls a database nobody is writing to"
+            adapter.inner.supervisor_checks.load(Ordering::Relaxed),
+            settled,
+            "an idle write path must cost no watchdog wakeups; two seconds at the old \
+             400ms idle tick would have been about five"
         );
 
-        // Queue a write the stalled writer cannot publish, so the depth stays above zero.
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A write into an empty queue wakes the watchdog promptly.
+    ///
+    /// Acceptance 2, and the other half of the property above: an idle watchdog is only
+    /// safe to have if a write starts it again. This is the case the ordering in
+    /// `enqueue_writes` exists for — notify after the write is visible, never before, or
+    /// the watchdog looks at an empty queue and goes back to sleep with work behind it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_write_into_an_empty_queue_wakes_the_watchdog() {
+        let dir = liveness_dir("wake_on_write");
+        let adapter = Arc::new(
+            WalStorageAdapter::new_with_config(liveness_config(&dir, 25, 65_536))
+                .expect("adapter opens"),
+        );
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let before = adapter.inner.supervisor_checks.load(Ordering::Relaxed);
+
+        // Stalled, so the queue stays non-empty and the watchdog has something to watch.
         fault_injection::stall_writer_at(&dir);
-        let adapter = Arc::new(adapter);
         let queued = {
             let adapter = adapter.clone();
             tokio::spawn(
                 async move { adapter.put_many(vec![(b"k".to_vec(), b"v".to_vec())]).await },
             )
         };
+
         wait_until(
-            "the queued write to reach the accumulator",
-            Duration::from_secs(10),
-            || adapter.inner.progress.queue_depth() > 0,
+            "the watchdog to observe the newly queued write",
+            Duration::from_secs(5),
+            || adapter.inner.supervisor_checks.load(Ordering::Relaxed) > before,
         )
         .await;
-
-        let active =
-            WalStorageAdapter::observe_write_path(&adapter.inner, &mut last_published).await;
-        assert_eq!(
-            active,
-            bounds.active_tick(),
-            "a non-empty queue must be polled at the active interval, or a stall waits an \
-             extra idle interval to be noticed"
-        );
 
         fault_injection::clear_writer_stall(&dir);
         let _ = tokio::time::timeout(Duration::from_secs(20), queued).await;
