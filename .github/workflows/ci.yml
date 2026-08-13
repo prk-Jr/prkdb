@@ -761,6 +761,25 @@ jobs:
   # ═══════════════════════════════════════════════════════════════════════════
   benchmark:
     name: "📊 Benchmarks: Local PrkDB + Kafka Reference"
+    # Push and pull request only, so the numbers from two runs can be compared.
+    #
+    # The mutation sweep below runs on `schedule` and `workflow_dispatch`, twenty shards
+    # four at a time, in this same workflow run. A benchmark measured next to it is
+    # measuring the sweep as much as the database, and nothing in the output said which
+    # trigger produced a given figure.
+    #
+    # That is not a hypothetical. Comparing a dispatch run against a push run showed
+    # producer throughput apparently falling from 418 to 176 MB/s and p99 batch latency
+    # rising from 30ms to 361ms — reproduced across two runs each, with the Kafka
+    # reference steady enough to look like a controlled comparison. It read as an obvious
+    # regression in the commit between them. Building both commits locally and running
+    # them alternately on one machine put them within 5% of each other: 503 against 530
+    # MB/s, p99 overlapping. The commit was innocent and the afternoon was not.
+    #
+    # A benchmark nobody can compare across runs is worse than no benchmark, because it
+    # invites exactly that investigation. Restricting it to the two triggers that measure
+    # under the same conditions is what makes the numbers mean something.
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     
@@ -1043,6 +1062,11 @@ jobs:
           - local PrkDB native storage-engine benchmarks
 
           They are useful for regression tracking in this repo, but they are **not** an apples-to-apples product comparison.
+
+          Produced by a **${{ github.event_name }}** run. Compare figures only against runs
+          with the same trigger: a run that also carries the twenty-shard mutation sweep is
+          measuring that sweep as much as the database, and the difference is large enough
+          to look convincingly like a regression.
 
           **Test Configuration:**
           - Records: 1,000,000 (Standard) / 10,000,000 (Sustained)
