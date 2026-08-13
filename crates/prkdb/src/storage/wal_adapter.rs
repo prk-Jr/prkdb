@@ -3426,6 +3426,95 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A batch of interleaved puts and deletes applies in the order it was queued.
+    ///
+    /// `publish_batch` coalesces a batch into as few WAL records as it can: consecutive
+    /// puts become one `PutBatch`, consecutive deletes one `DeleteBatch`. Switching between
+    /// them has to flush whatever has accumulated first, or the records come out in an
+    /// order the caller never asked for. Three mutants survived on those flushes — the one
+    /// in the put arm, the one in the delete arm, and the one that emits the trailing
+    /// deletes at the end — because every existing test writes puts only, and with no
+    /// deletes to interleave the flushes never fire.
+    ///
+    /// The last is the worst of the three: with the trailing flush inverted, a batch that
+    /// *ends* in a delete never emits its `DeleteBatch` at all, so the delete is silently
+    /// dropped and the key stays readable. A delete that reports success and does not
+    /// delete is the same class of defect as a write that reports success and does not
+    /// land.
+    ///
+    /// Queued through the accumulator with the writer stopped, so the whole sequence
+    /// reaches `publish_batch` as one batch — separate `put`/`delete` calls would each be
+    /// published on their own and never exercise the coalescing at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_mixed_batch_applies_its_puts_and_deletes_in_order() {
+        let dir = liveness_dir("mixed_batch");
+        let adapter = WalStorageAdapter::new(WalConfig {
+            log_dir: dir.clone(),
+            ..WalConfig::test_config()
+        })
+        .expect("adapter opens");
+
+        {
+            let tasks = adapter.inner.writer.get().expect("the writer was spawned");
+            tasks.supervisor.abort();
+            tasks.flush_loop.abort();
+        }
+
+        let put = |id: &[u8], data: &[u8]| {
+            LogRecord::new(LogOperation::Put {
+                collection: String::new(),
+                id: id.to_vec(),
+                data: data.to_vec(),
+            })
+        };
+        let delete = |id: &[u8]| {
+            LogRecord::new(LogOperation::Delete {
+                collection: String::new(),
+                id: id.to_vec(),
+            })
+        };
+
+        // `survivor` ends on a put, `casualty` ends on a delete: between them they cover
+        // switching in both directions and the trailing flush.
+        let receivers = adapter
+            .enqueue_writes(vec![
+                put(b"survivor", b"first"),
+                put(b"casualty", b"doomed"),
+                delete(b"survivor"),
+                put(b"survivor", b"second"),
+                delete(b"casualty"),
+            ])
+            .await
+            .expect("the batch is accepted");
+
+        StorageAdapter::flush(&adapter)
+            .await
+            .expect("flush publishes the batch");
+
+        for rx in receivers {
+            tokio::time::timeout(Duration::from_secs(5), rx)
+                .await
+                .expect("every queued write must be answered")
+                .expect("the sender must not be dropped without sending")
+                .expect("each write in the batch must succeed");
+        }
+
+        assert_eq!(
+            adapter.get(b"survivor").await.expect("read survivor"),
+            Some(b"second".to_vec()),
+            "the last write for this key was a put; a delete applied after it means the \
+             batch was reordered"
+        );
+        assert_eq!(
+            adapter.get(b"casualty").await.expect("read casualty"),
+            None,
+            "the last write for this key was a delete, and it was the final record in the \
+             batch; the key surviving means the trailing deletes were never emitted"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// A stale index entry must not hand back another key's value.
     ///
     /// `get` resolves a key to an offset through the index, reads whatever record is at
