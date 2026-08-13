@@ -3311,6 +3311,255 @@ mod tests {
     // Every one of them hung indefinitely before this work.
     // ------------------------------------------------------------------------------
 
+    /// Dropping the last handle publishes what is still queued.
+    ///
+    /// `WalStorageAdapter::drop` flushes the accumulator when the handle being dropped is
+    /// the last one. Deleting that body entirely left the suite green, because every other
+    /// test awaits its writes — `put_many` returns only once the write is published, so by
+    /// the time anything is dropped the accumulator is empty and the flush has nothing to
+    /// do.
+    ///
+    /// A write that is still queued is the case the flush exists for. Without it the
+    /// accumulator is dropped with the write inside, `PendingWrite`'s drop guard answers
+    /// the caller with an error, and a write that would have landed is lost at shutdown.
+    ///
+    /// `enqueue_write` rather than `put_many`, deliberately: it hands back the receiver
+    /// without holding the adapter, so the drop below is genuinely the last handle. A
+    /// spawned `put_many` would keep a clone alive and the guard would take the early
+    /// return instead.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropping_the_last_handle_publishes_what_is_still_queued() {
+        let dir = liveness_dir("drop_flushes");
+
+        let rx = {
+            let adapter = WalStorageAdapter::new(WalConfig {
+                log_dir: dir.clone(),
+                ..WalConfig::test_config()
+            })
+            .expect("adapter opens");
+
+            // Stop both writer tasks so the write stays in the accumulator for the drop
+            // to find. The stall fault cannot be used here: it is checked at the top of
+            // `flush_accumulator_inner`, which the drop flush calls too, so an armed stall
+            // would skip the very thing under test. Clearing it just before the drop
+            // instead lets the ordinary flush loop publish the write and the test stops
+            // depending on the drop at all — which is exactly how the first version of
+            // this test passed against `!= with ==`.
+            //
+            // The supervisor goes first: it watches the flush loop's JoinHandle, and would
+            // read the abort as the writer exiting and discharge the queued write itself.
+            {
+                let tasks = adapter.inner.writer.get().expect("the writer was spawned");
+                tasks.supervisor.abort();
+                tasks.flush_loop.abort();
+            }
+
+            let rx = adapter
+                .enqueue_write(LogRecord::new(LogOperation::Put {
+                    collection: String::new(),
+                    id: b"queued".to_vec(),
+                    data: b"value".to_vec(),
+                }))
+                .await
+                .expect("the write is accepted");
+
+            assert!(
+                adapter.inner.progress.queue_depth() > 0,
+                "the write must still be queued when the handle drops, or the drop flush \
+                 has nothing to publish and this test proves nothing"
+            );
+
+            rx
+            // adapter dropped here: the last handle, so the flush runs
+        };
+
+        let outcome = tokio::time::timeout(Duration::from_secs(20), rx)
+            .await
+            .expect("the drop flush must answer the queued write, not leave it hanging")
+            .expect("the sender must not be dropped without sending");
+
+        assert!(
+            outcome.is_ok(),
+            "a write still queued when the last handle dropped must be published by the \
+             drop flush; instead the caller was told: {outcome:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A batch write reports the bytes it wrote, and `flush` publishes what is queued.
+    ///
+    /// Two more survivors, both in the same shape as the read-side ones: a number reported
+    /// to somebody outside the process, and a method whose whole body could be replaced
+    /// with `Ok(())`.
+    ///
+    /// `put_many` sums `key.len() + value.len()` across the batch for the write-bytes
+    /// counter; `*` there turns a sum into a product and inflates the figure an operator
+    /// sizes disks from. The lengths below are chosen so the two cannot coincide.
+    ///
+    /// `flush` returning a bare `Ok(())` is the more serious of the pair. Its job is to
+    /// publish whatever is still in the accumulator and push the WAL to disk, and every
+    /// existing test that calls it has already awaited its writes — so there is nothing
+    /// pending, and a `flush` that does nothing is indistinguishable from one that works.
+    /// A write still queued is the case it exists for, and a `flush` that reports success
+    /// without publishing it is this repository's recurring defect once more: work
+    /// claimed, not done.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_batch_reports_its_bytes_and_flush_publishes_what_is_queued() {
+        let dir = liveness_dir("batch_bytes_and_flush");
+        let adapter = WalStorageAdapter::new(WalConfig {
+            log_dir: dir.clone(),
+            ..WalConfig::test_config()
+        })
+        .expect("adapter opens");
+
+        // 3 + 5 and 4 + 6: sums 8 and 10 for 18 total, products 15 and 24 for 39.
+        let items = vec![
+            (b"abc".to_vec(), b"12345".to_vec()),
+            (b"defg".to_vec(), b"123456".to_vec()),
+        ];
+        let expected: u64 = items.iter().map(|(k, v)| (k.len() + v.len()) as u64).sum();
+
+        let before = adapter.metrics().write_bytes_total;
+        adapter.put_many(items).await.expect("batch written");
+        assert_eq!(
+            adapter.metrics().write_bytes_total - before,
+            expected,
+            "a batch must report the bytes it wrote, not the product of the lengths"
+        );
+
+        // Now a write the flush has to find. The writer tasks are stopped so nothing else
+        // can publish it — supervisor first, or it reads the flush loop's abort as the
+        // writer exiting and discharges the write itself.
+        {
+            let tasks = adapter.inner.writer.get().expect("the writer was spawned");
+            tasks.supervisor.abort();
+            tasks.flush_loop.abort();
+        }
+
+        let rx = adapter
+            .enqueue_write(LogRecord::new(LogOperation::Put {
+                collection: String::new(),
+                id: b"queued".to_vec(),
+                data: b"value".to_vec(),
+            }))
+            .await
+            .expect("the write is accepted");
+        assert!(
+            adapter.inner.progress.queue_depth() > 0,
+            "the write must be queued before the flush, or flush has nothing to publish"
+        );
+
+        // Through the trait, deliberately. `adapter.flush()` resolves to the inherent
+        // `WalStorageAdapter::flush`; the `StorageAdapter` impl is a separate function that
+        // delegates to it, and it is that delegation a caller holding a `dyn StorageAdapter`
+        // actually goes through. Calling the inherent method leaves the impl untested — the
+        // first version of this test did exactly that and passed against `flush -> Ok(())`.
+        StorageAdapter::flush(&adapter)
+            .await
+            .expect("flush succeeds");
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("flush must publish the queued write, not leave it waiting")
+            .expect("the sender must not be dropped without sending");
+        assert!(
+            outcome.is_ok(),
+            "flush reported success while the queued write went unpublished: {outcome:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A batch of interleaved puts and deletes applies in the order it was queued.
+    ///
+    /// `publish_batch` coalesces a batch into as few WAL records as it can: consecutive
+    /// puts become one `PutBatch`, consecutive deletes one `DeleteBatch`. Switching between
+    /// them has to flush whatever has accumulated first, or the records come out in an
+    /// order the caller never asked for. Three mutants survived on those flushes — the one
+    /// in the put arm, the one in the delete arm, and the one that emits the trailing
+    /// deletes at the end — because every existing test writes puts only, and with no
+    /// deletes to interleave the flushes never fire.
+    ///
+    /// The last is the worst of the three: with the trailing flush inverted, a batch that
+    /// *ends* in a delete never emits its `DeleteBatch` at all, so the delete is silently
+    /// dropped and the key stays readable. A delete that reports success and does not
+    /// delete is the same class of defect as a write that reports success and does not
+    /// land.
+    ///
+    /// Queued through the accumulator with the writer stopped, so the whole sequence
+    /// reaches `publish_batch` as one batch — separate `put`/`delete` calls would each be
+    /// published on their own and never exercise the coalescing at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_mixed_batch_applies_its_puts_and_deletes_in_order() {
+        let dir = liveness_dir("mixed_batch");
+        let adapter = WalStorageAdapter::new(WalConfig {
+            log_dir: dir.clone(),
+            ..WalConfig::test_config()
+        })
+        .expect("adapter opens");
+
+        {
+            let tasks = adapter.inner.writer.get().expect("the writer was spawned");
+            tasks.supervisor.abort();
+            tasks.flush_loop.abort();
+        }
+
+        let put = |id: &[u8], data: &[u8]| {
+            LogRecord::new(LogOperation::Put {
+                collection: String::new(),
+                id: id.to_vec(),
+                data: data.to_vec(),
+            })
+        };
+        let delete = |id: &[u8]| {
+            LogRecord::new(LogOperation::Delete {
+                collection: String::new(),
+                id: id.to_vec(),
+            })
+        };
+
+        // `survivor` ends on a put, `casualty` ends on a delete: between them they cover
+        // switching in both directions and the trailing flush.
+        let receivers = adapter
+            .enqueue_writes(vec![
+                put(b"survivor", b"first"),
+                put(b"casualty", b"doomed"),
+                delete(b"survivor"),
+                put(b"survivor", b"second"),
+                delete(b"casualty"),
+            ])
+            .await
+            .expect("the batch is accepted");
+
+        StorageAdapter::flush(&adapter)
+            .await
+            .expect("flush publishes the batch");
+
+        for rx in receivers {
+            tokio::time::timeout(Duration::from_secs(5), rx)
+                .await
+                .expect("every queued write must be answered")
+                .expect("the sender must not be dropped without sending")
+                .expect("each write in the batch must succeed");
+        }
+
+        assert_eq!(
+            adapter.get(b"survivor").await.expect("read survivor"),
+            Some(b"second".to_vec()),
+            "the last write for this key was a put; a delete applied after it means the \
+             batch was reordered"
+        );
+        assert_eq!(
+            adapter.get(b"casualty").await.expect("read casualty"),
+            None,
+            "the last write for this key was a delete, and it was the final record in the \
+             batch; the key surviving means the trailing deletes were never emitted"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// With no writer, a write is refused rather than queued forever.
     ///
     /// `refuse_if_failed` already declines writes once the writer has *exited*, on the

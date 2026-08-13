@@ -983,3 +983,185 @@ async fn get_many_reads_each_key_out_of_a_compressed_batch() {
     })
     .await;
 }
+
+/// A read reports the bytes it moved, not the product of two lengths.
+///
+/// `record_read` is called with `key.len() + value.len()` in four separate arms of `get`:
+/// the cache hit, the `PutBatch` arm, the `CompressedPutBatch` arm, and the single-`Put`
+/// tail. The nightly sweep replaced `+` with `*` in all four and nothing noticed, because
+/// no test had ever read the byte counter.
+///
+/// Not a correctness defect — a wrong total misreports throughput rather than returning
+/// wrong data. Still worth pinning: read-bytes is the series an operator sizes hardware
+/// from, and the error grows with the value size rather than staying a fixed offset.
+///
+/// Each arm needs its own record shape *and* a cold cache, which is why this reopens the
+/// adapter between phases rather than reading twice. A first attempt did read twice from
+/// one adapter, and `put` had already populated the cache, so both reads were cache hits
+/// and three of the four arms were never reached — the test passed against three of the
+/// four mutants.
+///
+/// Lengths are chosen so sum and product cannot coincide: 5 + 7 = 12, 5 * 7 = 35.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_reports_the_bytes_it_moved() {
+    bounded("a_read_reports_the_bytes_it_moved", async {
+        use prkdb_core::wal::compression::CompressionConfig;
+        use prkdb_core::wal::mmap_parallel_wal::MmapParallelWal;
+        use prkdb_core::wal::{LogOperation, LogRecord};
+
+        const KEY: &[u8] = b"abcde"; // 5
+        const VAL: &[u8] = b"1234567"; // 7 — sum 12, product 35
+        let expected = (KEY.len() + VAL.len()) as u64;
+
+        // ── the PutBatch arm, plus the cache-hit arm ────────────────────────────────
+        let batch_dir = tempfile::tempdir().expect("tempdir");
+        {
+            let a = adapter(batch_dir.path());
+            a.put_many(vec![
+                (KEY.to_vec(), VAL.to_vec()),
+                (b"other".to_vec(), b"payload!".to_vec()),
+            ])
+            .await
+            .expect("write a batch");
+            a.flush().await.expect("flush");
+        }
+
+        let a = adapter(batch_dir.path());
+        let before = a.metrics().read_bytes_total;
+        assert_eq!(
+            a.get(KEY).await.expect("read"),
+            Some(VAL.to_vec()),
+            "the read must return the value, or the byte assertions are vacuous"
+        );
+        let after_wal = a.metrics().read_bytes_total;
+        assert_eq!(
+            after_wal - before,
+            expected,
+            "a batch-served read must report key + value bytes, not their product ({})",
+            KEY.len() * VAL.len()
+        );
+
+        a.get(KEY).await.expect("cached read");
+        assert_eq!(
+            a.metrics().read_bytes_total - after_wal,
+            expected,
+            "a cache-served read must report the same bytes as a WAL-served one"
+        );
+
+        // ── the single-Put arm and the compressed arm ───────────────────────────────
+        for compressed in [false, true] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let config = WalConfig {
+                log_dir: dir.path().to_path_buf(),
+                compression: CompressionConfig::default(),
+                ..WalConfig::test_config()
+            };
+
+            {
+                let wal = MmapParallelWal::open_or_create(config.clone(), config.segment_count)
+                    .await
+                    .expect("open the WAL directly");
+
+                let op = if compressed {
+                    // Padded so the batch clears `min_compress_bytes` and actually shrinks.
+                    let mut items = vec![(KEY.to_vec(), VAL.to_vec())];
+                    items.extend((0..120).map(|i| {
+                        (
+                            format!("pad-{i:04}").into_bytes(),
+                            format!("{}-{i}", "padding".repeat(32)).into_bytes(),
+                        )
+                    }));
+                    LogOperation::PutBatch {
+                        collection: String::new(),
+                        items,
+                    }
+                } else {
+                    LogOperation::Put {
+                        collection: String::new(),
+                        id: KEY.to_vec(),
+                        data: VAL.to_vec(),
+                    }
+                };
+
+                let record = LogRecord::new_with_compression(op, &CompressionConfig::default())
+                    .expect("build the record");
+                assert_eq!(
+                    matches!(record.operation, LogOperation::CompressedPutBatch { .. }),
+                    compressed,
+                    "the record shape decides which arm of `get` runs, so a batch that \
+                     failed to compress would silently retest an arm already covered"
+                );
+
+                wal.append(record).await.expect("append");
+                wal.sync().await.expect("sync");
+            }
+
+            let a = WalStorageAdapter::new(config).expect("open over the prepared WAL");
+            let before = a.metrics().read_bytes_total;
+            assert_eq!(
+                a.get(KEY).await.expect("read"),
+                Some(VAL.to_vec()),
+                "compressed={compressed}: the read must return the value"
+            );
+            assert_eq!(
+                a.metrics().read_bytes_total - before,
+                expected,
+                "compressed={compressed}: must report key + value bytes, not their product"
+            );
+        }
+    })
+    .await;
+}
+
+/// The three plain accessors report the adapter's real state, not a default.
+///
+/// `max_offset`, `get_log_dir` and `save_checkpoint` were each replaceable with a constant
+/// — `0`, an empty `PathBuf`, and a bare `Ok(())` — with the whole suite still green. They
+/// are small, but two of them are load-bearing: `get_log_dir` is what a caller uses to find
+/// the data directory, and `save_checkpoint` exists so the next startup can recover
+/// incrementally rather than rescanning the log. A `save_checkpoint` that reports success
+/// without writing anything is the same shape as every other defect in this file — it
+/// claims work it did not do, and the cost lands at the next restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_adapter_accessors_report_real_state() {
+    bounded("the_adapter_accessors_report_real_state", async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let a = adapter(dir.path());
+
+        assert_eq!(
+            a.get_log_dir(),
+            dir.path(),
+            "get_log_dir must name the directory this adapter was opened on; an empty \
+             path sends a caller looking for the data somewhere else entirely"
+        );
+
+        let before = a.max_offset();
+        a.put(b"offset-key", b"offset-value")
+            .await
+            .expect("write something to move the offset");
+        a.flush().await.expect("flush");
+        let after = a.max_offset();
+        assert!(
+            after > before,
+            "max_offset must advance as records are appended; it reported {after} after a \
+             write with {before} before it"
+        );
+
+        let checkpoint_path = dir.path().join("checkpoint.json");
+        assert!(
+            !checkpoint_path.exists(),
+            "no checkpoint should exist before one is saved, or the assertion below would \
+             pass without save_checkpoint doing anything"
+        );
+
+        a.save_checkpoint().expect("save a checkpoint");
+
+        assert!(
+            checkpoint_path.exists(),
+            "save_checkpoint returned Ok without writing {}; the next startup would find \
+             no checkpoint and rescan the whole log",
+            checkpoint_path.display()
+        );
+    })
+    .await;
+}
