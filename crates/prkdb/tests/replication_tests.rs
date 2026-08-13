@@ -456,10 +456,15 @@ async fn test_replication_state_tracking() {
     let _ = follower.clone().start().await;
     sleep(Duration::from_millis(100)).await;
 
-    // Initial state should be clean
+    // Snapshot the starting point rather than asserting it is zero.
+    //
+    // The property under test is that applying a change *advances* the tracked state, and
+    // the assertion at the end already states it as a delta. Requiring the follower to
+    // have applied nothing after a fixed 100ms sleep is a separate claim about startup
+    // timing, and not one this test is about: on a loaded machine the follower's sync loop
+    // can reach the leader inside that window and apply something first, which is how this
+    // test failed while a mutation baseline was running and took the whole run with it.
     let initial_state = follower.get_state().await;
-    assert_eq!(initial_state.changes_applied, 0);
-    assert!(initial_state.last_change_id.is_none());
 
     // Apply a change
     let change = prkdb_types::collection::ChangeEvent::Put(TestCollection {
