@@ -3266,6 +3266,82 @@ mod tests {
     // Every one of them hung indefinitely before this work.
     // ------------------------------------------------------------------------------
 
+    /// Dropping the last handle publishes what is still queued.
+    ///
+    /// `WalStorageAdapter::drop` flushes the accumulator when the handle being dropped is
+    /// the last one. Deleting that body entirely left the suite green, because every other
+    /// test awaits its writes — `put_many` returns only once the write is published, so by
+    /// the time anything is dropped the accumulator is empty and the flush has nothing to
+    /// do.
+    ///
+    /// A write that is still queued is the case the flush exists for. Without it the
+    /// accumulator is dropped with the write inside, `PendingWrite`'s drop guard answers
+    /// the caller with an error, and a write that would have landed is lost at shutdown.
+    ///
+    /// `enqueue_write` rather than `put_many`, deliberately: it hands back the receiver
+    /// without holding the adapter, so the drop below is genuinely the last handle. A
+    /// spawned `put_many` would keep a clone alive and the guard would take the early
+    /// return instead.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropping_the_last_handle_publishes_what_is_still_queued() {
+        let dir = liveness_dir("drop_flushes");
+
+        let rx = {
+            let adapter = WalStorageAdapter::new(WalConfig {
+                log_dir: dir.clone(),
+                ..WalConfig::test_config()
+            })
+            .expect("adapter opens");
+
+            // Stop both writer tasks so the write stays in the accumulator for the drop
+            // to find. The stall fault cannot be used here: it is checked at the top of
+            // `flush_accumulator_inner`, which the drop flush calls too, so an armed stall
+            // would skip the very thing under test. Clearing it just before the drop
+            // instead lets the ordinary flush loop publish the write and the test stops
+            // depending on the drop at all — which is exactly how the first version of
+            // this test passed against `!= with ==`.
+            //
+            // The supervisor goes first: it watches the flush loop's JoinHandle, and would
+            // read the abort as the writer exiting and discharge the queued write itself.
+            {
+                let tasks = adapter.inner.writer.get().expect("the writer was spawned");
+                tasks.supervisor.abort();
+                tasks.flush_loop.abort();
+            }
+
+            let rx = adapter
+                .enqueue_write(LogRecord::new(LogOperation::Put {
+                    collection: String::new(),
+                    id: b"queued".to_vec(),
+                    data: b"value".to_vec(),
+                }))
+                .await
+                .expect("the write is accepted");
+
+            assert!(
+                adapter.inner.progress.queue_depth() > 0,
+                "the write must still be queued when the handle drops, or the drop flush \
+                 has nothing to publish and this test proves nothing"
+            );
+
+            rx
+            // adapter dropped here: the last handle, so the flush runs
+        };
+
+        let outcome = tokio::time::timeout(Duration::from_secs(20), rx)
+            .await
+            .expect("the drop flush must answer the queued write, not leave it hanging")
+            .expect("the sender must not be dropped without sending");
+
+        assert!(
+            outcome.is_ok(),
+            "a write still queued when the last handle dropped must be published by the \
+             drop flush; instead the caller was told: {outcome:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// A stale index entry must not hand back another key's value.
     ///
     /// `get` resolves a key to an offset through the index, reads whatever record is at
