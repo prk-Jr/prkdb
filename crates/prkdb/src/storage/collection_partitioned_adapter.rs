@@ -875,6 +875,7 @@ impl StorageAdapter for CollectionPartitionedAdapter {
 
             worst.queue_depth += health.queue_depth;
             worst.publishes_total += health.publishes_total;
+            worst.direct_appends_total += health.direct_appends_total;
             worst.oldest_unpublished_age_ms = worst
                 .oldest_unpublished_age_ms
                 .max(health.oldest_unpublished_age_ms);
