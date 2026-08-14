@@ -154,6 +154,14 @@ pub struct WritePathProgress {
     /// Mirrors `failure.is_some()` so the hot path (`refuse_if_failed`) never takes the
     /// lock at all.
     failed: AtomicBool,
+
+    /// Writes appended straight to the log, bypassing the queue entirely.
+    ///
+    /// Kept apart from `published` on purpose. The watchdog decides a writer is stalled by
+    /// asking whether `published` moved between two observations; if direct appends landed
+    /// in the same counter, a stalled writer would look busy for as long as any `put`
+    /// traffic continued, and the detector would go quiet exactly when it is needed.
+    direct: AtomicU64,
 }
 
 impl Default for WritePathProgress {
@@ -172,6 +180,7 @@ impl WritePathProgress {
             last_publish_nanos: AtomicU64::new(0),
             failure: RwLock::new(None),
             failed: AtomicBool::new(false),
+            direct: AtomicU64::new(0),
         }
     }
 
@@ -249,6 +258,27 @@ impl WritePathProgress {
     /// misleading direction available.
     pub fn record_discharged(&self, count: u64) {
         self.resolve(count);
+    }
+
+    /// Record `count` writes appended straight to the log, bypassing the queue.
+    ///
+    /// Touches neither `enqueued`, `published`, the oldest-unpublished clock, nor the
+    /// failure state — none of which these writes have anything to say about. They never
+    /// sat in the queue, so they cannot change its depth; they were durable before the
+    /// call returned, so there is no window in which they were unpublished; and their
+    /// succeeding is no evidence that a stalled *writer* recovered, so clearing a stall
+    /// here would be the same lie `record_discharged` refuses to tell.
+    ///
+    /// What they are is writes that landed, which is worth reporting on its own series.
+    pub fn record_direct_append(&self, count: u64) {
+        if count == 0 {
+            return;
+        }
+        self.direct.fetch_add(count, Ordering::SeqCst);
+    }
+
+    pub fn direct_appends_total(&self) -> u64 {
+        self.direct.load(Ordering::SeqCst)
     }
 
     fn resolve(&self, count: u64) {
@@ -376,6 +406,7 @@ impl WritePathProgress {
                 .since_last_publish()
                 .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64),
             publishes_total: self.published_total(),
+            direct_appends_total: self.direct_appends_total(),
         }
     }
 }

@@ -33,7 +33,22 @@ pub struct WritePathHealth {
     pub last_publish_age_ms: Option<u64>,
     /// Batches published since start, monotonic. Exported as a counter so the publish rate
     /// is derived by the scraper rather than computed in-process.
+    ///
+    /// Counts writes the *background writer* published, and deliberately nothing else.
+    /// The stall detector asks whether this number moved between two observations, so a
+    /// second source incrementing it would mean a stalled writer never looks stalled for
+    /// as long as any other traffic continues. See [`Self::direct_appends_total`].
     pub publishes_total: u64,
+    /// Writes appended straight to the log by `put` and `delete`, monotonic.
+    ///
+    /// A separate series rather than part of `publishes_total`, for the reason given
+    /// there. These writes never enter the queue: they are appended synchronously and are
+    /// durable by the time the call returns, so they have no window in which they are
+    /// accepted but unpublished and nothing about them can stall.
+    ///
+    /// Reported so that a deployment whose traffic is single puts is not indistinguishable
+    /// from an idle one. Before this, such a database showed zero publishes forever.
+    pub direct_appends_total: u64,
 }
 
 impl WritePathHealth {
@@ -51,6 +66,7 @@ impl WritePathHealth {
             oldest_unpublished_age_ms: 0,
             last_publish_age_ms: None,
             publishes_total: 0,
+            direct_appends_total: 0,
         }
     }
 }

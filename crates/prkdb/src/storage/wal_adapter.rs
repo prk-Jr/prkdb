@@ -512,6 +512,13 @@ impl WalStorageAdapter {
         self.inner.cache.put_batch(cache_entries).await;
         drop(publish);
 
+        // Its own series, never `record_published`. These writes were durable before this
+        // function returned and never entered the queue, so they say nothing about whether
+        // the background writer is making progress — and the watchdog decides that by
+        // asking whether the publish count moved. Counting them there would mean a stalled
+        // writer looks busy for as long as any `put` traffic continues.
+        self.inner.progress.record_direct_append(batch_size as u64);
+
         Ok(())
     }
 
@@ -555,6 +562,10 @@ impl WalStorageAdapter {
 
         self.inner.cache.remove_batch(keys).await;
         drop(publish);
+
+        // Same series as `put_batch_impl`, for the same reason: appended synchronously,
+        // never queued, and no evidence about the background writer either way.
+        self.inner.progress.record_direct_append(batch_size as u64);
 
         Ok(())
     }
@@ -3602,6 +3613,60 @@ mod tests {
         );
 
         fault_injection::clear_never_start_writer(&dir);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A direct `put` is counted, and counted somewhere the watchdog does not look.
+    ///
+    /// `put` and `delete` append straight to the log: durable by the time the call
+    /// returns, never queued, nothing waiting on a writer. Until now the write-path
+    /// accounting only saw the accumulator, so a deployment whose traffic is single puts
+    /// reported zero publishes forever and was indistinguishable from an idle one — and
+    /// the Prometheus export inherited that.
+    ///
+    /// The fix has to be a *separate* counter, which is the half worth testing. The stall
+    /// detector decides a writer is stuck by asking whether `publishes_total` moved
+    /// between two observations. Had these writes been added there, a genuinely stalled
+    /// writer would look busy for as long as any `put` traffic continued, and the detector
+    /// would go quiet exactly when it is needed. So this asserts both that the direct
+    /// count moves and that the publish count does not.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_direct_write_is_counted_without_disturbing_the_stall_detector() {
+        let dir = liveness_dir("direct_appends");
+        let adapter = WalStorageAdapter::new(WalConfig {
+            log_dir: dir.clone(),
+            ..WalConfig::test_config()
+        })
+        .expect("adapter opens");
+
+        let before = adapter.write_path_health();
+        assert_eq!(before.direct_appends_total, 0, "nothing written yet");
+        assert_eq!(before.publishes_total, 0, "nothing published yet");
+
+        adapter.put(b"k", b"v").await.expect("write");
+        adapter.delete(b"k").await.expect("delete");
+
+        let after = adapter.write_path_health();
+        assert_eq!(
+            after.direct_appends_total, 2,
+            "a put and a delete both append directly and must both be counted; leaving \
+             them out makes a put-only workload look like an idle database"
+        );
+        assert_eq!(
+            after.publishes_total, before.publishes_total,
+            "direct appends must not move the publish count — that number is what the \
+             stall detector compares between observations, and a second source feeding it \
+             means a stalled writer never looks stalled while other traffic continues"
+        );
+        assert_eq!(
+            after.queue_depth, 0,
+            "these writes were durable before the call returned, so nothing is queued"
+        );
+        assert!(
+            after.healthy,
+            "a database that just wrote must not read as unhealthy"
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 

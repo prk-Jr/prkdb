@@ -255,6 +255,7 @@ mod tests {
             oldest_unpublished_age_ms: 0,
             last_publish_age_ms: Some(5),
             publishes_total: 42,
+            direct_appends_total: 7,
         };
         assert!(
             write_path_objection(&healthy).is_none(),
@@ -268,6 +269,7 @@ mod tests {
             oldest_unpublished_age_ms: 900,
             last_publish_age_ms: Some(900),
             publishes_total: 7,
+            direct_appends_total: 3,
         };
         let objection = write_path_objection(&stalled)
             .expect("a stalled writer must object to being sent traffic");
