@@ -1498,11 +1498,16 @@ mod tests {
 
         // Open both collections with a write that succeeds, so the stall below acts on a
         // live writer rather than on collection creation.
-        for name in ["users", "orders"] {
-            adapter
-                .put_to_collection(name, b"seed", b"v")
-                .await
-                .unwrap();
+        // `put_to_collection` goes through `put`, which appends directly — so these also
+        // supply the direct-append counts folded below. Unequal on purpose, for the same
+        // reason as the batch counts: one each would let `*=` pass, since 1 * 1 == 1.
+        for (name, writes) in [("users", 1), ("orders", 2)] {
+            for w in 0..writes {
+                adapter
+                    .put_to_collection(name, format!("seed-{w}").as_bytes(), b"v")
+                    .await
+                    .unwrap();
+            }
         }
 
         let collections = temp_dir.path().join("collections");
@@ -1633,6 +1638,29 @@ mod tests {
             expected,
             "the aggregate must sum each collection's publish count; the parts were \
              {per_collection:?}"
+        );
+
+        // The same fold, on the series that counts writes appended straight to the log.
+        // It is a separate field for a reason — `publishes_total` is what the stall
+        // detector watches — so it needs its own assertion; mutation caught `+= with *=`
+        // surviving here while the publish fold above was covered.
+        let direct_parts: Vec<u64> = adapter
+            .collections
+            .iter()
+            .map(|entry| entry.value().write_path_health().direct_appends_total)
+            .collect();
+        let direct_expected: u64 = direct_parts.iter().sum();
+
+        assert!(
+            direct_parts.len() >= 2 && direct_parts.iter().all(|c| *c > 0),
+            "both collections must have appended directly, or this fold is not exercised; \
+             saw {direct_parts:?}"
+        );
+        assert_eq!(
+            adapter.write_path_health().direct_appends_total,
+            direct_expected,
+            "the aggregate must sum each collection's direct-append count; the parts were \
+             {direct_parts:?}"
         );
     }
 
