@@ -26,6 +26,18 @@ updates:
       actions:
         patterns:
           - "*"
+    ignore:
+      # `dtolnay/rust-toolchain@1.95.0` is not an action release. The ref *is* the Rust
+      # toolchain to install, so Dependabot reading it as a version and bumping it invents
+      # a Rust release that does not exist: it proposed 1.100.0 across nineteen call sites
+      # and every job failed with "could not download nonexistent rust version 1.100.0",
+      # 404 from static.rust-lang.org.
+      #
+      # Even a real release would be wrong from here. The toolchain is pinned in
+      # rust-toolchain.toml, which asks that `channel` stay in sync with `rust-version` in
+      # the workspace Cargo.toml — three places that move together, deliberately, and not
+      # by a bot bumping one of them.
+      - dependency-name: "dtolnay/rust-toolchain"
     commit-message:
       prefix: "ci"
 
