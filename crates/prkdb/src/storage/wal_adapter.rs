@@ -2734,9 +2734,33 @@ impl StorageAdapter for WalStorageAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prkdb_types::replication::ReplicationConfig;
     use std::env;
     use std::fs;
     use std::time::Instant;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn replication_constructor_uses_the_supplied_wal_config() {
+        let dir = tempfile::tempdir().expect("temporary root");
+        let log_dir = dir.path().join("replicated-wal");
+        let config = WalConfig {
+            log_dir: log_dir.clone(),
+            segment_count: 2,
+            ..WalConfig::test_config()
+        };
+        let replication = ReplicationManager::new(ReplicationConfig::test_config())
+            .await
+            .expect("empty replica list needs no network");
+
+        let adapter = WalStorageAdapter::new_with_replication(config, replication)
+            .await
+            .expect("replicated adapter opens");
+
+        assert_eq!(adapter.inner._config.wal.log_dir, log_dir);
+        assert_eq!(adapter.inner._config.wal.segment_count, 2);
+        assert!(log_dir.join("mmap_segment_0").is_dir());
+        assert!(log_dir.join("mmap_segment_1").is_dir());
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_wal_adapter_put_get() {
