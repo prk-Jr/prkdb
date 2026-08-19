@@ -18,6 +18,7 @@
 *.pem
 
 /.agents/
+/.worktrees/
 
 # macOS
 .DS_Store
