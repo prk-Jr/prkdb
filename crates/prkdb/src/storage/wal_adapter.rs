@@ -2734,9 +2734,33 @@ impl StorageAdapter for WalStorageAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prkdb_types::replication::ReplicationConfig;
     use std::env;
     use std::fs;
     use std::time::Instant;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn replication_constructor_uses_the_supplied_wal_config() {
+        let dir = tempfile::tempdir().expect("temporary root");
+        let log_dir = dir.path().join("replicated-wal");
+        let config = WalConfig {
+            log_dir: log_dir.clone(),
+            segment_count: 2,
+            ..WalConfig::test_config()
+        };
+        let replication = ReplicationManager::new(ReplicationConfig::test_config())
+            .await
+            .expect("empty replica list needs no network");
+
+        let adapter = WalStorageAdapter::new_with_replication(config, replication)
+            .await
+            .expect("replicated adapter opens");
+
+        assert_eq!(adapter.inner._config.wal.log_dir, log_dir);
+        assert_eq!(adapter.inner._config.wal.segment_count, 2);
+        assert!(log_dir.join("mmap_segment_0").is_dir());
+        assert!(log_dir.join("mmap_segment_1").is_dir());
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_wal_adapter_put_get() {
@@ -3569,6 +3593,56 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn queued_puts_and_deletes_keep_their_collection_names() {
+        let dir = tempfile::tempdir().expect("temporary WAL directory");
+        let adapter = WalStorageAdapter::new(WalConfig {
+            log_dir: dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        })
+        .expect("adapter opens");
+
+        {
+            let tasks = adapter.inner.writer.get().expect("the writer was spawned");
+            tasks.supervisor.abort();
+            tasks.flush_loop.abort();
+        }
+
+        let (put, _put_rx) = PendingWrite::new(LogRecord::new(LogOperation::Put {
+            collection: "orders".to_string(),
+            id: b"order-1".to_vec(),
+            data: b"open".to_vec(),
+        }));
+        let (delete, _delete_rx) = PendingWrite::new(LogRecord::new(LogOperation::Delete {
+            collection: "archive".to_string(),
+            id: b"old-1".to_vec(),
+        }));
+
+        assert_eq!(
+            WalStorageAdapter::publish_batch(&adapter.inner, vec![put, delete]).await,
+            2
+        );
+
+        let records = adapter.inner.wal.scan().await.expect("scan published WAL");
+        let mut routed = records
+            .into_iter()
+            .map(|(_, record)| match record.operation {
+                LogOperation::PutBatch { collection, .. } => ("put", collection),
+                LogOperation::DeleteBatch { collection, .. } => ("delete", collection),
+                operation => panic!("unexpected published operation: {operation:?}"),
+            })
+            .collect::<Vec<_>>();
+        routed.sort();
+
+        assert_eq!(
+            routed,
+            vec![
+                ("delete", "archive".to_string()),
+                ("put", "orders".to_string()),
+            ]
+        );
     }
 
     /// With no writer, a write is refused rather than queued forever.
