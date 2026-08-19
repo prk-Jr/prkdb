@@ -19,7 +19,7 @@ futures = "0.3"
 tokio-stream = "0.1"
 
 # WebSocket support
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.30"
 url = "2.5"
 serde = { workspace = true }
 serde_json = { workspace = true }
