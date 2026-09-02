@@ -28,7 +28,7 @@ axum-server = { workspace = true }
 # Pinned to the same backend as the workspace so `install_default()` below has exactly one
 # provider to choose. See the panic it prevents in serve.rs.
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
-tower = { version = "0.4", features = ["util"] }
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.5", features = ["cors", "fs"] }
 futures-util = "0.3"
 tonic = { workspace = true, features = ["transport"] }
