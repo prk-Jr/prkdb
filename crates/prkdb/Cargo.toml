@@ -97,7 +97,7 @@ proptest = "1.4"
 # workspace's rustls already uses `aws-lc-rs`. Enabling both makes rustls unable to pick a
 # process-level CryptoProvider, and every TLS test panics at runtime with
 # "Could not automatically determine the process-level CryptoProvider".
-rcgen = { version = "0.13.2", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 
 [[bench]]
