@@ -12,4 +12,4 @@ prost = { workspace = true }
 prost-types = { workspace = true }
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-build = "0.14"
