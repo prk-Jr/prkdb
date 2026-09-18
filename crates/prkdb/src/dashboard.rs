@@ -457,7 +457,7 @@ fn snapshot(state: &DashboardState) -> MetricsSnapshot {
 
     if let Ok(mut nets) = state.networks.try_lock() {
         nets.refresh(true);
-        for (_interface_name, data) in nets.iter() {
+        for data in nets.values() {
             sys_metrics.network_rx_bytes += data.received();
             sys_metrics.network_tx_bytes += data.transmitted();
         }

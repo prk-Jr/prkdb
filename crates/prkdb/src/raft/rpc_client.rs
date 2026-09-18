@@ -13,10 +13,16 @@ pub enum RpcError {
     Transport(#[from] tonic::transport::Error),
 
     #[error("RPC error: {0}")]
-    Rpc(#[from] tonic::Status),
+    Rpc(#[source] Box<tonic::Status>),
 
     #[error("Invalid URI: {0}")]
     InvalidUri(String),
+}
+
+impl From<tonic::Status> for RpcError {
+    fn from(status: tonic::Status) -> Self {
+        Self::Rpc(Box::new(status))
+    }
 }
 
 /// Fault-injection rules, read from the file named by `CHAOS_CONFIG_PATH`.
@@ -94,9 +100,9 @@ impl RpcClientPool {
                                 if (self.local_node_id == node1 && target_node == node2)
                                     || (self.local_node_id == node2 && target_node == node1)
                                 {
-                                    return Err(RpcError::Rpc(tonic::Status::unavailable(
-                                        "Chaos partition",
-                                    )));
+                                    return Err(
+                                        tonic::Status::unavailable("Chaos partition").into()
+                                    );
                                 }
                             }
                             ChaosRule::Delay { src, dst, ms } => {
@@ -109,9 +115,7 @@ impl RpcClientPool {
                                     && target_node == dst
                                     && rand::random::<f64>() < rate
                                 {
-                                    return Err(RpcError::Rpc(tonic::Status::unavailable(
-                                        "Chaos drop",
-                                    )));
+                                    return Err(tonic::Status::unavailable("Chaos drop").into());
                                 }
                             }
                         }
@@ -200,7 +204,7 @@ impl RpcClientPool {
             Err(e) => {
                 // Remove client from cache on failure to force reconnection
                 self.remove_client(node_id).await;
-                Err(RpcError::Rpc(e))
+                Err(e.into())
             }
         }
     }
@@ -225,7 +229,7 @@ impl RpcClientPool {
             Err(e) => {
                 // Remove client from cache on failure to force reconnection
                 self.remove_client(node_id).await;
-                Err(RpcError::Rpc(e))
+                Err(e.into())
             }
         }
     }
@@ -250,7 +254,7 @@ impl RpcClientPool {
             Err(e) => {
                 // Remove client from cache on failure to force reconnection
                 self.remove_client(node_id).await;
-                Err(RpcError::Rpc(e))
+                Err(e.into())
             }
         }
     }
@@ -275,7 +279,7 @@ impl RpcClientPool {
             Err(e) => {
                 // Remove client from cache on failure to force reconnection
                 self.remove_client(node_id).await;
-                Err(RpcError::Rpc(e))
+                Err(e.into())
             }
         }
     }
@@ -284,5 +288,15 @@ impl RpcClientPool {
     pub async fn remove_client(&self, node_id: NodeId) {
         let mut clients = self.clients.write().await;
         clients.remove(&node_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RpcError;
+
+    #[test]
+    fn rpc_error_stays_small_for_result_callers() {
+        assert!(std::mem::size_of::<RpcError>() <= 32);
     }
 }
