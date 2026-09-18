@@ -45,20 +45,9 @@ ignore = [
     # ---------------------------------------------------------------------------
     # TRANSITIVE AND UNREACHABLE BY US — no direct dependency, no upgrade available.
     # ---------------------------------------------------------------------------
-    # rsa 0.9.10: Marvin Attack, timing sidechannel key recovery (CVSS 5.9).
-    # Reachable ONLY with the optional `prkdb-orm/mysql` feature, which pulls
-    # sqlx/mysql -> rsa for authentication. No default build enables it, and
-    # upstream has shipped no fixed version. Surfaced by cargo-audit, not by
-    # cargo-deny — which is why CI runs both.
-    "RUSTSEC-2023-0071",
-
     # rand 0.8.5 unsound only when a custom logger calls rand::rng() reentrantly.
     # PrkDB installs no such logger. Pulled transitively.
     "RUSTSEC-2026-0097",
-
-    # event-listener 5.4.1: !Send tags crossing thread boundaries via StackSlot.
-    # Arrives via sqlx-core; no upgrade sqlx accepts.
-    "RUSTSEC-2026-0221",
 
     # ---------------------------------------------------------------------------
     # UNMAINTAINED — informational. No known vulnerability in any of these; the
