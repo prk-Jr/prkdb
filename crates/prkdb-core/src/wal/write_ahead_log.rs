@@ -172,7 +172,7 @@ impl WriteAheadLog {
 
         // Find segment containing this offset
         let mut segment_offset = 0;
-        for (base_offset, _) in segments.iter() {
+        for base_offset in segments.keys() {
             if *base_offset <= offset {
                 segment_offset = *base_offset;
             } else {
