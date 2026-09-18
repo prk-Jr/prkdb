@@ -293,10 +293,29 @@ impl RpcClientPool {
 
 #[cfg(test)]
 mod tests {
-    use super::RpcError;
+    use super::{RpcClientPool, RpcError};
 
     #[test]
     fn rpc_error_stays_small_for_result_callers() {
         assert!(std::mem::size_of::<RpcError>() <= 32);
+    }
+
+    #[cfg(feature = "chaos")]
+    #[tokio::test]
+    async fn chaos_partition_rule_refuses_matching_peer() {
+        let dir = tempfile::tempdir().expect("chaos rules directory");
+        let rules_path = dir.path().join("chaos.json");
+        std::fs::write(
+            &rules_path,
+            r#"[{"Partition":{"node1":1,"node2":2}}]"#,
+        )
+        .expect("write chaos rules");
+
+        // This unit-test binary is the only process that sets this variable.
+        unsafe { std::env::set_var("CHAOS_CONFIG_PATH", &rules_path) };
+        let result = RpcClientPool::new(1).check_chaos(2).await;
+        unsafe { std::env::remove_var("CHAOS_CONFIG_PATH") };
+
+        assert!(matches!(result, Err(RpcError::Rpc(status)) if status.code() == tonic::Code::Unavailable));
     }
 }
