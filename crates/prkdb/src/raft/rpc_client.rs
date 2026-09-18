@@ -293,7 +293,7 @@ impl RpcClientPool {
 
 #[cfg(test)]
 mod tests {
-    use super::{RpcClientPool, RpcError};
+    use super::*;
 
     #[test]
     fn rpc_error_stays_small_for_result_callers() {
