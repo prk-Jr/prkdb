@@ -49,11 +49,7 @@ Those results are useful for tracking regressions inside this repo, but they are
 
 | Resource     | PrkDB     | Kafka (3-node)     |
 | ------------ | --------- | ------------------ |
-| Memory       | 50-200 MB | 1-6 GB per node    |
 | Disk         | WAL only  | Data + logs        |
-| CPU          | 1-4 cores | 2-8 cores per node |
-| Startup time | < 1 sec   | 10-60 sec          |
-| Binary size  | ~10 MB    | 100+ MB            |
 
 ---
 
@@ -178,7 +174,6 @@ let consumer2 = EventStream::<Order>::new(db.clone(), config2).await?;
 | Aspect           | Winner                                   |
 | ---------------- | ---------------------------------------- |
 | Local deployment | 🏆 **PrkDB** (embedded or single binary) |
-| Resource usage   | 🏆 **PrkDB** (10x less)                  |
 | Scalability      | Kafka (horizontal scaling)               |
 | Simplicity       | 🏆 **PrkDB** (embedded or single binary) |
 

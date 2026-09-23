@@ -1,0 +1,681 @@
+# Root-cause remediation finding ledger (spec §4.1).
+# Source of truth: docs/superpowers/specs/2026-09-23-root-cause-remediation-design.md §3.1-3.8, §7.
+# Generated status page: docs/status/remediation.md (via `cargo xtask remediation render`).
+
+# ---------------------------------------------------------------------------
+# 3.1 Storage and WAL (STO)
+# ---------------------------------------------------------------------------
+
+[[finding]]
+id = "STO-01"
+title = "Checkpoint recovery drops pre-checkpoint keys"
+area = "storage"
+severity = "critical"
+phase = 2
+status = "open"
+sources = ["audit-2026-09-23#1"]
+evidence = [
+  "crates/prkdb/src/storage/wal_adapter.rs:1050-1058",
+  "crates/prkdb/src/storage/checkpoint.rs:44-51",
+  "crates/prkdb-core/src/wal/mmap_parallel_wal.rs:310",
+  "crates/prkdb/src/storage/wal_adapter.rs:1737",
+]
+tripwire = "test:crates/prkdb/tests/tripwires.rs::sto01_checkpoint_drops_pre_checkpoint_keys_tripwire"
+
+[[finding]]
+id = "STO-02"
+title = "Writes acked before fsync; SyncMode::Durable never honored"
+area = "storage"
+severity = "critical"
+phase = 2
+status = "open"
+sources = ["audit-2026-09-23#11"]
+evidence = [
+  "crates/prkdb-core/src/wal/mmap_log_segment.rs:279-281",
+  "crates/prkdb/src/storage/wal_adapter.rs:497",
+]
+
+[[finding]]
+id = "STO-03"
+title = "WAL append outside publish_barrier can leave the live index pointing at a stale offset"
+area = "storage"
+severity = "medium"
+phase = 2
+status = "open"
+sources = ["audit-2026-09-23#17"]
+evidence = ["crates/prkdb/src/storage/wal_adapter.rs:478-509"]
+
+[[finding]]
+id = "STO-04"
+title = "scan_mmap skips CRC on open; torn records become invisible; directories never fsynced"
+area = "storage"
+severity = "medium"
+phase = 2
+status = "open"
+sources = ["audit-2026-09-23#18"]
+evidence = ["crates/prkdb-core/src/wal/mmap_log_segment.rs:676-720"]
+
+[[finding]]
+id = "STO-05"
+title = "WAL routing uses unstable DefaultHasher; replay ordered by segment id, not global order"
+area = "storage"
+severity = "medium"
+phase = 2
+status = "open"
+sources = ["audit-2026-09-23#19"]
+evidence = ["crates/prkdb-core/src/wal/mmap_parallel_wal.rs:407-418"]
+
+[[finding]]
+id = "STO-06"
+title = "Four WAL implementations in use; all data writes hash to one shard so fixes do not propagate"
+area = "storage"
+severity = "high"
+phase = 2
+status = "open"
+evidence = [
+  "crates/prkdb/src/storage/wal_adapter.rs:470",
+  "crates/prkdb/src/storage/wal_adapter.rs:540",
+]
+
+[[finding]]
+id = "STO-07"
+title = "BatchAccumulator::flush() sleeps and returns Ok while dropping executor errors"
+area = "storage"
+severity = "high"
+phase = 2
+status = "open"
+sources = ["review-2026-09-07#R06"]
+evidence = [
+  "crates/prkdb/src/batch_accumulator.rs:49,81,92,131-135",
+  "crates/prkdb/src/collection_handle.rs:177-187",
+]
+
+# ---------------------------------------------------------------------------
+# 3.2 Keys, indexes, partitioning (KEY)
+# ---------------------------------------------------------------------------
+
+[[finding]]
+id = "KEY-01"
+title = "Primary keys not namespaced by collection; different types can overwrite each other"
+area = "keys"
+severity = "high"
+phase = 2
+status = "open"
+sources = ["audit-2026-09-23#13", "review-2026-09-07#R01"]
+evidence = ["crates/prkdb/src/indexed_storage.rs:4280-4287,5273-5276"]
+tripwire = "test:crates/prkdb/tests/tripwires.rs::key01_collections_share_primary_keys_tripwire"
+
+[[finding]]
+id = "KEY-02"
+title = "upsert removes the new record's index entries instead of the old; unique index unenforced"
+area = "keys"
+severity = "high"
+phase = 2
+status = "open"
+sources = ["audit-2026-09-23#14"]
+evidence = ["crates/prkdb/src/indexed_storage.rs:4733"]
+
+[[finding]]
+id = "KEY-03"
+title = "AHasher::default() is randomly seeded per process; a key's partition changes after restart"
+area = "keys"
+severity = "high"
+phase = 2
+status = "open"
+sources = ["audit-2026-09-23#12"]
+evidence = ["crates/prkdb/src/partitioning.rs:51"]
+
+# ---------------------------------------------------------------------------
+# 3.3 Events, outbox, consumers (EVT)
+# ---------------------------------------------------------------------------
+tripwire = "test:crates/prkdb/tests/tripwires.rs::key03_partition_differs_across_processes_tripwire"
+
+[[finding]]
+id = "EVT-01"
+title = "static OUTBOX_SEQ resets on restart; persisted consumer offsets skip new events"
+area = "events"
+severity = "critical"
+phase = 2
+status = "open"
+sources = ["audit-2026-09-23#9"]
+evidence = ["crates/prkdb/src/outbox.rs:118"]
+tripwire = "test:crates/prkdb/tests/tripwires.rs::evt01_outbox_sequence_restarts_per_process_tripwire"
+
+[[finding]]
+id = "EVT-02"
+title = "Default WAL adapter keeps outbox in memory only; partitioned adapter discards outbox writes and returns Ok"
+area = "events"
+severity = "high"
+phase = 2
+status = "open"
+sources = ["audit-2026-09-23#10"]
+evidence = [
+  "crates/prkdb/src/storage/wal_adapter.rs:2482",
+  "crates/prkdb/src/storage/collection_partitioned_adapter.rs:525",
+]
+
+[[finding]]
+id = "EVT-03"
+title = "Mixed-partition batch routes all events to the first item's partition"
+area = "events"
+severity = "high"
+phase = 3
+status = "open"
+sources = ["review-2026-09-07#R08"]
+evidence = [
+  "crates/prkdb/src/collection_handle.rs:400-414,544-558",
+  "crates/prkdb/src/consumer.rs:304-319",
+]
+
+[[finding]]
+id = "EVT-04"
+title = "Sled \"atomic\" outbox methods apply two independent tree batches"
+area = "events"
+severity = "high"
+phase = 3
+status = "open"
+sources = ["review-2026-09-07#R05"]
+evidence = ["crates/prkdb-storage-sled/src/lib.rs:263-268,285-290"]
+
+[[finding]]
+id = "EVT-05"
+title = "put_with_outbox errors fall back to a non-atomic path, hiding real errors"
+area = "events"
+severity = "high"
+phase = 3
+status = "open"
+sources = ["review-2026-09-07#R07"]
+evidence = ["crates/prkdb/src/collection_handle.rs:282-299,608-625"]
+
+[[finding]]
+id = "EVT-06"
+title = "Auto-commit commits inside poll() before processing; no generation fencing; unassigned consumer falls back to partition 0"
+area = "events"
+severity = "high"
+phase = 3
+status = "open"
+sources = ["audit-2026-09-23#16"]
+evidence = ["crates/prkdb/src/consumer.rs:71,422,435,667"]
+
+# ---------------------------------------------------------------------------
+# 3.4 Transactions and TTL (TXN, TTL)
+# ---------------------------------------------------------------------------
+
+[[finding]]
+id = "TXN-01"
+title = "Commit writes puts then deletes in separate append_batch calls; crash between leaves a torn commit"
+area = "transactions"
+severity = "high"
+phase = 3
+status = "open"
+sources = ["audit-2026-09-23#15", "review-2026-09-07#R02"]
+evidence = [
+  "crates/prkdb/src/transaction.rs:415-422",
+  "crates/prkdb/src/storage/wal_adapter.rs:482-508,547-563",
+]
+
+[[finding]]
+id = "TXN-02"
+title = "Indexed \"atomic\" transaction loops over independent puts"
+area = "transactions"
+severity = "high"
+phase = 3
+status = "open"
+sources = ["review-2026-09-07#R03"]
+evidence = ["crates/prkdb/src/indexed_storage.rs:3308-3322,3354-3362"]
+
+[[finding]]
+id = "TXN-03"
+title = "Serializable read set keeps only the last read hash; ReadCommitted writers bypass the barrier, losing updates"
+area = "transactions"
+severity = "high"
+phase = 3
+status = "open"
+sources = ["audit-2026-09-23#15", "review-2026-09-07#R04"]
+evidence = ["crates/prkdb/src/transaction.rs:275-281,370-374,417,422"]
+
+[[finding]]
+id = "TXN-04"
+title = "Default isolation is ReadCommitted; D5 makes Serializable the default"
+area = "transactions"
+severity = "medium"
+phase = 3
+status = "open"
+evidence = ["crates/prkdb/src/transaction.rs:131"]
+tripwire = "test:crates/prkdb/tests/tripwires.rs::txn04_default_isolation_is_read_committed_tripwire"
+
+[[finding]]
+id = "TTL-01"
+title = "Expiry deletes without re-checking the version; value and TTL metadata written non-atomically"
+area = "ttl"
+severity = "medium"
+phase = 3
+status = "open"
+sources = ["audit-2026-09-23#21", "docs-audit-2026-09-23"]
+evidence = ["crates/prkdb/src/ttl.rs:180,197,270"]
+
+# ---------------------------------------------------------------------------
+# 3.5 Raft and cluster (RFT)
+# ---------------------------------------------------------------------------
+
+[[finding]]
+id = "RFT-01"
+title = "current_term/voted_for start at 0/None and are never persisted; double vote produces two leaders"
+area = "raft"
+severity = "critical"
+phase = 4
+status = "open"
+evidence = ["crates/prkdb/src/raft/node.rs:278-279"]
+
+[[finding]]
+id = "RFT-02"
+title = "Raft log never reloaded; entries stored under a random UUID without index/term"
+area = "raft"
+severity = "critical"
+phase = 4
+status = "open"
+sources = ["audit-2026-09-23#3"]
+evidence = [
+  "crates/prkdb/src/raft/node.rs:285",
+  "crates/prkdb/src/storage/wal_adapter.rs:964",
+]
+
+[[finding]]
+id = "RFT-03"
+title = "Commit index computed by ascending sort()/indices[len/2]; wrong majority on even node counts"
+area = "raft"
+severity = "critical"
+phase = 4
+status = "open"
+sources = ["audit-2026-09-23#4"]
+evidence = ["crates/prkdb/src/raft/node.rs:144", "crates/prkdb/src/raft/node.rs:833"]
+tripwire = "test:crates/prkdb/src/raft/node.rs::rft03_even_cluster_commits_without_majority_tripwire"
+
+[[finding]]
+id = "RFT-04"
+title = "log_start_index ignored after compaction/snapshot install; apply loop advances last_applied over gaps"
+area = "raft"
+severity = "critical"
+phase = 4
+status = "open"
+sources = ["audit-2026-09-23#5"]
+evidence = ["crates/prkdb/src/raft/node.rs:824,1355,1446,1461,1797"]
+
+[[finding]]
+id = "RFT-05"
+title = "Commit waiters keyed by index only; not failed on step-down, so a deposed leader's client can see another leader's entry"
+area = "raft"
+severity = "high"
+phase = 4
+status = "open"
+sources = ["audit-2026-09-23#6"]
+evidence = ["crates/prkdb/src/raft/node.rs:378-396"]
+
+[[finding]]
+id = "RFT-06"
+title = "ReadIndex heartbeat sends prev_log_index:0 with leader_commit; no no-op on election lets a linearizable read miss an acked write"
+area = "raft"
+severity = "high"
+phase = 4
+status = "open"
+sources = ["audit-2026-09-23#7"]
+evidence = ["crates/prkdb/src/raft/node.rs:500-510,552-559"]
+
+[[finding]]
+id = "RFT-07"
+title = "Failed InstallSnapshot counts toward commit; restore never clears old keys; stale snapshots accepted"
+area = "raft"
+severity = "high"
+phase = 4
+status = "open"
+sources = ["audit-2026-09-23#8"]
+evidence = [
+  "crates/prkdb/src/raft/service.rs:188",
+  "crates/prkdb/src/raft/state_machine.rs:219",
+]
+
+[[finding]]
+id = "RFT-08"
+title = "RPC client never sends x-prkdb-cluster-secret; mTLS mode configures no server TLS, so cluster cannot elect"
+area = "raft"
+severity = "medium"
+phase = 4
+status = "open"
+sources = ["audit-2026-09-23#20"]
+evidence = [
+  "crates/prkdb/src/raft/rpc_client.rs",
+  "crates/prkdb/src/bin/prkdb-server.rs",
+]
+
+[[finding]]
+id = "RFT-09"
+title = "a_committed_write_replicates_to_every_node failed the unmutated baseline in CI run 34021601202"
+area = "raft"
+severity = "medium"
+phase = 4
+status = "open"
+sources = ["review-2026-09-07#R11"]
+evidence = ["crates/prkdb/tests/in_process_cluster.rs:87"]
+
+# ---------------------------------------------------------------------------
+# 3.6 Schema, release, security (SCH, REL)
+# ---------------------------------------------------------------------------
+
+[[finding]]
+id = "SCH-01"
+title = "Schema collection name joined into a path allows writes outside the registry dir"
+area = "schema"
+severity = "high"
+phase = 0
+status = "verified"
+security = true
+sources = ["review-2026-09-07#R09"]
+evidence = ["crates/prkdb-schema/src/storage.rs:240-245,295-307"]
+regression_tests = ["test:crates/prkdb-schema/tests/collection_names.rs::sch01_traversal_names_are_rejected_before_any_write", "test:crates/prkdb-schema/tests/collection_names.rs::sch01_malformed_descriptor_is_rejected_before_any_write", "test:crates/prkdb-schema/tests/collection_names.rs::sch01_case_insensitive_collision_is_rejected_before_any_write", "test:crates/prkdb-schema/tests/collection_names.rs::sch01_storage_level_put_rejects_unsafe_names_before_any_write", "test:crates/prkdb-schema/tests/collection_names.rs::sch01_load_fails_closed_on_corrupt_index_with_unsafe_name"]
+changes = ["87efc53", "82f3351", "fd83391"]
+ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35883454867"
+
+[[finding]]
+id = "SCH-02"
+title = "Schema reload accepts missing descriptors; non-atomic writes; concurrent registrations can reuse a version"
+area = "schema"
+severity = "high"
+phase = 2
+status = "open"
+sources = ["review-2026-09-07#R10"]
+evidence = ["crates/prkdb-schema/src/storage.rs:198-222,283-319"]
+
+[[finding]]
+id = "REL-01"
+title = "prkdb-client path dep has no version; dry-run failures suppressed; validate_all.sh reports success on failure"
+area = "release"
+severity = "high"
+phase = 5
+status = "open"
+sources = ["review-2026-09-07#R12"]
+evidence = [".github/workflows/release.yml:86-104", "scripts/validate_all.sh"]
+
+# ---------------------------------------------------------------------------
+# 3.7 Tests and CI (TST)
+# ---------------------------------------------------------------------------
+
+[[finding]]
+id = "TST-01"
+title = "Chaos monkey tolerates 20% of acknowledged writes missing"
+area = "tests"
+severity = "high"
+phase = 4
+status = "open"
+evidence = ["crates/prkdb/tests/raft_chaos_tests.rs:1066"]
+
+[[finding]]
+id = "TST-02"
+title = "Linearizability workloads use 1 writer, 1 reader, ~25 ops; failed reads dropped"
+area = "tests"
+severity = "medium"
+phase = 4
+status = "open"
+
+[[finding]]
+id = "TST-03"
+title = "No restart/crash testing against a reference model"
+area = "tests"
+severity = "medium"
+phase = 1
+status = "open"
+
+[[finding]]
+id = "TST-04"
+title = "e2e_throughput_bench not declared harness = false; Criterion main likely never runs"
+area = "tests"
+severity = "low"
+phase = 1
+status = "open"
+
+[[finding]]
+id = "TST-05"
+title = "No power-loss (unsynced-data) testing; needs the WAL routed through Vfs"
+area = "tests"
+severity = "medium"
+phase = 2
+status = "open"
+
+[[finding]]
+id = "TST-06"
+title = "No deterministic simulation of the cluster"
+area = "tests"
+severity = "medium"
+phase = 4
+status = "open"
+
+[[finding]]
+id = "TST-07"
+title = "No fuzzing of WAL record, segment, snapshot, and proto decoding"
+area = "tests"
+severity = "low"
+phase = 2
+status = "open"
+
+# ---------------------------------------------------------------------------
+# 3.8 Documentation (DOC)
+# ---------------------------------------------------------------------------
+
+[[finding]]
+id = "DOC-01"
+title = "Cluster docs and compose files misdescribe multi-node setup (env vars, peer auth, metrics auth)"
+area = "docs"
+severity = "high"
+phase = 0
+status = "verified"
+sources = ["docs-audit-2026-09-23"]
+regression_tests = ["script:scripts/check_doc_claims.sh"]
+changes = ["27bd816", "6ebaaf5", "dcd2a6b"]
+ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35883454867"
+
+[[finding]]
+id = "DOC-02"
+title = "Rust client samples use PrkDbClient::new without credentials; Python client has no credential parameter"
+area = "docs"
+severity = "high"
+phase = 5
+status = "open"
+sources = ["docs-audit-2026-09-23"]
+
+[[finding]]
+id = "DOC-03"
+title = "Transactions, TTL, secondary-index, custom-adapter, and ORM doc samples do not compile"
+area = "docs"
+severity = "high"
+phase = 5
+status = "open"
+sources = ["docs-audit-2026-09-23"]
+
+[[finding]]
+id = "DOC-04"
+title = "Global --credential flag ignored by schema/codegen subcommands"
+area = "docs"
+severity = "medium"
+phase = 5
+status = "open"
+sources = ["docs-audit-2026-09-23"]
+evidence = [
+  "crates/prkdb-cli/src/main.rs:283",
+  "crates/prkdb-cli/src/commands/schema.rs:97",
+]
+
+[[finding]]
+id = "DOC-05"
+title = "README CLI commands and binary name do not exist; referenced examples missing"
+area = "docs"
+severity = "medium"
+phase = 5
+status = "open"
+sources = ["docs-audit-2026-09-23"]
+
+[[finding]]
+id = "DOC-06"
+title = "Rust version stated as 1.75+/1.95+ while the actual toolchain is 1.98"
+area = "docs"
+severity = "low"
+phase = 0
+status = "verified"
+sources = ["docs-audit-2026-09-23"]
+regression_tests = ["script:scripts/check_doc_claims.sh"]
+changes = ["27bd816", "6ebaaf5"]
+ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35883454867"
+
+[[finding]]
+id = "DOC-07"
+title = "prkdb_writer_healthy alert only exported by prkdb-cli serve; /metrics needs Admin; capability split undocumented"
+area = "docs"
+severity = "medium"
+phase = 5
+status = "open"
+sources = ["docs-audit-2026-09-23"]
+
+[[finding]]
+id = "DOC-08"
+title = "Missing pages: consumer groups, Docker, CLI reference, Raft ops, troubleshooting, Python client, upgrade"
+area = "docs"
+severity = "medium"
+phase = 5
+status = "open"
+sources = ["docs-audit-2026-09-23"]
+
+[[finding]]
+id = "DOC-09"
+title = "Unsourced performance claims (10x less resources, ~10 MB binary, <1s startup, 99.4% write success)"
+area = "docs"
+severity = "low"
+phase = 0
+status = "verified"
+sources = ["docs-audit-2026-09-23"]
+regression_tests = ["script:scripts/check_doc_claims.sh"]
+changes = ["27bd816", "6ebaaf5"]
+ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35883454867"
+
+[[finding]]
+id = "DOC-10"
+title = "ignoreDeadLinks: true hides orphaned methodology/status pages"
+area = "docs"
+severity = "low"
+phase = 5
+status = "open"
+sources = ["docs-audit-2026-09-23"]
+
+[[finding]]
+id = "DOC-11"
+title = "Transactions page claims Serializable is the default; code defaults to ReadCommitted"
+area = "docs"
+severity = "medium"
+phase = 0
+status = "verified"
+sources = ["docs-audit-2026-09-23"]
+regression_tests = ["script:scripts/check_doc_claims.sh"]
+changes = ["27bd816", "6ebaaf5"]
+ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35883454867"
+
+[[finding]]
+id = "DOC-12"
+title = "Nothing in CI runs the documented deploy recipes (docker compose up, 3-node setup)"
+area = "docs"
+severity = "medium"
+phase = 5
+status = "open"
+sources = ["docs-audit-2026-09-23"]
+
+# ---------------------------------------------------------------------------
+# Phase gates (spec §7)
+# ---------------------------------------------------------------------------
+
+[[finding]]
+id = "RFT-10"
+title = "CLUSTER_NODES rejects hostnames; 3-node compose cluster cannot start"
+area = "raft"
+severity = "high"
+phase = 4
+status = "open"
+sources = ["batch-e-review-2026-09-23"]
+evidence = ["crates/prkdb/src/bin/prkdb-server.rs:366"]
+
+[[finding]]
+id = "TST-08"
+title = "replication_tests binds fixed port 13197 and fails under parallel nextest runs"
+area = "tests"
+severity = "medium"
+phase = 0
+status = "verified"
+sources = ["batch-f-2026-09-23"]
+evidence = ["crates/prkdb/tests/replication_tests.rs:477"]
+regression_tests = ["test:crates/prkdb/tests/replication_tests.rs::test_replication_state_tracking"]
+changes = ["b6a6675"]
+ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35883454867"
+
+[[phase]]
+id = 0
+title = "Honesty and tracking"
+status = "gate_passed"
+gate = [
+  "remediation check and pre-push-check.sh green locally",
+  "phase PR sequence (§5)",
+  "Phase 0 findings verified via ci_evidence",
+  "the status page goes live with this push",
+]
+gate_evidence = ["https://github.com/prk-Jr/prkdb/actions/runs/35883454867"]
+
+[[phase]]
+id = 1
+title = "Harness and baseline"
+status = "not_started"
+gate = [
+  "blocking profile green",
+  "discovery reproduces STO-01",
+  "meta-test green",
+  "baseline committed",
+  "nextest in CI",
+  "then phase PR sequence",
+]
+
+[[phase]]
+id = 2
+title = "Format v2 and single-node root fixes"
+status = "not_started"
+gate = [
+  "all Phase 2 findings verified",
+  "Phase 2 blocking profile (§7.1) at 10k seeds green in both modes",
+  "golden-dir compat check green",
+  "Phase 2 durable baseline (§6.1) committed",
+  "perf gate green or perf_notes recorded",
+]
+
+[[phase]]
+id = 3
+title = "Semantics"
+status = "not_started"
+gate = [
+  "Phase 3 findings verified",
+  "Phase 3 blocking profile (§7.1) at 10k seeds green in both modes",
+  "existing WGL/Jepsen workloads green",
+  "perf gate green or perf_notes recorded",
+]
+
+[[phase]]
+id = 4
+title = "Raft"
+status = "not_started"
+gate = [
+  "Phase 4 findings verified",
+  "simulation 10k seeds green",
+  "raft/ format frozen and added to storage-compat",
+  "experimental label removed from clustering only if all of the above hold",
+]
+
+[[phase]]
+id = 5
+title = "Documentation and release"
+status = "not_started"
+gate = [
+  "all DOC/REL verified",
+  "docs build strict",
+  "compose smoke green",
+]

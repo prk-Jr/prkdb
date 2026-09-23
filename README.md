@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/prk-Jr/prkdb/actions/workflows/ci.yml/badge.svg)](https://github.com/prk-Jr/prkdb/actions/workflows/ci.yml)
 [![Chaos Tests](https://github.com/prk-Jr/prkdb/actions/workflows/chaos-tests.yml/badge.svg)](https://github.com/prk-Jr/prkdb/actions/workflows/chaos-tests.yml)
-[![Rust](https://img.shields.io/badge/Rust-1.95+-orange)](https://blog.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.98+-orange)](https://blog.rust-lang.org/)
 
 Docs: https://prk-jr.github.io/prkdb/
 
@@ -16,14 +16,14 @@ Docs: https://prk-jr.github.io/prkdb/
 - **ACID Transactions** - Commit/rollback, savepoints, conflict detection
 - **TTL/Expiration** - Auto-expire records after configurable duration
 - **Secondary Indexes** - Type-safe queries with `#[index]` macro
-- **Raft consensus** - Multi-node distributed replication with Pre-Vote protocol
-- **Advanced Sharding** - Consistent hashing and range-based partitioning
-- **Read Consistency Levels** - Linearizable, stale, and follower reads
-- **Kafka-style consumers** - Consumer groups with offset tracking
+- **Raft consensus** - Multi-node distributed replication with Pre-Vote protocol *(experimental — see [status](https://prk-jr.github.io/prkdb/status/remediation))*
+- **Advanced Sharding** - Consistent hashing and range-based partitioning *(experimental — see [status](https://prk-jr.github.io/prkdb/status/remediation))*
+- **Read Consistency Levels** - Linearizable, stale, and follower reads *(experimental — see [status](https://prk-jr.github.io/prkdb/status/remediation))*
+- **Kafka-style consumers** - Consumer groups with offset tracking *(experimental — see [status](https://prk-jr.github.io/prkdb/status/remediation))*
 - **ORM layer** - SQLite, PostgreSQL, MySQL support
 - **Type-safe collections** - `#[derive(Collection)]` macro
 - **Built-in monitoring** - Prometheus + Grafana dashboards
-- **Checkpoint Recovery** - Fast startup with incremental WAL recovery
+- **Checkpoint Recovery** - Fast startup with incremental WAL recovery *(known issue: [STO-01](https://prk-jr.github.io/prkdb/status/remediation))*
 
 ## 🧱 Modular Architecture
 
@@ -748,28 +748,60 @@ let joined = db.query::<Order>()
 ## Distributed Cluster
 
 ### One-Command Start
+
+`./scripts/start_cluster.sh` starts a **dev-only, unauthenticated** 3-node cluster
+(`PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1`) — see below.
+
 ```bash
 ./scripts/start_cluster.sh
 ```
 
+`prkdb-server` refuses to start a multi-node `CLUSTER_NODES` unless one of
+`PRKDB_CLUSTER_SECRET`, `PRKDB_TLS_CLIENT_CA`, or `PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1`
+is set. Today, only `PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1` actually forms a working
+cluster: nothing in the codebase sends the cluster-secret header to peers, and
+`prkdb-server` does not configure peer TLS even when `PRKDB_TLS_CLIENT_CA` is set —
+setting either of those two variables passes the startup check but peers still reject
+each other and no leader is elected
+(known issue: [RFT-08](https://prk-jr.github.io/prkdb/status/remediation)). Mutual TLS
+for peers currently only works with `prkdb-cli serve`.
+
+| Variable | Purpose |
+|---|---|
+| `PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1` | The only mode that currently forms a cluster. **Development on a trusted network only** — any caller that can reach the port can issue Raft RPCs. |
+| `PRKDB_CLUSTER_SECRET` / `PRKDB_TLS_CLIENT_CA` | Satisfy the startup check but do not currently authenticate peers (RFT-08) |
+| `PRKDB_BOOTSTRAP_TOKEN` | Creates the first admin principal on an empty data directory; ignored once any principal exists; use the same value on every node |
+| `PRKDB_METRICS_ADDR` | Metrics bind address; use `0.0.0.0:<port>` inside containers |
+
+`/metrics` requires an Admin bearer token: `curl -H "Authorization: Bearer $PRKDB_BOOTSTRAP_TOKEN" http://localhost:9091/metrics`.
+
 ### Manual Setup
+
+Dev-only, unauthenticated peers (see above):
+
 ```bash
 # Terminal 1
 NODE_ID=1 \
 CLUSTER_NODES=1@127.0.0.1:8080,2@127.0.0.1:8081,3@127.0.0.1:8082 \
 STORAGE_PATH=/tmp/prkdb/node1 \
+PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1 \
+PRKDB_BOOTSTRAP_TOKEN=change-me \
 cargo run --release -p prkdb --bin prkdb-server
 
 # Terminal 2
 NODE_ID=2 \
 CLUSTER_NODES=1@127.0.0.1:8080,2@127.0.0.1:8081,3@127.0.0.1:8082 \
 STORAGE_PATH=/tmp/prkdb/node2 \
+PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1 \
+PRKDB_BOOTSTRAP_TOKEN=change-me \
 cargo run --release -p prkdb --bin prkdb-server
 
 # Terminal 3
 NODE_ID=3 \
 CLUSTER_NODES=1@127.0.0.1:8080,2@127.0.0.1:8081,3@127.0.0.1:8082 \
 STORAGE_PATH=/tmp/prkdb/node3 \
+PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1 \
+PRKDB_BOOTSTRAP_TOKEN=change-me \
 cargo run --release -p prkdb --bin prkdb-server
 ```
 
@@ -920,7 +952,7 @@ cargo test --test corruption_tests -- --ignored --nocapture
 ```
 
 **Chaos Monkey Results:**
-- ✅ 99.4% write success rate during active chaos
+- ✅ High write success rate maintained during active chaos — see [benchmark methodology](docs/benchmarks/methodology.md) for measured figures and their status
 - ✅ 100% data integrity after stabilization
 - ✅ Survives up to 2 concurrent node failures (maintains quorum)
 
@@ -930,7 +962,7 @@ cargo test --test corruption_tests -- --ignored --nocapture
 |----------|--------|
 | Local Benchmarks | ✅ Raw PrkDB and Kafka reference artifacts published in CI |
 | Chaos Engineering | ✅ 19 tests (Raft + Jepsen + Extended + Corruption) |
-| Raft Cluster | ✅ 5-node chaos monkey with 99.4% success |
+| Raft Cluster | ✅ 5-node chaos monkey — see [benchmark methodology](docs/benchmarks/methodology.md) |
 | Storage Backends | ✅ 8 tests |
 | ORM Layer | ✅ 15 tests |
 | Sharding | ✅ 7 tests (ConsistentHash + Range) |

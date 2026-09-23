@@ -197,6 +197,20 @@ impl FileSchemaStorage {
         info!("Loading {} schemas from disk", schemas.len());
 
         for schema in schemas {
+            // Fail closed: a corrupt or tampered index must not let an unsafe
+            // collection name reach `descriptor_path` (SCH-01). We refuse
+            // rather than try to guess a safe interpretation: there is no
+            // deployed data yet, so failing loudly is strictly better than
+            // silently misreading the index.
+            crate::names::validate_collection_name(&schema.collection).map_err(|_| {
+                SchemaError::Storage(format!(
+                    "corrupt schema index: invalid collection name {:?}; the registry was \
+                     written by an older PrkDB that accepted unsafe names — remove or rename \
+                     the entry in schemas.json",
+                    crate::names::truncate_for_error(&schema.collection)
+                ))
+            })?;
+
             // Load the descriptor from its file
             let descriptor_path = self.descriptor_path(&schema.collection, schema.version);
 
@@ -292,6 +306,8 @@ impl FileSchemaStorage {
 #[async_trait]
 impl SchemaStorage for FileSchemaStorage {
     async fn put(&self, schema: &Schema) -> SchemaResult<()> {
+        crate::names::validate_collection_name(&schema.collection)?;
+
         // Save descriptor to file
         let descriptor_path = self.descriptor_path(&schema.collection, schema.version);
 

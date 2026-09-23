@@ -1,0 +1,49 @@
+name: Remediation Gate
+
+# Dispatched by the maintainer against a phase PR's head ref (spec §5, step 3).
+# Must exist on main to be dispatchable, which is why it ships in Phase 0.
+run-name: Remediation gate — phase ${{ inputs.phase }} @ ${{ inputs.ref }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to verify (phase PR head)
+        required: true
+      phase:
+        description: Phase number (0-5)
+        required: true
+        type: choice
+        options: ['0', '1', '2', '3', '4', '5']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: remediation-gate-${{ inputs.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ledger-and-tests:
+    name: Ledger and Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      - run: cargo xtask remediation check
+      - run: cargo test --workspace --no-fail-fast
+  # Phase 1 adds a sharded `harness` job here (Task 1.14).

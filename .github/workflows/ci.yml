@@ -432,6 +432,21 @@ jobs:
         run: bash scripts/check_chaos_tests_run.sh
 
 
+  remediation:
+    name: Remediation Ledger
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      # The ledger is the only record of what is fixed. A finding cannot be marked
+      # fixed without a regression test that exists and is not ignored (spec §4.2).
+      - run: cargo xtask remediation check
+      - run: cargo xtask remediation render --check
+      - run: bash scripts/check_doc_claims.sh
+
+
   nightly-slow-tests:
     name: Nightly Slow Tests
     runs-on: ubuntu-latest
