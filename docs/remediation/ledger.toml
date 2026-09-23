@@ -367,12 +367,13 @@ title = "Schema collection name joined into a path allows writes outside the reg
 area = "schema"
 severity = "high"
 phase = 0
-status = "fixed"
+status = "verified"
 security = true
 sources = ["review-2026-09-07#R09"]
 evidence = ["crates/prkdb-schema/src/storage.rs:240-245,295-307"]
 regression_tests = ["test:crates/prkdb-schema/tests/collection_names.rs::sch01_traversal_names_are_rejected_before_any_write", "test:crates/prkdb-schema/tests/collection_names.rs::sch01_malformed_descriptor_is_rejected_before_any_write", "test:crates/prkdb-schema/tests/collection_names.rs::sch01_case_insensitive_collision_is_rejected_before_any_write", "test:crates/prkdb-schema/tests/collection_names.rs::sch01_storage_level_put_rejects_unsafe_names_before_any_write", "test:crates/prkdb-schema/tests/collection_names.rs::sch01_load_fails_closed_on_corrupt_index_with_unsafe_name"]
 changes = ["87efc53", "82f3351", "fd83391"]
+ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35883454867"
 
 [[finding]]
 id = "SCH-02"
@@ -465,10 +466,11 @@ title = "Cluster docs and compose files misdescribe multi-node setup (env vars, 
 area = "docs"
 severity = "high"
 phase = 0
-status = "fixed"
+status = "verified"
 sources = ["docs-audit-2026-09-23"]
 regression_tests = ["script:scripts/check_doc_claims.sh"]
 changes = ["27bd816", "6ebaaf5", "dcd2a6b"]
+ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35883454867"
 
 [[finding]]
 id = "DOC-02"
@@ -516,10 +518,11 @@ title = "Rust version stated as 1.75+/1.95+ while the actual toolchain is 1.98"
 area = "docs"
 severity = "low"
 phase = 0
-status = "fixed"
+status = "verified"
 sources = ["docs-audit-2026-09-23"]
 regression_tests = ["script:scripts/check_doc_claims.sh"]
 changes = ["27bd816", "6ebaaf5"]
+ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35883454867"
 
 [[finding]]
 id = "DOC-07"
@@ -545,10 +548,11 @@ title = "Unsourced performance claims (10x less resources, ~10 MB binary, <1s st
 area = "docs"
 severity = "low"
 phase = 0
-status = "fixed"
+status = "verified"
 sources = ["docs-audit-2026-09-23"]
 regression_tests = ["script:scripts/check_doc_claims.sh"]
 changes = ["27bd816", "6ebaaf5"]
+ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35883454867"
 
 [[finding]]
 id = "DOC-10"
@@ -565,10 +569,11 @@ title = "Transactions page claims Serializable is the default; code defaults to 
 area = "docs"
 severity = "medium"
 phase = 0
-status = "fixed"
+status = "verified"
 sources = ["docs-audit-2026-09-23"]
 regression_tests = ["script:scripts/check_doc_claims.sh"]
 changes = ["27bd816", "6ebaaf5"]
+ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35883454867"
 
 [[finding]]
 id = "DOC-12"
@@ -599,22 +604,24 @@ title = "replication_tests binds fixed port 13197 and fails under parallel nexte
 area = "tests"
 severity = "medium"
 phase = 0
-status = "fixed"
+status = "verified"
 sources = ["batch-f-2026-09-23"]
 evidence = ["crates/prkdb/tests/replication_tests.rs:477"]
 regression_tests = ["test:crates/prkdb/tests/replication_tests.rs::test_replication_state_tracking"]
 changes = ["b6a6675"]
+ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35883454867"
 
 [[phase]]
 id = 0
 title = "Honesty and tracking"
-status = "not_started"
+status = "gate_passed"
 gate = [
   "remediation check and pre-push-check.sh green locally",
   "phase PR sequence (§5)",
   "Phase 0 findings verified via ci_evidence",
   "the status page goes live with this push",
 ]
+gate_evidence = ["https://github.com/prk-Jr/prkdb/actions/runs/35883454867"]
 
 [[phase]]
 id = 1
