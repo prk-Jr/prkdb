@@ -326,7 +326,7 @@ The harness always runs a **blocking profile** (must be green; gates pushes) and
    - DOC-11 interim wording: *"Transactions currently default to `ReadCommitted`, which does not detect conflicts. Pass `IsolationLevel::Serializable` for conflict detection. Serializable becomes the default in an upcoming release."*
    - DOC-01: document `PRKDB_CLUSTER_SECRET` / `PRKDB_TLS_CLIENT_CA` and the bootstrap token; fix both compose files (peer secret, metrics bind, healthcheck auth, simple-compose port).
    - DOC-06 Rust version; DOC-09 unsourced claims removed or sourced.
-4. SCH-01: validate schema collection names (reject separators, `..`, absolute paths, control characters), encode to filesystem names, reject malformed descriptors before any write.
+4. SCH-01: validate schema collection names against an allowlist (reject separators, `..`, absolute paths, control characters), reject malformed descriptors before any write.
 5. `scripts/pre-push-check.sh` (§5.1).
 6. Tripwires for every finding that can be reproduced cheaply without the harness (at least STO-01, KEY-01, KEY-03, EVT-01, RFT-03, TXN-04).
 7. `.github/workflows/remediation-gate.yml` (`workflow_dispatch`, inputs `ref` and `phase`): runs `remediation check`, the workspace tests, and, when the phase has a profile (§7.1), the sharded harness at the gate seed count. With no profile it runs only the first two. It must be on `main` after Phase 0 so it can be dispatched against later phase PRs.

@@ -30,6 +30,10 @@ pub enum SchemaError {
     #[error("Invalid schema descriptor: {0}")]
     InvalidDescriptor(String),
 
+    /// Collection name is not a safe logical name
+    #[error("Invalid collection name {0:?}: use 1-128 characters from [A-Za-z0-9_.-], not starting with '.'")]
+    InvalidCollectionName(String),
+
     /// Storage error
     #[error("Storage error: {0}")]
     Storage(String),

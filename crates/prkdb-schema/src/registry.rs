@@ -40,6 +40,9 @@ impl<S: SchemaStorage> SchemaRegistry<S> {
         compatibility: CompatibilityMode,
         migration_id: Option<String>,
     ) -> SchemaResult<Schema> {
+        crate::names::validate_collection_name(collection)?;
+        crate::names::validate_descriptor(&schema_proto)?;
+
         info!("Registering schema for collection '{}'", collection);
 
         // Check if there's an existing schema

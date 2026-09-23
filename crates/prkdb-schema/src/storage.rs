@@ -292,6 +292,8 @@ impl FileSchemaStorage {
 #[async_trait]
 impl SchemaStorage for FileSchemaStorage {
     async fn put(&self, schema: &Schema) -> SchemaResult<()> {
+        crate::names::validate_collection_name(&schema.collection)?;
+
         // Save descriptor to file
         let descriptor_path = self.descriptor_path(&schema.collection, schema.version);
 
