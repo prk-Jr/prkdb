@@ -34,6 +34,11 @@ pub enum SchemaError {
     #[error("Invalid collection name {0:?}: use 1-128 characters from [A-Za-z0-9_.-], not starting with '.'")]
     InvalidCollectionName(String),
 
+    /// Collection name collides with an existing collection under case-folding
+    /// (e.g. `Users` vs `users` on a case-insensitive filesystem)
+    #[error("Collection name {name:?} collides with existing collection {existing:?} when case is ignored")]
+    CollectionNameConflict { name: String, existing: String },
+
     /// Storage error
     #[error("Storage error: {0}")]
     Storage(String),

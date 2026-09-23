@@ -1144,7 +1144,7 @@ impl<S: prkdb_schema::SchemaStorage + 'static> PrkDbServiceTrait for PrkDbGrpcSe
         self.validate_admin_token(&req.admin_token)?;
 
         tracing::info!(
-            "RegisterSchema: collection='{}', compatibility={:?}",
+            "RegisterSchema: collection={:?}, compatibility={:?}",
             req.collection,
             req.compatibility
         );

@@ -63,8 +63,11 @@ impl CompatibilityChecker {
         result
     }
 
-    /// Helper to decode schema bytes as either FileDescriptorSet or FileDescriptorProto
-    fn decode_descriptor(bytes: &[u8]) -> Result<FileDescriptorProto, String> {
+    /// Helper to decode schema bytes as either FileDescriptorSet or FileDescriptorProto.
+    ///
+    /// `pub(crate)` so `names::validate_descriptor` can reuse this decode logic
+    /// instead of duplicating it.
+    pub(crate) fn decode_descriptor(bytes: &[u8]) -> Result<FileDescriptorProto, String> {
         // Try decoding as FileDescriptorSet first
         if let Ok(set) = FileDescriptorSet::decode(bytes) {
             if let Some(file) = set.file.into_iter().next() {

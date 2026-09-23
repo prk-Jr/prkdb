@@ -43,6 +43,19 @@ impl<S: SchemaStorage> SchemaRegistry<S> {
         crate::names::validate_collection_name(collection)?;
         crate::names::validate_descriptor(&schema_proto)?;
 
+        // SCH-01 continuation: on case-insensitive filesystems, "users" and
+        // "Users" would map to the same `descriptors/` directory, so a new
+        // (i.e. not exactly-matching) collection whose name case-folds to an
+        // existing one is rejected before any write.
+        if let Some(conflict) = self.storage.list().await?.into_iter().find(|info| {
+            info.collection.eq_ignore_ascii_case(collection) && info.collection != collection
+        }) {
+            return Err(SchemaError::CollectionNameConflict {
+                name: crate::names::truncate_for_error(collection),
+                existing: crate::names::truncate_for_error(&conflict.collection),
+            });
+        }
+
         info!("Registering schema for collection '{}'", collection);
 
         // Check if there's an existing schema
@@ -179,7 +192,11 @@ mod tests {
     }
 
     fn create_empty_proto() -> Vec<u8> {
-        FileDescriptorProto::default().encode_to_vec()
+        FileDescriptorProto {
+            name: Some("test.proto".into()),
+            ..Default::default()
+        }
+        .encode_to_vec()
     }
 
     #[tokio::test]
@@ -238,5 +255,46 @@ mod tests {
 
         let schemas = registry.list().await.unwrap();
         assert_eq!(schemas.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_case_insensitive_name_collision_is_rejected() {
+        let registry = create_test_registry();
+
+        registry
+            .register(
+                "users",
+                create_empty_proto(),
+                CompatibilityMode::Backward,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let err = registry
+            .register(
+                "Users",
+                create_empty_proto(),
+                CompatibilityMode::Backward,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, SchemaError::CollectionNameConflict { .. }),
+            "{err:?}"
+        );
+
+        // Exact re-registration of the original name is unaffected.
+        let v2 = registry
+            .register(
+                "users",
+                create_empty_proto(),
+                CompatibilityMode::Backward,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(v2.version, 2);
     }
 }

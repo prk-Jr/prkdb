@@ -34,14 +34,14 @@
 
 mod compatibility;
 mod error;
-pub mod names;
+mod names;
 mod registry;
 mod storage;
 mod types;
 
 pub use compatibility::CompatibilityChecker;
 pub use error::{SchemaError, SchemaResult};
-pub use names::validate_collection_name;
+pub use names::{validate_collection_name, MAX_COLLECTION_NAME_LEN};
 pub use registry::SchemaRegistry;
 pub use storage::{FileSchemaStorage, InMemorySchemaStorage, SchemaStorage};
 pub use types::{CompatibilityMode, CompatibilityResult, Schema, SchemaInfo, SchemaVersion};
