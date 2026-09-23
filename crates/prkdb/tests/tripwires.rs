@@ -16,9 +16,13 @@ use std::sync::Arc;
 const CHILD_ENV: &str = "PRKDB_TRIPWIRE_CHILD";
 
 fn child_result(test_name: &str) -> String {
+    // The env var carries the exact test name so the child can confirm it's the
+    // process this call spawned; an incidentally-exported PRKDB_TRIPWIRE_CHILD in
+    // the parent's own environment then can't make the parent branch vacuously
+    // pass as if it were the child (see `is_child`).
     let out = std::process::Command::new(std::env::current_exe().unwrap())
         .args([test_name, "--exact", "--nocapture", "--test-threads=1"])
-        .env(CHILD_ENV, "1")
+        .env(CHILD_ENV, test_name)
         .output()
         .expect("spawn child");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -29,19 +33,25 @@ fn child_result(test_name: &str) -> String {
         .lines()
         .find_map(|l| {
             l.find("CHILD_RESULT=")
-                .map(|i| &l[i + "CHILD_RESULT=".len()..])
+                .map(|i| l[i + "CHILD_RESULT=".len()..].split_whitespace().next())
         })
+        .flatten()
         .map(str::to_owned)
         .unwrap_or_else(|| {
             panic!(
-                "child printed no result; stdout:\n{stdout}\nstderr:\n{}",
+                "child printed no result; status: {:?}; stdout:\n{stdout}\nstderr:\n{}",
+                out.status,
                 String::from_utf8_lossy(&out.stderr)
             )
         })
 }
 
-fn is_child() -> bool {
-    std::env::var_os(CHILD_ENV).is_some()
+/// True only when this process was spawned by `child_result` for `test_name`
+/// specifically. Checking the value (not just presence) of `CHILD_ENV` means an
+/// unrelated `PRKDB_TRIPWIRE_CHILD` exported in the parent's own environment
+/// can't make the parent take the child branch and vacuously pass.
+fn is_child(test_name: &str) -> bool {
+    std::env::var(CHILD_ENV).as_deref() == Ok(test_name)
 }
 
 fn wal_config(dir: &std::path::Path) -> WalConfig {
@@ -66,12 +76,20 @@ async fn sto01_checkpoint_drops_pre_checkpoint_keys_tripwire() {
     let b = WalStorageAdapter::open_async(wal_config(dir.path()))
         .await
         .unwrap();
-    assert_eq!(
-        b.get(&[b'k', 0]).await.unwrap(),
-        None,
-        "STO-01 appears fixed: invert this tripwire"
-    );
-    assert_eq!(b.get(&[b'k', 4]).await.unwrap(), Some(b"v".to_vec()));
+    // Checkpoint recovery replays only from `max_offset` onward, so every key
+    // written before the checkpoint is dropped on reopen. Count how many of the
+    // 5 keys survive rather than pinning exact indices: because all 5 keys route
+    // to the same segment (collection is "") and the recovery scan's bound is
+    // inclusive, asserting on a specific index (e.g. k0 vs k4) would fail for
+    // reasons unrelated to STO-01 itself (segment/routing changes, off-by-one
+    // fixes elsewhere) rather than tracking the bug this tripwire is for.
+    let mut recovered = 0;
+    for i in 0..5u8 {
+        if b.get(&[b'k', i]).await.unwrap().is_some() {
+            recovered += 1;
+        }
+    }
+    assert!(recovered < 5, "STO-01 appears fixed: invert this tripwire");
 }
 
 #[derive(Collection, Serialize, Deserialize, Clone, Debug)]
@@ -106,18 +124,27 @@ async fn key01_collections_share_primary_keys_tripwire() {
     })
     .await
     .unwrap();
-    let user = db.get::<TwUser>(&1).await.unwrap().unwrap();
-    assert_eq!(
-        user.name, "Project",
-        "KEY-01 appears fixed: invert this tripwire"
-    );
+    // Match rather than unwrap the result chain: a fix that makes `get` return an
+    // error or `None` for the colliding id (instead of quietly returning the
+    // wrong record) should also read as "fixed" here, not panic with an
+    // unrelated unwrap failure.
+    match db.get::<TwUser>(&1).await {
+        Ok(Some(user)) if user.name == "Project" => {}
+        other => panic!("KEY-01 appears fixed: invert this tripwire (got {other:?})"),
+    }
 }
 
 /// KEY-03: the default partitioner is seeded per process.
+///
+/// Blind spot: this also flips (falsely reading as "fixed") if ahash's
+/// runtime random seeding is disabled (e.g. building without the default
+/// `runtime-rng` feature, or pinning a fixed seed), since the partitioner would
+/// then hash deterministically across processes for reasons unrelated to
+/// KEY-03 being fixed in `DefaultPartitioner` itself.
 #[test]
 fn key03_partition_differs_across_processes_tripwire() {
     use prkdb::partitioning::{DefaultPartitioner, Partitioner};
-    if is_child() {
+    if is_child("key03_partition_differs_across_processes_tripwire") {
         let p = DefaultPartitioner::<String>::new().partition(&"user-42".to_string(), 1_000_000);
         println!("CHILD_RESULT={p}");
         return;
@@ -138,9 +165,15 @@ struct TwEvent {
 }
 
 /// EVT-01: the outbox sequence restarts at 1 in every process.
+///
+/// Blind spot: a fix that seeds `OUTBOX_SEQ` from persisted storage on startup
+/// would still restart at 1 here, because this child process never opens any
+/// storage — there is nothing to seed from. Such a fix would make this
+/// tripwire keep passing even though EVT-01 is fixed for real deployments, so
+/// the fixer must invert it by hand rather than rely on it turning red.
 #[test]
 fn evt01_outbox_sequence_restarts_per_process_tripwire() {
-    if is_child() {
+    if is_child("evt01_outbox_sequence_restarts_per_process_tripwire") {
         println!(
             "CHILD_RESULT={}",
             prkdb::outbox::make_outbox_id_for_type::<TwEvent>(None)

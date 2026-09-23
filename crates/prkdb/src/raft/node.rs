@@ -138,9 +138,10 @@ impl FollowerState {
 
 use super::state_machine::StateMachine;
 
-/// Match index replicated on a majority. Kept byte-for-byte equivalent to the
-/// previous inline code so the RFT-03 tripwire documents current behaviour.
-pub(crate) fn majority_match_index(indices: &mut [u64]) -> u64 {
+/// Intended: highest index held by a majority. BUG (RFT-03): ascending sort +
+/// `[len/2]` over-reports on even cluster sizes. Panics if empty (the leader's
+/// own index is always present).
+fn majority_match_index(indices: &mut [u64]) -> u64 {
     indices.sort_unstable();
     indices[indices.len() / 2]
 }
