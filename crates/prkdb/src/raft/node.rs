@@ -136,8 +136,15 @@ impl FollowerState {
     }
 }
 
-/// Core Raft node structure
 use super::state_machine::StateMachine;
+
+/// Intended: highest index held by a majority. BUG (RFT-03): ascending sort +
+/// `[len/2]` over-reports on even cluster sizes. Panics if empty (the leader's
+/// own index is always present).
+fn majority_match_index(indices: &mut [u64]) -> u64 {
+    indices.sort_unstable();
+    indices[indices.len() / 2]
+}
 
 /// Core Raft node structure
 pub struct RaftNode {
@@ -823,12 +830,7 @@ impl RaftNode {
         let log = self.log.read().await;
         indices.push(log.len() as u64);
 
-        // Sort to find median (majority)
-        indices.sort_unstable();
-
-        // Majority index is at position n/2 (for n+1 nodes including leader)
-        let majority_idx = indices.len() / 2;
-        let new_commit_index = indices[majority_idx];
+        let new_commit_index = majority_match_index(&mut indices);
 
         // Only update if the new commit index is for current term
         let mut commit_index = self.commit_index.write().await;
@@ -2569,5 +2571,20 @@ mod tests {
         );
         assert_eq!(node.get_state().await, RaftState::Candidate);
         assert_eq!(node.current_term().await, 5);
+    }
+}
+
+#[cfg(test)]
+mod rft03_tripwire {
+    use super::majority_match_index;
+
+    /// RFT-03 tripwire: asserts the BUG. 4 nodes, only 2 hold index 5, yet 5 is
+    /// reported as majority-replicated (correct answer: 1). When this fails, the
+    /// bug is fixed: invert it into a regression test and update the ledger.
+    #[test]
+    fn rft03_even_cluster_commits_without_majority_tripwire() {
+        assert_eq!(majority_match_index(&mut [1, 1, 5, 5]), 5);
+        // 2-node cluster: leader alone "commits".
+        assert_eq!(majority_match_index(&mut [0, 7]), 7);
     }
 }
