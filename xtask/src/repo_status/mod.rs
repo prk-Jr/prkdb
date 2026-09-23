@@ -235,10 +235,23 @@ fn build_dimension_report(
     passing_summary: &'static str,
 ) -> DimensionReport {
     if id == DimensionId::Verification {
-        let open = findings
+        let verification_findings: Vec<&Finding> = findings
             .iter()
             .filter(|finding| finding.dimension == DimensionId::Verification)
-            .count();
+            .collect();
+        let open = verification_findings.len();
+        // Derived from whichever findings the ledger collector actually produced
+        // (open-critical vs unreadable-ledger), not a single hard-coded sentence,
+        // so the summary always matches what's in `findings`.
+        let summary = if open > 0 {
+            verification_findings
+                .iter()
+                .map(|finding| finding.message.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        } else {
+            passing_summary.to_owned()
+        };
         return DimensionReport {
             id,
             status: if open > 0 {
@@ -251,11 +264,7 @@ fn build_dimension_report(
             } else {
                 Confidence::Low
             },
-            summary: if open > 0 {
-                "Open critical remediation findings; see docs/status/remediation.md.".to_owned()
-            } else {
-                passing_summary.to_owned()
-            },
+            summary,
         };
     }
 

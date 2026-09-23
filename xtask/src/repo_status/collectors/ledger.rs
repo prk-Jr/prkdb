@@ -9,9 +9,25 @@ pub(in super::super) fn collect(repo_root: &Path) -> Vec<Finding> {
     let Ok(text) = std::fs::read_to_string(repo_root.join("docs/remediation/ledger.toml")) else {
         return vec![];
     };
-    let Ok(ledger) = Ledger::parse(&text) else {
-        return vec![];
+    let ledger = match Ledger::parse(&text) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            return vec![Finding {
+                id: "remediation-ledger-unreadable".into(),
+                dimension: DimensionId::Verification,
+                severity: Severity::Warning,
+                confidence: Confidence::High,
+                message: format!("docs/remediation/ledger.toml failed to parse: {err}"),
+                evidence: vec![Evidence::new(
+                    "docs/remediation/ledger.toml",
+                    "ledger present but not parsable as TOML matching the schema",
+                )],
+            }];
+        }
     };
+    // `Status::Fixed` deliberately still counts as open here: "fixed" means the code
+    // change landed, not that it has been verified (spec §4.1) — only `Verified` (and
+    // the terminal `WontFix`/`Duplicate` states) close a finding out of this dimension.
     let open: Vec<_> = ledger
         .finding
         .iter()
@@ -112,5 +128,20 @@ status = "verified"
     fn missing_ledger_produces_no_findings() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(collect(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn unparsable_ledger_produces_a_warning_naming_the_parse_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_ledger(tmp.path(), "this is not valid toml [[[");
+
+        let findings = collect(tmp.path());
+
+        assert_eq!(findings.len(), 1);
+        let finding = &findings[0];
+        assert_eq!(finding.id, "remediation-ledger-unreadable");
+        assert_eq!(finding.dimension, DimensionId::Verification);
+        assert_eq!(finding.severity, Severity::Warning);
+        assert!(finding.message.contains("failed to parse"));
     }
 }
