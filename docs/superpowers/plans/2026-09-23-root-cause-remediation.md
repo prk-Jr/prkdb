@@ -33,7 +33,21 @@
 - **Finding workflow:** tripwire exists → change tripwire into a failing regression test → fix → test passes → ledger entry updated (`status`, `regression_tests`, `changes`) → `cargo xtask remediation check` passes → commit.
 - **Perf note:** for any task touching `crates/prkdb-core/src/wal/`, `crates/prkdb/src/storage/`, `indexed_storage.rs`, or `transaction.rs`, run the relevant Criterion bench before and after (`cargo bench -p prkdb --bench <name> -- --save-baseline before` / `--baseline before`) and put the delta in the commit body.
 - **Test command:** Phase 0 uses `cargo test`; from Task 1.1 use `cargo nextest run`.
-- **The hook `block-no-verify` rejects any git flag starting with `--no-`** (including `--no-edit`). Use `git commit --amend -C HEAD` to reuse a message.
+- **The hook `block-no-verify` rejects any shell command that contains `git commit` together with a `--no-…` flag or a `-n` anywhere in the same command text (e.g. `sed -n`, `grep -n`).** Run `git commit` as its own command; use `git commit --amend -C HEAD` to reuse a message.
+- **CI preamble.** Every new workflow job that builds `prkdb` (anything beyond `xtask`) starts with exactly the `test` job's setup from `.github/workflows/ci.yml`:
+  ```yaml
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+      - uses: actions/checkout@v4          # add `with: ref: ${{ inputs.ref }}` in remediation-gate.yml
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@1.98.1   # never @stable: it overrides rust-toolchain.toml
+      - uses: Swatinem/rust-cache@v2
+  ```
+  Jobs that only run `xtask` need checkout, `dtolnay/rust-toolchain@1.98.1`, and rust-cache. **`xtask` must never depend on `prkdb` or `prkdb-verify`**: `prkdb-proto`'s build script needs `protoc`, and the existing xtask-only jobs (`repo-status-snapshot`, `fmt`, `repo-audit.yml`) do not install it.
 
 ---
 
@@ -943,17 +957,19 @@ Expected: all pass (the existing tests use real `FileDescriptorProto` bytes).
 
 - [ ] **Step 5: Update ledger and commit**
 
-In `ledger.toml` for SCH-01: `status = "fixed"`, `regression_tests = ["test:crates/prkdb-schema/tests/collection_names.rs::sch01_traversal_names_are_rejected_before_any_write", "test:crates/prkdb-schema/tests/collection_names.rs::sch01_malformed_descriptor_is_rejected_before_any_write"]`, `changes = ["<this commit's SHA, filled by amend>"]`.
+In `ledger.toml` for SCH-01: `status = "fixed"`, `regression_tests = ["test:crates/prkdb-schema/tests/collection_names.rs::sch01_traversal_names_are_rejected_before_any_write", "test:crates/prkdb-schema/tests/collection_names.rs::sch01_malformed_descriptor_is_rejected_before_any_write"]`, `changes = ["<code commit SHA>"]` (set after the code commit).
 
+Code commit first, ledger as a separate follow-up commit (spec §5: fix → ledger update), so the recorded SHA stays valid:
 ```bash
-cargo xtask remediation check   # fails until changes is filled; commit first, then:
 git add crates/prkdb-schema docs/superpowers/specs/2026-09-23-root-cause-remediation-design.md
 git commit -m "fix: reject unsafe schema collection names and malformed descriptors"
-# put the SHA into changes, then:
-git add docs/remediation/ledger.toml && git commit --amend -C HEAD
-cargo xtask remediation check && cargo xtask remediation render && git add docs/status/remediation.md && git commit --amend -C HEAD
+git rev-parse --short HEAD        # put this SHA into SCH-01 `changes`
+cargo xtask remediation check
+cargo xtask remediation render
+git add docs/remediation/ledger.toml docs/status/remediation.md
+git commit -m "docs: mark SCH-01 fixed in remediation ledger"
 ```
-(Amending changes the SHA; record the SHA of the *code* commit before amending the ledger, or list the PR URL at phase-gate time. `changes` only needs to be non-empty and traceable.)
+Never amend a commit whose SHA is recorded in the ledger. This pattern applies to every finding in this plan.
 
 ---
 
@@ -1201,7 +1217,7 @@ Also fix line 69 ("under Serializable Isolation") to say "when `IsolationLevel::
 
 - [ ] **Step 4: DOC-09 — unsourced claims**
 
-Delete "10x less resource usage", "~10 MB binary", "<1 sec startup" from `docs/guide/streaming-kafka-comparison.md` (lines ~52-56 and ~181) and "99.4% write success" from `README.md` (~922), or replace each with a link to a measured result in `docs/benchmarks/methodology.md`. Run `grep -rn "10x\|10 MB\|99.4" README.md docs/guide` — expected: no matches.
+Delete "10x less" (including "(10x less)" at ~181), "~10 MB binary", "<1 sec startup" from `docs/guide/streaming-kafka-comparison.md` (lines ~52-56 and ~181) and "99.4% write success" from `README.md` (~922), or replace each with a link to a measured result in `docs/benchmarks/methodology.md`. Keep the benchmark caveat sentences that `xtask/src/repo_status/collectors/docs.rs` requires in README and the streaming doc. Add ` *(known issue: [STO-01](https://prk-jr.github.io/prkdb/status/remediation))*` to the README "Checkpoint Recovery" bullet (~26). Run `grep -rn "10x less\|10 MB\|99.4" README.md docs/guide` — expected: no matches.
 
 - [ ] **Step 5: DOC-01 — deployment docs and compose**
 
@@ -1261,7 +1277,7 @@ check "Serializable\*\* isolation mode by default" docs/guide
 check "Rust-1.95" README.md
 check "Rust 1.75" docs/guide
 check "99.4%" README.md
-check "10x less resource" docs/guide
+check "10x less" docs/guide
 grep -q "PRKDB_CLUSTER_SECRET" docs/guide/deployment.md || { echo "  ✗ deployment.md lacks PRKDB_CLUSTER_SECRET"; fail=1; }
 grep -q "PRKDB_CLUSTER_SECRET" docker-compose.yml || { echo "  ✗ docker-compose.yml lacks PRKDB_CLUSTER_SECRET"; fail=1; }
 exit $fail
@@ -1291,7 +1307,7 @@ git commit -m "docs: mark clustering experimental and correct misleading claims"
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
       # The ledger is the only record of what is fixed. A finding cannot be marked
       # fixed without a regression test that exists and is not ignored (spec §4.2).
@@ -1299,7 +1315,7 @@ git commit -m "docs: mark clustering experimental and correct misleading claims"
       - run: cargo xtask remediation render --check
       - run: bash scripts/check_doc_claims.sh
 ```
-Match the toolchain/cache actions the neighbouring jobs use (copy from the `check` job if they differ).
+This is an xtask-only job: no protoc needed (see Conventions).
 
 - [ ] **Step 2: Gate workflow**
 
@@ -1324,13 +1340,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo xtask remediation check
-      - run: cargo test --workspace
+      - run: cargo test --workspace --no-fail-fast
   # Phase 1 adds a sharded `harness` job here (Task 1.14).
 ```
 
@@ -1349,6 +1372,8 @@ step tests
 if command -v cargo-nextest >/dev/null; then cargo nextest run --workspace; else cargo test --workspace; fi
 if [ -d crates/prkdb-verify ]; then step harness; cargo xtask verify --profile blocking --seeds 200 --mode durable; fi
 step ledger;       cargo xtask remediation check && cargo xtask remediation render --check
+step repo-status;  cargo xtask repo-status snapshot --fail-on-objective-drift
+step readme-tests; cargo xtask readme-tests --check
 step doc-claims;   bash scripts/check_doc_claims.sh
 echo; echo "pre-push-check: all green"
 ```
@@ -1365,6 +1390,74 @@ Expected: `pre-push-check: all green`. Fix any fmt/clippy fallout in files this 
 git add .github/workflows/ci.yml .github/workflows/remediation-gate.yml scripts/pre-push-check.sh
 git commit -m "ci: add remediation ledger job, gate workflow, and pre-push check"
 ```
+
+---
+
+### Task 0.10b: `repo-status` reads the ledger (spec §4.3)
+
+**Files:**
+- Create: `xtask/src/repo_status/collectors/ledger.rs`
+- Modify: `xtask/src/repo_status/collectors/mod.rs`, `xtask/src/repo_status/mod.rs:237-244`
+
+Emits a **Warning** (not Error), so the Verification dimension turns red without tripping `--fail-on-objective-drift`, which counts only Error findings and would otherwise keep CI red until Phase 2.
+
+- [ ] **Step 1: Collector**
+
+```rust
+//! Verification dimension from the remediation ledger (spec §4.3): open critical
+//! findings make it red. Warning severity: visible, never fails objective-drift CI.
+
+use super::super::model::{Confidence, DimensionId, Evidence, Finding, Severity};
+use crate::remediation::model::{Ledger, Severity as LSev, Status};
+use std::path::Path;
+
+pub(in super::super) fn collect(repo_root: &Path) -> Vec<Finding> {
+    let Ok(text) = std::fs::read_to_string(repo_root.join("docs/remediation/ledger.toml")) else { return vec![] };
+    let Ok(ledger) = Ledger::parse(&text) else { return vec![] };
+    let open: Vec<_> = ledger
+        .finding
+        .iter()
+        .filter(|f| f.severity == LSev::Critical && !matches!(f.status, Status::Verified | Status::WontFix | Status::Duplicate))
+        .collect();
+    if open.is_empty() {
+        return vec![];
+    }
+    vec![Finding {
+        id: "open-critical-remediation-findings".into(),
+        dimension: DimensionId::Verification,
+        severity: Severity::Warning,
+        confidence: Confidence::High,
+        message: format!(
+            "{} critical remediation finding(s) not yet verified: {}",
+            open.len(),
+            open.iter().map(|f| f.id.as_str()).collect::<Vec<_>>().join(", ")
+        ),
+        evidence: vec![Evidence::new("docs/remediation/ledger.toml", "see docs/status/remediation.md")],
+    }]
+}
+```
+Register it: in `collectors/mod.rs` add `pub(super) mod ledger;` and in `collect_findings` add `findings.extend(ledger::collect(repo_root));`.
+
+- [ ] **Step 2: Dimension rule** — in `build_dimension_report`, replace the unconditional Verification early return with:
+```rust
+    if id == DimensionId::Verification {
+        let open = findings.iter().filter(|f| f.dimension == DimensionId::Verification).count();
+        return DimensionReport {
+            id,
+            status: if open > 0 { Status::Red } else { Status::Unknown },
+            confidence: if open > 0 { Confidence::High } else { Confidence::Low },
+            summary: if open > 0 {
+                "Open critical remediation findings; see docs/status/remediation.md.".to_owned()
+            } else {
+                passing_summary.to_owned()
+            },
+        };
+    }
+```
+
+- [ ] **Step 3: Test** — add a unit test in `ledger.rs` with a tempdir ledger holding one open critical and one verified critical; assert exactly one Warning finding naming only the open id. Run `cargo test -p xtask repo_status`, then `cargo xtask repo-status snapshot --fail-on-objective-drift` (exit 0), then `cargo xtask repo-status render` and include the regenerated `docs/status/repo-status.md`.
+
+- [ ] **Step 4: Commit** — `feat: derive repo-status verification from the remediation ledger`.
 
 ---
 
@@ -1449,6 +1542,9 @@ pub trait VfsFile: Send + Sync {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize>;
     fn set_len(&self, len: u64) -> io::Result<()>;
     fn len(&self) -> io::Result<u64>;
+    fn is_empty(&self) -> io::Result<bool> {
+        Ok(self.len()? == 0)
+    }
     /// Durably persist file contents written so far (fdatasync).
     fn sync_data(&self) -> io::Result<()>;
 }
@@ -2037,8 +2133,8 @@ pub struct WalSut {
     db: Option<WalStorageAdapter>,
 }
 
-fn config(dir: &PathBuf) -> WalConfig {
-    WalConfig { log_dir: dir.clone(), ..WalConfig::test_config() }
+fn config(dir: &std::path::Path) -> WalConfig {
+    WalConfig { log_dir: dir.to_path_buf(), ..WalConfig::test_config() }
 }
 
 impl WalSut {
@@ -2074,7 +2170,10 @@ impl Sut for WalSut {
         self.open().await
     }
     async fn crash(&mut self) -> anyhow::Result<()> {
-        // In-process crash: drop without flush. Acknowledged writes must survive.
+        // In-process "crash": drop without an explicit flush. NOTE: today's
+        // WalStorageAdapter::drop runs flush_on_last_handle_drop, so this behaves
+        // like a clean reopen. Real crash coverage comes from the SIGKILL test
+        // (Task 1.10) and PowerLoss (Task 2.5); do not read a green run as more.
         self.db = None;
         self.open().await
     }
@@ -2307,45 +2406,56 @@ Expected: 3 passed. **If `blocking_profile_is_green_on_current_code` fails**, ap
 
 ---
 
-### Task 1.9: `cargo xtask verify`
+### Task 1.9: Harness binary and `cargo xtask verify`
 
 **Files:**
+- Create: `crates/prkdb-verify/src/bin/verify.rs`
 - Create: `xtask/src/verify.rs`
-- Modify: `xtask/src/main.rs`, `xtask/Cargo.toml` (add `prkdb-verify = { path = "../crates/prkdb-verify" }`, `tokio = { workspace = true }`)
+- Modify: `xtask/src/main.rs` (no new xtask dependencies — see Conventions)
 
-- [ ] **Step 1: Write**
+- [ ] **Step 1: Harness binary** — `crates/prkdb-verify/src/bin/verify.rs`:
 
 ```rust
-//! `cargo xtask verify [--profile blocking|discovery] [--seed N] [--seeds K] [--ops M] [--mode durable]`
+//! verify [--profile blocking|discovery] [--seed N] [--seed-offset N] [--seeds K] [--ops M] [--mode durable]
 
 use anyhow::{bail, Result};
 use prkdb_verify::ops::Profile;
 use prkdb_verify::runner::run_seeds;
 use prkdb_verify::sut::WalSut;
 
-pub fn run(args: &[&str]) -> Result<()> {
+fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
     let mut profile = Profile::Blocking;
     let (mut first, mut seeds, mut ops) = (0u64, 200u64, 80usize);
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        let mut val = || it.next().copied().ok_or_else(|| anyhow::anyhow!("{a} needs a value"));
-        match *a {
-            "--profile" => profile = Profile::parse(val()?).ok_or_else(|| anyhow::anyhow!("bad profile"))?,
-            "--seed" => { first = val()?.parse()?; seeds = 1; }
+        let mut val = || it.next().cloned().ok_or_else(|| anyhow::anyhow!("{a} needs a value"));
+        match a.as_str() {
+            "--profile" => profile = Profile::parse(&val()?).ok_or_else(|| anyhow::anyhow!("bad profile"))?,
+            "--seed" => {
+                first = val()?.parse()?;
+                seeds = 1;
+            }
+            "--seed-offset" => first = val()?.parse()?,
             "--seeds" => seeds = val()?.parse()?,
             "--ops" => ops = val()?.parse()?,
-            "--mode" => { if val()? != "durable" { bail!("only durable mode exists until Phase 2a"); } }
+            "--mode" => {
+                if val()? != "durable" {
+                    bail!("only durable mode exists until Phase 2a");
+                }
+            }
             other => bail!("unknown argument {other}"),
         }
     }
+    let name = if profile == Profile::Blocking { "blocking" } else { "discovery" };
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let report = rt.block_on(run_seeds(WalSut::new, first, seeds, ops, profile))?;
-    println!("seeds={} checks={}", report.seeds, report.checks);
+    println!("profile={name} seeds={} checks={}", report.seeds, report.checks);
     if report.checks == 0 {
         bail!("vacuous run: no checks compared");
     }
     if let Some(f) = report.failure {
-        eprintln!("FAILED seed={} (replay: cargo xtask verify --profile {:?} --seed {} --ops {})", f.seed, profile, f.seed, ops);
+        eprintln!("FAILED seed={} (replay: cargo xtask verify --profile {name} --seed {} --ops {ops})", f.seed, f.seed);
         eprintln!("minimized ops: {:#?}", f.ops);
         eprintln!("mismatch: {:?}", f.mismatch);
         bail!("harness failure");
@@ -2353,14 +2463,34 @@ pub fn run(args: &[&str]) -> Result<()> {
     Ok(())
 }
 ```
-Main arm: `["verify", rest @ ..] => verify::run(rest),` and add `mod verify;`. Make `Profile` print lowercase: in the replay line use `if profile == Profile::Blocking { "blocking" } else { "discovery" }`.
 
-- [ ] **Step 2: Run**
+- [ ] **Step 2: xtask shim** — `xtask/src/verify.rs` (xtask stays free of prkdb and protoc):
 
-Run: `cargo xtask verify --seeds 50` → `seeds=50 checks=...`, exit 0.
-Run: `cargo xtask verify --profile discovery --seeds 50` → exits non-zero with a minimized sequence containing `Checkpoint`.
+```rust
+//! `cargo xtask verify ...` forwards to the prkdb-verify binary so xtask stays light.
 
-- [ ] **Step 3: Commit** — `feat: add cargo xtask verify`.
+use anyhow::{bail, Result};
+
+pub fn run(args: &[&str]) -> Result<()> {
+    let status = std::process::Command::new(env!("CARGO"))
+        .args(["run", "--release", "-q", "-p", "prkdb-verify", "--bin", "verify", "--"])
+        .args(args)
+        .status()?;
+    if !status.success() {
+        bail!("verify failed ({status})");
+    }
+    Ok(())
+}
+```
+In `main.rs`: `mod verify;`, arm `["verify", rest @ ..] => verify::run(rest),`, and a usage line.
+
+- [ ] **Step 3: Run**
+
+Run: `cargo xtask verify --seeds 50` → `profile=blocking seeds=50 checks=…`, exit 0.
+Run: `cargo xtask verify --profile discovery --seeds 50` → non-zero exit with a minimized sequence containing `Checkpoint`.
+Run: `cargo tree -p xtask | grep -c prkdb` → `0`.
+
+- [ ] **Step 4: Commit** — `feat: add harness binary and cargo xtask verify`.
 
 ---
 
@@ -2395,11 +2525,10 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-- [ ] **Step 2: Test** — spawns the child (`env!("CARGO_BIN_EXE_crash_child")`), reads stdout until `ACK 199`, sends `SIGKILL` (`child.kill()` sends SIGKILL on Unix), reopens with `open_async`, asserts `k0..k199` all present. Mark it `#[ignore = "slow: runs in nightly-slow-tests"]` (allowed category) and add it to the nightly job's test filter.
+- [ ] **Step 2: Test** — spawns the child (`env!("CARGO_BIN_EXE_crash_child")`), reads stdout until `ACK 199`, sends `SIGKILL` (`child.kill()` sends SIGKILL on Unix), reopens with `open_async`, asserts `k0..k199` all present. It takes a few seconds, so it runs on every PR (not `#[ignore]`d); add `| binary(sigkill)` to the nextest `process-spawning` filter. Gate the file with `#![cfg(unix)]`.
 
 ```rust
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "slow: runs in nightly-slow-tests"]
 async fn acknowledged_writes_survive_sigkill() {
     use std::io::{BufRead, BufReader};
     let dir = tempfile::tempdir().unwrap();
@@ -2427,20 +2556,20 @@ async fn acknowledged_writes_survive_sigkill() {
 }
 ```
 
-- [ ] **Step 3: Run once locally** — `cargo nextest run -p prkdb-verify --test sigkill --run-ignored all`. If it fails, this is STO-07 (acknowledgement before WAL write): turn it into an STO-07 tripwire (assert some key missing) instead, and tell the maintainer.
+- [ ] **Step 3: Run it five times** — `for i in 1 2 3 4 5; do cargo nextest run -p prkdb-verify --test sigkill || break; done`. If it fails **every** time: rename it `sto07_acknowledged_writes_lost_on_sigkill_tripwire`, invert the assertion (at least one key missing), set it as STO-07's `tripwire`, and tell the maintainer. If it fails **intermittently**: a tripwire would flake, so instead make the test return early unless `PRKDB_DISCOVERY=1` is set, run it in the nightly discovery step, record the observed loss rate in STO-07's `evidence`, and tell the maintainer. Never use `#[ignore]` for this (ledger invariant 4).
 - [ ] **Step 4: Commit** — `test: add SIGKILL crash check for acknowledged writes`.
 
 ---
 
-### Task 1.11: TST-01 — chaos allowance to zero
+### Task 1.11: TST-01 moves to Phase 4 (spec amendment)
 
-**Files:** `crates/prkdb/tests/raft_chaos_tests.rs:~1066`
+The chaos monkey loses a *random* amount of data, so before Raft is fixed it can be neither a deterministic tripwire nor a zero-loss test. It is also `#[ignore]`d ("needs a built prkdb-server binary"), which ledger invariant 4 forbids for tripwires, and `chaos-tests.yml:53` selects it by name.
 
-- [ ] **Step 1:** Read the assertion around line 1066. Change the tolerated missing fraction from 20 % to 0 (assert `missing.is_empty()`).
-- [ ] **Step 2:** Run it (it's chaos-gated): `cargo nextest run -p prkdb --test raft_chaos_tests --features chaos --run-ignored all`.
-  - If it **passes** at 0: TST-01 `fixed`; nothing else to do.
-  - If it **fails** (expected, RFT-02/RFT-04): rename the test with a `_tripwire` suffix and invert the assertion to `assert!(!missing.is_empty(), "RFT-02/04 appear fixed: invert this tripwire")`. Set it as the `tripwire` of RFT-02 in the ledger. TST-01 is `fixed` (the allowance is gone either way).
-- [ ] **Step 3: Commit** — `test: remove 20% loss allowance from chaos test (TST-01)`.
+- [ ] **Step 1:** In the spec, change TST-01's phase from 1 to 4 and its text to: *"Chaos monkey tolerates 20 % of acknowledged writes missing. Fixed in Phase 4 by asserting `missing == 0` once RFT-02/RFT-04 are fixed."* Move the TST-01 bullet from spec Phase 1 to 4d and add a revision-history row.
+- [ ] **Step 2:** In `ledger.toml`, set TST-01 `phase = 4`.
+- [ ] **Step 3:** Commit — `docs: move TST-01 to phase 4; random chaos loss cannot be a tripwire`.
+
+(Phase 4 changes `raft_chaos_tests.rs:~1070` from `assert!(verification_rate >= 0.8, …)` to `assert_eq!(missing, 0, …)` — `missing` is a counter — and records `ci-job:chaos-tests.yml/raft-chaos-tests` as TST-01's regression evidence.)
 
 ---
 
@@ -2475,15 +2604,18 @@ out=${1:?usage: capture_baseline.sh <out.toml>}
   echo "machine = \"$(uname -srm) / $(sysctl -n machdep.cpu.brand_string 2>/dev/null || grep -m1 'model name' /proc/cpuinfo | cut -d: -f2)\""
 } > "$out"
 for bench in e2e_throughput_bench; do
-  cargo bench -p prkdb --bench "$bench" -- --noplot 2>&1 | tee "/tmp/$bench.log" >/dev/null
+  # --output-format bencher prints one line per benchmark
+  # ("test <name> ... bench: <ns> ns/iter (+/- <ns>)"), which survives long names that
+  # Criterion's default output wraps onto two lines.
+  cargo bench -p prkdb --bench "$bench" -- --output-format bencher 2>/dev/null > "/tmp/$bench.log"
   echo "[$bench]" >> "$out"
-  grep -E '^[a-z_/0-9 -]+ +time:' "/tmp/$bench.log" | sed -E 's/^([^ ]+) +time: +\[[^ ]+ [^ ]+ ([^ ]+ [^ ]+).*/"\1" = "\2"/' >> "$out"
+  sed -nE 's/^test (.+) \.\.\. bench: +([0-9,]+) ns\/iter.*/"\1" = \2/p' "/tmp/$bench.log" | tr -d ',' >> "$out"
 done
 echo "wrote $out"
 ```
 Extend the `for bench in` list with every bench that covers a §6.1 row (`ls crates/prkdb/benches crates/prkdb-core/benches` and pick: put, batch put, get/index query, recovery, consumer poll). The 1 GiB recovery and 3-node rows need new benches. Add `crates/prkdb/benches/recovery_bench.rs` (write 1 GiB with `put_batch`, flush, time `open_async`) and `crates/prkdb/benches/cluster_write_bench.rs` (reuse `tests/helpers/in_process_cluster.rs` via `#[path]`), each with a `[[bench]] harness = false` entry.
 
-- [ ] **Step 3: Capture** — `scripts/capture_baseline.sh docs/benchmarks/baseline-2026-09.toml`; commit the file.
+- [ ] **Step 3: Capture** — `scripts/capture_baseline.sh docs/benchmarks/baseline-2026-09.toml`; confirm every bench in the log appears with a numeric ns/iter value; commit the file.
 - [ ] **Step 4: Commit** — `perf: record phase 1 benchmark baseline and fix e2e bench harness`.
 
 ---
@@ -2496,7 +2628,14 @@ Extend the `for bench in` list with every bench that covers a §6.1 row (`ls cra
 
 - [ ] **Step 1:** Check the current crate name: `cargo search iai-callgrind gungraun --limit 3`. Use whichever is maintained; pin its runner version to the library version.
 - [ ] **Step 2:** Bench functions for: `WalStorageAdapter::put` (1 KiB, 100 iterations, in a tempdir), `get` hit, `put_batch` of 100, `IndexedStorage::insert` with one index, `LogRecord` encode/decode.
-- [ ] **Step 3:** `perf-gate.yml` runs on `pull_request` to `main` (phase PRs only), on ubuntu: `sudo apt-get install -y valgrind`, install the runner, bench the **base SHA**, then the **head SHA** in the same job, and fail if any instruction count rises > 5 %. The job prints each delta; the PR author then records justified regressions as `perf_note` on the responsible finding.
+- [ ] **Step 3:** `perf-gate.yml` runs on `pull_request` to `main` (phase PRs only), on ubuntu: `sudo apt-get install -y valgrind`, install the runner, bench the **base SHA**, then the **head SHA** in the same job, and compute per-benchmark instruction deltas (use the CI preamble plus `sudo apt-get install -y valgrind`). **Override (spec §6.2):** a regression > 5 % fails the job unless the PR's diff to `docs/remediation/ledger.toml` adds or changes a non-empty `perf_note`:
+```bash
+if git diff "$BASE_SHA" "$HEAD_SHA" -- docs/remediation/ledger.toml | grep -qE '^\+perf_note = ".+"'; then
+  echo "regression justified by a ledger perf_note"; exit 0
+fi
+echo "instruction-count regression > 5% without a ledger perf_note"; exit 1
+```
+The job summary lists every delta either way.
 - [ ] **Step 4: Commit** — `ci: add deterministic instruction-count perf gate for phase PRs`.
 
 ---
@@ -2513,13 +2652,11 @@ Extend the `for bench in` list with every bench that covers a §6.1 row (`ls cra
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # CI preamble (plan Conventions): disk cleanup, checkout, protoc, rust 1.98.1, cache
       - run: cargo xtask verify --profile blocking --seeds 200 --mode durable
 ```
 
-- [ ] **Step 2: Nightly** — in `nightly-slow-tests` add `cargo xtask verify --profile blocking --seeds 20000` and a separate `continue-on-error: true` step `cargo xtask verify --profile discovery --seeds 2000`.
+- [ ] **Step 2: Nightly** — time it first: `time cargo xtask verify --seeds 200` locally, extrapolate to 20k, and create a dedicated `nightly-harness` job (schedule/dispatch only, CI preamble) with `timeout-minutes` = 1.5× the estimate; shard it like the gate job if that exceeds 60 minutes. Do not add it to the 45-minute `nightly-slow-tests` job. Add a `continue-on-error: true` step `cargo xtask verify --profile discovery --seeds 2000`. Add the nightly Criterion trend (spec §6.2): run the §6.1 benches with `--output-format bencher` and publish with `benchmark-action/github-action-benchmark@v1` (`tool: cargo`, `gh-pages-branch: bench-data`, `auto-push: true`, `fail-on-alert: false`).
 
 - [ ] **Step 3: Gate workflow** — add to `remediation-gate.yml`:
 ```yaml
@@ -2532,15 +2669,11 @@ Extend the `for bench in` list with every bench that covers a §6.1 row (`ls cra
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # CI preamble (plan Conventions), with checkout `ref: ${{ inputs.ref }}`
       # 10 shards x 1000 seeds = the 10k-seed gate (spec §5 step 3).
       - run: cargo xtask verify --profile blocking --seeds 1000 --seed-offset $(( ${{ matrix.shard }} * 1000 ))
 ```
-Add `--seed-offset N` to `xtask verify` (sets `first` without forcing `seeds = 1`).
+(`--seed-offset` is implemented in Task 1.9.)
 
 - [ ] **Step 4: Commit** — `ci: run crash/restart harness per PR, nightly, and at phase gates`.
 
@@ -2549,7 +2682,7 @@ Add `--seed-offset N` to `xtask verify` (sets `first` without forcing `seeds = 1
 ### Task 1.15: Phase 1 gate
 
 - [ ] `scripts/pre-push-check.sh` green (it now runs the harness).
-- [ ] Ledger: TST-01, TST-03, TST-04 `fixed` with evidence.
+- [ ] Ledger: TST-03, TST-04 `fixed` with evidence (TST-01 moved to Phase 4 by Task 1.11).
 - [ ] Push, open `Phase 1: harness and baseline` PR, CI green, dispatch `remediation-gate` with `phase=1`, record run URLs as `ci_evidence` / `harness` / `gate_evidence`, set `verified` / `gate_passed`, render, commit, push, maintainer merges.
 
 ---
@@ -2567,20 +2700,20 @@ Code-level steps for Tasks 2.2–2.19 are written into this file **after Task 2.
 - [ ] Decision rule (spec 2a): proceed if Fast loses ≤ 15 % vs the Phase 1 baseline and the single writer is not the bottleneck; otherwise **stop and report** to the maintainer with numbers and the sharded-with-global-sequence alternative.
 - [ ] Write the decision record; then expand Tasks 2.2–2.19 to code level in this plan and commit (`docs: expand phase 2 plan after WAL spike`).
 
-### Task 2.2: One WAL through `Vfs` with a writer thread (STO-06, STO-02)
-Failing test first: `crates/prkdb-verify/tests/harness.rs::durable_put_survives_power_loss` (fails today: no `Vfs`). Files: `crates/prkdb-core/src/wal/` (new `single_log.rs`, `segment.rs`), `crates/prkdb/src/storage/wal_adapter.rs` (switch to it), `SyncMode` wiring.
+### Task 2.2: One globally ordered WAL through `Vfs` with a writer thread (STO-06, STO-02, STO-05)
+Failing tests first: `crates/prkdb-verify/tests/harness.rs::durable_put_survives_power_loss` (fails today: no `Vfs`) and `crates/prkdb-core/tests/single_log.rs::replay_order_equals_append_order_across_segment_roll` (append three segments' worth of records from 8 tasks, reopen, replay yields exactly append order by global offset — STO-05). Files: `crates/prkdb-core/src/wal/single_log.rs`, `crates/prkdb-core/src/wal/segment.rs` (new), `crates/prkdb-core/src/wal/config.rs` (`SyncMode`; remove `segment_count`/`shard_count`), `crates/prkdb/src/storage/wal_adapter.rs` (switch to it).
 
 ### Task 2.3: CRC on open, torn-tail truncation, directory fsync (STO-04)
-Failing test: write records, corrupt the middle of the last record via `FaultFs`, reopen → earlier records readable, tail truncated, later appends visible after next reopen.
+Files: `crates/prkdb-core/src/wal/segment.rs` (open/scan), `crates/prkdb-core/src/wal/single_log.rs` (dir fsync on roll/remove). Failing test `crates/prkdb-core/tests/single_log.rs::torn_tail_is_truncated_and_later_appends_survive`: write records, corrupt the middle of the last record via `FaultFs`, reopen → earlier records readable, tail truncated, later appends visible after next reopen.
 
 ### Task 2.4: Delete the other WAL implementations (STO-06)
 Migrate every caller found by `grep -rlw "ParallelWal\|AsyncParallelWal\|MmapParallelWal\|WriteAheadLog" crates --include='*.rs'`; delete modules; `cargo build --workspace` and full tests green.
 
 ### Task 2.5: `PowerLoss` and Fast mode in the harness (TST-05)
-Extend `ops.rs` (`Op::PowerLoss`), `sut.rs` (`FaultFs`-backed SUT), `checker.rs` (Fast prefix check), `xtask verify --mode fast`. Blocking profile gains `PowerLoss` per §7.1.
+Files: `crates/prkdb-verify/src/{ops.rs, sut.rs, checker.rs, bin/verify.rs}`. Failing tests in `crates/prkdb-verify/tests/harness.rs`: `fast_mode_checker_catches_lost_synced_data` (a Fast-mode SUT that discards already-synced data must be caught) and `blocking_profile_includes_power_loss` (generator). Extend `ops.rs` (`Op::PowerLoss`), `sut.rs` (`FaultFs`-backed SUT), `checker.rs` (Fast prefix check), `xtask verify --mode fast`. Blocking profile gains `PowerLoss` per §7.1.
 
 ### Task 2.6: Format v2 marker, open rules, migration registry, `prkdb-cli migrate` (D3, D4)
-Failing tests: empty dir → `FORMAT` created with `format = 2`; non-empty dir without `FORMAT` → error text containing "format"; `prkdb-cli migrate --data-dir` prints "no migrations available for format 2".
+Files: `crates/prkdb/src/storage/format.rs` (new: `FORMAT` read/write, open rules), `crates/prkdb/src/storage/migrations.rs` (new: `Migration` trait, empty registry), `crates/prkdb/src/storage/wal_adapter.rs` (format check in `new`/`open_async`), `crates/prkdb-cli/src/commands/migrate.rs` (new) + registration in `crates/prkdb-cli/src/commands.rs`. Failing tests in `crates/prkdb/tests/format_v2.rs`: empty dir → `FORMAT` created with `format = 2`; non-empty dir without `FORMAT` → error text containing "format"; `prkdb-cli migrate --data-dir` prints "no migrations available for format 2".
 
 ### Task 2.7: Key codec and collection catalog (KEY-01)
 Invert `key01_collections_share_primary_keys_tripwire` into `key01_collections_with_same_id_are_independent` (get/query/update/delete/restart). Files: new `crates/prkdb/src/keys.rs` (codec), `crates/prkdb/src/catalog.rs`, `indexed_storage.rs` call sites.
@@ -2589,22 +2722,22 @@ Invert `key01_collections_share_primary_keys_tripwire` into `key01_collections_w
 Invert the KEY-03 tripwire into `key03_partition_is_stable_across_processes` plus golden vectors (`partition("user-42", 1024) == <value>` for 10 keys). Switch `partitioning.rs` to seahash with a fixed seed.
 
 ### Task 2.9: Event identity from the WAL offset (EVT-01)
-Invert the EVT-01 tripwire into `evt01_event_ids_do_not_repeat_across_processes`; add a restart test where a consumer at offset N sees every new event. Opaque `EventSeq` type. Sled/SQL: persisted sequence row in the same transaction.
+Files: `crates/prkdb/src/outbox.rs` (remove `OUTBOX_SEQ`; add `EventSeq`), `crates/prkdb/src/consumer.rs` (offsets as `EventSeq`), `crates/prkdb-storage-sled/src/lib.rs` and `crates/prkdb-storage-sql/src/` (persisted sequence row). Invert the EVT-01 tripwire into `evt01_event_ids_do_not_repeat_across_processes`; add a restart test where a consumer at offset N sees every new event. Opaque `EventSeq` type. Sled/SQL: persisted sequence row in the same transaction.
 
 ### Task 2.10: Checkpoint = index snapshot (STO-01)
 Invert both STO-01 tripwires; add property test `recover(checkpoint, wal) == recover(∅, wal)` in `prkdb-verify`. Discovery `Checkpoint` op moves to the blocking profile.
 
 ### Task 2.11: Real compaction (STO-01 follow-through)
-Failing test: write > segment size with overwrites, compact, reopen → only live values, old segments removed.
+Files: `crates/prkdb-core/src/wal/compaction.rs`, `crates/prkdb-core/src/wal/single_log.rs`, `crates/prkdb/src/storage/wal_adapter.rs:~1737` (compactor trigger). Failing test `crates/prkdb/tests/compaction_test.rs::compaction_keeps_only_live_values_and_removes_old_segments`: write > segment size with overwrites, compact, reopen → only live values, old segments removed.
 
 ### Task 2.12: Append/publish ordering (STO-03)
-Failing test: 8 concurrent writers to one key, many rounds, then reopen; live value must equal recovered value (the concurrency op in the harness, if not caught earlier).
+Files: `crates/prkdb/src/storage/wal_adapter.rs:~478-509` (publish under the writer's ordering point). Failing test `crates/prkdb/tests/durability.rs::concurrent_same_key_live_equals_recovered`: 8 concurrent writers to one key, many rounds, then reopen; live value must equal recovered value (the concurrency op in the harness, if not caught earlier).
 
 ### Task 2.13: `BatchAccumulator::flush` barrier (STO-07)
 Failing test adapted from `docs/reviews/probes/core_review.rs::flush_returns_while_the_executor_is_blocked` (assert flush stays pending while the executor is blocked; executor error is returned by flush).
 
 ### Task 2.14: Upsert index cleanup and unique enforcement (KEY-02)
-Failing tests: update a record's indexed field → old value's query returns nothing; insert duplicate on `#[index(unique)]` → typed error, no partial write.
+Files: `crates/prkdb/src/indexed_storage.rs:~4733` (upsert); extract index maintenance into `crates/prkdb/src/index_maintenance.rs` while rewriting it (spec §9). Failing tests in `crates/prkdb/tests/indexed_db_tests.rs`: update a record's indexed field → old value's query returns nothing; insert duplicate on `#[index(unique)]` → typed error, no partial write.
 
 ### Task 2.15: Outbox persisted with its data (EVT-02)
 Failing test: put with outbox on `WalStorageAdapter`, reopen, `outbox_list` still contains the event; partitioned adapter returns `UnsupportedCapability` instead of Ok.
