@@ -1,19 +1,14 @@
 // Replication Tests
 //
-// NOTE: These tests use shared port ranges and may conflict when run in parallel.
-// For reliable execution, run with: cargo test --test replication_tests -- --test-threads=1
-//
-// The replication logic is fully functional - port conflicts are a test infrastructure issue,
-// not a functional problem with the replication system itself.
+// All ports here are OS-assigned (bind `127.0.0.1:0`, then read back the port via
+// `local_addr()`) rather than hardcoded or derived from a name/counter, so tests are safe to
+// run in parallel, including across the separate processes `cargo nextest` uses per test.
 
 use prkdb::prelude::Collection;
 use prkdb::replication::{ReplicaNode, ReplicationConfig, ReplicationManager, ReplicationTiming};
 use prkdb::storage::InMemoryAdapter;
 use prkdb::PrkDb;
 use serde::{Deserialize, Serialize};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
@@ -83,40 +78,22 @@ async fn free_ports(n: usize) -> Vec<u16> {
         .collect()
 }
 
-// Generate unique port ranges for each test to avoid conflicts in parallel execution
-fn get_test_ports(test_name: &str) -> (u16, u16) {
-    let mut hasher = DefaultHasher::new();
-    test_name.hash(&mut hasher);
-    let hash = hasher.finish();
-
-    // Use hash to generate port range starting from 10000
-    // Each test gets 2 ports (leader and follower)
-    let base_port = 10000 + ((hash % 20000) as u16);
-    // Ensure we don't exceed port range and have space for follower
-    let leader_port = if base_port > 60000 {
-        base_port - 10000
-    } else {
-        base_port
-    };
-    let follower_port = leader_port + 1;
-
-    (leader_port, follower_port)
-}
-
 async fn create_leader_follower_setup() -> (Arc<ReplicationManager>, Arc<ReplicationManager>) {
-    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let name = format!("default_test_{}", id);
-    create_leader_follower_setup_with_ports(&name).await
+    create_leader_follower_setup_with_ports().await
 }
 
+// `nextest` runs every test in its own process, so a process-local counter or a hash of a
+// caller-supplied name cannot make ports unique across tests: two tests running in parallel
+// processes independently compute the same "unique" value and collide on the same port. Ask
+// the OS for two free ports instead (see `free_ports` above), which is unique across
+// processes by construction.
 async fn create_leader_follower_setup_with_ports(
-    test_name: &str,
 ) -> (Arc<ReplicationManager>, Arc<ReplicationManager>) {
     let leader_db = create_test_db();
     let follower_db = create_test_db();
 
-    let (leader_port, follower_port) = get_test_ports(test_name);
+    let ports = free_ports(2).await;
+    let (leader_port, follower_port) = (ports[0], ports[1]);
 
     let leader_config = ReplicationConfig {
         self_node: ReplicaNode {
@@ -383,8 +360,7 @@ async fn test_data_replication_delete() {
 
 #[tokio::test]
 async fn test_multiple_changes_replication() {
-    let (leader, follower) =
-        create_leader_follower_setup_with_ports("test_multiple_changes_replication").await;
+    let (leader, follower) = create_leader_follower_setup_with_ports().await;
 
     let _ = leader.clone().start().await;
     let _ = follower.clone().start().await;
@@ -419,8 +395,7 @@ async fn test_multiple_changes_replication() {
 
 #[tokio::test]
 async fn test_follower_sync_loop_recovery() {
-    let (leader, follower) =
-        create_leader_follower_setup_with_ports("test_follower_sync_loop_recovery").await;
+    let (leader, follower) = create_leader_follower_setup_with_ports().await;
 
     // Start leader first
     let _ = leader.clone().start().await;
