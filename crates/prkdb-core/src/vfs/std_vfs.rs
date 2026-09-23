@@ -1,4 +1,4 @@
-use super::{Vfs, VfsFile};
+use super::{OpenMode, Vfs, VfsFile};
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -16,12 +16,16 @@ impl VfsFile for StdFile {
             use std::os::unix::fs::FileExt;
             self.0.write_all_at(buf, offset)
         }
-        #[cfg(windows)]
+        #[cfg(not(unix))]
         {
             use std::os::windows::fs::FileExt;
             let mut done = 0;
             while done < buf.len() {
-                done += self.0.seek_write(&buf[done..], offset + done as u64)?;
+                let n = self.0.seek_write(&buf[done..], offset + done as u64)?;
+                if n == 0 {
+                    return Err(io::Error::from(io::ErrorKind::WriteZero));
+                }
+                done += n;
             }
             Ok(())
         }
@@ -32,18 +36,27 @@ impl VfsFile for StdFile {
             use std::os::unix::fs::FileExt;
             let mut n = 0;
             while n < buf.len() {
-                let r = self.0.read_at(&mut buf[n..], offset + n as u64)?;
+                match self.0.read_at(&mut buf[n..], offset + n as u64) {
+                    Ok(0) => break,
+                    Ok(r) => n += r,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(n)
+        }
+        #[cfg(not(unix))]
+        {
+            use std::os::windows::fs::FileExt;
+            let mut n = 0;
+            while n < buf.len() {
+                let r = self.0.seek_read(&mut buf[n..], offset + n as u64)?;
                 if r == 0 {
                     break;
                 }
                 n += r;
             }
             Ok(n)
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::FileExt;
-            self.0.seek_read(buf, offset)
         }
     }
     fn set_len(&self, len: u64) -> io::Result<()> {
@@ -58,10 +71,12 @@ impl VfsFile for StdFile {
 }
 
 impl Vfs for StdVfs {
-    fn open(&self, path: &Path) -> io::Result<Arc<dyn VfsFile>> {
-        Ok(Arc::new(StdFile(
-            OpenOptions::new().read(true).write(true).open(path)?,
-        )))
+    fn open(&self, path: &Path, mode: OpenMode) -> io::Result<Arc<dyn VfsFile>> {
+        let file = match mode {
+            OpenMode::Read => OpenOptions::new().read(true).open(path)?,
+            OpenMode::ReadWrite => OpenOptions::new().read(true).write(true).open(path)?,
+        };
+        Ok(Arc::new(StdFile(file)))
     }
     fn create(&self, path: &Path) -> io::Result<Arc<dyn VfsFile>> {
         Ok(Arc::new(StdFile(
@@ -89,8 +104,8 @@ impl Vfs for StdVfs {
         v.sort();
         Ok(v)
     }
-    fn exists(&self, path: &Path) -> bool {
-        path.exists()
+    fn exists(&self, path: &Path) -> io::Result<bool> {
+        path.try_exists()
     }
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
         #[cfg(unix)]
