@@ -2,7 +2,7 @@
 
 PrkDB supports fully atomic, consistent, isolated, and durable (ACID) transactions. You can safely bundle multiple read and write operations together to ensure they either all succeed or all fail as a single unit.
 
-PrkDB transactions execute in **Serializable** isolation mode by default, meaning concurrent transactions will trigger conflict detection rather than risking dirty reads or write skews.
+Transactions currently default to `ReadCommitted`, which does not detect conflicts. Pass `IsolationLevel::Serializable` for conflict detection. Serializable becomes the default in an upcoming release.
 
 ## Basic Transactions
 
@@ -66,7 +66,7 @@ tx.commit().await?;
 
 ## Conflict Detection
 
-When multiple clients attempt to modify the same keys concurrently under Serializable Isolation, PrkDB's storage engine tracks reads and writes.
+When multiple clients attempt to modify the same keys concurrently when `IsolationLevel::Serializable` is set, PrkDB's storage engine tracks reads and writes.
 
 If `Transaction B` commits a modification to a key that `Transaction A` previously read within its uncommitted transaction scope, `Transaction A` will receive a `ConflictDetected` error upon its deferred `commit()` call.
 

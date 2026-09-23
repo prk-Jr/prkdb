@@ -15,7 +15,7 @@ hero:
 
 features:
   - title: Distributed & Consistent
-    details: Built on Raft consensus for strong consistency and high availability.
+    details: Built on Raft consensus for strong consistency and high availability. Clustering is experimental — see remediation status.
   - title: Performant
     details: Written in Rust for maximum performance and memory safety.
   - title: Flexible Schema

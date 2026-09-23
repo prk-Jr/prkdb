@@ -28,6 +28,28 @@ cp target/release/prkdb-cli /usr/local/bin/prkdb
 - Node 2 address: `10.0.0.2:8081`
 - Node 3 address: `10.0.0.3:8082`
 
+`prkdb-server` refuses to start a multi-node `CLUSTER_NODES` unless one of
+`PRKDB_CLUSTER_SECRET`, `PRKDB_TLS_CLIENT_CA`, or `PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1`
+is set. Today, only `PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1` actually forms a working
+cluster: nothing in the codebase sends the cluster-secret header to peers, and
+`prkdb-server` does not configure peer TLS even when `PRKDB_TLS_CLIENT_CA` is set —
+setting either of those two variables passes the startup check but peers still reject
+each other and no leader is elected
+(known issue: [RFT-08](https://prk-jr.github.io/prkdb/status/remediation)). Mutual TLS
+for peers currently only works with `prkdb-cli serve`.
+
+| Variable | Purpose |
+|---|---|
+| `PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1` | The only mode that currently forms a cluster. **Development on a trusted network only** — any caller that can reach the port can issue Raft RPCs. |
+| `PRKDB_CLUSTER_SECRET` / `PRKDB_TLS_CLIENT_CA` | Satisfy the startup check but do not currently authenticate peers (RFT-08) |
+| `PRKDB_BOOTSTRAP_TOKEN` | Creates the first admin principal on an empty data directory; ignored once any principal exists; use the same value on every node |
+| `PRKDB_METRICS_ADDR` | Metrics bind address; use `0.0.0.0:<port>` inside containers |
+
+`/metrics` requires an Admin bearer token: `curl -H "Authorization: Bearer $PRKDB_BOOTSTRAP_TOKEN" http://localhost:9091/metrics`.
+
+`./scripts/start_cluster.sh` starts a dev-only, unauthenticated 3-node cluster using
+`PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1`.
+
 ### Systemd unit
 
 Create `/etc/systemd/system/prkdb.service` on each node.
@@ -46,7 +68,13 @@ Environment=CLUSTER_NODES=1@10.0.0.1:8080,2@10.0.0.2:8081,3@10.0.0.3:8082
 Environment=STORAGE_PATH=/var/lib/prkdb/node1
 # Required: the server refuses to start with no principals configured.
 # Ignored once any principal exists, so a restart cannot mint a second way in.
+# Use the same value on every node.
 Environment=PRKDB_BOOTSTRAP_TOKEN=change-me
+# Required for a multi-node CLUSTER_NODES: one of PRKDB_CLUSTER_SECRET,
+# PRKDB_TLS_CLIENT_CA or PRKDB_ALLOW_UNAUTHENTICATED_PEERS. Only the last forms a
+# cluster today (RFT-08); run it only on a trusted network.
+# See https://prk-jr.github.io/prkdb/status/remediation
+Environment=PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1
 Environment=PRKDB_ADVERTISED_GRPC_ADDR=http://db-1.example.com:8080
 Environment=PRKDB_ADVERTISED_NODE_ADDRS=2=http://db-2.example.com:8081,3=http://db-3.example.com:8082
 ExecStart=/usr/local/bin/prkdb-server
@@ -79,19 +107,18 @@ sudo systemctl start prkdb
 On node 1:
 
 ```bash
-curl http://127.0.0.1:9091/metrics | grep prkdb_up
+curl -H "Authorization: Bearer $PRKDB_BOOTSTRAP_TOKEN" http://127.0.0.1:9091/metrics | grep prkdb_up
 ```
 
 On node 2:
 
 ```bash
-curl http://127.0.0.1:9092/metrics | grep prkdb_up
+curl -H "Authorization: Bearer $PRKDB_BOOTSTRAP_TOKEN" http://127.0.0.1:9092/metrics | grep prkdb_up
 ```
 
 ### Check the gRPC API
 
 ```bash
-export PRKDB_BOOTSTRAP_TOKEN=change-me   # creates the admin on first start
 export PRKDB_CREDENTIAL=change-me         # what clients send
 prkdb --server http://127.0.0.1:8080 collection list
 ```
@@ -99,7 +126,6 @@ prkdb --server http://127.0.0.1:8080 collection list
 ### Check schema registry persistence
 
 ```bash
-export PRKDB_BOOTSTRAP_TOKEN=change-me   # creates the admin on first start
 export PRKDB_CREDENTIAL=change-me         # what clients send
 prkdb schema list --server http://127.0.0.1:8080
 ```

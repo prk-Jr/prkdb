@@ -1,5 +1,9 @@
 version: '3.8'
 
+# KNOWN BROKEN (RFT-10): prkdb-server does not resolve hostnames in CLUSTER_NODES
+# (tracked in the remediation ledger), so this 3-node file cannot start yet. Use
+# scripts/start_cluster.sh for a local dev cluster.
+
 networks:
   prkdb-net:
     driver: bridge
@@ -26,8 +30,13 @@ services:
       - STORAGE_PATH=/data/prkdb
       - NUM_PARTITIONS=9
       - RUST_LOG=info
+      # Dev-only: real peer authentication (RFT-08) is not implemented yet.
+      - PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1
+      - PRKDB_BOOTSTRAP_TOKEN=${PRKDB_BOOTSTRAP_TOKEN:?set PRKDB_BOOTSTRAP_TOKEN}
+      - PRKDB_METRICS_ADDR=0.0.0.0:9091
+    # NOTE: this healthcheck exposes the bootstrap token in `ps` inside the container (dev compose only).
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9091/metrics"]
+      test: ["CMD-SHELL", "curl -f -H \"Authorization: Bearer $$PRKDB_BOOTSTRAP_TOKEN\" http://localhost:9091/metrics"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -55,8 +64,13 @@ services:
       - STORAGE_PATH=/data/prkdb
       - NUM_PARTITIONS=9
       - RUST_LOG=info
+      # Dev-only: real peer authentication (RFT-08) is not implemented yet.
+      - PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1
+      - PRKDB_BOOTSTRAP_TOKEN=${PRKDB_BOOTSTRAP_TOKEN:?set PRKDB_BOOTSTRAP_TOKEN}
+      - PRKDB_METRICS_ADDR=0.0.0.0:9092
+    # NOTE: this healthcheck exposes the bootstrap token in `ps` inside the container (dev compose only).
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9092/metrics"]
+      test: ["CMD-SHELL", "curl -f -H \"Authorization: Bearer $$PRKDB_BOOTSTRAP_TOKEN\" http://localhost:9092/metrics"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -84,8 +98,13 @@ services:
       - STORAGE_PATH=/data/prkdb
       - NUM_PARTITIONS=9
       - RUST_LOG=info
+      # Dev-only: real peer authentication (RFT-08) is not implemented yet.
+      - PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1
+      - PRKDB_BOOTSTRAP_TOKEN=${PRKDB_BOOTSTRAP_TOKEN:?set PRKDB_BOOTSTRAP_TOKEN}
+      - PRKDB_METRICS_ADDR=0.0.0.0:9093
+    # NOTE: this healthcheck exposes the bootstrap token in `ps` inside the container (dev compose only).
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9093/metrics"]
+      test: ["CMD-SHELL", "curl -f -H \"Authorization: Bearer $$PRKDB_BOOTSTRAP_TOKEN\" http://localhost:9093/metrics"]
       interval: 5s
       timeout: 3s
       retries: 5

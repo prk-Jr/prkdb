@@ -17,6 +17,8 @@ services:
       - GRPC_PORT=50051
       - STORAGE_PATH=/data/prkdb
       - RUST_LOG=info
+      - CLUSTER_NODES=1@127.0.0.1:50051
+      - PRKDB_BOOTSTRAP_TOKEN=${PRKDB_BOOTSTRAP_TOKEN:?set PRKDB_BOOTSTRAP_TOKEN}
     restart: unless-stopped
 
   prometheus:
