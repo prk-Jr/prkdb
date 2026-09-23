@@ -1,5 +1,9 @@
 # PrkDB Replication Guide
 
+::: warning Experimental
+Clustering is experimental until the remediation program's Raft phase completes. See [Remediation status](/status/remediation).
+:::
+
 PrkDB v2 uses **Multi-Raft Consensus** to provide strong consistency, high availability, and horizontal scalability.
 
 ## Overview

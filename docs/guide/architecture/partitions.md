@@ -1,5 +1,9 @@
 # Partitions & Sharding
 
+::: warning Experimental
+Clustering is experimental until the remediation program's Raft phase completes. See [Remediation status](/status/remediation).
+:::
+
 PrkDB uses advanced partitioning strategies to distribute data across the cluster. This allows the database to scale horizontally, handling massive throughput and storage requirements that exceed the capacity of a single node.
 
 ## Partitioning Strategies

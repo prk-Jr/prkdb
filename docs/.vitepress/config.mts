@@ -73,6 +73,10 @@ export default defineConfig({
           { text: 'Metrics', link: '/guide/metrics' },
         ],
       },
+      {
+        text: 'Status',
+        items: [{ text: 'Remediation status', link: '/status/remediation' }],
+      },
     ],
 
     socialLinks: [{ icon: 'github', link: 'https://github.com/prk-Jr/prkdb' }],

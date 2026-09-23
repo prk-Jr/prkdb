@@ -1,5 +1,9 @@
 # Leader Election & Raft
 
+::: warning Experimental
+Clustering is experimental until the remediation program's Raft phase completes. See [Remediation status](/status/remediation).
+:::
+
 At the heart of PrkDB's distributed architecture is the **Raft Consensus Protocol**. Raft ensures that all nodes in your cluster agree on the state of the data, providing strong consistency and high availability even in the face of network partitions or server crashes.
 
 ## How It Works

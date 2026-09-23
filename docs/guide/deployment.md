@@ -28,6 +28,17 @@ cp target/release/prkdb-cli /usr/local/bin/prkdb
 - Node 2 address: `10.0.0.2:8081`
 - Node 3 address: `10.0.0.3:8082`
 
+Every multi-node cluster must authenticate its Raft peers, or `prkdb-server` refuses to start:
+
+| Variable | Purpose |
+|---|---|
+| `PRKDB_CLUSTER_SECRET` | Shared secret sent on every Raft RPC (same value on all nodes) |
+| `PRKDB_TLS_CLIENT_CA` | Alternative: mutual TLS for peers |
+| `PRKDB_BOOTSTRAP_TOKEN` | Creates the first admin principal on an empty data directory |
+| `PRKDB_METRICS_ADDR` | Metrics bind address; use `0.0.0.0:<port>` inside containers |
+
+`/metrics` requires an Admin bearer token: `curl -H "Authorization: Bearer $PRKDB_BOOTSTRAP_TOKEN" http://localhost:9091/metrics`.
+
 ### Systemd unit
 
 Create `/etc/systemd/system/prkdb.service` on each node.
@@ -47,6 +58,9 @@ Environment=STORAGE_PATH=/var/lib/prkdb/node1
 # Required: the server refuses to start with no principals configured.
 # Ignored once any principal exists, so a restart cannot mint a second way in.
 Environment=PRKDB_BOOTSTRAP_TOKEN=change-me
+# Required: the server refuses to start a multi-node CLUSTER_NODES without this
+# (or PRKDB_TLS_CLIENT_CA) — Raft peers must authenticate each other.
+Environment=PRKDB_CLUSTER_SECRET=change-me-too
 Environment=PRKDB_ADVERTISED_GRPC_ADDR=http://db-1.example.com:8080
 Environment=PRKDB_ADVERTISED_NODE_ADDRS=2=http://db-2.example.com:8081,3=http://db-3.example.com:8082
 ExecStart=/usr/local/bin/prkdb-server
@@ -91,7 +105,6 @@ curl http://127.0.0.1:9092/metrics | grep prkdb_up
 ### Check the gRPC API
 
 ```bash
-export PRKDB_BOOTSTRAP_TOKEN=change-me   # creates the admin on first start
 export PRKDB_CREDENTIAL=change-me         # what clients send
 prkdb --server http://127.0.0.1:8080 collection list
 ```
@@ -99,7 +112,6 @@ prkdb --server http://127.0.0.1:8080 collection list
 ### Check schema registry persistence
 
 ```bash
-export PRKDB_BOOTSTRAP_TOKEN=change-me   # creates the admin on first start
 export PRKDB_CREDENTIAL=change-me         # what clients send
 prkdb schema list --server http://127.0.0.1:8080
 ```

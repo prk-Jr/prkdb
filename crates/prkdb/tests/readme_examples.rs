@@ -1331,8 +1331,8 @@ async fn readme_line_702() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 778
-async fn readme_line_778() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 795
+async fn readme_line_795() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
@@ -1366,8 +1366,8 @@ async fn readme_line_778() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// README.md line 796
-async fn readme_line_796() -> Result<(), Box<dyn std::error::Error>> {
+/// README.md line 813
+async fn readme_line_813() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = a_db();
     let client = a_client();
     let mut storage = any_storage();
