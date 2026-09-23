@@ -28,16 +28,27 @@ cp target/release/prkdb-cli /usr/local/bin/prkdb
 - Node 2 address: `10.0.0.2:8081`
 - Node 3 address: `10.0.0.3:8082`
 
-Every multi-node cluster must authenticate its Raft peers, or `prkdb-server` refuses to start:
+`prkdb-server` refuses to start a multi-node `CLUSTER_NODES` unless one of
+`PRKDB_CLUSTER_SECRET`, `PRKDB_TLS_CLIENT_CA`, or `PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1`
+is set. Today, only `PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1` actually forms a working
+cluster: nothing in the codebase sends the cluster-secret header to peers, and
+`prkdb-server` does not configure peer TLS even when `PRKDB_TLS_CLIENT_CA` is set —
+setting either of those two variables passes the startup check but peers still reject
+each other and no leader is elected
+(known issue: [RFT-08](https://prk-jr.github.io/prkdb/status/remediation)). Mutual TLS
+for peers currently only works with `prkdb-cli serve`.
 
 | Variable | Purpose |
 |---|---|
-| `PRKDB_CLUSTER_SECRET` | Shared secret sent on every Raft RPC (same value on all nodes) |
-| `PRKDB_TLS_CLIENT_CA` | Alternative: mutual TLS for peers |
-| `PRKDB_BOOTSTRAP_TOKEN` | Creates the first admin principal on an empty data directory |
+| `PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1` | The only mode that currently forms a cluster. **Development on a trusted network only** — any caller that can reach the port can issue Raft RPCs. |
+| `PRKDB_CLUSTER_SECRET` / `PRKDB_TLS_CLIENT_CA` | Satisfy the startup check but do not currently authenticate peers (RFT-08) |
+| `PRKDB_BOOTSTRAP_TOKEN` | Creates the first admin principal on an empty data directory; ignored once any principal exists; use the same value on every node |
 | `PRKDB_METRICS_ADDR` | Metrics bind address; use `0.0.0.0:<port>` inside containers |
 
 `/metrics` requires an Admin bearer token: `curl -H "Authorization: Bearer $PRKDB_BOOTSTRAP_TOKEN" http://localhost:9091/metrics`.
+
+`./scripts/start_cluster.sh` starts a dev-only, unauthenticated 3-node cluster using
+`PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1`.
 
 ### Systemd unit
 
@@ -57,10 +68,15 @@ Environment=CLUSTER_NODES=1@10.0.0.1:8080,2@10.0.0.2:8081,3@10.0.0.3:8082
 Environment=STORAGE_PATH=/var/lib/prkdb/node1
 # Required: the server refuses to start with no principals configured.
 # Ignored once any principal exists, so a restart cannot mint a second way in.
+# Use the same value on every node.
 Environment=PRKDB_BOOTSTRAP_TOKEN=change-me
 # Required: the server refuses to start a multi-node CLUSTER_NODES without this
-# (or PRKDB_TLS_CLIENT_CA) — Raft peers must authenticate each other.
-Environment=PRKDB_CLUSTER_SECRET=change-me-too
+# (or PRKDB_TLS_CLIENT_CA). Neither of those actually authenticates Raft peers today
+# (known issue RFT-08: the secret is never sent, and peer TLS is never configured) —
+# this only satisfies the startup check. PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1 is the
+# only mode that currently forms a working cluster, and it is for a trusted network
+# only. See https://prk-jr.github.io/prkdb/status/remediation
+Environment=PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1
 Environment=PRKDB_ADVERTISED_GRPC_ADDR=http://db-1.example.com:8080
 Environment=PRKDB_ADVERTISED_NODE_ADDRS=2=http://db-2.example.com:8081,3=http://db-3.example.com:8082
 ExecStart=/usr/local/bin/prkdb-server
@@ -93,13 +109,13 @@ sudo systemctl start prkdb
 On node 1:
 
 ```bash
-curl http://127.0.0.1:9091/metrics | grep prkdb_up
+curl -H "Authorization: Bearer $PRKDB_BOOTSTRAP_TOKEN" http://127.0.0.1:9091/metrics | grep prkdb_up
 ```
 
 On node 2:
 
 ```bash
-curl http://127.0.0.1:9092/metrics | grep prkdb_up
+curl -H "Authorization: Bearer $PRKDB_BOOTSTRAP_TOKEN" http://127.0.0.1:9092/metrics | grep prkdb_up
 ```
 
 ### Check the gRPC API

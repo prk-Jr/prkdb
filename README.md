@@ -748,28 +748,43 @@ let joined = db.query::<Order>()
 ## Distributed Cluster
 
 ### One-Command Start
+
+`./scripts/start_cluster.sh` starts a **dev-only, unauthenticated** 3-node cluster
+(`PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1`) — see below.
+
 ```bash
 ./scripts/start_cluster.sh
 ```
 
-Every multi-node cluster must authenticate its Raft peers, or `prkdb-server` refuses to start:
+`prkdb-server` refuses to start a multi-node `CLUSTER_NODES` unless one of
+`PRKDB_CLUSTER_SECRET`, `PRKDB_TLS_CLIENT_CA`, or `PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1`
+is set. Today, only `PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1` actually forms a working
+cluster: nothing in the codebase sends the cluster-secret header to peers, and
+`prkdb-server` does not configure peer TLS even when `PRKDB_TLS_CLIENT_CA` is set —
+setting either of those two variables passes the startup check but peers still reject
+each other and no leader is elected
+(known issue: [RFT-08](https://prk-jr.github.io/prkdb/status/remediation)). Mutual TLS
+for peers currently only works with `prkdb-cli serve`.
 
 | Variable | Purpose |
 |---|---|
-| `PRKDB_CLUSTER_SECRET` | Shared secret sent on every Raft RPC (same value on all nodes) |
-| `PRKDB_TLS_CLIENT_CA` | Alternative: mutual TLS for peers |
-| `PRKDB_BOOTSTRAP_TOKEN` | Creates the first admin principal on an empty data directory |
+| `PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1` | The only mode that currently forms a cluster. **Development on a trusted network only** — any caller that can reach the port can issue Raft RPCs. |
+| `PRKDB_CLUSTER_SECRET` / `PRKDB_TLS_CLIENT_CA` | Satisfy the startup check but do not currently authenticate peers (RFT-08) |
+| `PRKDB_BOOTSTRAP_TOKEN` | Creates the first admin principal on an empty data directory; ignored once any principal exists; use the same value on every node |
 | `PRKDB_METRICS_ADDR` | Metrics bind address; use `0.0.0.0:<port>` inside containers |
 
 `/metrics` requires an Admin bearer token: `curl -H "Authorization: Bearer $PRKDB_BOOTSTRAP_TOKEN" http://localhost:9091/metrics`.
 
 ### Manual Setup
+
+Dev-only, unauthenticated peers (see above):
+
 ```bash
 # Terminal 1
 NODE_ID=1 \
 CLUSTER_NODES=1@127.0.0.1:8080,2@127.0.0.1:8081,3@127.0.0.1:8082 \
 STORAGE_PATH=/tmp/prkdb/node1 \
-PRKDB_CLUSTER_SECRET=change-me \
+PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1 \
 PRKDB_BOOTSTRAP_TOKEN=change-me \
 cargo run --release -p prkdb --bin prkdb-server
 
@@ -777,7 +792,7 @@ cargo run --release -p prkdb --bin prkdb-server
 NODE_ID=2 \
 CLUSTER_NODES=1@127.0.0.1:8080,2@127.0.0.1:8081,3@127.0.0.1:8082 \
 STORAGE_PATH=/tmp/prkdb/node2 \
-PRKDB_CLUSTER_SECRET=change-me \
+PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1 \
 PRKDB_BOOTSTRAP_TOKEN=change-me \
 cargo run --release -p prkdb --bin prkdb-server
 
@@ -785,7 +800,7 @@ cargo run --release -p prkdb --bin prkdb-server
 NODE_ID=3 \
 CLUSTER_NODES=1@127.0.0.1:8080,2@127.0.0.1:8081,3@127.0.0.1:8082 \
 STORAGE_PATH=/tmp/prkdb/node3 \
-PRKDB_CLUSTER_SECRET=change-me \
+PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1 \
 PRKDB_BOOTSTRAP_TOKEN=change-me \
 cargo run --release -p prkdb --bin prkdb-server
 ```

@@ -61,10 +61,12 @@ The HTTP server now re-exports the real Prometheus registry instead of placehold
 
 ## Example Checks
 
+`/metrics` requires an Admin bearer token:
+
 ```bash
-curl http://127.0.0.1:9091/metrics | grep prkdb_up
-curl http://127.0.0.1:9091/metrics | grep prkdb_raft_state
-curl http://127.0.0.1:9091/metrics | grep prkdb_operation_duration_seconds
+curl -H "Authorization: Bearer $PRKDB_BOOTSTRAP_TOKEN" http://127.0.0.1:9091/metrics | grep prkdb_up
+curl -H "Authorization: Bearer $PRKDB_BOOTSTRAP_TOKEN" http://127.0.0.1:9091/metrics | grep prkdb_raft_state
+curl -H "Authorization: Bearer $PRKDB_BOOTSTRAP_TOKEN" http://127.0.0.1:9091/metrics | grep prkdb_operation_duration_seconds
 ```
 
 ## Alert Ideas
