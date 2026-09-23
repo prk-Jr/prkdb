@@ -1217,7 +1217,7 @@ Also fix line 69 ("under Serializable Isolation") to say "when `IsolationLevel::
 
 - [ ] **Step 4: DOC-09 — unsourced claims**
 
-Delete "10x less" (including "(10x less)" at ~181), "~10 MB binary", "<1 sec startup" from `docs/guide/streaming-kafka-comparison.md` (lines ~52-56 and ~181) and "99.4% write success" from `README.md` (~922), or replace each with a link to a measured result in `docs/benchmarks/methodology.md`. Keep the benchmark caveat sentences that `xtask/src/repo_status/collectors/docs.rs` requires in README and the streaming doc. Add ` *(known issue: [STO-01](https://prk-jr.github.io/prkdb/status/remediation))*` to the README "Checkpoint Recovery" bullet (~26). Run `grep -rn "10x less\|10 MB\|99.4" README.md docs/guide` — expected: no matches.
+Delete "10x less" (including "(10x less)" at ~181), "~10 MB binary", "<1 sec startup" from `docs/guide/streaming-kafka-comparison.md` (lines ~52-56 and ~181) and "99.4%" from `README.md` (two occurrences, ~923 and ~933), or replace each with a link to a measured result in `docs/benchmarks/methodology.md`. Keep the benchmark caveat sentences that `xtask/src/repo_status/collectors/docs.rs` requires in README and the streaming doc. Add ` *(known issue: [STO-01](https://prk-jr.github.io/prkdb/status/remediation))*` to the README "Checkpoint Recovery" bullet (~26). Run `grep -rn "10x less\|10 MB\|99.4" README.md docs/guide` — expected: no matches.
 
 - [ ] **Step 5: DOC-01 — deployment docs and compose**
 
@@ -2488,7 +2488,7 @@ In `main.rs`: `mod verify;`, arm `["verify", rest @ ..] => verify::run(rest),`, 
 
 Run: `cargo xtask verify --seeds 50` → `profile=blocking seeds=50 checks=…`, exit 0.
 Run: `cargo xtask verify --profile discovery --seeds 50` → non-zero exit with a minimized sequence containing `Checkpoint`.
-Run: `cargo tree -p xtask | grep -c prkdb` → `0`.
+Run: `cargo tree -p xtask -e normal --prefix none | grep -cE '^prkdb'` → `0`.
 
 - [ ] **Step 4: Commit** — `feat: add harness binary and cargo xtask verify`.
 
@@ -2565,9 +2565,10 @@ async fn acknowledged_writes_survive_sigkill() {
 
 The chaos monkey loses a *random* amount of data, so before Raft is fixed it can be neither a deterministic tripwire nor a zero-loss test. It is also `#[ignore]`d ("needs a built prkdb-server binary"), which ledger invariant 4 forbids for tripwires, and `chaos-tests.yml:53` selects it by name.
 
-- [ ] **Step 1:** In the spec, change TST-01's phase from 1 to 4 and its text to: *"Chaos monkey tolerates 20 % of acknowledged writes missing. Fixed in Phase 4 by asserting `missing == 0` once RFT-02/RFT-04 are fixed."* Move the TST-01 bullet from spec Phase 1 to 4d and add a revision-history row.
-- [ ] **Step 2:** In `ledger.toml`, set TST-01 `phase = 4`.
-- [ ] **Step 3:** Commit — `docs: move TST-01 to phase 4; random chaos loss cannot be a tripwire`.
+The spec amendment is already applied (spec revision 5). If Task 0.5 transcribed TST-01 with `phase = 1`:
+
+- [ ] **Step 1:** In `ledger.toml`, set TST-01 `phase = 4`; run `cargo xtask remediation check`.
+- [ ] **Step 2:** Commit — `docs: record TST-01 under phase 4 in the ledger`.
 
 (Phase 4 changes `raft_chaos_tests.rs:~1070` from `assert!(verification_rate >= 0.8, …)` to `assert_eq!(missing, 0, …)` — `missing` is a counter — and records `ci-job:chaos-tests.yml/raft-chaos-tests` as TST-01's regression evidence.)
 
@@ -2650,13 +2651,14 @@ The job summary lists every delta either way.
   harness:
     name: Crash/Restart Harness
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # A cold cache builds a separate release profile of prkdb for the harness binary.
+    timeout-minutes: 30
     steps:
       # CI preamble (plan Conventions): disk cleanup, checkout, protoc, rust 1.98.1, cache
       - run: cargo xtask verify --profile blocking --seeds 200 --mode durable
 ```
 
-- [ ] **Step 2: Nightly** — time it first: `time cargo xtask verify --seeds 200` locally, extrapolate to 20k, and create a dedicated `nightly-harness` job (schedule/dispatch only, CI preamble) with `timeout-minutes` = 1.5× the estimate; shard it like the gate job if that exceeds 60 minutes. Do not add it to the 45-minute `nightly-slow-tests` job. Add a `continue-on-error: true` step `cargo xtask verify --profile discovery --seeds 2000`. Add the nightly Criterion trend (spec §6.2): run the §6.1 benches with `--output-format bencher` and publish with `benchmark-action/github-action-benchmark@v1` (`tool: cargo`, `gh-pages-branch: bench-data`, `auto-push: true`, `fail-on-alert: false`).
+- [ ] **Step 2: Nightly** — time it first: `time cargo xtask verify --seeds 200` locally, extrapolate to 20k, and create a dedicated `nightly-harness` job (schedule/dispatch only, CI preamble) with `timeout-minutes` = 1.5× the estimate; shard it like the gate job if that exceeds 60 minutes. Do not add it to the 45-minute `nightly-slow-tests` job. Add a `continue-on-error: true` step `cargo xtask verify --profile discovery --seeds 2000`. Add the nightly Criterion trend (spec §6.2): run the §6.1 benches with `--output-format bencher` and publish with `benchmark-action/github-action-benchmark@v1` (`tool: cargo`, `gh-pages-branch: bench-data`, `auto-push: true`, `fail-on-alert: false`). That job needs `permissions: contents: write` because `auto-push` writes to the `bench-data` branch; ci.yml sets no permissions today.
 
 - [ ] **Step 3: Gate workflow** — add to `remediation-gate.yml`:
 ```yaml
@@ -2713,7 +2715,7 @@ Migrate every caller found by `grep -rlw "ParallelWal\|AsyncParallelWal\|MmapPar
 Files: `crates/prkdb-verify/src/{ops.rs, sut.rs, checker.rs, bin/verify.rs}`. Failing tests in `crates/prkdb-verify/tests/harness.rs`: `fast_mode_checker_catches_lost_synced_data` (a Fast-mode SUT that discards already-synced data must be caught) and `blocking_profile_includes_power_loss` (generator). Extend `ops.rs` (`Op::PowerLoss`), `sut.rs` (`FaultFs`-backed SUT), `checker.rs` (Fast prefix check), `xtask verify --mode fast`. Blocking profile gains `PowerLoss` per §7.1.
 
 ### Task 2.6: Format v2 marker, open rules, migration registry, `prkdb-cli migrate` (D3, D4)
-Files: `crates/prkdb/src/storage/format.rs` (new: `FORMAT` read/write, open rules), `crates/prkdb/src/storage/migrations.rs` (new: `Migration` trait, empty registry), `crates/prkdb/src/storage/wal_adapter.rs` (format check in `new`/`open_async`), `crates/prkdb-cli/src/commands/migrate.rs` (new) + registration in `crates/prkdb-cli/src/commands.rs`. Failing tests in `crates/prkdb/tests/format_v2.rs`: empty dir → `FORMAT` created with `format = 2`; non-empty dir without `FORMAT` → error text containing "format"; `prkdb-cli migrate --data-dir` prints "no migrations available for format 2".
+First read `crates/prkdb-core/tests/format_version.rs` and whatever it tests: if a format-version mechanism already exists, extend it (or delete it) rather than adding a second one; this task must end with exactly one. Files: `crates/prkdb/src/storage/format.rs` (new: `FORMAT` read/write, open rules), `crates/prkdb/src/storage/migrations.rs` (new: `Migration` trait, empty registry), `crates/prkdb/src/storage/wal_adapter.rs` (format check in `new`/`open_async`), `crates/prkdb-cli/src/commands/migrate.rs` (new) + registration in `crates/prkdb-cli/src/commands.rs`. Failing tests in `crates/prkdb/tests/format_v2.rs`: empty dir → `FORMAT` created with `format = 2`; non-empty dir without `FORMAT` → error text containing "format"; `prkdb-cli migrate --data-dir` prints "no migrations available for format 2".
 
 ### Task 2.7: Key codec and collection catalog (KEY-01)
 Invert `key01_collections_share_primary_keys_tripwire` into `key01_collections_with_same_id_are_independent` (get/query/update/delete/restart). Files: new `crates/prkdb/src/keys.rs` (codec), `crates/prkdb/src/catalog.rs`, `indexed_storage.rs` call sites.

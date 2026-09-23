@@ -139,7 +139,7 @@ Sources: **A** = 2026-09-23 correctness audit (A#n), **R** = 2026-09-07 senior r
 
 | ID | Sev | Finding | Phase |
 |---|---|---|---|
-| TST-01 | HIGH | Chaos monkey tolerates 20 % of acknowledged writes missing (`raft_chaos_tests.rs:1066`). Fixed when the allowance is 0; the loss that remains is tracked by RFT tripwires. | 1 |
+| TST-01 | HIGH | Chaos monkey tolerates 20 % of acknowledged writes missing (`raft_chaos_tests.rs:1066`). Fixed in Phase 4 by asserting `missing == 0` once RFT-02/RFT-04 are fixed; random loss cannot serve as a deterministic tripwire earlier. | 4 |
 | TST-02 | MED | Linearizability workloads: 1 writer, 1 reader, ~25 ops, failed reads dropped. | 4 |
 | TST-03 | MED | No restart/crash testing against a reference model. | 1 |
 | TST-04 | LOW | `e2e_throughput_bench` not declared `harness = false`; Criterion `main` likely never runs. | 1 |
@@ -353,7 +353,6 @@ New workspace crate `crates/prkdb-verify` (`publish = false`).
 
 **Also in Phase 1:**
 - **Checker can fail:** the discovery profile (with `Checkpoint`) reproduces STO-01 on `main`. Meta-test: a deliberately broken SUT wrapper (drops every 10th put) must be caught by the blocking profile.
-- TST-01: the chaos allowance becomes 0 missing acknowledged writes; that change makes TST-01 `fixed`. The loss that remains becomes an RFT-02/RFT-04 tripwire (asserts it still occurs) until Phase 4 fixes it.
 - Switch to `cargo nextest` with a `ci` profile (test groups for process-spawning tests, slow-timeout, retries reported not hidden).
 - TST-04 and the §6.1 Phase 1 baseline.
 - CI: blocking profile 200 seeds per PR (time-boxed ~5 min); nightly 20k seeds blocking + 2k discovery (non-blocking).
@@ -432,7 +431,7 @@ Otherwise: record numbers in the ledger and repair in place (hard-state persiste
 
 **4c. Deterministic simulation (TST-06; ≈4 of the phase's days).** `madsim` with seeded partitions, crashes, disk faults, and clock skew. madsim is not fully drop-in: it needs `cfg(madsim)` builds, `madsim-tokio` / `madsim-tonic` substituted across the affected crates, and its own filesystem shim. Disk faults therefore come from running `faultfs` behind `Vfs` inside the simulation, not from madsim's fs. If substitution proves too invasive, fall back to `turmoil` with the transport behind a trait. Histories feed the existing WGL checker. Rules borrowed from Iggy's simulator: separate PRNG streams per concern, seed printed on failure, `--seed` replay, and a report of how many operations the checker actually compared (an empty run must fail).
 
-**4d.** RFT-08 (peer auth actually sent; mTLS server config), RFT-09 (root-cause the flaky baseline with the simulator, no timeout bumps), TST-02 (multi-writer, multi-reader workloads, failed reads classified not dropped).
+**4d.** RFT-08 (peer auth actually sent; mTLS server config), RFT-09 (root-cause the flaky baseline with the simulator, no timeout bumps), TST-02 (multi-writer, multi-reader workloads, failed reads classified not dropped), TST-01 (chaos monkey asserts `missing == 0`).
 
 **Gate:** Phase 4 findings `verified`; simulation 10k seeds green; `raft/` format frozen and added to storage-compat; experimental label removed from clustering only if all of the above hold.
 
@@ -513,5 +512,6 @@ No unrelated refactoring.
 |---|---|---|
 | 1 | 2026-09-23 | Initial spec from the 2026-09-23 audits and the 2026-09-07 review; decisions D1–D9 (D9: publishing policy). |
 | 2 | 2026-09-23 | Spec review pass 1: `Vfs` seam defined in Phase 1, WAL routed through it in 2a; per-area `verified`; tripwires instead of expected-failure lists; single-phase IDs (DOC-11, DOC-12, TST-05..07 split out); harness op profiles per phase (§7.1); Fast mode from 2a; commit-based workflow with phase-PR CI sequence; private backup repo with Actions off; storage-compat timing; single globally ordered WAL; like-for-like Raft gate; madsim budget; DOC-11 interim wording. |
+| 5 | 2026-09-23 | Plan review: TST-01 moved to Phase 4 (random chaos loss cannot be a deterministic tripwire, and the test is `#[ignore]`d for needing a server binary). |
 | 4 | 2026-09-23 | Spec review pass 3: `remediation-gate.yml` ships in Phase 0 so it is dispatchable from `main`; Phases 0 and 5 use the phase-PR CI run as `gate_evidence`; noted that evidence checks prove existence, not execution. |
 | 3 | 2026-09-23 | Spec review pass 2: evidence kinds for non-code findings (`script:`, `ci-job:`, `xtask:`); TST-01 redefined as the allowance; `remediation-gate` workflow as the only source of gate evidence; cluster event identity = Raft index behind opaque `EventSeq`; Raft log as separate `raft/` store with suffix truncation; blocking-op demotion rule; dedicated WAL writer thread; KEY-03 harness exemption. |
