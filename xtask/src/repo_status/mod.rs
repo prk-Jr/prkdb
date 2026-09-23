@@ -235,11 +235,27 @@ fn build_dimension_report(
     passing_summary: &'static str,
 ) -> DimensionReport {
     if id == DimensionId::Verification {
+        let open = findings
+            .iter()
+            .filter(|finding| finding.dimension == DimensionId::Verification)
+            .count();
         return DimensionReport {
             id,
-            status: Status::Unknown,
-            confidence: Confidence::Low,
-            summary: passing_summary.to_owned(),
+            status: if open > 0 {
+                Status::Red
+            } else {
+                Status::Unknown
+            },
+            confidence: if open > 0 {
+                Confidence::High
+            } else {
+                Confidence::Low
+            },
+            summary: if open > 0 {
+                "Open critical remediation findings; see docs/status/remediation.md.".to_owned()
+            } else {
+                passing_summary.to_owned()
+            },
         };
     }
 

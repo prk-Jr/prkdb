@@ -1,5 +1,6 @@
 pub(super) mod contracts;
 pub(super) mod docs;
+pub(super) mod ledger;
 pub(super) mod versions;
 pub(super) mod workflows;
 pub(super) mod workspace;
@@ -15,6 +16,7 @@ pub(super) fn collect_findings(repo_root: &Path) -> Result<Vec<Finding>> {
     findings.extend(docs::collect(&snapshot));
     findings.extend(contracts::collect(&snapshot));
     findings.extend(versions::collect(&snapshot));
+    findings.extend(ledger::collect(repo_root));
     Ok(findings)
 }
 
