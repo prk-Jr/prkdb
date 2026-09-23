@@ -65,7 +65,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | TST-03 | medium | 1 | open | No restart/crash testing against a reference model |
 | TST-05 | medium | 2 | open | No power-loss (unsynced-data) testing; needs the WAL routed through Vfs |
 | TST-06 | medium | 4 | open | No deterministic simulation of the cluster |
-| TST-08 | medium | 0 | open | replication_tests binds fixed port 13197 and fails under parallel nextest runs |
+| TST-08 | medium | 0 | fixed | replication_tests binds fixed port 13197 and fails under parallel nextest runs |
 | TTL-01 | medium | 3 | open | Expiry deletes without re-checking the version; value and TTL metadata written non-atomically |
 | TXN-04 | medium | 3 | open | Default isolation is ReadCommitted; D5 makes Serializable the default |
 | DOC-06 | low | 0 | fixed | Rust version stated as 1.75+/1.95+ while the actual toolchain is 1.98 |
