@@ -126,6 +126,7 @@ Sources: **A** = 2026-09-23 correctness audit (A#n), **R** = 2026-09-07 senior r
 | RFT-07 | HIGH | Failed InstallSnapshot counts toward commit; `restore` never clears old keys; stale snapshots accepted. | `raft/service.rs:188`, `state_machine.rs:219` (A#8) | Reported | 4 |
 | RFT-08 | MED | RPC client never sends `x-prkdb-cluster-secret`; mTLS mode configures no server TLS → cluster cannot elect (outage, fails closed). | `raft/rpc_client.rs`, `bin/prkdb-server.rs` (A#20) | Reported | 4 |
 | RFT-09 | MED | `a_committed_write_replicates_to_every_node` failed unmutated baseline in CI run 34021601202. | `tests/in_process_cluster.rs:87` (R11) | Reported | 4 |
+| RFT-10 | HIGH | `CLUSTER_NODES` is parsed with `parse::<SocketAddr>()`, so hostnames (`node1:50051`) are rejected and the 3-node `docker-compose.yml` cannot start any node; the listen address doubles as the bind address. | `bin/prkdb-server.rs:366` (Batch E quality review, 2026-09-23) | Verified | 4 |
 
 ### 3.6 Schema, release, security (SCH, REL)
 
@@ -431,7 +432,7 @@ Otherwise: record numbers in the ledger and repair in place (hard-state persiste
 
 **4c. Deterministic simulation (TST-06; ≈4 of the phase's days).** `madsim` with seeded partitions, crashes, disk faults, and clock skew. madsim is not fully drop-in: it needs `cfg(madsim)` builds, `madsim-tokio` / `madsim-tonic` substituted across the affected crates, and its own filesystem shim. Disk faults therefore come from running `faultfs` behind `Vfs` inside the simulation, not from madsim's fs. If substitution proves too invasive, fall back to `turmoil` with the transport behind a trait. Histories feed the existing WGL checker. Rules borrowed from Iggy's simulator: separate PRNG streams per concern, seed printed on failure, `--seed` replay, and a report of how many operations the checker actually compared (an empty run must fail).
 
-**4d.** RFT-08 (peer auth actually sent; mTLS server config), RFT-09 (root-cause the flaky baseline with the simulator, no timeout bumps), TST-02 (multi-writer, multi-reader workloads, failed reads classified not dropped), TST-01 (chaos monkey asserts `missing == 0`).
+**4d.** RFT-08 (peer auth actually sent; mTLS server config), RFT-10 (resolve hostnames in `CLUSTER_NODES`, bind `0.0.0.0:<port>`, advertise the configured name), RFT-09 (root-cause the flaky baseline with the simulator, no timeout bumps), TST-02 (multi-writer, multi-reader workloads, failed reads classified not dropped), TST-01 (chaos monkey asserts `missing == 0`).
 
 **Gate:** Phase 4 findings `verified`; simulation 10k seeds green; `raft/` format frozen and added to storage-compat; experimental label removed from clustering only if all of the above hold.
 
@@ -512,6 +513,7 @@ No unrelated refactoring.
 |---|---|---|
 | 1 | 2026-09-23 | Initial spec from the 2026-09-23 audits and the 2026-09-07 review; decisions D1–D9 (D9: publishing policy). |
 | 2 | 2026-09-23 | Spec review pass 1: `Vfs` seam defined in Phase 1, WAL routed through it in 2a; per-area `verified`; tripwires instead of expected-failure lists; single-phase IDs (DOC-11, DOC-12, TST-05..07 split out); harness op profiles per phase (§7.1); Fast mode from 2a; commit-based workflow with phase-PR CI sequence; private backup repo with Actions off; storage-compat timing; single globally ordered WAL; like-for-like Raft gate; madsim budget; DOC-11 interim wording. |
+| 6 | 2026-09-23 | Execution: RFT-10 added (hostnames rejected in `CLUSTER_NODES`), found by the Batch E docs review. |
 | 5 | 2026-09-23 | Plan review: TST-01 moved to Phase 4 (random chaos loss cannot be a deterministic tripwire, and the test is `#[ignore]`d for needing a server binary). |
 | 4 | 2026-09-23 | Spec review pass 3: `remediation-gate.yml` ships in Phase 0 so it is dispatchable from `main`; Phases 0 and 5 use the phase-PR CI run as `gate_evidence`; noted that evidence checks prove existence, not execution. |
 | 3 | 2026-09-23 | Spec review pass 2: evidence kinds for non-code findings (`script:`, `ci-job:`, `xtask:`); TST-01 redefined as the allowance; `remediation-gate` workflow as the only source of gate evidence; cluster event identity = Raft index behind opaque `EventSeq`; Raft log as separate `raft/` store with suffix truncation; blocking-op demotion rule; dedicated WAL writer thread; KEY-03 harness exemption. |

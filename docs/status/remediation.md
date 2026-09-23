@@ -12,7 +12,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | 1 | Harness and baseline | not_started | 0/2 |
 | 2 | Format v2 and single-node root fixes | not_started | 0/15 |
 | 3 | Semantics | not_started | 0/9 |
-| 4 | Raft | not_started | 0/12 |
+| 4 | Raft | not_started | 0/13 |
 | 5 | Documentation and release | not_started | 0/9 |
 
 ## Findings
@@ -41,6 +41,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | RFT-05 | high | 4 | open | Commit waiters keyed by index only; not failed on step-down, so a deposed leader's client can see another leader's entry |
 | RFT-06 | high | 4 | open | ReadIndex heartbeat sends prev_log_index:0 with leader_commit; no no-op on election lets a linearizable read miss an acked write |
 | RFT-07 | high | 4 | open | Failed InstallSnapshot counts toward commit; restore never clears old keys; stale snapshots accepted |
+| RFT-10 | high | 4 | open | CLUSTER_NODES rejects hostnames; 3-node compose cluster cannot start |
 | SCH-02 | high | 2 | open | Schema reload accepts missing descriptors; non-atomic writes; concurrent registrations can reuse a version |
 | STO-06 | high | 2 | open | Four WAL implementations in use; all data writes hash to one shard so fixes do not propagate |
 | STO-07 | high | 2 | open | BatchAccumulator::flush() sleeps and returns Ok while dropping executor errors |
