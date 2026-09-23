@@ -1371,7 +1371,9 @@ step clippy;       cargo clippy --workspace --all-targets -- -D warnings
 step tests
 if command -v cargo-nextest >/dev/null; then cargo nextest run --workspace; else cargo test --workspace; fi
 if [ -d crates/prkdb-verify ]; then step harness; cargo xtask verify --profile blocking --seeds 200 --mode durable; fi
-step ledger;       cargo xtask remediation check && cargo xtask remediation render --check
+# Never chain with `&&`: under `set -e` a failing non-final command in an `&&` list is ignored.
+step ledger;        cargo xtask remediation check
+step ledger-render; cargo xtask remediation render --check
 step repo-status;  cargo xtask repo-status snapshot --fail-on-objective-drift
 step readme-tests; cargo xtask readme-tests --check
 step doc-claims;   bash scripts/check_doc_claims.sh
