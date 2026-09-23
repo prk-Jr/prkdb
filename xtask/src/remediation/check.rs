@@ -49,10 +49,14 @@ pub fn check(ledger: &Ledger, root: &Path) -> Vec<String> {
                     errs.push(format!("{id}: {e}"));
                 }
             }
-            if !f.tripwire.is_empty() && evidence::resolve(root, &f.tripwire).is_ok() {
-                errs.push(format!(
-                    "{id}: tripwire still exists; invert it into the regression test"
-                ));
+            if !f.tripwire.is_empty() {
+                match evidence::tripwire_is_gone(root, &f.tripwire) {
+                    Ok(true) => {}
+                    Ok(false) => errs.push(format!(
+                        "{id}: tripwire still exists; invert it into the regression test"
+                    )),
+                    Err(e) => errs.push(format!("{id}: cannot parse tripwire file: {e}")),
+                }
             }
         }
         // 3. open tripwires must exist
@@ -187,6 +191,15 @@ mod tests {
         assert!(check(&l, root().path())
             .iter()
             .any(|m| m.contains("tripwire still exists")));
+    }
+
+    #[test]
+    fn fixed_with_unparsable_tripwire_file_reports_parse_error_not_gone() {
+        let r = root();
+        fs::write(r.path().join("t/broken.rs"), "fn ( { not rust").unwrap();
+        let l = one("status = \"fixed\"\ntripwire = \"test:t/broken.rs::trip\"\nregression_tests = [\"test:t/a.rs::reg\"]\nchanges = [\"abc123\"]");
+        let e = check(&l, r.path());
+        assert!(e.iter().any(|m| m.contains("parse")), "{e:?}");
     }
 
     #[test]

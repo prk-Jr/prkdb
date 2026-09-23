@@ -77,16 +77,21 @@ fn valid_rel_path(s: &str) -> bool {
 /// Returns Ok if the target exists under `root`.
 pub fn resolve(root: &Path, target: &str) -> Result<(), String> {
     match parse(target)? {
-        Target::Test { file, func } => {
-            let item = find_fn_item(root, file, func)?
-                .ok_or_else(|| format!("`{target}`: fn `{func}` not found in {file}"))?;
-            if !has_test_attr(&item.attrs) {
-                return Err(format!(
-                    "`{target}`: fn `{func}` in {file} does not carry a test attribute"
-                ));
+        Target::Test { file, func } => match fn_status(root, file, func) {
+            FnStatus::FileMissing => Err(format!("`{target}`: {file} missing (NotFound)")),
+            FnStatus::ParseError(e) => Err(format!("`{target}`: {e}")),
+            FnStatus::NotFound => Err(format!("`{target}`: fn `{func}` not found in {file}")),
+            FnStatus::Ambiguous(n) => Err(format!("`{target}`: ambiguous: {n} fns named {func}")),
+            FnStatus::Found(item) => {
+                if has_test_attr(&item.attrs) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "`{target}`: fn `{func}` in {file} does not carry a test attribute"
+                    ))
+                }
             }
-            Ok(())
-        }
+        },
         Target::Script(path) => {
             let full = root.join(path);
             let meta = std::fs::metadata(&full)
@@ -213,40 +218,91 @@ fn has_ignore_attr(attrs: &[Attribute]) -> bool {
     })
 }
 
-/// Parses `file` under `root` and returns the fn item named `name`, walking into
-/// nested modules. `Ok(None)` means the file parsed but no such fn exists.
-fn find_fn_item(root: &Path, file: &str, name: &str) -> Result<Option<ItemFn>, String> {
-    let text = read(root, file)?;
-    let parsed = syn::parse_file(&text).map_err(|e| format!("{file}: failed to parse: {e}"))?;
+/// Outcome of looking up a named fn in a source file, distinguishing "the file
+/// doesn't exist" from "the file exists but can't be parsed" from "it parsed
+/// but the fn isn't there" from "more than one fn has that name" — each of
+/// which a caller may need to treat differently (see [`tripwire_is_gone`]).
+enum FnStatus {
+    /// No file at that path.
+    FileMissing,
+    /// The file exists but isn't valid Rust (or couldn't be read for another
+    /// reason); we can't tell whether the fn is there.
+    ParseError(String),
+    /// The file parsed; no fn with that name exists anywhere in it.
+    NotFound,
+    /// The file parsed; more than one fn with that name exists (e.g. in
+    /// different `mod`s), so which one is "the" evidence is ambiguous.
+    Ambiguous(usize),
+    /// Exactly one fn with that name exists.
+    Found(Box<ItemFn>),
+}
+
+/// Parses `file` under `root` and looks for every fn item named `name`,
+/// walking into nested modules.
+fn fn_status(root: &Path, file: &str, name: &str) -> FnStatus {
+    let text = match std::fs::read_to_string(root.join(file)) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return FnStatus::FileMissing,
+        Err(e) => return FnStatus::ParseError(format!("{file} unreadable ({:?})", e.kind())),
+    };
+    let parsed = match syn::parse_file(&text) {
+        Ok(p) => p,
+        Err(e) => return FnStatus::ParseError(format!("{file}: failed to parse: {e}")),
+    };
 
     struct Finder<'a> {
         name: &'a str,
-        found: Option<ItemFn>,
+        matches: Vec<ItemFn>,
     }
     impl<'a, 'ast> Visit<'ast> for Finder<'a> {
         fn visit_item_fn(&mut self, node: &'ast ItemFn) {
-            if self.found.is_none() && node.sig.ident == self.name {
-                self.found = Some(node.clone());
+            if node.sig.ident == self.name {
+                self.matches.push(node.clone());
             }
             visit::visit_item_fn(self, node);
         }
     }
 
-    let mut finder = Finder { name, found: None };
+    let mut finder = Finder {
+        name,
+        matches: Vec::new(),
+    };
     finder.visit_file(&parsed);
-    Ok(finder.found)
+    match finder.matches.len() {
+        0 => FnStatus::NotFound,
+        1 => FnStatus::Found(Box::new(finder.matches.remove(0))),
+        n => FnStatus::Ambiguous(n),
+    }
 }
 
 /// True if the fn named `func` in `file` carries an `#[ignore]` or
 /// `#[cfg_attr(.., ignore)]` attribute, determined from its own parsed attributes
-/// rather than a line window.
+/// rather than a line window. Returns `false` (can't tell) when the fn is
+/// missing, ambiguous, or the file doesn't parse.
 pub fn is_ignored(root: &Path, target: &str) -> bool {
     let Ok(Target::Test { file, func }) = parse(target) else {
         return false;
     };
-    match find_fn_item(root, file, func) {
-        Ok(Some(item)) => has_ignore_attr(&item.attrs),
-        _ => false,
+    matches!(fn_status(root, file, func), FnStatus::Found(item) if has_ignore_attr(&item.attrs))
+}
+
+/// Spec §4.2 invariant 2: a tripwire counts as "gone" only if its file is
+/// missing, or the file parses cleanly and contains no fn with that name.
+/// A file that exists but fails to parse (or an ambiguous match) is reported
+/// as an error instead of silently being treated as gone, since we genuinely
+/// can't tell whether the tripwire was removed.
+///
+/// Only meaningful for `test:` targets (tripwires are always fn references);
+/// other target kinds fall back to plain [`resolve`] semantics.
+pub fn tripwire_is_gone(root: &Path, target: &str) -> Result<bool, String> {
+    match parse(target)? {
+        Target::Test { file, func } => match fn_status(root, file, func) {
+            FnStatus::FileMissing | FnStatus::NotFound => Ok(true),
+            FnStatus::Found(_) => Ok(false),
+            FnStatus::ParseError(e) => Err(e),
+            FnStatus::Ambiguous(n) => Err(format!("ambiguous: {n} fns named {func}")),
+        },
+        _ => Ok(resolve(root, target).is_err()),
     }
 }
 
@@ -371,5 +427,53 @@ mod nested {
             fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
         }
         assert!(resolve(r.path(), "script:run.sh").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_executable_script_is_rejected() {
+        let r = repo();
+        let script = r.path().join("run.sh");
+        fs::write(&script, "#!/bin/sh\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o644)).unwrap();
+        let err = resolve(r.path(), "script:run.sh").unwrap_err();
+        assert!(err.contains("not executable"), "{err}");
+    }
+
+    #[test]
+    fn empty_fn_name_is_rejected() {
+        let err = parse("test:x.rs::").unwrap_err();
+        assert!(err.contains("function name is empty"), "{err}");
+    }
+
+    #[test]
+    fn ambiguous_fn_name_is_reported_by_resolve_and_is_ignored() {
+        let r = repo();
+        fs::write(
+            r.path().join("t/b.rs"),
+            "mod one {\n    #[test]\n    fn foo() {}\n}\n\nmod two {\n    #[test]\n    fn foo() {}\n}\n",
+        )
+        .unwrap();
+        let err = resolve(r.path(), "test:t/b.rs::foo").unwrap_err();
+        assert!(err.contains("ambiguous: 2 fns named foo"), "{err}");
+        // Can't reliably say an ambiguous fn is ignored; is_ignored stays false.
+        assert!(!is_ignored(r.path(), "test:t/b.rs::foo"));
+    }
+
+    #[test]
+    fn tripwire_parse_error_is_reported_not_treated_as_gone() {
+        let r = repo();
+        fs::write(r.path().join("t/broken.rs"), "fn ( { this is not rust").unwrap();
+        let err = tripwire_is_gone(r.path(), "test:t/broken.rs::anything").unwrap_err();
+        assert!(err.contains("parse"), "{err}");
+    }
+
+    #[test]
+    fn tripwire_is_gone_when_file_missing_or_fn_absent() {
+        let r = repo();
+        assert!(tripwire_is_gone(r.path(), "test:t/does-not-exist.rs::x").unwrap());
+        assert!(tripwire_is_gone(r.path(), "test:t/a.rs::not_a_real_fn").unwrap());
+        assert!(!tripwire_is_gone(r.path(), "test:t/a.rs::good").unwrap());
     }
 }

@@ -57,3 +57,15 @@ pub fn run_render(check_only: bool) -> Result<()> {
 fn normalize_line_endings(s: &str) -> String {
     s.replace("\r\n", "\n")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_line_endings_collapses_crlf_to_lf() {
+        assert_eq!(normalize_line_endings("a\r\nb\r\n"), "a\nb\n");
+        assert_eq!(normalize_line_endings("a\nb\n"), "a\nb\n");
+        assert_eq!(normalize_line_endings(""), "");
+    }
+}
