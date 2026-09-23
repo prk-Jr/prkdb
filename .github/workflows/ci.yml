@@ -618,7 +618,9 @@ jobs:
       # signal, on purpose and out of the gating path.
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --no-fail-fast
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run --workspace --profile ci
+      - run: cargo test --doc --workspace
 
   schema-integration:
     name: Schema E2E Integration
