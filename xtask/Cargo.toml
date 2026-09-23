@@ -11,6 +11,7 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml = "0.8"
+syn = { version = "2", features = ["full", "visit"] }
 
 [dev-dependencies]
 tempfile = "3"

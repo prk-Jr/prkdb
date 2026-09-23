@@ -42,12 +42,10 @@ pub enum PhaseStatus {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-// `area`, `sources`, `evidence`, and `perf_note` are part of the ledger schema (spec §4.1)
-// but not yet read by `check` or `render`; later tasks in the remediation program consume them.
-#[allow(dead_code)]
 pub struct Finding {
     pub id: String,
     pub title: String,
+    #[expect(dead_code, reason = "read by later tasks")]
     pub area: String,
     pub severity: Severity,
     pub phase: u8,
@@ -55,8 +53,10 @@ pub struct Finding {
     #[serde(default)]
     pub security: bool,
     #[serde(default)]
+    #[expect(dead_code, reason = "read by later tasks")]
     pub sources: Vec<String>,
     #[serde(default)]
+    #[expect(dead_code, reason = "read by later tasks")]
     pub evidence: Vec<String>,
     #[serde(default)]
     pub tripwire: String,
@@ -69,6 +69,7 @@ pub struct Finding {
     #[serde(default)]
     pub ci_evidence: String,
     #[serde(default)]
+    #[expect(dead_code, reason = "read by later tasks")]
     pub perf_note: String,
     #[serde(default)]
     pub decision: String,
@@ -78,13 +79,12 @@ pub struct Finding {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-// `gate` is part of the ledger schema (spec §4.1) but not yet read by `check` or `render`.
-#[allow(dead_code)]
 pub struct Phase {
     pub id: u8,
     pub title: String,
     pub status: PhaseStatus,
     #[serde(default)]
+    #[expect(dead_code, reason = "read by later tasks")]
     pub gate: Vec<String>,
     #[serde(default)]
     pub gate_evidence: Vec<String>,

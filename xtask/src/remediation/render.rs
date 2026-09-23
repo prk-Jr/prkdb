@@ -1,6 +1,6 @@
 //! Renders docs/status/remediation.md. Security findings are hidden until fixed (§5.1).
 
-use super::model::{Ledger, Status};
+use super::model::{Finding, Ledger, PhaseStatus, Severity, Status};
 use std::fmt::Write;
 
 pub fn render(ledger: &Ledger) -> String {
@@ -13,40 +13,36 @@ pub fn render(ledger: &Ledger) -> String {
     .unwrap();
     writeln!(out, "Tracks the root-cause remediation program. A finding is **verified** only when its regression tests passed in public CI (and, for storage, keys, events, transactions, TTL and Raft, the crash/restart harness).\n").unwrap();
 
+    // Same visibility filter used for the findings table below, so a hidden
+    // (unfixed) security finding can't leak through the phase counts either.
+    let visible: Vec<&Finding> = ledger
+        .finding
+        .iter()
+        .filter(|f| !f.security || matches!(f.status, Status::Fixed | Status::Verified))
+        .collect();
+
     writeln!(
         out,
         "## Phases\n\n| Phase | Title | Status | Findings verified |\n|---|---|---|---|"
     )
     .unwrap();
     for p in &ledger.phase {
-        let all: Vec<_> = ledger.finding.iter().filter(|f| f.phase == p.id).collect();
-        let done = all
-            .iter()
-            .filter(|f| {
-                matches!(
-                    f.status,
-                    Status::Verified | Status::WontFix | Status::Duplicate
-                )
-            })
-            .count();
+        let all: Vec<_> = visible.iter().filter(|f| f.phase == p.id).collect();
+        let done = all.iter().filter(|f| is_closed(f.status)).count();
         writeln!(
             out,
-            "| {} | {} | {:?} | {}/{} |",
+            "| {} | {} | {} | {}/{} |",
             p.id,
-            p.title,
-            p.status,
+            p.title.replace('|', "\\|"),
+            phase_status_name(p.status),
             done,
             all.len()
         )
         .unwrap();
     }
 
-    let mut visible: Vec<_> = ledger
-        .finding
-        .iter()
-        .filter(|f| !f.security || matches!(f.status, Status::Fixed | Status::Verified))
-        .collect();
-    visible.sort_by(|a, b| {
+    let mut sorted = visible;
+    sorted.sort_by(|a, b| {
         (is_closed(a.status), a.severity, &a.id).cmp(&(is_closed(b.status), b.severity, &b.id))
     });
 
@@ -55,14 +51,14 @@ pub fn render(ledger: &Ledger) -> String {
         "\n## Findings\n\n| ID | Severity | Phase | Status | Title |\n|---|---|---|---|---|"
     )
     .unwrap();
-    for f in visible {
+    for f in sorted {
         writeln!(
             out,
-            "| {} | {:?} | {} | {:?} | {} |",
+            "| {} | {} | {} | {} | {} |",
             f.id,
-            f.severity,
+            severity_name(f.severity),
             f.phase,
-            f.status,
+            status_name(f.status),
             f.title.replace('|', "\\|")
         )
         .unwrap();
@@ -72,6 +68,37 @@ pub fn render(ledger: &Ledger) -> String {
 
 fn is_closed(s: Status) -> bool {
     matches!(s, Status::Verified | Status::WontFix | Status::Duplicate)
+}
+
+/// Ledger-file spelling of a `Status` (snake_case, matching the TOML values),
+/// so the rendered page shows the same vocabulary the ledger uses instead of
+/// Rust's `Debug` (PascalCase) representation.
+fn status_name(s: Status) -> &'static str {
+    match s {
+        Status::Open => "open",
+        Status::InProgress => "in_progress",
+        Status::Fixed => "fixed",
+        Status::Verified => "verified",
+        Status::WontFix => "wont_fix",
+        Status::Duplicate => "duplicate",
+    }
+}
+
+fn phase_status_name(s: PhaseStatus) -> &'static str {
+    match s {
+        PhaseStatus::NotStarted => "not_started",
+        PhaseStatus::InProgress => "in_progress",
+        PhaseStatus::GatePassed => "gate_passed",
+    }
+}
+
+fn severity_name(s: Severity) -> &'static str {
+    match s {
+        Severity::Critical => "critical",
+        Severity::High => "high",
+        Severity::Medium => "medium",
+        Severity::Low => "low",
+    }
 }
 
 #[cfg(test)]
@@ -96,5 +123,27 @@ mod tests {
         .unwrap();
         let text = render(&l);
         assert!(text.find("STO-01").unwrap() < text.find("DOC-06").unwrap());
+    }
+
+    #[test]
+    fn hidden_security_finding_does_not_leak_via_phase_counts() {
+        // A hidden (unfixed) security finding must not be counted in the phase's
+        // total, or its "done" status would be inferable from the ratio.
+        let l = Ledger::parse(concat!(
+            "[[finding]]\nid = \"SCH-01\"\ntitle = \"secret\"\narea = \"schema\"\nseverity = \"high\"\nphase = 0\nstatus = \"open\"\nsecurity = true\n",
+            "[[phase]]\nid = 0\ntitle = \"p\"\nstatus = \"not_started\"\n",
+        ))
+        .unwrap();
+        let text = render(&l);
+        assert!(text.contains("| 0 | p | not_started | 0/0 |"));
+    }
+
+    #[test]
+    fn phase_titles_and_statuses_are_escaped_and_snake_case() {
+        let l = Ledger::parse("[[phase]]\nid = 0\ntitle = \"a | b\"\nstatus = \"gate_passed\"\ngate_evidence = [\"x\"]\n").unwrap();
+        let text = render(&l);
+        assert!(text.contains("a \\| b"));
+        assert!(text.contains("gate_passed"));
+        assert!(!text.contains("GatePassed"));
     }
 }

@@ -2,7 +2,7 @@
 
 use super::evidence;
 use super::model::{Ledger, PhaseStatus, Status};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 const PREFIXES: [&str; 10] = [
@@ -12,7 +12,11 @@ const PREFIXES: [&str; 10] = [
 pub fn check(ledger: &Ledger, root: &Path) -> Vec<String> {
     let mut errs = Vec::new();
     let mut seen = HashSet::new();
-    let ids: HashSet<&str> = ledger.finding.iter().map(|f| f.id.as_str()).collect();
+    let status_by_id: HashMap<&str, Status> = ledger
+        .finding
+        .iter()
+        .map(|f| (f.id.as_str(), f.status))
+        .collect();
 
     for f in &ledger.finding {
         let id = &f.id;
@@ -20,10 +24,11 @@ pub fn check(ledger: &Ledger, root: &Path) -> Vec<String> {
         if !seen.insert(id.as_str()) {
             errs.push(format!("{id}: duplicate id"));
         }
-        let well_formed = id.len() == 6
+        let bytes = id.as_bytes();
+        let well_formed = bytes.len() == 6
             && PREFIXES.contains(&f.prefix())
-            && id.as_bytes()[3] == b'-'
-            && id[4..].bytes().all(|b| b.is_ascii_digit());
+            && bytes[3] == b'-'
+            && bytes[4..].iter().all(|b| b.is_ascii_digit());
         if !well_formed {
             errs.push(format!(
                 "{id}: id must match ^(STO|KEY|EVT|TXN|TTL|RFT|SCH|REL|TST|DOC)-\\d{{2}}$"
@@ -79,12 +84,38 @@ pub fn check(ledger: &Ledger, root: &Path) -> Vec<String> {
         if f.status == Status::WontFix && f.decision.is_empty() {
             errs.push(format!("{id}: wont_fix requires decision"));
         }
-        if f.status == Status::Duplicate && !ids.contains(f.duplicate_of.as_str()) {
-            errs.push(format!("{id}: duplicate_of must name an existing id"));
+        if f.status == Status::Duplicate {
+            if f.duplicate_of == *id {
+                errs.push(format!("{id}: duplicate_of must not reference itself"));
+            } else {
+                match status_by_id.get(f.duplicate_of.as_str()) {
+                    None => errs.push(format!("{id}: duplicate_of must name an existing id")),
+                    Some(Status::Duplicate) => errs.push(format!(
+                        "{id}: duplicate_of must not reference another duplicate"
+                    )),
+                    Some(_) => {}
+                }
+            }
         }
         // 7. phase is a single integer by construction (u8); range-check it
         if f.phase > 6 {
             errs.push(format!("{id}: phase must be 0..=6"));
+        }
+        // finding phases must reference a declared phase, but only once the ledger
+        // actually declares phases (small fixtures without any [[phase]] still pass)
+        if !ledger.phase.is_empty() && !ledger.phase.iter().any(|p| p.id == f.phase) {
+            errs.push(format!(
+                "{id}: phase {} has no matching [[phase]] entry",
+                f.phase
+            ));
+        }
+    }
+
+    // duplicate [[phase]] ids
+    let mut seen_phase_ids = HashSet::new();
+    for p in &ledger.phase {
+        if !seen_phase_ids.insert(p.id) {
+            errs.push(format!("phase {}: duplicate phase id", p.id));
         }
     }
 
@@ -124,7 +155,7 @@ mod tests {
         fs::create_dir_all(d.path().join("t")).unwrap();
         fs::write(
             d.path().join("t/a.rs"),
-            "fn trip() {}\nfn reg() {}\n#[ignore = \"slow: x\"]\nfn ign() {}\n",
+            "#[test]\nfn trip() {}\n#[test]\nfn reg() {}\n#[test]\n#[ignore = \"slow: x\"]\nfn ign() {}\n",
         )
         .unwrap();
         d
@@ -190,5 +221,54 @@ mod tests {
         assert!(check(&l, root().path())
             .iter()
             .any(|m| m.contains("id must match")));
+    }
+
+    #[test]
+    fn self_duplicate_fails() {
+        let l = Ledger::parse("[[finding]]\nid = \"STO-01\"\ntitle = \"t\"\narea = \"s\"\nseverity = \"low\"\nphase = 0\nstatus = \"duplicate\"\nduplicate_of = \"STO-01\"\n").unwrap();
+        assert!(check(&l, root().path())
+            .iter()
+            .any(|m| m.contains("must not reference itself")));
+    }
+
+    #[test]
+    fn duplicate_of_a_duplicate_fails() {
+        let text = concat!(
+            "[[finding]]\nid = \"STO-01\"\ntitle = \"a\"\narea = \"s\"\nseverity = \"low\"\nphase = 0\nstatus = \"duplicate\"\nduplicate_of = \"STO-02\"\n",
+            "[[finding]]\nid = \"STO-02\"\ntitle = \"b\"\narea = \"s\"\nseverity = \"low\"\nphase = 0\nstatus = \"duplicate\"\nduplicate_of = \"STO-03\"\n",
+            "[[finding]]\nid = \"STO-03\"\ntitle = \"c\"\narea = \"s\"\nseverity = \"low\"\nphase = 0\nstatus = \"open\"\n",
+        );
+        let e = check(&Ledger::parse(text).unwrap(), root().path());
+        assert!(e
+            .iter()
+            .any(|m| m.contains("must not reference another duplicate")));
+    }
+
+    #[test]
+    fn finding_phase_without_declared_phase_entry_fails_when_phases_declared() {
+        let text = concat!(
+            "[[finding]]\nid = \"STO-01\"\ntitle = \"a\"\narea = \"s\"\nseverity = \"low\"\nphase = 3\nstatus = \"open\"\n",
+            "[[phase]]\nid = 0\ntitle = \"p\"\nstatus = \"not_started\"\n",
+        );
+        let e = check(&Ledger::parse(text).unwrap(), root().path());
+        assert!(e.iter().any(|m| m.contains("no matching [[phase]] entry")));
+    }
+
+    #[test]
+    fn finding_phase_without_declared_phase_entry_is_ok_when_no_phases_declared() {
+        let l = one("status = \"open\"");
+        assert!(!check(&l, root().path())
+            .iter()
+            .any(|m| m.contains("no matching [[phase]] entry")));
+    }
+
+    #[test]
+    fn duplicate_phase_ids_fail() {
+        let text = concat!(
+            "[[phase]]\nid = 0\ntitle = \"a\"\nstatus = \"not_started\"\n",
+            "[[phase]]\nid = 0\ntitle = \"b\"\nstatus = \"not_started\"\n",
+        );
+        let e = check(&Ledger::parse(text).unwrap(), root().path());
+        assert!(e.iter().any(|m| m.contains("duplicate phase id")));
     }
 }
