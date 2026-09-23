@@ -240,15 +240,18 @@ fn build_dimension_report(
             .filter(|finding| finding.dimension == DimensionId::Verification)
             .collect();
         let open = verification_findings.len();
-        // Derived from whichever findings the ledger collector actually produced
-        // (open-critical vs unreadable-ledger), not a single hard-coded sentence,
-        // so the summary always matches what's in `findings`.
-        let summary = if open > 0 {
-            verification_findings
-                .iter()
-                .map(|finding| finding.message.as_str())
-                .collect::<Vec<_>>()
-                .join(" ")
+        // A fixed sentence chosen by finding id, never the finding message: the
+        // page fingerprint covers ids, not summaries, so a message that lists open
+        // finding ids would go stale on the committed page without tripping drift.
+        // The per-finding detail lives in docs/status/remediation.md, which
+        // `remediation render --check` keeps in sync.
+        let summary = if verification_findings
+            .iter()
+            .any(|finding| finding.id == "remediation-ledger-unreadable")
+        {
+            "Remediation ledger could not be parsed; see docs/remediation/ledger.toml.".to_owned()
+        } else if open > 0 {
+            "Open critical remediation findings; see docs/status/remediation.md.".to_owned()
         } else {
             passing_summary.to_owned()
         };

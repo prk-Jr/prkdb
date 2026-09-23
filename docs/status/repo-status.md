@@ -8,7 +8,7 @@ Current status: `red`
 
 | Dimension | Status | Confidence | Summary |
 | --- | --- | --- | --- |
-| verification | red | high | 7 critical remediation finding(s) not yet verified: STO-01, STO-02, EVT-01, RFT-01, RFT-02, RFT-03, RFT-04 |
+| verification | red | high | Open critical remediation findings; see docs/status/remediation.md. |
 | docs_coverage | green | high | Documentation drift checks passed for the current snapshot scope. |
 | contract_consistency | green | high | Docs and command-surface contract checks passed for the current snapshot scope. |
 | benchmark_credibility | green | high | Benchmark caveat checks passed for the current snapshot scope. |
