@@ -300,6 +300,30 @@ mod tests {
         assert!(std::mem::size_of::<RpcError>() <= 32);
     }
 
+    /// A peer that is not listening must surface as an error rather than a default
+    /// response. Returning `Ok(InstallSnapshotResponse::default())` would tell the leader
+    /// the follower accepted the snapshot at term 0 — it would advance its match index
+    /// for a follower that received nothing, and the snapshot would never be retried.
+    #[tokio::test]
+    async fn send_install_snapshot_reports_an_unreachable_peer() {
+        // Bind then drop, so the address is one nothing is listening on rather than a
+        // hard-coded guess that could collide with something real on the runner.
+        let addr = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a port");
+            listener.local_addr().expect("reserved address")
+        };
+
+        let pool = RpcClientPool::new(1);
+        let result = pool
+            .send_install_snapshot(2, &addr.to_string(), InstallSnapshotRequest::default(), 0)
+            .await;
+
+        assert!(
+            matches!(result, Err(RpcError::Transport(_))),
+            "expected a transport error, got {result:?}"
+        );
+    }
+
     #[cfg(feature = "chaos")]
     #[tokio::test]
     async fn chaos_partition_rule_refuses_matching_peer() {

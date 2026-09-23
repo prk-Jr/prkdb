@@ -334,8 +334,20 @@ jobs:
       - name: Mutate the changed lines
         run: |
           set -o pipefail
+          # `--features prkdb/chaos` because cargo-mutants mutates from the syntax tree,
+          # before `cfg` is evaluated: it generates mutants for `#[cfg(feature = ...)]`
+          # code whether or not that feature is on. With chaos off, the mutant is written
+          # into a function the compiler never sees, the suite passes unchanged, and the
+          # mutant is reported MISSED — unkillable by any test, because the test that
+          # kills it (`chaos_partition_rule_refuses_matching_peer`) is gated on the same
+          # feature and is not compiled either. That is what failed shard 2 of run
+          # 35327050707 on `RpcClientPool::check_chaos`.
+          #
+          # Package-qualified because two packages are selected and `prkdb-cli` declares
+          # no features; a bare `--features chaos` is rejected in that shape.
           cargo mutants --no-shuffle --timeout 300 \
             --test-tool nextest --jobs 2 \
+            --features prkdb/chaos \
             --shard ${{ matrix.shard }}/8 \
             --in-diff /tmp/pr.diff \
             --package prkdb --package prkdb-cli 2>&1 | tee /tmp/mutants.log
