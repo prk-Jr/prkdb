@@ -621,6 +621,7 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run --workspace --profile ci
       - run: cargo test --doc --workspace
+        if: ${{ !cancelled() }}
 
   schema-integration:
     name: Schema E2E Integration
