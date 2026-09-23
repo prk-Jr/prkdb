@@ -247,7 +247,7 @@ fn build_dimension_report(
         // `remediation render --check` keeps in sync.
         let summary = if verification_findings
             .iter()
-            .any(|finding| finding.id == "remediation-ledger-unreadable")
+            .any(|finding| finding.id == collectors::ledger::LEDGER_UNREADABLE_ID)
         {
             "Remediation ledger could not be parsed; see docs/remediation/ledger.toml.".to_owned()
         } else if open > 0 {

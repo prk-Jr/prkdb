@@ -5,6 +5,11 @@ use super::super::model::{Confidence, DimensionId, Evidence, Finding, Severity};
 use crate::remediation::model::{Ledger, Severity as LSev, Status};
 use std::path::Path;
 
+/// Finding id emitted when the ledger exists but cannot be parsed.
+pub(in super::super) const LEDGER_UNREADABLE_ID: &str = "remediation-ledger-unreadable";
+/// Finding id emitted when critical findings are not yet verified.
+pub(in super::super) const OPEN_CRITICAL_ID: &str = "open-critical-remediation-findings";
+
 pub(in super::super) fn collect(repo_root: &Path) -> Vec<Finding> {
     let Ok(text) = std::fs::read_to_string(repo_root.join("docs/remediation/ledger.toml")) else {
         return vec![];
@@ -13,7 +18,7 @@ pub(in super::super) fn collect(repo_root: &Path) -> Vec<Finding> {
         Ok(ledger) => ledger,
         Err(err) => {
             return vec![Finding {
-                id: "remediation-ledger-unreadable".into(),
+                id: LEDGER_UNREADABLE_ID.into(),
                 dimension: DimensionId::Verification,
                 severity: Severity::Warning,
                 confidence: Confidence::High,
@@ -43,7 +48,7 @@ pub(in super::super) fn collect(repo_root: &Path) -> Vec<Finding> {
         return vec![];
     }
     vec![Finding {
-        id: "open-critical-remediation-findings".into(),
+        id: OPEN_CRITICAL_ID.into(),
         dimension: DimensionId::Verification,
         severity: Severity::Warning,
         confidence: Confidence::High,
@@ -139,7 +144,7 @@ status = "verified"
 
         assert_eq!(findings.len(), 1);
         let finding = &findings[0];
-        assert_eq!(finding.id, "remediation-ledger-unreadable");
+        assert_eq!(finding.id, LEDGER_UNREADABLE_ID);
         assert_eq!(finding.dimension, DimensionId::Verification);
         assert_eq!(finding.severity, Severity::Warning);
         assert!(finding.message.contains("failed to parse"));
