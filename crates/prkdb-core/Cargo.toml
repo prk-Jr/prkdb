@@ -42,6 +42,7 @@ lazy_static = { workspace = true, optional = true }
 
 [features]
 metrics = ["prometheus", "axum", "lazy_static"]
+vfs-conformance = []
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
