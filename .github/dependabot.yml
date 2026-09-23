@@ -27,7 +27,7 @@ updates:
         patterns:
           - "*"
     ignore:
-      # `dtolnay/rust-toolchain@1.95.0` is not an action release. The ref *is* the Rust
+      # `dtolnay/rust-toolchain@1.98.1` is not an action release. The ref *is* the Rust
       # toolchain to install, so Dependabot reading it as a version and bumping it invents
       # a Rust release that does not exist: it proposed 1.100.0 across nineteen call sites
       # and every job failed with "could not download nonexistent rust version 1.100.0",

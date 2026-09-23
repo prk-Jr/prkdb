@@ -13,10 +13,16 @@ pub enum RpcError {
     Transport(#[from] tonic::transport::Error),
 
     #[error("RPC error: {0}")]
-    Rpc(#[from] tonic::Status),
+    Rpc(#[source] Box<tonic::Status>),
 
     #[error("Invalid URI: {0}")]
     InvalidUri(String),
+}
+
+impl From<tonic::Status> for RpcError {
+    fn from(status: tonic::Status) -> Self {
+        Self::Rpc(Box::new(status))
+    }
 }
 
 /// Fault-injection rules, read from the file named by `CHAOS_CONFIG_PATH`.
@@ -94,9 +100,9 @@ impl RpcClientPool {
                                 if (self.local_node_id == node1 && target_node == node2)
                                     || (self.local_node_id == node2 && target_node == node1)
                                 {
-                                    return Err(RpcError::Rpc(tonic::Status::unavailable(
-                                        "Chaos partition",
-                                    )));
+                                    return Err(
+                                        tonic::Status::unavailable("Chaos partition").into()
+                                    );
                                 }
                             }
                             ChaosRule::Delay { src, dst, ms } => {
@@ -109,9 +115,7 @@ impl RpcClientPool {
                                     && target_node == dst
                                     && rand::random::<f64>() < rate
                                 {
-                                    return Err(RpcError::Rpc(tonic::Status::unavailable(
-                                        "Chaos drop",
-                                    )));
+                                    return Err(tonic::Status::unavailable("Chaos drop").into());
                                 }
                             }
                         }
@@ -200,7 +204,7 @@ impl RpcClientPool {
             Err(e) => {
                 // Remove client from cache on failure to force reconnection
                 self.remove_client(node_id).await;
-                Err(RpcError::Rpc(e))
+                Err(e.into())
             }
         }
     }
@@ -225,7 +229,7 @@ impl RpcClientPool {
             Err(e) => {
                 // Remove client from cache on failure to force reconnection
                 self.remove_client(node_id).await;
-                Err(RpcError::Rpc(e))
+                Err(e.into())
             }
         }
     }
@@ -250,7 +254,7 @@ impl RpcClientPool {
             Err(e) => {
                 // Remove client from cache on failure to force reconnection
                 self.remove_client(node_id).await;
-                Err(RpcError::Rpc(e))
+                Err(e.into())
             }
         }
     }
@@ -275,7 +279,7 @@ impl RpcClientPool {
             Err(e) => {
                 // Remove client from cache on failure to force reconnection
                 self.remove_client(node_id).await;
-                Err(RpcError::Rpc(e))
+                Err(e.into())
             }
         }
     }
@@ -284,5 +288,57 @@ impl RpcClientPool {
     pub async fn remove_client(&self, node_id: NodeId) {
         let mut clients = self.clients.write().await;
         clients.remove(&node_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rpc_error_stays_small_for_result_callers() {
+        assert!(std::mem::size_of::<RpcError>() <= 32);
+    }
+
+    /// A peer that is not listening must surface as an error rather than a default
+    /// response. Returning `Ok(InstallSnapshotResponse::default())` would tell the leader
+    /// the follower accepted the snapshot at term 0 — it would advance its match index
+    /// for a follower that received nothing, and the snapshot would never be retried.
+    #[tokio::test]
+    async fn send_install_snapshot_reports_an_unreachable_peer() {
+        // Bind then drop, so the address is one nothing is listening on rather than a
+        // hard-coded guess that could collide with something real on the runner.
+        let addr = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a port");
+            listener.local_addr().expect("reserved address")
+        };
+
+        let pool = RpcClientPool::new(1);
+        let result = pool
+            .send_install_snapshot(2, &addr.to_string(), InstallSnapshotRequest::default(), 0)
+            .await;
+
+        assert!(
+            matches!(result, Err(RpcError::Transport(_))),
+            "expected a transport error, got {result:?}"
+        );
+    }
+
+    #[cfg(feature = "chaos")]
+    #[tokio::test]
+    async fn chaos_partition_rule_refuses_matching_peer() {
+        let dir = tempfile::tempdir().expect("chaos rules directory");
+        let rules_path = dir.path().join("chaos.json");
+        std::fs::write(&rules_path, r#"[{"Partition":{"node1":1,"node2":2}}]"#)
+            .expect("write chaos rules");
+
+        // This unit-test binary is the only process that sets this variable.
+        unsafe { std::env::set_var("CHAOS_CONFIG_PATH", &rules_path) };
+        let result = RpcClientPool::new(1).check_chaos(2).await;
+        unsafe { std::env::remove_var("CHAOS_CONFIG_PATH") };
+
+        assert!(
+            matches!(result, Err(RpcError::Rpc(status)) if status.code() == tonic::Code::Unavailable)
+        );
     }
 }

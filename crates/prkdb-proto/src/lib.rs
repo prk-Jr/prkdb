@@ -15,7 +15,12 @@
 //! use prkdb_proto::raft::prk_db_service_client::PrkDbServiceClient;
 //! ```
 
-/// Generated protobuf types and gRPC service definitions
+/// Generated protobuf types and gRPC service definitions.
+///
+/// Tonic generates RPC trait methods with `tonic::Status` as the error type.
+/// Rust 1.98's `result_large_err` lint applies to that generated code, but the
+/// generated API is controlled by Tonic rather than this crate.
+#[allow(clippy::result_large_err)]
 pub mod raft {
     tonic::include_proto!("raft");
 }

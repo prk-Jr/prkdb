@@ -23,7 +23,7 @@ version = "0.6.0"
 edition = "2021"
 # Keep in sync with rust-toolchain.toml. The previous README claim of "Rust 1.70+"
 # was never verified or enforced by anything.
-rust-version = "1.95"
+rust-version = "1.98"
 license = "Apache-2.0"
 repository = "https://github.com/prk-Jr/prkdb"
 authors = ["prk-Jr"]
