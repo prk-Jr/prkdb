@@ -1,7 +1,7 @@
 version: '3.8'
 
-# KNOWN BROKEN: prkdb-server does not resolve hostnames in CLUSTER_NODES (tracked in
-# the remediation ledger), so this 3-node file cannot start yet. Use
+# KNOWN BROKEN (RFT-10): prkdb-server does not resolve hostnames in CLUSTER_NODES
+# (tracked in the remediation ledger), so this 3-node file cannot start yet. Use
 # scripts/start_cluster.sh for a local dev cluster.
 
 networks:

@@ -15,5 +15,7 @@ grep -q "Rust-$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)+" README.md
 grep -q "ReadCommitted" docs/guide/features/transactions.md || { echo "  ✗ transactions.md no longer documents the ReadCommitted default"; fail=1; }
 grep -q "RFT-08" docs/guide/deployment.md || { echo "  ✗ deployment.md lacks the RFT-08 known-issue note"; fail=1; }
 grep -q "PRKDB_ALLOW_UNAUTHENTICATED_PEERS" docs/guide/deployment.md || { echo "  ✗ deployment.md lacks PRKDB_ALLOW_UNAUTHENTICATED_PEERS"; fail=1; }
+grep -q "RFT-08" README.md || { echo "  ✗ README.md lacks the RFT-08 known-issue note"; fail=1; }
+grep -q "PRKDB_ALLOW_UNAUTHENTICATED_PEERS" README.md || { echo "  ✗ README.md lacks PRKDB_ALLOW_UNAUTHENTICATED_PEERS"; fail=1; }
 
 exit $fail

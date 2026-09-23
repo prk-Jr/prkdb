@@ -70,12 +70,10 @@ Environment=STORAGE_PATH=/var/lib/prkdb/node1
 # Ignored once any principal exists, so a restart cannot mint a second way in.
 # Use the same value on every node.
 Environment=PRKDB_BOOTSTRAP_TOKEN=change-me
-# Required: the server refuses to start a multi-node CLUSTER_NODES without this
-# (or PRKDB_TLS_CLIENT_CA). Neither of those actually authenticates Raft peers today
-# (known issue RFT-08: the secret is never sent, and peer TLS is never configured) —
-# this only satisfies the startup check. PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1 is the
-# only mode that currently forms a working cluster, and it is for a trusted network
-# only. See https://prk-jr.github.io/prkdb/status/remediation
+# Required for a multi-node CLUSTER_NODES: one of PRKDB_CLUSTER_SECRET,
+# PRKDB_TLS_CLIENT_CA or PRKDB_ALLOW_UNAUTHENTICATED_PEERS. Only the last forms a
+# cluster today (RFT-08); run it only on a trusted network.
+# See https://prk-jr.github.io/prkdb/status/remediation
 Environment=PRKDB_ALLOW_UNAUTHENTICATED_PEERS=1
 Environment=PRKDB_ADVERTISED_GRPC_ADDR=http://db-1.example.com:8080
 Environment=PRKDB_ADVERTISED_NODE_ADDRS=2=http://db-2.example.com:8081,3=http://db-3.example.com:8082
