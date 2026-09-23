@@ -8,7 +8,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 
 | Phase | Title | Status | Findings verified |
 |---|---|---|---|
-| 0 | Honesty and tracking | not_started | 0/4 |
+| 0 | Honesty and tracking | not_started | 0/6 |
 | 1 | Harness and baseline | not_started | 0/2 |
 | 2 | Format v2 and single-node root fixes | not_started | 0/15 |
 | 3 | Semantics | not_started | 0/9 |
@@ -26,7 +26,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | RFT-04 | critical | 4 | open | log_start_index ignored after compaction/snapshot install; apply loop advances last_applied over gaps |
 | STO-01 | critical | 2 | open | Checkpoint recovery drops pre-checkpoint keys |
 | STO-02 | critical | 2 | open | Writes acked before fsync; SyncMode::Durable never honored |
-| DOC-01 | high | 0 | open | Cluster setup and both compose files fail: undocumented env vars, metrics bind, healthcheck auth, port mismatch |
+| DOC-01 | high | 0 | fixed | Cluster docs and compose files misdescribe multi-node setup (env vars, peer auth, metrics auth) |
 | DOC-02 | high | 5 | open | Rust client samples use PrkDbClient::new without credentials; Python client has no credential parameter |
 | DOC-03 | high | 5 | open | Transactions, TTL, secondary-index, custom-adapter, and ORM doc samples do not compile |
 | EVT-02 | high | 2 | open | Default WAL adapter keeps outbox in memory only; partitioned adapter discards outbox writes and returns Ok |
@@ -42,6 +42,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | RFT-06 | high | 4 | open | ReadIndex heartbeat sends prev_log_index:0 with leader_commit; no no-op on election lets a linearizable read miss an acked write |
 | RFT-07 | high | 4 | open | Failed InstallSnapshot counts toward commit; restore never clears old keys; stale snapshots accepted |
 | RFT-10 | high | 4 | open | CLUSTER_NODES rejects hostnames; 3-node compose cluster cannot start |
+| SCH-01 | high | 0 | fixed | Schema collection name joined into a path allows writes outside the registry dir |
 | SCH-02 | high | 2 | open | Schema reload accepts missing descriptors; non-atomic writes; concurrent registrations can reuse a version |
 | STO-06 | high | 2 | open | Four WAL implementations in use; all data writes hash to one shard so fixes do not propagate |
 | STO-07 | high | 2 | open | BatchAccumulator::flush() sleeps and returns Ok while dropping executor errors |
@@ -53,7 +54,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | DOC-05 | medium | 5 | open | README CLI commands and binary name do not exist; referenced examples missing |
 | DOC-07 | medium | 5 | open | prkdb_writer_healthy alert only exported by prkdb-cli serve; /metrics needs Admin; capability split undocumented |
 | DOC-08 | medium | 5 | open | Missing pages: consumer groups, Docker, CLI reference, Raft ops, troubleshooting, Python client, upgrade |
-| DOC-11 | medium | 0 | open | Transactions page claims Serializable is the default; code defaults to ReadCommitted |
+| DOC-11 | medium | 0 | fixed | Transactions page claims Serializable is the default; code defaults to ReadCommitted |
 | DOC-12 | medium | 5 | open | Nothing in CI runs the documented deploy recipes (docker compose up, 3-node setup) |
 | RFT-08 | medium | 4 | open | RPC client never sends x-prkdb-cluster-secret; mTLS mode configures no server TLS, so cluster cannot elect |
 | RFT-09 | medium | 4 | open | a_committed_write_replicates_to_every_node failed the unmutated baseline in CI run 34021601202 |
@@ -64,10 +65,11 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | TST-03 | medium | 1 | open | No restart/crash testing against a reference model |
 | TST-05 | medium | 2 | open | No power-loss (unsynced-data) testing; needs the WAL routed through Vfs |
 | TST-06 | medium | 4 | open | No deterministic simulation of the cluster |
+| TST-08 | medium | 0 | open | replication_tests binds fixed port 13197 and fails under parallel nextest runs |
 | TTL-01 | medium | 3 | open | Expiry deletes without re-checking the version; value and TTL metadata written non-atomically |
 | TXN-04 | medium | 3 | open | Default isolation is ReadCommitted; D5 makes Serializable the default |
-| DOC-06 | low | 0 | open | Rust version stated as 1.75+/1.95+ while the actual toolchain is 1.98 |
-| DOC-09 | low | 0 | open | Unsourced performance claims (10x less resources, ~10 MB binary, <1s startup, 99.4% write success) |
+| DOC-06 | low | 0 | fixed | Rust version stated as 1.75+/1.95+ while the actual toolchain is 1.98 |
+| DOC-09 | low | 0 | fixed | Unsourced performance claims (10x less resources, ~10 MB binary, <1s startup, 99.4% write success) |
 | DOC-10 | low | 5 | open | ignoreDeadLinks: true hides orphaned methodology/status pages |
 | TST-04 | low | 1 | open | e2e_throughput_bench not declared harness = false; Criterion main likely never runs |
 | TST-07 | low | 2 | open | No fuzzing of WAL record, segment, snapshot, and proto decoding |
