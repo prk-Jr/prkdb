@@ -1143,9 +1143,14 @@ impl<S: prkdb_schema::SchemaStorage + 'static> PrkDbServiceTrait for PrkDbGrpcSe
         let req = request.into_inner();
         self.validate_admin_token(&req.admin_token)?;
 
+        // `req.collection` is untrusted and not yet validated: log only its
+        // length and a bounded prefix so an oversized/adversarial name can't
+        // blow up the log line.
+        let collection_prefix: String = req.collection.chars().take(64).collect();
         tracing::info!(
-            "RegisterSchema: collection={:?}, compatibility={:?}",
-            req.collection,
+            "RegisterSchema: collection_len={}, collection_prefix={:?}, compatibility={:?}",
+            req.collection.chars().count(),
+            collection_prefix,
             req.compatibility
         );
 

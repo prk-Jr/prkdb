@@ -6,8 +6,12 @@ use prost_types::FileDescriptorProto;
 use std::sync::Arc;
 
 fn valid_proto() -> Vec<u8> {
+    proto_with_name("user.proto")
+}
+
+fn proto_with_name(name: &str) -> Vec<u8> {
     FileDescriptorProto {
-        name: Some("user.proto".into()),
+        name: Some(name.into()),
         ..Default::default()
     }
     .encode_to_vec()
@@ -99,14 +103,27 @@ async fn sch01_round_trip_preserves_distinct_collections_after_reload() {
     let root = tempfile::tempdir().unwrap();
     let base = root.path().join("registry");
 
+    let users_proto = proto_with_name("users.proto");
+    let orders_proto = proto_with_name("orders.proto");
+
     {
         let registry = SchemaRegistry::new(Arc::new(FileSchemaStorage::new(base.clone())));
         registry
-            .register("users", valid_proto(), CompatibilityMode::Backward, None)
+            .register(
+                "users",
+                users_proto.clone(),
+                CompatibilityMode::Backward,
+                None,
+            )
             .await
             .unwrap();
         registry
-            .register("orders", valid_proto(), CompatibilityMode::Backward, None)
+            .register(
+                "orders",
+                orders_proto.clone(),
+                CompatibilityMode::Backward,
+                None,
+            )
             .await
             .unwrap();
     }
@@ -116,11 +133,25 @@ async fn sch01_round_trip_preserves_distinct_collections_after_reload() {
 
     let users = storage.get_latest("users").await.unwrap();
     assert!(users.is_some());
-    assert_eq!(users.unwrap().descriptor, valid_proto());
+    let users_schema = users.unwrap();
+    assert_eq!(users_schema.descriptor, users_proto);
+    assert_eq!(
+        FileDescriptorProto::decode(users_schema.descriptor.as_slice())
+            .unwrap()
+            .name,
+        Some("users.proto".to_string())
+    );
 
     let orders = storage.get_latest("orders").await.unwrap();
     assert!(orders.is_some());
-    assert_eq!(orders.unwrap().descriptor, valid_proto());
+    let orders_schema = orders.unwrap();
+    assert_eq!(orders_schema.descriptor, orders_proto);
+    assert_eq!(
+        FileDescriptorProto::decode(orders_schema.descriptor.as_slice())
+            .unwrap()
+            .name,
+        Some("orders.proto".to_string())
+    );
 }
 
 #[tokio::test]
