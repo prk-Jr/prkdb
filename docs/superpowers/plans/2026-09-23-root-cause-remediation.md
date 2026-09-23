@@ -1488,16 +1488,16 @@ Register it: in `collectors/mod.rs` add `pub(super) mod ledger;` and in `collect
 slow-timeout = { period = "60s", terminate-after = 5 }
 
 [profile.ci]
-retries = 2            # retries are reported in the summary, never silent
+retries = 0            # flaky tests are findings; a retry would turn a flake green
 failure-output = "immediate-final"
 fail-fast = false
 
 [test-groups]
-process-spawning = { max-threads = 1 }
+serial-servers = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = "test(/_tripwire$/) | binary(raft_chaos_tests) | binary(in_process_cluster)"
-test-group = "process-spawning"
+test-group = "serial-servers"
 ```
 
 - [ ] **Step 2: Run locally**
@@ -1519,6 +1519,8 @@ In the `test` job replace `cargo test --workspace` with:
 ---
 
 ### Task 1.2: `Vfs` trait and `StdVfs`
+
+> **As built (review-hardened, commits b112104 + 33e419e):** the real API differs from the code below — `fn exists(&self, path: &Path) -> io::Result<bool>` (never hides I/O errors), `fn open(&self, path: &Path, mode: OpenMode) -> io::Result<Arc<dyn VfsFile>>` with `OpenMode::{Read, ReadWrite}`, and every method documents its durability contract. `crates/prkdb-core/src/vfs/` is the source of truth; later tasks must implement/consume that API, not the snippet below. The nextest group in Task 1.1 was also widened and renamed `serial-servers` (all prkdb-cli test binaries + every `mod helpers` binary + tripwires).
 
 **Files:**
 - Create: `crates/prkdb-core/src/vfs/mod.rs`, `crates/prkdb-core/src/vfs/std_vfs.rs`
@@ -1711,6 +1713,8 @@ Add to `crates/prkdb-core/Cargo.toml` `[features]`: `vfs-conformance = []`.
 ---
 
 ### Task 1.3: `prkdb-verify` crate and `faultfs`
+
+> **API note:** implement the as-built `Vfs` (see Task 1.2 note): `exists` returns `io::Result<bool>`, `open` takes `OpenMode` (writes through a `Read` handle must return an error), and `FaultFs` must honour exactly the durability rules documented on each trait method.
 
 **Files:**
 - Create: `crates/prkdb-verify/Cargo.toml`, `crates/prkdb-verify/src/lib.rs`, `crates/prkdb-verify/src/faultfs.rs`
@@ -2527,7 +2531,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-- [ ] **Step 2: Test** — spawns the child (`env!("CARGO_BIN_EXE_crash_child")`), reads stdout until `ACK 199`, sends `SIGKILL` (`child.kill()` sends SIGKILL on Unix), reopens with `open_async`, asserts `k0..k199` all present. It takes a few seconds, so it runs on every PR (not `#[ignore]`d); add `| binary(sigkill)` to the nextest `process-spawning` filter. Gate the file with `#![cfg(unix)]`.
+- [ ] **Step 2: Test** — spawns the child (`env!("CARGO_BIN_EXE_crash_child")`), reads stdout until `ACK 199`, sends `SIGKILL` (`child.kill()` sends SIGKILL on Unix), reopens with `open_async`, asserts `k0..k199` all present. It takes a few seconds, so it runs on every PR (not `#[ignore]`d); add `| binary(sigkill)` to the nextest `serial-servers` filter. Gate the file with `#![cfg(unix)]`.
 
 ```rust
 #[tokio::test(flavor = "multi_thread")]
