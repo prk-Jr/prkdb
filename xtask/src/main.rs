@@ -1,4 +1,5 @@
 mod readme_tests;
+mod remediation;
 mod repo_status;
 
 use anyhow::Result;
