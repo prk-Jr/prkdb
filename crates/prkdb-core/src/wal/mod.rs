@@ -2,10 +2,12 @@ pub mod adaptive;
 pub mod async_fsync;
 pub mod async_log_segment;
 pub mod async_parallel_wal;
+pub mod batch;
 pub mod buffer_pool;
 pub mod compaction;
 pub mod compression;
 pub mod config;
+pub mod frame;
 pub mod log_record;
 pub mod log_segment;
 pub mod metrics;
@@ -13,9 +15,12 @@ pub mod mmap_log_segment;
 pub mod mmap_parallel_wal;
 pub mod offset_index;
 pub mod parallel_wal;
+pub mod segment;
 pub mod write_ahead_log;
 
-pub use compression::{compress, decompress, CompressionConfig, CompressionError, CompressionType};
+pub use compression::{
+    compress, decompress, decompress_bounded, CompressionConfig, CompressionError, CompressionType,
+};
 pub use config::{CompactionPolicy, WalConfig};
 pub use log_record::{LogOperation, LogRecord};
 pub use log_segment::LogSegment;
@@ -42,6 +47,33 @@ pub enum WalError {
 
     #[error("Recovery failed: {0}")]
     Recovery(String),
+
+    #[error("unsupported WAL format {found} in {path}; this build reads format {supported}")]
+    UnsupportedFormat {
+        path: std::path::PathBuf,
+        found: u32,
+        supported: u32,
+    },
+
+    #[error("corrupt WAL: {path} at byte {offset}: {reason}")]
+    CorruptSegment {
+        path: std::path::PathBuf,
+        offset: u64,
+        reason: String,
+    },
+
+    #[error("record of {len} bytes in {path} exceeds the {max}-byte limit")]
+    RecordTooLarge {
+        path: std::path::PathBuf,
+        len: usize,
+        max: usize,
+    },
+
+    #[error("WAL is poisoned by an earlier I/O failure and accepts no more writes: {0}")]
+    Poisoned(String),
+
+    #[error("WAL is closed")]
+    Closed,
 }
 pub use offset_index::OffsetIndex;
 pub use parallel_wal::ParallelWal;
