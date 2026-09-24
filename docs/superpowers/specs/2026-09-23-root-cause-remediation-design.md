@@ -26,6 +26,9 @@ Resolved with the maintainer on 2026-09-23.
 | **D7** | **One spec, one plan, one program branch, one machine-checked ledger.** | Tracking cannot silently drift from code (§4). |
 | **D8** | **Clustering is labelled experimental until Phase 4 exits.** | Honest scope while Raft is unsafe; removes the label only on evidence. |
 | **D9** | **Commit locally; push to the public repo once per phase, together with that phase's fixes.** | No unfixed security finding is ever public; no CI runs for spec-only commits; private remote holds backups (§5.1). |
+| **D10** | **Approved probe pushes.** A phase branch may be pushed to `origin` before its gate (no PR) when the maintainer approves it, so `workflow_dispatch` probes (Linux benchmarks, Valgrind) can run. Decided 2026-09-24 for Phase 2. | D9's purpose — no unfixed *security* finding goes public — still holds: probe pushes require that the branch contains no open security finding. |
+| **D11** | **One WAL per data directory, no exceptions.** `CollectionPartitionedAdapter` keeps its routing but writes into the single globally ordered WAL (collection is a record field); no per-collection WALs. Decided 2026-09-24. | Global order, atomic cross-collection commits, and one recovery path are preserved (spec 2a). |
+| **D12** | **Phase 2 breaking changes accepted** (beta, no deployed users): a failed fsync poisons the WAL until reopen; `StorageConfig.sync_mode` moves to `WalConfig`; writes stuck behind a stalled writer return `WriteNotConfirmed` on client timeout; `IndexedStorage` ids switch from JSON to bincode; `CollectionHandle` keys drop the partition. Decided 2026-09-24. | Documented on the upgrade page (Phase 5); they land together with the format v2 break (D3). |
 
 ---
 
@@ -516,6 +519,7 @@ No unrelated refactoring.
 |---|---|---|
 | 1 | 2026-09-23 | Initial spec from the 2026-09-23 audits and the 2026-09-07 review; decisions D1–D9 (D9: publishing policy). |
 | 2 | 2026-09-23 | Spec review pass 1: `Vfs` seam defined in Phase 1, WAL routed through it in 2a; per-area `verified`; tripwires instead of expected-failure lists; single-phase IDs (DOC-11, DOC-12, TST-05..07 split out); harness op profiles per phase (§7.1); Fast mode from 2a; commit-based workflow with phase-PR CI sequence; private backup repo with Actions off; storage-compat timing; single globally ordered WAL; like-for-like Raft gate; madsim budget; DOC-11 interim wording. |
+| 10 | 2026-09-24 | Decisions D10 (approved probe pushes), D11 (one WAL, including CollectionPartitionedAdapter), D12 (Phase 2 breaking changes accepted). |
 | 9 | 2026-09-24 | Execution: STO-09 added (`cache_capacity` ignored by `new_with_config`), found by the Task 2.1 WAL spike. |
 | 8 | 2026-09-24 | Execution: TST-09 added (perf gate WAL benches measure ~500 instructions). |
 | 7 | 2026-09-24 | Execution: STO-08 added (`segment_bytes` ignored by the mmap WAL). |
