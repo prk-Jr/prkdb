@@ -468,6 +468,42 @@ jobs:
       - run: cargo test -p prkdb --test load_tests -- --ignored --test-threads=1
       - run: cargo test -p prkdb --test chaos_tests chaos_test_memory_pressure -- --ignored --test-threads=1
 
+  nightly-harness:
+    name: Nightly Crash/Restart Harness
+    runs-on: ubuntu-latest
+    # Measured locally: `time cargo xtask verify --profile blocking --seeds 200 --mode
+    # durable` is ~5s warm (debug profile), i.e. ~25ms/seed. Extrapolated to the 20k
+    # seeds run here that's ~500s (~8.3 min) of harness time; adding a cold-cache debug
+    # build on a fresh runner puts the whole job at roughly 10-14 minutes, so 1.5x that
+    # estimate is ~20 minutes. Well under the 60-minute threshold in the task, so this
+    # job is not sharded (unlike the phase-gate `harness` job in remediation-gate.yml).
+    timeout-minutes: 20
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo xtask verify --profile blocking --seeds 20000 --mode durable
+      # profile=discovery currently and deliberately fails (it reproduces STO-01, see
+      # the ledger), so it must never gate the workflow. It stays here, non-blocking,
+      # as a standing repro/detection signal until STO-01 is fixed.
+      - name: Discovery profile (non-blocking; reproduces STO-01 by design)
+        continue-on-error: true
+        run: cargo xtask verify --profile discovery --seeds 2000 --mode durable
+      # TODO(Task 1.12): once the §6.1 Criterion benches exist, add the nightly trend
+      # step here — run them with `--output-format bencher` and publish via
+      # `benchmark-action/github-action-benchmark@v1` (tool: cargo, gh-pages-branch:
+      # bench-data, auto-push: true, fail-on-alert: false). That also needs
+      # `permissions: contents: write` on this job for the auto-push to bench-data.
+      # Skipped for now: the benches this plan (spec §6.1) refers to don't exist yet.
+
   security-audit:
     name: Security Audit
     runs-on: ubuntu-latest
@@ -622,6 +658,30 @@ jobs:
       - run: cargo nextest run --workspace --profile ci
       - run: cargo test --doc --workspace
         if: ${{ !cancelled() }}
+
+  harness:
+    name: Crash/Restart Harness
+    runs-on: ubuntu-latest
+    # A cold cache builds a separate release profile of prkdb for the harness binary.
+    timeout-minutes: 30
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
+      # newer compiler than the repository declares — and failing on lints no
+      # contributor could reproduce locally. `nightly-check` keeps the forward-looking
+      # signal, on purpose and out of the gating path.
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      # 200 seeds measured at ~5s warm locally; well inside the 30-minute budget even
+      # accounting for a cold cache building the debug profile from scratch.
+      - run: cargo xtask verify --profile blocking --seeds 200 --mode durable
 
   schema-integration:
     name: Schema E2E Integration

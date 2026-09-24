@@ -46,4 +46,34 @@ jobs:
           save-if: false
       - run: cargo xtask remediation check
       - run: cargo test --workspace --no-fail-fast
-  # Phase 1 adds a sharded `harness` job here (Task 1.14).
+
+  harness:
+    name: Crash/Restart Harness
+    # Phases 0 and 5 don't touch the storage/WAL path this harness exercises: phase 0
+    # only stands the gate workflow up, and phase 5 is close-out. Every other phase
+    # gate runs it.
+    if: ${{ inputs.phase != '0' && inputs.phase != '5' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      # 10 shards x 1000 seeds = the 10k-seed gate (spec §5 step 3).
+      - run: cargo xtask verify --profile blocking --seeds 1000 --seed-offset $(( ${{ matrix.shard }} * 1000 ))
