@@ -1,0 +1,116 @@
+name: Performance Gate
+
+# Deterministic instruction-count gate for phase PRs (spec §6.2). Only meaningful on a
+# pull request to main, since it benchmarks base SHA vs. head SHA of the same PR.
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # Pin the runner binary to the library version pinned in crates/prkdb/Cargo.toml
+  # (Task 1.13: "pin its runner version to the library version"). Bump both together.
+  GUNGRAUN_VERSION: "0.19.4"
+
+jobs:
+  instruction-count-gate:
+    name: Instruction-count regression gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      # CI preamble (spec conventions): identical to ci.yml's `test` job setup.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+      - uses: actions/checkout@v4
+        with:
+          # Need both the PR head and its merge base in the same checkout to bench each
+          # in turn.
+          fetch-depth: 0
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Valgrind
+        run: sudo apt-get install -y valgrind
+
+      - name: Install gungraun-runner
+        run: cargo install gungraun-runner --version "$GUNGRAUN_VERSION" --locked
+
+      - name: Resolve base and head SHAs
+        id: shas
+        run: |
+          echo "base=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+          echo "head=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+
+      # Benchmarked in the same job, on the same runner, so both share whatever noise
+      # the runner itself contributes (spec §6.2: "base commit and the PR head are
+      # benchmarked in the same job").
+      # gungraun/iai-callgrind compares each benchmark id against the previous run
+      # recorded under target/ for that same id (see scripts/perf_gate_deltas.py's
+      # docstring). Benching base first, then head, in the same job and without
+      # clearing target/ in between, makes the head run's own terminal output already
+      # contain the base-vs-head diff.
+      # The very first phase PR to carry this workflow benches a base SHA that predates
+      # `iai_hot_paths` entirely (it lands in the same PR as this workflow). Treat a
+      # missing bench at base as "no prior baseline" rather than failing the job: with no
+      # base run recorded, gungraun's own first-run-vs-baseline comparison reports "N/A"
+      # for the head run too, which scripts/perf_gate_deltas.py already reads as a 0%
+      # delta.
+      - name: Bench base SHA
+        run: |
+          git checkout "${{ steps.shas.outputs.base }}"
+          if [ -f crates/prkdb/benches/iai_hot_paths.rs ]; then
+            cargo bench -p prkdb --bench iai_hot_paths 2>&1 | tee base-bench.log
+          else
+            echo "iai_hot_paths does not exist at base SHA; no prior baseline to compare against" | tee base-bench.log
+          fi
+
+      - name: Bench head SHA
+        run: |
+          git checkout "${{ steps.shas.outputs.head }}"
+          cargo bench -p prkdb --bench iai_hot_paths 2>&1 | tee head-bench.log
+
+      - name: Compute instruction-count deltas
+        run: |
+          python3 scripts/perf_gate_deltas.py base-bench.log head-bench.log \
+            > deltas.json
+
+      - name: Print deltas to job summary
+        if: always()
+        run: |
+          echo "## Instruction-count deltas (base -> head)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/perf_gate_deltas.py --summary deltas.json >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Enforce the >5% regression gate
+        run: |
+          regressed=$(python3 scripts/perf_gate_deltas.py --regressed deltas.json)
+          if [ -z "$regressed" ]; then
+            echo "no benchmark regressed more than 5%"
+            exit 0
+          fi
+
+          echo "regressed benchmarks (>5%):"
+          echo "$regressed"
+
+          # Override (spec §6.2): a regression is allowed when the PR's diff to the
+          # ledger adds or changes a non-empty perf_note.
+          if git diff "${{ steps.shas.outputs.base }}" "${{ steps.shas.outputs.head }}" -- docs/remediation/ledger.toml | grep -qE '^\+perf_note = ".+"'; then
+            echo "regression justified by a ledger perf_note"
+            exit 0
+          fi
+
+          echo "instruction-count regression > 5% without a ledger perf_note"
+          exit 1
