@@ -3536,6 +3536,8 @@ Run: `cargo nextest run -p prkdb-core --test wal_segment` → every test panics 
 
 ### Task 2.6: `Wal` — writer thread, group commit, reservations, recovery (library only)
 
+> **From the Task 2.5 codec review:** recovery must never surface a bare `Batch::decode` error. Wrap every decode/`read_frame` failure during `Wal::open` replay with the segment path, byte offset and LSN (spec §8, "refuse to open, name the file"), and add a test that corrupts a batch body inside an otherwise valid frame and asserts the open error names the segment file and LSN. Decompression goes through the bounded decoder added in the 2.5 fix.
+
 The real log, not yet wired into the adapter. Ported from the spike's `SingleLog` (`wal_write_path_spike.rs`, `writer_loop`) and completed with everything the spike omitted (decision record §6 risk 5).
 
 **Files:**
