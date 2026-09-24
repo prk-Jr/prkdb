@@ -19,6 +19,7 @@ else
   cargo test --workspace
 fi
 if [ -d crates/prkdb-verify ]; then step harness; cargo xtask verify --profile blocking --seeds 200 --mode durable; fi
+step wal-fast-rule; python3 scripts/wal_fast_rule.py --self-test
 step ledger;        cargo xtask remediation check
 step ledger-render; cargo xtask remediation render --check
 step repo-status;   cargo xtask repo-status snapshot --fail-on-objective-drift > /dev/null

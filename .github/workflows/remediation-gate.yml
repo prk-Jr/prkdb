@@ -2,43 +2,35 @@ name: Remediation Gate
 
 # Dispatched by the maintainer against a phase PR's head ref (spec §5, step 3).
 # Must exist on main to be dispatchable, which is why it ships in Phase 0.
-run-name: Remediation gate — phase ${{ inputs.phase }} @ ${{ inputs.ref }}
+#
+# Task 2.2 (spec §7 Phase 2, D10): the `probe` input lets a maintainer-approved probe
+# push of a phase branch (no PR) dispatch this same workflow to run a benchmark or a
+# Valgrind bench on a Linux runner, without running the phase gate itself. The
+# `run-name` suffix below makes a probe run visually impossible to mistake for gate
+# evidence.
+run-name: Remediation gate — phase ${{ inputs.phase }} @ ${{ inputs.ref }}${{ inputs.probe != 'none' && format(' (probe {0})', inputs.probe) || '' }}
 
 on:
   workflow_dispatch:
     inputs:
       ref:
-        description: Git ref to verify (phase PR head), or to probe
+        description: Git ref to verify (phase PR head)
         required: true
       phase:
         description: Phase number (0-5)
         required: true
         type: choice
         options: ['0', '1', '2', '3', '4', '5']
-      # Linux probe path (Task 2.2, spec §7 Phase 2, D10): lets a phase branch pushed
-      # without a PR (maintainer-approved probe push) run a benchmark or a Valgrind
-      # bench on a Linux runner, e.g. to satisfy the Task 2.1 spike's Risk 1 condition
-      # ("run this bench on Linux ... before merging the writer"). Leaving this at
-      # 'none' runs the normal gate untouched; 'bench'/'valgrind' skip the gate jobs
-      # below and run only the matching probe job.
       probe:
-        description: Linux probe instead of the gate ('none' for a normal phase gate)
+        description: "Linux probe to run instead of the gate (none = normal gate run)"
         required: false
+        default: none
         type: choice
-        options: ['none', 'bench', 'valgrind']
-        default: 'none'
-      bench_name:
-        description: 'probe != none: cargo bench target under crates/prkdb/benches (default depends on probe kind)'
+        options: [none, wal-bench, iai]
+      base_ref:
+        description: "wal-bench only: also bench this ref first, in the same job"
         required: false
-        default: ''
-      bench_filter:
-        description: 'probe=bench only: SPIKE_FILTER substring passed to the bench'
-        required: false
-        default: ''
-      bench_reps:
-        description: 'probe=bench only: SPIKE_REPS passed to the bench'
-        required: false
-        default: '1'
+        default: ""
 
 permissions:
   contents: read
@@ -77,9 +69,7 @@ jobs:
   ledger-and-tests:
     name: Ledger and Tests
     needs: resolve
-    # Skipped on a probe dispatch (probe != 'none'): a probe push exists only to run a
-    # benchmark or Valgrind bench on Linux, not to gate a phase.
-    if: ${{ inputs.probe == 'none' || inputs.probe == '' }}
+    if: ${{ inputs.probe == 'none' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -106,8 +96,8 @@ jobs:
     needs: resolve
     # Phases 0 and 5 don't touch the storage/WAL path this harness exercises: phase 0
     # only stands the gate workflow up, and phase 5 is close-out. Every other phase
-    # gate runs it. Also skipped on a probe dispatch (see ledger-and-tests above).
-    if: ${{ (inputs.probe == 'none' || inputs.probe == '') && inputs.phase != '0' && inputs.phase != '5' }}
+    # gate runs it. Also skipped on a probe dispatch.
+    if: ${{ inputs.probe == 'none' && inputs.phase != '0' && inputs.phase != '5' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     # Ten shards, not because ten are needed to fit the time budget, but for headroom
@@ -165,12 +155,12 @@ jobs:
           PHASE: ${{ inputs.phase }}
           PROBE: ${{ inputs.probe }}
         run: |
-          if [ "$RESULT" = "success" ]; then
-            echo "Harness result: success" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$PROBE" != "none" ]; then
+            echo "probe run: harness not applicable" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          if [ "$RESULT" = "skipped" ] && [ -n "$PROBE" ] && [ "$PROBE" != "none" ]; then
-            echo "Harness result: skipped (probe=$PROBE dispatch, expected)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$RESULT" = "success" ]; then
+            echo "Harness result: success" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if [ "$RESULT" = "skipped" ] && { [ "$PHASE" = "0" ] || [ "$PHASE" = "5" ]; }; then
@@ -181,13 +171,14 @@ jobs:
           echo "::error::Harness did not pass and was not a legitimate phase 0/5 skip: $RESULT"
           exit 1
 
-  probe-bench:
-    name: Linux bench probe
+  probe-wal-bench:
+    name: Probe — WAL write path bench (Linux)
     needs: resolve
-    if: ${{ inputs.probe == 'bench' }}
+    if: ${{ inputs.probe == 'wal-bench' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
+      # CI preamble (plan Conventions), with checkout `ref: ${{ needs.resolve.outputs.sha }}`
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet
@@ -197,44 +188,48 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.sha }}
           persist-credentials: false
+          fetch-depth: 0
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: false
-      - name: Run bench probe
+      - name: Bench base ref (optional)
+        if: ${{ inputs.base_ref != '' }}
         env:
-          BENCH_NAME: ${{ inputs.bench_name }}
-          SPIKE_FILTER: ${{ inputs.bench_filter }}
-          SPIKE_REPS: ${{ inputs.bench_reps }}
+          BASE_REF: ${{ inputs.base_ref }}
         run: |
           set -o pipefail
-          name="${BENCH_NAME:-wal_write_path_spike}"
-          echo "Bench: $name (filter='${SPIKE_FILTER}', reps=${SPIKE_REPS:-1})" >> "$GITHUB_STEP_SUMMARY"
-          cargo bench -p prkdb --bench "$name" | tee probe-bench-output.txt
-      - name: Publish bench probe output
-        if: always()
+          git checkout "$BASE_REF"
+          SPIKE_REPS=3 cargo bench -p prkdb --bench wal_write_path_spike | tee base.md
+          git checkout "${{ needs.resolve.outputs.sha }}"
+      - name: Bench ref
+        run: |
+          set -o pipefail
+          SPIKE_REPS=3 cargo bench -p prkdb --bench wal_write_path_spike | tee head.md
+      - name: Apply the Fast rule and publish the tables
         run: |
           {
-            echo '```'
-            cat probe-bench-output.txt 2>/dev/null || echo "(no output captured)"
-            echo '```'
+            echo "**PROBE — not gate evidence**"
+            echo "## Host"; echo; nproc; lscpu | grep 'Model name'; df -hT . | tail -1
+            if [ -f base.md ]; then echo; echo "## Base (${{ inputs.base_ref }})"; cat base.md; fi
+            echo; echo "## Head"; cat head.md
+            echo; echo "## Fast rule"
           } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: probe-bench-output
-          path: probe-bench-output.txt
-          if-no-files-found: warn
+          python3 scripts/wal_fast_rule.py --self-test
+          if [ -f base.md ]; then
+            python3 scripts/wal_fast_rule.py --base base.md --head head.md | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            python3 scripts/wal_fast_rule.py --head head.md | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
 
-  probe-valgrind:
-    name: Linux Valgrind probe
+  probe-iai:
+    name: Probe — instruction counts (Linux)
     needs: resolve
-    if: ${{ inputs.probe == 'valgrind' }}
+    if: ${{ inputs.probe == 'iai' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
+      # CI preamble (plan Conventions)
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet
@@ -248,24 +243,17 @@ jobs:
         run: sudo apt-get install -y protobuf-compiler
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: false
-      - name: Install Valgrind
-        run: sudo apt-get install -y valgrind
-      - name: Install gungraun-runner
-        run: cargo install gungraun-runner --version "0.19.4" --locked
-      - name: Run Valgrind probe
+      - run: |
+          echo "**PROBE — not gate evidence**" >> "$GITHUB_STEP_SUMMARY"
+      - run: sudo apt-get install -y valgrind
+      - run: cargo install gungraun-runner --version 0.19.4 --locked
+      - name: Instruction counts, one thread per summary
         env:
-          BENCH_NAME: ${{ inputs.bench_name }}
+          GUNGRAUN_COLOR: never
         run: |
           set -o pipefail
-          name="${BENCH_NAME:-iai_hot_paths}"
-          cargo bench -p prkdb --bench "$name" -- --save-summary=json | tee probe-valgrind-output.txt
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: probe-valgrind-output
-          path: |
-            probe-valgrind-output.txt
-            target/gungraun
-          if-no-files-found: warn
+          cargo bench -p prkdb --bench iai_hot_paths -- --save-summary=json \
+            --callgrind-args='--separate-threads=yes' | tee iai.log
+          python3 scripts/perf_gate_deltas.py list-names target/gungraun
+          python3 scripts/perf_gate_deltas.py floors target/gungraun scripts/perf_gate_floors.toml \
+            | tee -a "$GITHUB_STEP_SUMMARY"

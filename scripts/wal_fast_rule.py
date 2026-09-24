@@ -1,221 +1,108 @@
 #!/usr/bin/env python3
-"""Apply the Task 2.1 spike's Fast-mode <=15% rule to a `wal_write_path_spike` run.
+"""Apply the spec's 2a rule to raw WAL write-path bench output (Task 2.2).
 
-Background: `docs/remediation/decisions/2026-09-24-single-log-spike.md` §1 records the
-spec's stop condition for the Task 2.1 spike: "Does `Fast` mode lose more than 15% put
-throughput against the current path?" If yes, the spike escalates to the maintainer
-rather than proceeding. §6 Risk 1 notes that answer was measured on macOS, where the
-current path pays an unrelated `msync` penalty that Linux does not, so the 1-writer
-cells specifically need to be re-measured on Linux before Task 2.2 merges the writer
-(Task 2.2, spec §7 Phase 2 preamble).
+Rule (spec §7 2a, decision record §6 risk 1): the new write path in Fast mode may lose at
+most 15 % put throughput against the path it replaces, per (writers, value size) cell.
 
-This script reads the bench's own markdown table (the format `wal_write_path_spike.rs`
-prints via `print_header`/`print_row`) from a raw output file or stdin, and for each
-(writers, value size) cell present, compares `single_log_fast`'s ops/s against
-`current_adapter_put`'s ops/s (the public write path the spike is meant to replace).
-
-Verdict per cell:
-  ratio = fast_ops_s / current_ops_s
-  loss_pct = (1 - ratio) * 100
-  PASS  if loss_pct <= 15.0 (Fast is at most 15% slower, or faster)
-  LOSS  otherwise
-
-The 1-writer cells are the ones the decision record's Risk 1 flags as the open
-condition; every LOSS cell fails the run, but a LOSS on a 1-writer cell is called out
-explicitly, since only the task text's specified mitigation (a bounded `try_recv` spin
-before the writer parks, per §6 Risk 1) may be applied before escalating a 1-writer
-LOSS to the maintainer.
-
-Usage:
-  wal_fast_rule.py check <raw-output-file>   # '-' or omitted = stdin
-  wal_fast_rule.py --self-test               # verify parsing + verdict logic
-
-Exit codes: 0 = every cell PASS, 1 = at least one cell LOSS, 2 = usage/parse error.
+Input is the bench's raw stdout (`print_row` in the bench), never a hand-edited table.
+Head-only mode compares cells inside one run: `wal_fast` vs `current_mmap_wal`.
+Base/head mode compares `current_adapter_put` in the head run (new adapter) against the
+same cell in the base run (old adapter), both benched in the same job on the same runner.
+Exit status 1 if any cell loses more than 15 %. `--self-test` checks the parser and both
+modes against scripts/testdata/wal_bench_sample.md and exits non-zero on any surprise.
 """
 from __future__ import annotations
 
+import argparse
+import contextlib
+import io
+import re
+import statistics
 import sys
 from pathlib import Path
 
-FAST_KIND = "single_log_fast"
-CURRENT_KIND = "current_adapter_put"
-LOSS_THRESHOLD_PCT = 15.0
-
-FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "wal_fast_rule_sample.md"
+ROW = re.compile(r"^\| (?P<cell>[a-z_]+)/(?P<w>\d+)w/(?P<v>\d+)k \| \d+ \| \d+ KiB \| (?P<ops>\d+) \|")
+LIMIT = 0.85
+FIXTURE = Path(__file__).resolve().parent / "testdata" / "wal_bench_sample.md"
 
 
-class ParseError(Exception):
-    """Raised when the raw bench output does not contain a well-formed table."""
+def parse(path: str | Path) -> dict[tuple[str, int, int], float]:
+    samples: dict[tuple[str, int, int], list[float]] = {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            m = ROW.match(line)
+            if m:
+                key = (m["cell"], int(m["w"]), int(m["v"]))
+                samples.setdefault(key, []).append(float(m["ops"]))
+    if not samples:
+        sys.exit(f"{path}: no bench rows found; the row format changed or the bench failed")
+    return {k: statistics.median(v) for k, v in samples.items()}
 
 
-def parse_row(line: str) -> dict | None:
-    """Parse one `| cell | writers | value | ops/s | ... |` row, or None if not a data row."""
-    if not line.startswith("|"):
-        return None
-    cols = [c.strip() for c in line.strip().strip("|").split("|")]
-    if len(cols) < 4:
-        return None
-    name, writers_s, value_s, ops_s = cols[0], cols[1], cols[2], cols[3]
-    if name in ("cell", "") or set(name) <= {"-"}:
-        return None  # header or separator row
-    try:
-        writers = int(writers_s)
-    except ValueError:
-        return None
-    value_kib = value_s.replace("KiB", "").strip()
-    try:
-        ops = float(ops_s)
-    except ValueError:
-        return None
-    kind = name.rsplit("/", 2)[0] if "/" in name else name
-    return {"name": name, "kind": kind, "writers": writers, "value_kib": value_kib, "ops_s": ops}
-
-
-def parse_table(text: str) -> list[dict]:
-    rows = [r for r in (parse_row(line) for line in text.splitlines()) if r is not None]
-    if not rows:
-        raise ParseError("no bench table rows found (expected '| cell | writers | ... |' lines)")
-    return rows
-
-
-def pair_cells(rows: list[dict]) -> list[dict]:
-    """Match `single_log_fast` and `current_adapter_put` rows by (writers, value_kib)."""
-    by_key: dict[tuple, dict] = {}
-    for row in rows:
-        if row["kind"] not in (FAST_KIND, CURRENT_KIND):
-            continue
-        key = (row["writers"], row["value_kib"])
-        by_key.setdefault(key, {})[row["kind"]] = row
-
+def pairs_for(head: dict, base: dict | None) -> list[tuple[str, float, float]]:
     pairs = []
-    for (writers, value_kib), kinds in sorted(by_key.items()):
-        if FAST_KIND not in kinds or CURRENT_KIND not in kinds:
-            continue
-        fast = kinds[FAST_KIND]
-        current = kinds[CURRENT_KIND]
-        if current["ops_s"] <= 0:
-            continue
-        ratio = fast["ops_s"] / current["ops_s"]
-        loss_pct = (1.0 - ratio) * 100.0
-        verdict = "PASS" if loss_pct <= LOSS_THRESHOLD_PCT else "LOSS"
-        pairs.append(
-            {
-                "writers": writers,
-                "value_kib": value_kib,
-                "fast_ops_s": fast["ops_s"],
-                "current_ops_s": current["ops_s"],
-                "ratio": ratio,
-                "loss_pct": loss_pct,
-                "verdict": verdict,
-                "is_one_writer": writers == 1,
-            }
-        )
+    if base is not None:
+        for (cell, w, v), old in sorted(base.items()):
+            if cell == "current_adapter_put" and (cell, w, v) in head:
+                pairs.append((f"adapter_put/{w}w/{v}k", head[(cell, w, v)], old))
+    else:
+        for (cell, w, v), new in sorted(head.items()):
+            if cell == "wal_fast" and ("current_mmap_wal", w, v) in head:
+                pairs.append((f"wal_fast/{w}w/{v}k", new, head[("current_mmap_wal", w, v)]))
     return pairs
 
 
-def format_report(pairs: list[dict]) -> str:
-    lines = [
-        "| writers | value | fast ops/s | current ops/s | ratio | loss % | verdict |",
-        "|---|---|---|---|---|---|---|",
-    ]
-    for p in pairs:
-        lines.append(
-            f"| {p['writers']} | {p['value_kib']} KiB | {p['fast_ops_s']:.0f} | "
-            f"{p['current_ops_s']:.0f} | {p['ratio']:.3f} | {p['loss_pct']:+.1f}% | "
-            f"{p['verdict']} |"
-        )
-    return "\n".join(lines)
+def compare(pairs: list[tuple[str, float, float]]) -> dict[str, bool]:
+    print("| cell | new ops/s | old ops/s | ratio | verdict |")
+    print("|---|--:|--:|--:|---|")
+    verdicts = {}
+    for name, new, old in pairs:
+        ratio = new / old if old else float("inf")
+        verdicts[name] = ratio >= LIMIT
+        print(f"| {name} | {new:.0f} | {old:.0f} | {ratio:.2f} | {'ok' if verdicts[name] else 'LOSS > 15 %'} |")
+    return verdicts
 
 
-def evaluate(text: str) -> tuple[list[dict], int]:
-    """Return (pairs, exit_code). exit_code 0 = all PASS, 1 = some LOSS."""
-    rows = parse_table(text)
-    pairs = pair_cells(rows)
+def run(head_path, base_path=None) -> tuple[int, dict[str, bool]]:
+    head = parse(head_path)
+    pairs = pairs_for(head, parse(base_path) if base_path else None)
     if not pairs:
-        raise ParseError(
-            f"found rows, but no matching '{FAST_KIND}'/'{CURRENT_KIND}' pairs "
-            "by (writers, value size)"
-        )
-    exit_code = 1 if any(p["verdict"] == "LOSS" for p in pairs) else 0
-    return pairs, exit_code
-
-
-def check(path_arg: str | None) -> int:
-    if path_arg is None or path_arg == "-":
-        text = sys.stdin.read()
-    else:
-        text = Path(path_arg).read_text(encoding="utf-8")
-
-    try:
-        pairs, exit_code = evaluate(text)
-    except ParseError as error:
-        print(f"wal_fast_rule.py: {error}", file=sys.stderr)
-        return 2
-
-    print(format_report(pairs))
-    print()
-    one_writer_losses = [p for p in pairs if p["is_one_writer"] and p["verdict"] == "LOSS"]
-    if one_writer_losses:
-        print(
-            "STOP: 1-writer LOSS >15% found. Apply only the mitigation the task text "
-            "specifies (spec decision record §6 Risk 1: a bounded try_recv spin before "
-            "the writer parks, and avoid a second caller-side handoff) before "
-            "re-measuring; otherwise escalate to the maintainer. Do not proceed past "
-            "this STOP.",
-            file=sys.stderr,
-        )
-    elif exit_code != 0:
-        print("LOSS found on a non-1-writer cell.", file=sys.stderr)
-    else:
-        print("PASS: every cell is within the Fast-mode <=15% rule.")
-    return exit_code
+        sys.exit("no comparable cells: expected wal_fast + current_mmap_wal, or current_adapter_put in both runs")
+    verdicts = compare(pairs)
+    failed = sum(not ok for ok in verdicts.values())
+    print(f"\n{failed} cell(s) lose more than 15 %" if failed else "\nall cells within the 15 % rule")
+    return (1 if failed else 0), verdicts
 
 
 def self_test() -> int:
-    if not FIXTURE_PATH.exists():
-        print(f"wal_fast_rule.py --self-test: missing fixture {FIXTURE_PATH}", file=sys.stderr)
-        return 2
-
-    text = FIXTURE_PATH.read_text(encoding="utf-8")
-    rows = parse_table(text)
-    assert len(rows) >= 4, f"expected >=4 parsed rows, got {len(rows)}"
-
-    pairs, exit_code = evaluate(text)
-    by_writers = {p["writers"]: p for p in pairs}
-
-    # Fixture is built so that 1w is a clean PASS (~9% loss) and 8w is a deliberate
-    # LOSS (~25% loss), exercising both branches of the rule and the parser's ability
-    # to tell them apart.
-    assert 1 in by_writers, "fixture must include a 1-writer cell"
-    assert by_writers[1]["verdict"] == "PASS", f"expected 1w PASS, got {by_writers[1]}"
-    assert 8 in by_writers, "fixture must include an 8-writer cell"
-    assert by_writers[8]["verdict"] == "LOSS", f"expected 8w LOSS, got {by_writers[8]}"
-    assert exit_code == 1, "fixture has a LOSS cell, evaluate() must return exit_code 1"
-
-    # A malformed / empty input must be a parse error (exit 2), not a false PASS.
-    try:
-        parse_table("no table here\njust text\n")
-    except ParseError:
-        pass
-    else:
-        raise AssertionError("parse_table must raise ParseError on non-table input")
-
-    print("wal_fast_rule.py --self-test: OK")
-    return 0
+    with contextlib.redirect_stdout(io.StringIO()):
+        code, v = run(FIXTURE)
+        base_code, bv = run(FIXTURE, FIXTURE)
+    want = {"wal_fast/1w/1k": True, "wal_fast/8w/1k": True, "wal_fast/1w/64k": False}
+    problems = []
+    if v != want or code != 1:
+        problems.append(f"head-only: got {v} exit {code}, want {want} exit 1")
+    if bv != {"adapter_put/1w/1k": True} or base_code != 0:
+        problems.append(f"base/head: got {bv} exit {base_code}, want adapter_put/1w/1k ok, exit 0")
+    for p in problems:
+        print(f"self-test FAILED: {p}", file=sys.stderr)
+    if not problems:
+        print("wal_fast_rule.py self-test: ok")
+    return 1 if problems else 0
 
 
-def main(argv: list[str]) -> int:
-    if argv[:1] == ["--self-test"]:
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--head")
+    ap.add_argument("--base")
+    ap.add_argument("--self-test", action="store_true")
+    args = ap.parse_args()
+    if args.self_test:
         return self_test()
-    if argv[:1] == ["check"]:
-        return check(argv[1] if len(argv) > 1 else None)
-    print(
-        "usage: wal_fast_rule.py check <raw-output-file|->\n"
-        "       wal_fast_rule.py --self-test",
-        file=sys.stderr,
-    )
-    return 2
+    if not args.head:
+        ap.error("--head is required unless --self-test")
+    return run(args.head, args.base)[0]
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    sys.exit(main())
