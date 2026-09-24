@@ -20,6 +20,7 @@
 pub mod batch_config;
 pub mod batching;
 pub mod buffer_pool; // Phase 5.2: Buffer pooling for serialization
+pub mod format; // Phase 2a: the one on-disk format version (spec D3)
 pub mod io; // Phase 24B: Platform I/O abstraction (io_uring, sendfile)
 pub mod replication;
 pub mod serialization;
