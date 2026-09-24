@@ -29,6 +29,24 @@
 //! setup function below builds the adapter that way, on a `Builder::new_multi_thread()`
 //! runtime (single worker thread is enough here; multi-thread is required only because
 //! `block_in_place` panics on a current-thread runtime).
+//!
+//! Every benchmark function below also returns its fixture instead of dropping it.
+//! `gungraun-macros` 0.9.1's codegen (`src/lib_bench.rs`, `render_standalone` around
+//! lines 623-660, mirrored for the `#[bench::..]` case in `render_as_code` around
+//! lines 294-315) places the *body* of the annotated function inside an inner
+//! `mod __gungraun_wrapper_mod`, and callgrind's default `--toggle-collect` glob
+//! (`*::__gungraun_wrapper_mod::*`, `gungraun-runner-0.19.4`'s
+//! `runner::DEFAULT_TOGGLE`) starts counting on entry to that module and stops when it
+//! *returns* to its caller (a separate, uncounted `__gungraun_wrapper_id_mod::wrapper`
+//! function). If the annotated function takes an owned fixture and does not return it,
+//! the fixture's drop glue runs as part of that function's own epilogue — i.e. before
+//! the `ret`, still inside the counted region — so `Runtime` shutdown, `WalStorageAdapter`
+//! drop (closing WAL file handles), and `TempDir`'s directory removal would all be
+//! counted as if they were part of the operation under test. Returning the fixture moves
+//! it out instead: the uncounted caller (`__gungraun_wrapper_id_mod::wrapper`, whose
+//! return type mirrors the annotated function's via `to_caller_signature`'s
+//! `..self.0.clone()`) receives it and the top-level `__run` function drops it via
+//! `let _ = ..`, entirely outside `__gungraun_wrapper_mod`.
 
 use gungraun::{library_benchmark, library_benchmark_group, main};
 use prkdb::indexed_storage::IndexedStorage;
@@ -84,7 +102,9 @@ fn setup_wal_put() -> (Runtime, TempDir, WalStorageAdapter, Vec<u8>) {
 // (a plain `//` comment, not `///`: gungraun's `#[library_benchmark]` macro rejects any
 // other attribute on the function it decorates, and a doc comment desugars to one.)
 #[library_benchmark(setup = setup_wal_put)]
-fn bench_wal_put((rt, _dir, adapter, value): (Runtime, TempDir, WalStorageAdapter, Vec<u8>)) {
+fn bench_wal_put(
+    (rt, dir, adapter, value): (Runtime, TempDir, WalStorageAdapter, Vec<u8>),
+) -> (Runtime, TempDir, WalStorageAdapter, Vec<u8>) {
     rt.block_on(async {
         for i in 0..PUT_ITERATIONS {
             let key = format!("bench-key-{i}").into_bytes();
@@ -94,6 +114,9 @@ fn bench_wal_put((rt, _dir, adapter, value): (Runtime, TempDir, WalStorageAdapte
                 .unwrap();
         }
     });
+    // Returned (not dropped here) so the runtime/tempdir/adapter teardown happens in
+    // the uncounted caller — see the module doc comment.
+    (rt, dir, adapter, value)
 }
 
 // Setup for `bench_wal_get_hit`: the fixture key is pre-inserted here, outside the
@@ -111,11 +134,16 @@ fn setup_wal_get_hit() -> (Runtime, TempDir, WalStorageAdapter) {
 
 // `WalStorageAdapter::get` against a key already present (hit path).
 #[library_benchmark(setup = setup_wal_get_hit)]
-fn bench_wal_get_hit((rt, _dir, adapter): (Runtime, TempDir, WalStorageAdapter)) {
+fn bench_wal_get_hit(
+    (rt, dir, adapter): (Runtime, TempDir, WalStorageAdapter),
+) -> (Runtime, TempDir, WalStorageAdapter) {
     rt.block_on(async {
         let got = adapter.get(black_box(b"bench-key")).await.unwrap();
         black_box(got);
     });
+    // See the module doc comment: return the fixture so its teardown happens outside
+    // the counted region.
+    (rt, dir, adapter)
 }
 
 /// A batch of key/value entries for `bench_wal_put_batch_100`.
@@ -136,12 +164,20 @@ fn setup_wal_put_batch_100() -> WalPutBatchFixture {
     (rt, dir, adapter, entries)
 }
 
+/// What's left of the fixture after `put_batch` consumes `entries`: the runtime,
+/// tempdir, and adapter, whose teardown must happen outside the counted region.
+type WalPutBatchTeardown = (Runtime, TempDir, WalStorageAdapter);
+
 // `WalStorageAdapter::put_batch` for 100 entries.
 #[library_benchmark(setup = setup_wal_put_batch_100)]
-fn bench_wal_put_batch_100((rt, _dir, adapter, entries): WalPutBatchFixture) {
+fn bench_wal_put_batch_100((rt, dir, adapter, entries): WalPutBatchFixture) -> WalPutBatchTeardown {
     rt.block_on(async {
         adapter.put_batch(black_box(entries)).await.unwrap();
     });
+    // `entries` is consumed by `put_batch` itself (real work, not fixture teardown) so
+    // it can't be returned too; the runtime/tempdir/adapter still are, per the module
+    // doc comment.
+    (rt, dir, adapter)
 }
 
 #[derive(Collection, Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -170,10 +206,13 @@ fn setup_indexed_storage_insert() -> (Runtime, IndexedStorage<InMemoryAdapter>, 
 #[library_benchmark(setup = setup_indexed_storage_insert)]
 fn bench_indexed_storage_insert(
     (rt, storage, record): (Runtime, IndexedStorage<InMemoryAdapter>, IaiIndexedRecord),
-) {
+) -> (Runtime, IndexedStorage<InMemoryAdapter>, IaiIndexedRecord) {
     rt.block_on(async {
         storage.insert(black_box(&record)).await.unwrap();
     });
+    // `insert` only borrows `record`; return the whole fixture so the runtime and
+    // storage teardown happens outside the counted region (module doc comment).
+    (rt, storage, record)
 }
 
 fn new_log_record() -> LogRecord {
@@ -186,8 +225,12 @@ fn new_log_record() -> LogRecord {
 
 // `LogRecord` encode (on-disk `serialize`).
 #[library_benchmark(setup = new_log_record)]
-fn bench_log_record_encode(record: LogRecord) {
+fn bench_log_record_encode(record: LogRecord) -> LogRecord {
     black_box(record.serialize());
+    // `serialize` only borrows `record` (`&self`); return the input fixture itself so
+    // its drop (the 1 KiB `data` buffer) happens outside the counted region, per the
+    // module doc comment.
+    record
 }
 
 // Setup for `bench_log_record_decode`: the record is built and serialized here, outside
@@ -198,8 +241,11 @@ fn setup_log_record_decode() -> Vec<u8> {
 
 // `LogRecord` decode (on-disk `deserialize`), the inverse of the encode benchmark above.
 #[library_benchmark(setup = setup_log_record_decode)]
-fn bench_log_record_decode(bytes: Vec<u8>) {
+fn bench_log_record_decode(bytes: Vec<u8>) -> Vec<u8> {
     black_box(LogRecord::deserialize(black_box(&bytes)).unwrap());
+    // `deserialize` only borrows `bytes` (`&[u8]`); return the input fixture so its
+    // drop happens outside the counted region, same reasoning as encode above.
+    bytes
 }
 
 library_benchmark_group!(

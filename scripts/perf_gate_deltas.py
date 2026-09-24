@@ -37,9 +37,20 @@ real sample):
   preserve +-inf/NaN without becoming `null`.
 
   A `Left`-only `metrics` value (no `diffs`) means this benchmark has no prior baseline
-  to compare against — this script reports that as "bootstrap: no comparison" rather
-  than a 0% delta, since 0% would misleadingly claim gungraun actually compared two
-  runs.
+  to compare against. Whether that is an error depends on whether the benchmark existed
+  at base at all (see `--base-list` below): a *new* benchmark added by this PR has never
+  been benched at base and a missing comparison is expected ("new: no comparison"); a
+  benchmark that *did* exist at base but still shows up Left-only means the comparison
+  gungraun was asked to do silently didn't happen, which is a bug worth failing on.
+
+`--base-list`: a text file, one benchmark name per line (as produced by this script's
+own `list-names` subcommand, run against target/gungraun right after the base bench
+step and before the head step overwrites those same summary.json files — both base and
+head write to `dir.join("summary.json")` for a given benchmark, per
+`SummaryOutput::init` in `src/summary/model.rs`, so nothing from base's summaries
+survives the head run). Names not in this file are new; names in this file with no
+matching head summary are reported as removed (a warning, not a failure — the base
+benchmark may have been intentionally renamed or deleted).
 
 NOTE ON CONFIDENCE: the field names, tagging conventions, and the "totals of parts" /
 "Ir under Callgrind" structure above were read directly from gungraun-runner 0.19.4's
@@ -53,8 +64,6 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-
-REGRESSION_THRESHOLD_PCT = 5.0
 
 
 class SummaryError(Exception):
@@ -93,13 +102,21 @@ def benchmark_name(benchmark: dict) -> str:
     return name
 
 
-def extract_row(path: Path) -> dict:
+def load_benchmark(path: Path) -> dict | None:
     try:
-        benchmark = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        return {"name": str(path), "error": f"could not parse: {error}"}
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def extract_row(path: Path, base_names: set[str] | None) -> dict:
+    benchmark = load_benchmark(path)
+    if benchmark is None:
+        return {"name": str(path), "error": f"could not parse {path} as JSON"}
 
     name = benchmark_name(benchmark)
+    existed_at_base = base_names is not None and name in base_names
+
     found = find_ir_total(benchmark)
     if found is None:
         return {"name": name, "error": "no Callgrind Instructions (Ir) metric found"}
@@ -137,7 +154,7 @@ def extract_row(path: Path) -> dict:
     except SummaryError as error:
         return {"name": name, "error": str(error)}
 
-    return {
+    row = {
         "name": name,
         "base": base,
         "head": head,
@@ -146,28 +163,60 @@ def extract_row(path: Path) -> dict:
         "regressed": len(regressions) > 0,
         "regressions": regressions,
     }
+    if bootstrap:
+        row["new"] = base_names is not None and not existed_at_base
+    return row
 
 
 def find_summaries(root: Path) -> list[Path]:
     return sorted(root.rglob("summary.json"))
 
 
-def extract(root: Path, expect_baseline: bool) -> tuple[list[dict], list[str]]:
+def read_base_list(path: str | None) -> set[str] | None:
+    if path is None:
+        return None
+    text = Path(path).read_text(encoding="utf-8")
+    return {line.strip() for line in text.splitlines() if line.strip()}
+
+
+def extract(root: Path, base_names: set[str] | None) -> tuple[list[dict], list[str]]:
     """Return (rows, problems). `problems` is non-empty iff the gate should fail closed."""
     paths = find_summaries(root)
-    rows = [extract_row(path) for path in paths]
+    rows = [extract_row(path, base_names) for path in paths]
 
     problems: list[str] = []
     if not rows:
         problems.append(f"found zero benchmark summaries under {root}")
+
+    head_names = {row["name"] for row in rows}
     for row in rows:
         if "error" in row:
             problems.append(f"{row['name']}: {row['error']}")
-        elif expect_baseline and row.get("bootstrap"):
+        elif row.get("bootstrap") and base_names is not None and not row.get("new"):
             problems.append(
-                f"{row['name']}: no base comparison, but base was benched this run"
+                f"{row['name']}: no base comparison, but this benchmark existed at base"
             )
+
+    if base_names is not None:
+        for missing in sorted(base_names - head_names):
+            rows.append(
+                {
+                    "name": missing,
+                    "removed": True,
+                    "note": "existed at base, no summary at head (deleted or renamed?)",
+                }
+            )
+
     return rows, problems
+
+
+def list_names(root: Path) -> int:
+    """Print one benchmark name per line, for capturing as a `--base-list` file."""
+    for path in find_summaries(root):
+        benchmark = load_benchmark(path)
+        if benchmark is not None:
+            print(benchmark_name(benchmark))
+    return 0
 
 
 def summary(deltas_path: str) -> int:
@@ -177,11 +226,15 @@ def summary(deltas_path: str) -> int:
     print("| Benchmark | Base | Head | Delta | Regressed |")
     print("|---|---|---|---|---|")
     for r in rows:
+        if r.get("removed"):
+            print(f"| {r['name']} | - | - | REMOVED: {r['note']} | - |")
+            continue
         if "error" in r:
             print(f"| {r['name']} | - | - | ERROR: {r['error']} | - |")
             continue
         if r.get("bootstrap"):
-            print(f"| {r['name']} | - | {r['head']} | bootstrap: no comparison | - |")
+            label = "new: no comparison" if r.get("new") else "bootstrap: no comparison"
+            print(f"| {r['name']} | - | {r['head']} | {label} | - |")
             continue
         print(
             f"| {r['name']} | {r['base']} | {r['head']} | {r['pct']:+.2f}% "
@@ -191,11 +244,18 @@ def summary(deltas_path: str) -> int:
 
 
 def regressed(deltas_path: str) -> int:
-    """Print one benchmark name per line for every gungraun-flagged regression."""
+    """Print one benchmark name per line for every gungraun-flagged regression.
+
+    Trusts gungraun's own `regressions` verdict (populated from `--callgrind-limits`
+    and driving its exit code 3) exclusively — this used to also independently flag
+    any row with pct > 5%, which could disagree with gungraun's own limit check
+    (e.g. a different metric, or a hard limit) and made this list not actually
+    reflect what gungraun decided.
+    """
     with open(deltas_path, encoding="utf-8") as f:
         rows = json.load(f)
     for r in rows:
-        if r.get("regressed") or (isinstance(r.get("pct"), (int, float)) and r["pct"] > REGRESSION_THRESHOLD_PCT):
+        if r.get("regressed"):
             print(r["name"])
     return 0
 
@@ -205,10 +265,22 @@ def main() -> int:
         return summary(sys.argv[2])
     if len(sys.argv) == 3 and sys.argv[1] == "--regressed":
         return regressed(sys.argv[2])
+    if len(sys.argv) == 3 and sys.argv[1] == "list-names":
+        return list_names(Path(sys.argv[2]))
     if len(sys.argv) >= 3 and sys.argv[1] == "extract":
         root = Path(sys.argv[2])
-        expect_baseline = "--expect-baseline" in sys.argv[3:]
-        rows, problems = extract(root, expect_baseline)
+        rest = sys.argv[3:]
+        base_list_path = None
+        if "--base-list" in rest:
+            idx = rest.index("--base-list")
+            try:
+                base_list_path = rest[idx + 1]
+            except IndexError:
+                print("perf_gate_deltas.py: --base-list requires a file path", file=sys.stderr)
+                return 2
+        base_names = read_base_list(base_list_path)
+
+        rows, problems = extract(root, base_names)
         print(json.dumps(rows, indent=2))
         if problems:
             for problem in problems:
@@ -217,7 +289,8 @@ def main() -> int:
         return 0
 
     print(
-        "usage: perf_gate_deltas.py extract <gungraun-target-dir> [--expect-baseline]\n"
+        "usage: perf_gate_deltas.py extract <gungraun-target-dir> [--base-list <file>]\n"
+        "       perf_gate_deltas.py list-names <gungraun-target-dir>\n"
         "       perf_gate_deltas.py --summary <deltas.json>\n"
         "       perf_gate_deltas.py --regressed <deltas.json>",
         file=sys.stderr,

@@ -90,18 +90,40 @@ jobs:
       # no `--save-baseline=base` step runs, so the head step's `--baseline=base`
       # comparison naturally reports "no comparison" for every benchmark (gungraun
       # creates a new baseline instead of comparing — see --baseline's docs in
-      # args.rs), which scripts/perf_gate_deltas.py reports as "bootstrap: no
-      # comparison" rather than a crash, and the base_benched output below tells the
-      # deltas step not to expect a comparison.
+      # args.rs). base-benchmarks.txt is left empty in that case, so
+      # scripts/perf_gate_deltas.py treats every head benchmark as new (see below)
+      # rather than erroring.
+      #
+      # A benchmark added or renamed in a *later* PR after this file starts existing at
+      # base would otherwise still need special-casing — that's what base-benchmarks.txt
+      # (captured with `--save-summary=json` here too, then `list-names`) is for: it
+      # records which benchmark ids existed at base by name, so the deltas step can tell
+      # "new benchmark, no comparison possible" apart from "existing benchmark, base
+      # comparison unexpectedly missing" (see scripts/perf_gate_deltas.py's docstring).
+      # This must run and be captured to a *separate* file before the head step below,
+      # because both base and head write to the same `summary.json` path per benchmark
+      # (SummaryOutput::init in gungraun's source) — the head run overwrites base's
+      # summaries in place.
+      #
+      # NOTE: a benchmark that's already broken on main (e.g. panics, or was removed
+      # from main mid-flight) makes *every* PR's base step fail here, including the PR
+      # that would fix it — the base step benches main's tree, not the PR's. If that
+      # happens, the fix has to land on main first (or this workflow needs a manual
+      # override), since this job can't tell "broken because of this PR" apart from
+      # "broken already, on main".
       - name: Bench base SHA
         id: base_bench
         run: |
           git checkout "${{ steps.shas.outputs.base }}"
           if [ -f crates/prkdb/benches/iai_hot_paths.rs ]; then
-            cargo bench -p prkdb --bench iai_hot_paths -- --save-baseline=base
+            cargo bench -p prkdb --bench iai_hot_paths -- \
+              --save-baseline=base --save-summary=json
+            python3 scripts/perf_gate_deltas.py list-names target/gungraun \
+              > base-benchmarks.txt
             echo "benched=true" >> "$GITHUB_OUTPUT"
           else
             echo "iai_hot_paths does not exist at base SHA; no prior baseline to compare against"
+            : > base-benchmarks.txt
             echo "benched=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -133,18 +155,18 @@ jobs:
 
       - name: Compute instruction-count deltas
         run: |
-          extra_args=()
-          if [ "${{ steps.base_bench.outputs.benched }}" = "true" ]; then
-            extra_args+=(--expect-baseline)
-          fi
-          python3 scripts/perf_gate_deltas.py extract target/gungraun "${extra_args[@]}" \
-            > deltas.json
+          python3 scripts/perf_gate_deltas.py extract target/gungraun \
+            --base-list base-benchmarks.txt > deltas.json
 
       - name: Print deltas to job summary
         if: always()
         run: |
           echo "## Instruction-count deltas (base -> head)" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ ! -f deltas.json ]; then
+            echo "no deltas.json (the deltas step itself failed before writing one)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           python3 scripts/perf_gate_deltas.py --summary deltas.json >> "$GITHUB_STEP_SUMMARY"
 
       - name: Enforce the regression gate
