@@ -436,7 +436,9 @@ title = "e2e_throughput_bench not declared harness = false; Criterion main likel
 area = "tests"
 severity = "low"
 phase = 1
-status = "open"
+status = "fixed"
+regression_tests = ["script:scripts/check_bench_harness.sh"]
+changes = ["67e1308"]
 
 [[finding]]
 id = "TST-05"

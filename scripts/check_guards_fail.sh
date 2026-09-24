@@ -83,12 +83,19 @@ must_fail "check_chaos_tests_run" "NEVER RUN" \
       PRKDB_WORKFLOW_GLOB="$FIXTURES/no-chaos-step/*.yml" \
       bash scripts/check_chaos_tests_run.sh
 
+# 4. bench-harness (TST-04), against a Cargo.toml where e2e_throughput_bench is declared
+# without harness = false.
+must_fail "check_bench_harness" "no [[bench]] entry" \
+  env PRKDB_BENCH_CARGO_TOML="$FIXTURES/missing-bench-harness/Cargo.toml" \
+      bash scripts/check_bench_harness.sh
+
 echo
 echo "And must accept the repository as it stands:"
 must_pass "check_ignore_reasons" bash scripts/check_ignore_reasons.sh
 must_pass "check_docs_cover_cli" bash scripts/check_docs_cover_cli.sh
 must_pass "check_chaos_tests_run" bash scripts/check_chaos_tests_run.sh
 must_pass "check_wrapper_completeness" bash scripts/check_wrapper_completeness.sh
+must_pass "check_bench_harness" bash scripts/check_bench_harness.sh
 
 echo
 if [[ $failed -eq 0 ]]; then

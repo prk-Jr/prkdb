@@ -66,7 +66,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | TXN-04 | medium | 3 | open | Default isolation is ReadCommitted; D5 makes Serializable the default |
 | DOC-10 | low | 5 | open | ignoreDeadLinks: true hides orphaned methodology/status pages |
 | STO-08 | low | 2 | open | WalConfig::segment_bytes ignored by the mmap WAL (segment size hardcoded to 64 MB) |
-| TST-04 | low | 1 | open | e2e_throughput_bench not declared harness = false; Criterion main likely never runs |
+| TST-04 | low | 1 | fixed | e2e_throughput_bench not declared harness = false; Criterion main likely never runs |
 | TST-07 | low | 2 | open | No fuzzing of WAL record, segment, snapshot, and proto decoding |
 | DOC-01 | high | 0 | verified | Cluster docs and compose files misdescribe multi-node setup (env vars, peer auth, metrics auth) |
 | SCH-01 | high | 0 | verified | Schema collection name joined into a path allows writes outside the registry dir |
