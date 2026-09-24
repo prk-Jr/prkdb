@@ -59,7 +59,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | STO-04 | medium | 2 | open | scan_mmap skips CRC on open; torn records become invisible; directories never fsynced |
 | STO-05 | medium | 2 | open | WAL routing uses unstable DefaultHasher; replay ordered by segment id, not global order |
 | TST-02 | medium | 4 | open | Linearizability workloads use 1 writer, 1 reader, ~25 ops; failed reads dropped |
-| TST-03 | medium | 1 | open | No restart/crash testing against a reference model |
+| TST-03 | medium | 1 | fixed | No restart/crash testing against a reference model |
 | TST-05 | medium | 2 | open | No power-loss (unsynced-data) testing; needs the WAL routed through Vfs |
 | TST-06 | medium | 4 | open | No deterministic simulation of the cluster |
 | TTL-01 | medium | 3 | open | Expiry deletes without re-checking the version; value and TTL metadata written non-atomically |

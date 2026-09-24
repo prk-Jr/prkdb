@@ -19,6 +19,7 @@ evidence = [
   "crates/prkdb/src/storage/checkpoint.rs:44-51",
   "crates/prkdb-core/src/wal/mmap_parallel_wal.rs:310",
   "crates/prkdb/src/storage/wal_adapter.rs:1737",
+  "test:crates/prkdb-verify/tests/harness.rs::sto01_discovery_profile_finds_checkpoint_loss_tripwire",
 ]
 tripwire = "test:crates/prkdb/tests/tripwires.rs::sto01_checkpoint_drops_pre_checkpoint_keys_tripwire"
 
@@ -422,7 +423,12 @@ title = "No restart/crash testing against a reference model"
 area = "tests"
 severity = "medium"
 phase = 1
-status = "open"
+status = "fixed"
+regression_tests = [
+  "test:crates/prkdb-verify/tests/harness.rs::meta_harness_catches_a_lossy_sut",
+  "test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_on_current_code",
+]
+changes = ["61cde01f69ff8ed1a2718a856c55e437fee38b85"]
 
 [[finding]]
 id = "TST-04"
