@@ -93,28 +93,50 @@ async fn blocking_profile_is_green_on_current_code() {
     );
 }
 
+/// True only for STO-01's own shape: a minimized sequence containing a
+/// `Checkpoint` after which an acknowledged key comes back missing. A checkpoint
+/// that errors, or restores a stale value, is a different bug and must not keep
+/// this tripwire green after STO-01 is fixed.
+fn is_sto01(failure: &Failure) -> bool {
+    failure.ops.iter().any(|op| matches!(op, Op::Checkpoint))
+        && matches!(
+            &failure.outcome,
+            Outcome::Mismatch { mismatch, .. }
+                if mismatch.expected.is_some() && mismatch.actual.is_none()
+        )
+}
+
 /// Searches the discovery profile (which, unlike blocking, includes
-/// Checkpoint) across successive seed ranges for a finding whose minimized
-/// ops contain a `Checkpoint`. Advances past any non-matching finding rather
-/// than stopping at it, since `run_seeds` returns at the very first finding
-/// it hits and other bugs (or other seeds) may lie beyond it.
-async fn find_checkpoint_tripwire() -> Option<Failure> {
+/// Checkpoint) across successive seed ranges for an STO-01-shaped finding.
+/// Advances past other findings rather than stopping at them, since
+/// `run_seeds` returns at the first finding it hits. Both the seed range and
+/// the number of skipped findings are bounded, so once STO-01 is fixed this
+/// fails with the inversion message instead of a nextest timeout.
+async fn find_sto01_finding() -> Option<Failure> {
     const OPS_LEN: usize = 60;
     const CHUNK: u64 = 25;
-    const MAX_SEED: u64 = 2_000;
+    // STO-01 reproduces on nearly every seed; 300 keeps a wide margin while a
+    // fixed build exhausts the budget in seconds, not minutes.
+    const MAX_SEED: u64 = 300;
+    const MAX_SKIPPED_FINDINGS: usize = 20;
 
     let mut start = 0u64;
+    let mut skipped = 0usize;
     while start < MAX_SEED {
         let report = run_seeds(WalSut::new, start, CHUNK, OPS_LEN, Profile::Discovery)
             .await
             .expect("harness error");
         match report.failure {
-            Some(failure) if failure.ops.iter().any(|op| matches!(op, Op::Checkpoint)) => {
-                return Some(failure)
-            }
+            Some(failure) if is_sto01(&failure) => return Some(failure),
             Some(failure) => {
-                // A real finding, just not the checkpoint one we're after:
-                // keep searching past it.
+                skipped += 1;
+                assert!(
+                    skipped <= MAX_SKIPPED_FINDINGS,
+                    "discovery keeps finding non-STO-01 failures (last: seed {} {:?}); \
+                     these are new findings, record them in the ledger",
+                    failure.seed,
+                    failure.outcome
+                );
                 start = failure.seed + 1;
             }
             None => start += CHUNK,
@@ -130,14 +152,12 @@ async fn find_checkpoint_tripwire() -> Option<Failure> {
 /// docs/remediation/ledger.toml, STO-01).
 #[tokio::test(flavor = "multi_thread")]
 async fn sto01_discovery_profile_finds_checkpoint_loss_tripwire() {
-    match find_checkpoint_tripwire().await {
-        Some(failure) => {
-            assert!(
-                failure.ops.iter().any(|op| matches!(op, Op::Checkpoint)),
-                "expected the minimized reproduction to contain a Checkpoint, got {:?}",
-                failure.ops
-            );
-        }
+    match find_sto01_finding().await {
+        // Keep the reproducer visible so inverting this tripwire has it ready.
+        Some(failure) => eprintln!(
+            "STO-01 still reproduces: seed {} ops {:?}",
+            failure.seed, failure.ops
+        ),
         None => panic!("STO-01 appears fixed: invert this tripwire"),
     }
 }
