@@ -2718,6 +2718,12 @@ Files: `crates/prkdb-core/src/wal/segment.rs` (open/scan), `crates/prkdb-core/sr
 Migrate every caller found by `grep -rlw "ParallelWal\|AsyncParallelWal\|MmapParallelWal\|WriteAheadLog" crates --include='*.rs'`; delete modules; `cargo build --workspace` and full tests green.
 
 ### Task 2.5: `PowerLoss` and Fast mode in the harness (TST-05)
+
+> **Design constraints from the Phase 1 harness review (apply before adding ops):**
+> - **Model answers "acceptable values", not one value.** Fast mode (acked-but-unsynced writes may or may not survive) and Phase 3 transactions break exact equality. Change `Model` to track, per key, the durable value plus pending values since the last sync/checkpoint/clean reopen, and `Mismatch.expected` to that acceptable set. Do this in 2.5, before the Fast profile lands, or the checker gets rewritten twice.
+> - **`Sut` grows without breaking implementations.** Either a single `async fn apply(&mut self, op: &Op) -> anyhow::Result<OpResult>` plus `get`, or new methods with default bodies returning `Unsupported` that the runner treats as a profile mismatch. `PowerLoss` needs the `FaultFs` handle and a seeded rng: derive one `ChaCha8Rng` stream per concern (workload, faults) from the seed in the runner, never ad hoc.
+> - **Op coverage is reported.** Count executed ops per kind in `Report`, so a green run can't hide a disabled op.
+> - The Phase 1 FaultFs already models: per-directory durable entries (including subdirectories), inode-reusing truncating `create`, stale handles after power loss (epoch), and `Tear::{None, Prefix, ZeroTail, Garbage}` with sector-granular tearing of in-place overwrites.
 Files: `crates/prkdb-verify/src/{ops.rs, sut.rs, checker.rs, bin/verify.rs}`. Failing tests in `crates/prkdb-verify/tests/harness.rs`: `fast_mode_checker_catches_lost_synced_data` (a Fast-mode SUT that discards already-synced data must be caught) and `blocking_profile_includes_power_loss` (generator). Extend `ops.rs` (`Op::PowerLoss`), `sut.rs` (`FaultFs`-backed SUT), `checker.rs` (Fast prefix check), `xtask verify --mode fast`. Blocking profile gains `PowerLoss` per §7.1.
 
 ### Task 2.6: Format v2 marker, open rules, migration registry, `prkdb-cli migrate` (D3, D4)
