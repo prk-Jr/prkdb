@@ -471,13 +471,22 @@ jobs:
   nightly-harness:
     name: Nightly Crash/Restart Harness
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     # Measured locally: `time cargo xtask verify --profile blocking --seeds 200 --mode
     # durable` is ~5s warm (debug profile), i.e. ~25ms/seed. Extrapolated to the 20k
-    # seeds run here that's ~500s (~8.3 min) of harness time; adding a cold-cache debug
-    # build on a fresh runner puts the whole job at roughly 10-14 minutes, so 1.5x that
-    # estimate is ~20 minutes. Well under the 60-minute threshold in the task, so this
-    # job is not sharded (unlike the phase-gate `harness` job in remediation-gate.yml).
-    timeout-minutes: 20
+    # seeds run here that's ~500s (~8.3 min) of harness time; a cold GitHub-hosted
+    # runner also has to do a cold-cache debug build plus the discovery-profile step
+    # below, and none of that has been measured on the actual runner yet, so 40 minutes
+    # is a deliberately generous estimate rather than a tight one. Plan: after the first
+    # scheduled run reports its actual wall time, lower this to roughly 1.5x that
+    # observed figure instead of carrying the guess forward.
+    #
+    # Deliberately debug, not release: debug_assertions and overflow checks stay on,
+    # which is what a crash/restart harness is for, and a cold release build on a fresh
+    # runner is roughly break-even against a cold debug build anyway — release doesn't
+    # buy back enough compile time here to be worth losing those checks.
+    timeout-minutes: 40
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Free disk space
@@ -495,8 +504,17 @@ jobs:
       # the ledger), so it must never gate the workflow. It stays here, non-blocking,
       # as a standing repro/detection signal until STO-01 is fixed.
       - name: Discovery profile (non-blocking; reproduces STO-01 by design)
+        id: discovery
         continue-on-error: true
         run: cargo xtask verify --profile discovery --seeds 2000 --mode durable
+      # Surfaces the outcome even though the step itself can't fail the job: a
+      # continue-on-error step that silently stays green forever is easy to forget
+      # about. Expected to say "failure" until STO-01 is fixed; once it starts
+      # reporting "success", remove continue-on-error above and update the ledger.
+      - name: Publish discovery-profile outcome
+        if: always()
+        run: |
+          echo "Discovery profile outcome: ${{ steps.discovery.outcome }} (expected: failure, until STO-01 is fixed)" >> "$GITHUB_STEP_SUMMARY"
       # TODO(Task 1.12): once the §6.1 Criterion benches exist, add the nightly trend
       # step here — run them with `--output-format bencher` and publish via
       # `benchmark-action/github-action-benchmark@v1` (tool: cargo, gh-pages-branch:
@@ -662,7 +680,10 @@ jobs:
   harness:
     name: Crash/Restart Harness
     runs-on: ubuntu-latest
-    # A cold cache builds a separate release profile of prkdb for the harness binary.
+    permissions:
+      contents: read
+    # A cold cache builds the debug/dev profile of prkdb for the harness binary (not a
+    # separate release profile — `cargo xtask verify` builds debug by default).
     timeout-minutes: 30
     steps:
       - name: Free disk space
