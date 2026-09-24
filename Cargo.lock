@@ -2416,6 +2416,7 @@ dependencies = [
  "gungraun",
  "http",
  "lazy_static",
+ "libc",
  "lz4",
  "mimalloc",
  "minicbor",
