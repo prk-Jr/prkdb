@@ -9,9 +9,11 @@
 //! using small, fast, deterministic wrappers.
 
 use prkdb_verify::model::{Key, Value};
-use prkdb_verify::ops::{key, Profile};
-use prkdb_verify::runner::{run_seeds, Outcome};
+use prkdb_verify::ops::{key, Op, Profile, KEY_SPACE};
+use prkdb_verify::runner::{run_ops, run_seeds, run_seeds_with, Outcome};
 use prkdb_verify::sut::{Sut, WalSut};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// Wraps a `WalSut`, deleting a fixed key straight out from under it on every
 /// `crash`, regardless of what the model thinks happened — simulating an
@@ -233,6 +235,253 @@ async fn detects_stale_value() {
         other => panic!("expected a Mismatch on the stale key, got {other:?}"),
     }
     assert!(!failure.ops.is_empty());
+}
+
+/// Wraps a `WalSut`, deleting whichever key was *last put* right before a
+/// crash — unlike `LosesKeyOnCrash`'s fixed key, the buggy key here depends
+/// on the op sequence itself, so a naive shrink that changes what was last
+/// put before a crash would drift onto a mismatch for a *different* key.
+struct CorruptsLastPutOnCrash {
+    inner: WalSut,
+    last_put: Option<Key>,
+}
+
+#[async_trait::async_trait]
+impl Sut for CorruptsLastPutOnCrash {
+    async fn put(&mut self, k: &Key, v: &Value) -> anyhow::Result<()> {
+        self.last_put = Some(k.clone());
+        self.inner.put(k, v).await
+    }
+    async fn delete(&mut self, k: &Key) -> anyhow::Result<()> {
+        self.inner.delete(k).await
+    }
+    async fn get(&mut self, k: &Key) -> anyhow::Result<Option<Value>> {
+        self.inner.get(k).await
+    }
+    async fn reopen(&mut self) -> anyhow::Result<()> {
+        self.inner.reopen().await
+    }
+    async fn crash(&mut self) -> anyhow::Result<()> {
+        self.inner.crash().await?;
+        if let Some(k) = self.last_put.clone() {
+            self.inner.delete(&k).await?;
+        }
+        Ok(())
+    }
+    async fn checkpoint(&mut self) -> anyhow::Result<()> {
+        self.inner.checkpoint().await
+    }
+}
+
+/// Wraps a `WalSut`, losing a fixed key on crash only every *other* time
+/// `crash` is called globally (a shared counter, not per-instance) —
+/// simulating a flaky, nondeterministic bug: fresh SUT instances built by the
+/// minimizer's `reproduces` won't all see the bug fire.
+struct FlakyLosesKeyOnCrash {
+    inner: WalSut,
+    lost: Key,
+    counter: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Sut for FlakyLosesKeyOnCrash {
+    async fn put(&mut self, k: &Key, v: &Value) -> anyhow::Result<()> {
+        self.inner.put(k, v).await
+    }
+    async fn delete(&mut self, k: &Key) -> anyhow::Result<()> {
+        self.inner.delete(k).await
+    }
+    async fn get(&mut self, k: &Key) -> anyhow::Result<Option<Value>> {
+        self.inner.get(k).await
+    }
+    async fn reopen(&mut self) -> anyhow::Result<()> {
+        self.inner.reopen().await
+    }
+    async fn crash(&mut self) -> anyhow::Result<()> {
+        self.inner.crash().await?;
+        let n = self.counter.fetch_add(1, Ordering::SeqCst);
+        if n.is_multiple_of(2) {
+            self.inner.delete(&self.lost).await?;
+        }
+        Ok(())
+    }
+    async fn checkpoint(&mut self) -> anyhow::Result<()> {
+        self.inner.checkpoint().await
+    }
+}
+
+/// Wraps a `WalSut`, always failing a `put` for one fixed key.
+struct FailsPutOnKey {
+    inner: WalSut,
+    target: Key,
+}
+
+#[async_trait::async_trait]
+impl Sut for FailsPutOnKey {
+    async fn put(&mut self, k: &Key, v: &Value) -> anyhow::Result<()> {
+        if *k == self.target {
+            anyhow::bail!("simulated put failure on target key");
+        }
+        self.inner.put(k, v).await
+    }
+    async fn delete(&mut self, k: &Key) -> anyhow::Result<()> {
+        self.inner.delete(k).await
+    }
+    async fn get(&mut self, k: &Key) -> anyhow::Result<Option<Value>> {
+        self.inner.get(k).await
+    }
+    async fn reopen(&mut self) -> anyhow::Result<()> {
+        self.inner.reopen().await
+    }
+    async fn crash(&mut self) -> anyhow::Result<()> {
+        self.inner.crash().await
+    }
+    async fn checkpoint(&mut self) -> anyhow::Result<()> {
+        self.inner.checkpoint().await
+    }
+}
+
+/// N1 drift guard: the minimizer must never accept a shrunk sequence that
+/// reproduces a *different* finding (here, a mismatch on a different key)
+/// than the original. `CorruptsLastPutOnCrash`'s buggy key moves depending on
+/// the op sequence, so a minimizer without this guard could easily drift.
+#[tokio::test(flavor = "multi_thread")]
+async fn minimizer_never_accepts_a_drifted_finding() {
+    let make = || async {
+        Ok(CorruptsLastPutOnCrash {
+            inner: WalSut::new().await?,
+            last_put: None,
+        })
+    };
+    let report = run_seeds(make, 0, 30, 30, Profile::Blocking)
+        .await
+        .expect("harness error");
+    let failure = report.failure.expect("expected a finding");
+    let expected_key = match &failure.outcome {
+        Outcome::Mismatch { mismatch, .. } => mismatch.key.clone(),
+        other => panic!("expected a Mismatch, got {other:?}"),
+    };
+
+    // Replay the minimized sequence fresh: if the minimizer had accepted a
+    // shrink that reproduced a mismatch on a *different* key along the way,
+    // `same_kind`'s key check should have rejected it, so the final,
+    // reported failure must still reproduce a mismatch on the same key.
+    let mut sut = CorruptsLastPutOnCrash {
+        inner: WalSut::new().await.expect("fresh SUT"),
+        last_put: None,
+    };
+    let replay = run_ops(&mut sut, &failure.ops)
+        .await
+        .expect("harness error");
+    match replay {
+        Outcome::Mismatch { mismatch, .. } => assert_eq!(
+            mismatch.key, expected_key,
+            "minimized ops reproduce a mismatch on a different key than reported"
+        ),
+        other => panic!("minimized ops no longer reproduce a Mismatch: {other:?}"),
+    }
+}
+
+/// A nondeterministic SUT bug, checked with `repro_attempts > 1`: some
+/// `reproduces()` attempts inevitably won't see the bug fire (see
+/// `FlakyLosesKeyOnCrash`). The minimizer must not panic over this — it
+/// should simply treat those attempts as "didn't reproduce" and fall back to
+/// keeping the op, eventually returning the original kind of failure.
+#[tokio::test(flavor = "multi_thread")]
+async fn nondeterministic_failure_with_repro_attempts_does_not_panic() {
+    let lost = key(3);
+    let counter = Arc::new(AtomicUsize::new(0));
+    let make = {
+        let lost = lost.clone();
+        let counter = counter.clone();
+        move || {
+            let lost = lost.clone();
+            let counter = counter.clone();
+            async move {
+                Ok(FlakyLosesKeyOnCrash {
+                    inner: WalSut::new().await?,
+                    lost,
+                    counter,
+                })
+            }
+        }
+    };
+    let report = run_seeds_with(make, 0, 30, 20, Profile::Blocking, 3)
+        .await
+        .expect("harness error should not panic or propagate");
+    let failure = report
+        .failure
+        .expect("expected the flaky bug to be caught at least once");
+    match &failure.outcome {
+        Outcome::Mismatch { mismatch, .. } => assert_eq!(mismatch.key, lost),
+        other => panic!("expected a Mismatch on the flaky lost key, got {other:?}"),
+    }
+}
+
+/// A `put` that errors mid-sequence is reported as a `SutError` (with the
+/// seed that found it) and minimizes down to essentially just that op.
+#[tokio::test(flavor = "multi_thread")]
+async fn detects_and_minimizes_put_sut_error() {
+    let target = key(4);
+    let make = {
+        let target = target.clone();
+        move || {
+            let target = target.clone();
+            async move {
+                Ok(FailsPutOnKey {
+                    inner: WalSut::new().await?,
+                    target,
+                })
+            }
+        }
+    };
+    let report = run_seeds(make, 0, 30, 20, Profile::Blocking)
+        .await
+        .expect("harness error");
+    let failure = report.failure.expect("expected a finding");
+    // The seed that found the bug is carried on the (minimized) failure.
+    assert!(failure.seed < 30);
+    match &failure.outcome {
+        Outcome::SutError { op, .. } => {
+            assert!(matches!(op, Op::Put(k, _) if *k == target));
+        }
+        other => panic!("expected a SutError on Put, got {other:?}"),
+    }
+    assert_eq!(
+        failure.ops.len(),
+        1,
+        "expected the minimizer to shrink to exactly the failing Put, got {:?}",
+        failure.ops
+    );
+}
+
+/// The checker must compare a key the model has `touched` even when that key
+/// falls outside the generator's nominal `KEY_SPACE` — otherwise a bug that
+/// only reaches an out-of-space key could never be caught. Feeds
+/// `Model::touched` by hand-crafting an `Op::Put` for a key `key(i)` can
+/// never produce (`i` is a `u8`, but `key_space` only ever draws `0..16`).
+#[tokio::test(flavor = "multi_thread")]
+async fn checks_a_touched_key_outside_key_space() {
+    let outside: Key = vec![b'z', 200];
+    assert!(
+        !(0..KEY_SPACE).map(key).any(|k| k == outside),
+        "test key must actually be outside the generator's key space"
+    );
+
+    let mut sut = WalSut::new().await.expect("fresh SUT");
+    let ops = vec![Op::Put(outside.clone(), b"v".to_vec()), Op::Crash];
+    let outcome = run_ops(&mut sut, &ops).await.expect("harness error");
+    match outcome {
+        // A plain WalSut has no bug, so this passes — but `checks` must
+        // count the touched out-of-space key on top of the full nominal
+        // KEY_SPACE, proving check_durable actually widened its sweep to
+        // include it instead of only ever comparing `0..KEY_SPACE`.
+        Outcome::Pass { checks } => assert!(
+            checks > KEY_SPACE as usize,
+            "expected the checker to compare the touched out-of-space key too, got {checks} checks"
+        ),
+        other => panic!("expected Pass, got {other:?}"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
