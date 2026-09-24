@@ -18,7 +18,9 @@ pub mod parallel_wal;
 pub mod segment;
 pub mod write_ahead_log;
 
-pub use compression::{compress, decompress, CompressionConfig, CompressionError, CompressionType};
+pub use compression::{
+    compress, decompress, decompress_bounded, CompressionConfig, CompressionError, CompressionType,
+};
 pub use config::{CompactionPolicy, WalConfig};
 pub use log_record::{LogOperation, LogRecord};
 pub use log_segment::LogSegment;
@@ -60,8 +62,12 @@ pub enum WalError {
         reason: String,
     },
 
-    #[error("record of {len} bytes exceeds the {max}-byte limit")]
-    RecordTooLarge { len: usize, max: usize },
+    #[error("record of {len} bytes in {path} exceeds the {max}-byte limit")]
+    RecordTooLarge {
+        path: std::path::PathBuf,
+        len: usize,
+        max: usize,
+    },
 
     #[error("WAL is poisoned by an earlier I/O failure and accepts no more writes: {0}")]
     Poisoned(String),

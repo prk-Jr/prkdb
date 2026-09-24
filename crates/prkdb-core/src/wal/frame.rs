@@ -8,6 +8,19 @@
 //! **Deviation 1 (spec revision 11):** CRC-32 via `crc32fast` (already a `prkdb-core`
 //! dependency, hardware-accelerated) instead of CRC-32C, to add no new dependency. The
 //! frame header carries no algorithm field, so this choice is fixed for format 2.
+//!
+//! **Accepted risk: `len` is not itself covered by the CRC.** The CRC is computed over
+//! `lsn | kind | payload`, where `payload`'s bounds come from `len`. If corruption
+//! altered `len` to point at a different (wrong) boundary, and the bytes at that wrong
+//! boundary happened to still satisfy the CRC over `lsn | kind | <wrong payload>`, the
+//! corruption would go undetected. That coincidence needs a 32-bit CRC to collide, which
+//! is a false-negative rate of roughly 2⁻³², the same order of magnitude LevelDB and
+//! RocksDB accept for their own per-record CRCs, and far below realistic hardware
+//! bit-flip rates. Folding `len` into the CRC input was considered and rejected: it would
+//! not close this gap (a corrupted `len` still changes the CRC input consistently with
+//! itself) and would only protect against a `len` that is corrupted alone while every
+//! other byte, including the CRC, stays intact — a case decode_frame already catches via
+//! its own bounds and (for `Batch`) `BadLength(0)`.
 
 /// A frame's position in the log: its byte offset within its segment, once written.
 pub type Lsn = u64;
@@ -117,6 +130,13 @@ pub fn decode_frame(buf: &[u8]) -> Decoded<'_> {
         None => return Decoded::Fault(FrameFault::UnknownKind(kind_byte)),
     };
 
+    // A zero-length payload is only legitimate for `Elided` (a compacted-away record,
+    // header only). A `Batch` frame always carries at least an encoded op count, so a
+    // zero length there is corruption, not a valid empty batch.
+    if len == 0 && kind == FrameKind::Batch {
+        return Decoded::Fault(FrameFault::BadLength(0));
+    }
+
     let frame_len = FRAME_HEADER_LEN + len as usize;
     if buf.len() < frame_len {
         return Decoded::Fault(FrameFault::Truncated);
@@ -190,5 +210,32 @@ mod tests {
         let last = buf.len() - 1;
         buf[last] ^= 0xFF;
         assert_eq!(decode_frame(&buf), Decoded::Fault(FrameFault::BadCrc));
+    }
+
+    /// A `Batch` frame always encodes at least an op count, so a zero-length payload is
+    /// corruption, not a valid empty batch — even though the CRC (over an empty payload)
+    /// is internally consistent.
+    #[test]
+    fn a_zero_length_batch_payload_is_bad_length() {
+        let mut buf = Vec::new();
+        encode_frame(&mut buf, 1, FrameKind::Batch, b"");
+        assert_eq!(decode_frame(&buf), Decoded::Fault(FrameFault::BadLength(0)));
+    }
+
+    /// `Elided` is the one frame kind allowed to carry no payload (a compacted-away
+    /// record keeping its LSN slot).
+    #[test]
+    fn a_zero_length_elided_payload_is_a_valid_frame() {
+        let mut buf = Vec::new();
+        encode_frame(&mut buf, 1, FrameKind::Elided, b"");
+        assert_eq!(
+            decode_frame(&buf),
+            Decoded::Frame {
+                lsn: 1,
+                kind: FrameKind::Elided,
+                payload: b"",
+                frame_len: FRAME_HEADER_LEN,
+            }
+        );
     }
 }

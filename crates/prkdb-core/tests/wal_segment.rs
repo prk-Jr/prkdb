@@ -4,13 +4,13 @@ use prkdb_core::format::FORMAT_VERSION;
 use prkdb_core::vfs::{OpenMode, StdVfs, Vfs, VfsFile};
 use prkdb_core::wal::batch::{Batch, BatchOp};
 use prkdb_core::wal::frame::{
-    decode_frame, encode_frame, Decoded, FrameFault, FrameKind, FRAME_HEADER_LEN,
+    decode_frame, encode_frame, Decoded, FrameFault, FrameKind, FRAME_HEADER_LEN, MAX_PAYLOAD_LEN,
 };
 use prkdb_core::wal::segment::{
     parse_segment_file_name, read_frame, scan_segment, segment_file_name, write_segment_header,
     RecordLoc, SegmentScan, SEGMENT_HEADER_LEN,
 };
-use prkdb_core::wal::{CompressionConfig, WalError};
+use prkdb_core::wal::{compress, CompressionConfig, CompressionType, WalError};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -216,4 +216,78 @@ fn a_batch_with_trailing_bytes_or_unknown_tag_is_corrupt() {
     let tag_at = 1 + 1 + 4 + 4; // version, codec, raw_len, count
     bad_tag[tag_at] = 99;
     assert!(Batch::decode(&bad_tag).is_err());
+}
+
+/// A crafted batch payload: a tiny compressed body (highly compressible zeros) whose
+/// real decompressed size is far larger than the `raw_len` it claims. `Batch::decode`
+/// must reject this without ever materializing the real, much larger output.
+#[test]
+fn a_batch_claiming_a_small_raw_len_but_decompressing_larger_is_rejected() {
+    let huge = vec![0u8; 8 * 1024 * 1024]; // 8 MiB of highly compressible data
+    let cfg = CompressionConfig {
+        compression_type: CompressionType::Lz4,
+        min_compress_bytes: 0,
+        compression_level: 1,
+    };
+    let compressed = compress(&huge, &cfg).unwrap();
+    assert!(
+        compressed.len() < huge.len() / 10,
+        "the point of the test is a compressed body much smaller than its real \
+         decompressed size, got {} bytes for {} real bytes",
+        compressed.len(),
+        huge.len()
+    );
+
+    let mut bytes = Vec::new();
+    bytes.push(1u8); // batch version
+    bytes.push(CompressionType::Lz4 as u8);
+    bytes.extend_from_slice(&100u32.to_le_bytes()); // claims only 100 raw bytes
+    bytes.extend_from_slice(&compressed);
+
+    assert!(
+        Batch::decode(&bytes).is_err(),
+        "a body that decompresses far past its claimed raw_len must be rejected"
+    );
+}
+
+/// `raw_len` above `MAX_PAYLOAD_LEN` is rejected before any decompression is attempted.
+#[test]
+fn a_raw_len_above_the_payload_cap_is_rejected_before_decompressing() {
+    let mut bytes = Vec::new();
+    bytes.push(1u8); // batch version
+    bytes.push(CompressionType::None as u8);
+    bytes.extend_from_slice(&(MAX_PAYLOAD_LEN as u32 + 1).to_le_bytes());
+    // No body bytes: if this were decompressed instead of rejected up front, decoding
+    // would fail for a different reason (missing data) rather than the length check.
+    let err = Batch::decode(&bytes).unwrap_err();
+    assert!(format!("{err}").contains("exceeds"), "{err}");
+}
+
+/// A payload larger than the segment scanner's chunk size must still be read back whole
+/// and unmangled, exercising the multi-chunk read path in `scan_segment`.
+#[test]
+fn a_frame_spanning_the_scan_chunk_boundary_is_read_intact() {
+    let dir = tempfile::tempdir().unwrap();
+    let big: Vec<u8> = (0..1_500_000u32).map(|i| (i % 251) as u8).collect(); // > 1 MiB
+    let (path, _) = write_segment(dir.path(), 1, std::slice::from_ref(&big));
+    let (seen, s) = scan(&path, 1).unwrap();
+    assert_eq!(seen, vec![(1, big)]);
+    assert_eq!(s.stopped, None);
+    assert_eq!(s.valid_len, s.file_len);
+}
+
+/// The same oversized frame, torn well past the scan chunk boundary: the scan must stop
+/// with `Truncated` at the frame's start, not panic or silently return a partial payload.
+#[test]
+fn a_torn_frame_spanning_the_scan_chunk_boundary_is_truncated() {
+    let dir = tempfile::tempdir().unwrap();
+    let big = vec![0xCDu8; 1_500_000]; // > 1 MiB
+    let (path, starts) = write_segment(dir.path(), 1, &[big]);
+    let f = StdVfs.open(&path, OpenMode::ReadWrite).unwrap();
+    // Truncate partway through the payload, past the 1 MiB scan chunk boundary.
+    f.set_len(starts[0] + FRAME_HEADER_LEN as u64 + 1_200_000)
+        .unwrap();
+    let (seen, s) = scan(&path, 1).unwrap();
+    assert_eq!(seen.len(), 0);
+    assert_eq!(s.stopped, Some((starts[0], FrameFault::Truncated)));
 }

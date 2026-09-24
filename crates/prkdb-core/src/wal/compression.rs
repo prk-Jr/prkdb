@@ -184,6 +184,61 @@ pub fn decompress(
     }
 }
 
+/// Decompresses `data`, refusing to produce more than `max_len` bytes.
+///
+/// A compressed blob can claim to expand to an arbitrary size (a "decompression bomb");
+/// `decompress` above reads to completion before anything can check that, so a small
+/// malicious input can force an unbounded allocation. This reads through a `Take`
+/// adapter capped at `max_len + 1` bytes, so the decoder itself never accumulates more
+/// than that bound in memory, and returns an error the instant the output would exceed
+/// `max_len` rather than after decompressing all of it.
+pub fn decompress_bounded(
+    data: &[u8],
+    compression_type: CompressionType,
+    max_len: usize,
+) -> Result<Vec<u8>, CompressionError> {
+    match compression_type {
+        CompressionType::None => {
+            if data.len() > max_len {
+                return Err(CompressionError::DecompressionFailed(format!(
+                    "decompressed output of {} bytes exceeds the {max_len}-byte limit",
+                    data.len()
+                )));
+            }
+            Ok(data.to_vec())
+        }
+        CompressionType::Lz4 => {
+            let decoder = lz4::Decoder::new(data)
+                .map_err(|e| CompressionError::DecompressionFailed(e.to_string()))?;
+            read_bounded(decoder, max_len)
+        }
+        CompressionType::Snappy => {
+            let decoder = snap::read::FrameDecoder::new(data);
+            read_bounded(decoder, max_len)
+        }
+        CompressionType::Zstd => {
+            let decoder = zstd::Decoder::new(data)
+                .map_err(|e| CompressionError::DecompressionFailed(e.to_string()))?;
+            read_bounded(decoder, max_len)
+        }
+    }
+}
+
+/// Reads `reader` to completion through a bound of `max_len + 1` bytes, erroring if the
+/// output turns out to exceed `max_len`. The `+ 1` lets a decompressed size of exactly
+/// `max_len` succeed while still detecting anything larger without reading further.
+fn read_bounded<R: Read>(reader: R, max_len: usize) -> Result<Vec<u8>, CompressionError> {
+    let mut limited = reader.take(max_len as u64 + 1);
+    let mut out = Vec::new();
+    limited.read_to_end(&mut out)?;
+    if out.len() > max_len {
+        return Err(CompressionError::DecompressionFailed(format!(
+            "decompressed output exceeds the {max_len}-byte limit"
+        )));
+    }
+    Ok(out)
+}
+
 /// Calculate compression ratio (original_size / compressed_size)
 pub fn compression_ratio(original_size: usize, compressed_size: usize) -> f64 {
     if compressed_size == 0 {
@@ -282,5 +337,51 @@ mod tests {
         assert_eq!(compression_ratio(1000, 500), 2.0);
         assert_eq!(compression_ratio(1000, 250), 4.0);
         assert_eq!(compression_ratio(1000, 1000), 1.0);
+    }
+
+    #[test]
+    fn decompress_bounded_accepts_output_within_the_limit() {
+        let data = generate_test_data(4096);
+        let config = CompressionConfig {
+            compression_type: CompressionType::Lz4,
+            min_compress_bytes: 0,
+            compression_level: 3,
+        };
+        let compressed = compress(&data, &config).unwrap();
+        let out = decompress_bounded(&compressed, CompressionType::Lz4, data.len()).unwrap();
+        assert_eq!(out, data);
+    }
+
+    /// A decompression bomb: a small compressed input whose real decompressed size is
+    /// far larger than the caller's claimed bound. `decompress_bounded` must error
+    /// without ever materializing the full output.
+    #[test]
+    fn decompress_bounded_rejects_a_bomb_without_allocating_the_full_output() {
+        let huge_zeros = vec![0u8; 64 * 1024 * 1024]; // 64 MiB of highly compressible data
+        let config = CompressionConfig {
+            compression_type: CompressionType::Lz4,
+            min_compress_bytes: 0,
+            compression_level: 3,
+        };
+        let compressed = compress(&huge_zeros, &config).unwrap();
+        assert!(
+            compressed.len() < huge_zeros.len() / 100,
+            "the point of the test is a compressed input much smaller than its real \
+             decompressed size, got {} bytes for {} real bytes",
+            compressed.len(),
+            huge_zeros.len()
+        );
+        // Claim a decompressed size far below the real one; `decompress_bounded` must
+        // stop within `max_len + 1` bytes of output rather than reading to completion.
+        let max_len = 4096;
+        let err = decompress_bounded(&compressed, CompressionType::Lz4, max_len).unwrap_err();
+        assert!(matches!(err, CompressionError::DecompressionFailed(_)));
+    }
+
+    #[test]
+    fn decompress_bounded_rejects_uncompressed_data_over_the_limit() {
+        let data = vec![7u8; 100];
+        let err = decompress_bounded(&data, CompressionType::None, 10).unwrap_err();
+        assert!(matches!(err, CompressionError::DecompressionFailed(_)));
     }
 }

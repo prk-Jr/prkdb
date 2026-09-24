@@ -248,6 +248,7 @@ pub fn read_frame(file: &dyn VfsFile, path: &Path, loc: RecordLoc) -> Result<Vec
     let len = u32::from_le_bytes(header[0..4].try_into().expect("4-byte slice"));
     if len as usize > MAX_PAYLOAD_LEN {
         return Err(WalError::RecordTooLarge {
+            path: path.to_path_buf(),
             len: len as usize,
             max: MAX_PAYLOAD_LEN,
         });

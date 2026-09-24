@@ -18,11 +18,15 @@
 //! `2 Delete: u32 klen | key`. Tags 3-5 (outbox put, outbox remove, event) are added in
 //! Tasks 2.19-2.20, before the format is frozen by the golden directory in Task 2.24.
 
-use super::{compress, decompress, CompressionConfig, CompressionType, WalError};
+use super::frame::MAX_PAYLOAD_LEN;
+use super::{compress, decompress_bounded, CompressionConfig, CompressionType, WalError};
 
 const BATCH_VERSION: u8 = 1;
 const TAG_PUT: u8 = 1;
 const TAG_DELETE: u8 = 2;
+/// Smallest possible encoded op: a `Delete` with a zero-length key (tag byte + 4-byte
+/// length prefix). Used only to cap a preallocation, not to reject anything.
+const MIN_OP_LEN: usize = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BatchOp {
@@ -78,7 +82,11 @@ fn decode_ops(raw: &[u8]) -> Result<Batch, WalError> {
         .ok_or_else(|| WalError::Serialization("batch ops: missing count".to_string()))?;
     let count = u32::from_le_bytes(count_bytes.try_into().expect("4-byte slice")) as usize;
     let mut pos = 4;
-    let mut ops = Vec::with_capacity(count.min(1 << 20));
+    // Cap the preallocation at what the remaining bytes could actually encode, so a
+    // bogus `count` (e.g. u32::MAX) on a small input can't force a huge allocation
+    // before the loop below ever reads a byte past the real data.
+    let max_ops_by_size = raw.len().saturating_sub(4) / MIN_OP_LEN;
+    let mut ops = Vec::with_capacity(count.min(max_ops_by_size));
 
     for _ in 0..count {
         let tag = *raw
@@ -156,13 +164,27 @@ impl Batch {
         let raw_len = u32::from_le_bytes(header[2..6].try_into().expect("4-byte slice")) as usize;
         let body = &bytes[6..];
 
+        // Reject an oversized claimed size *before* decompressing anything: `raw_len` is
+        // attacker-controlled (it comes from the frame we're decoding), and bounding it
+        // here means the bounded decompress below never has to trust more than
+        // MAX_PAYLOAD_LEN worth of output, regardless of what the compressed body
+        // itself could be coaxed into producing.
+        if raw_len > MAX_PAYLOAD_LEN {
+            return Err(WalError::Serialization(format!(
+                "batch raw_len {raw_len} exceeds the {MAX_PAYLOAD_LEN}-byte limit"
+            )));
+        }
+
         let codec = CompressionType::from_u8(codec_byte)
             .ok_or_else(|| WalError::Serialization(format!("unknown batch codec {codec_byte}")))?;
 
+        // Bounded to `raw_len`: a compressed `body` that decompresses to more than the
+        // batch itself claims is a decompression bomb, and this must not be allowed to
+        // allocate past that claim before noticing.
         let raw = if codec == CompressionType::None {
             body.to_vec()
         } else {
-            decompress(body, codec)
+            decompress_bounded(body, codec, raw_len)
                 .map_err(|e| WalError::Serialization(format!("batch decompress: {e}")))?
         };
 
