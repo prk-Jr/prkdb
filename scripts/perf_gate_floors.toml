@@ -7,7 +7,10 @@ min_ratio = 100.0   # 100 puts must at least encode 100 records
 
 [floors.bench_wal_get_one]
 reference = "bench_log_record_decode"
-min_ratio = 1.0     # a hit must at least decode one record
+# The fixture evicts the key from cache before the measured get (see
+# setup_wal_get_one's doc comment in iai_hot_paths.rs), so this is an index lookup plus
+# a real WAL read and decode, not a cache hit; it must at least decode one record.
+min_ratio = 1.0
 
 [floors.bench_wal_batch_of_100]
 reference = "bench_log_record_encode"

@@ -254,6 +254,11 @@ jobs:
           GUNGRAUN_COLOR: never
         run: |
           set -o pipefail
+          # rust-cache (above) may restore a stale target/gungraun/ from a previous
+          # probe run on the same cache key; a leftover summary.json under an old
+          # benchmark name would otherwise sit alongside this run's summaries (see
+          # perf-gate.yml's "Bench base SHA" step for the same issue in the PR gate).
+          rm -rf target/gungraun
           cargo bench -p prkdb --bench iai_hot_paths -- --save-summary=json \
             --callgrind-args='--separate-threads=yes' | tee iai.log
           python3 scripts/perf_gate_deltas.py list-names target/gungraun

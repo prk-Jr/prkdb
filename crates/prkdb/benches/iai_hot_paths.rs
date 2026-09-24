@@ -29,10 +29,12 @@
 //! per-function toggle would never see it either way.
 //!
 //! The fix does not depend on picking apart those two effects: every WAL benchmark below
-//! disables the default entry point (`EntryPoint::None` + `--collect-at-start=no`, the
-//! pattern gungraun's own `Callgrind::entry_point` rustdoc documents for client-request
-//! benchmarks) and instead brackets the measured call with the `client_requests` crate
-//! feature's `start_instrumentation`/`stop_instrumentation`. Those client requests switch
+//! disables the default entry point (`EntryPoint::None` + the Callgrind arguments
+//! `--instr-atstart=no --collect-atstart=yes`; see `whole_process`'s doc comment below
+//! for why those two flags, not the `--collect-at-start=no` gungraun's own rustdoc
+//! example uses, which Valgrind rejects outright) and instead brackets the measured call
+//! with the `client_requests` crate feature's `start_instrumentation`/
+//! `stop_instrumentation`. Those client requests switch
 //! Valgrind's instrumentation for the **whole process**, not a per-thread toggle, so
 //! every thread's work between the two calls is counted — including a WAL writer thread
 //! once one exists. The measured body also lives in a free function *outside* the
@@ -84,6 +86,7 @@ use gungraun::client_requests::callgrind::{start_instrumentation, stop_instrumen
 use gungraun::{library_benchmark, library_benchmark_group, main};
 use gungraun::{Callgrind, EntryPoint, LibraryBenchmarkConfig};
 use prkdb::indexed_storage::IndexedStorage;
+use prkdb::storage::config::StorageConfig;
 use prkdb::storage::{InMemoryAdapter, WalStorageAdapter};
 use prkdb_core::wal::log_record::{LogOperation, LogRecord};
 use prkdb_core::wal::WalConfig;
@@ -194,27 +197,70 @@ fn bench_wal_put_100(
     (rt, dir, adapter, value)
 }
 
-// Setup for `bench_wal_get_one`: the fixture key is pre-inserted here, outside the
-// measured region, so only the `get` itself is counted.
-fn setup_wal_get_hit() -> (Runtime, TempDir, WalStorageAdapter) {
+/// `ShardedLruCache` (`crates/prkdb/src/storage/cache.rs`) always uses 16 shards, each
+/// with capacity `max(1, cache_capacity / 16)`; any `cache_capacity <= 16` gives every
+/// shard capacity exactly 1, so a second `put` into the same shard evicts whatever was
+/// there.
+const WAL_GET_CACHE_CAPACITY: usize = 16;
+
+/// How many decoy keys `setup_wal_get_one` inserts, after `bench-key`, to evict it from
+/// its cache shard. See that function's doc comment for why this count, not a
+/// hash-replicated single collision, is what forces the eviction.
+const EVICTION_KEYS: u32 = 256;
+
+/// Setup for `bench_wal_get_one`: builds an adapter whose cache cannot still be holding
+/// `bench-key` by the time the benchmark runs, so the measured `get` exercises the index
+/// lookup and WAL read (`WalStorageAdapter::get`'s steps 2-3), not the cache-hit
+/// short-circuit (step 1). Without this, `get_one` was measuring a cache hit — an
+/// in-memory hash lookup — not the WAL read its name promises.
+///
+/// The eviction: `WAL_GET_CACHE_CAPACITY` gives every one of `ShardedLruCache`'s 16
+/// shards a capacity of 1, so `bench-key` is inserted, then `EVICTION_KEYS` further
+/// distinct keys are inserted. Whichever shard `bench-key` hashed into, at least one of
+/// those `EVICTION_KEYS` keys almost certainly lands there too and evicts it: with keys
+/// spread roughly uniformly over 16 shards, the chance any given shard is missed by all
+/// `EVICTION_KEYS` of them is `(15/16)^EVICTION_KEYS`, effectively zero at 256
+/// (`≈ 4e-8`). This count-based approach, not a hand-computed single colliding key, is
+/// deliberate: matching `ShardedLruCache::shard_index`'s hash would mean replicating
+/// `std::collections::hash_map::DefaultHasher`'s algorithm here, which the standard
+/// library explicitly does not guarantee stable across Rust versions — a replica could
+/// silently stop matching on a toolchain bump, and this benchmark would quietly go back
+/// to measuring a cache hit with no test failure to say so. There is no public API on
+/// `WalStorageAdapter` to inspect cache occupancy directly to assert the miss instead;
+/// this is the next best thing available without changing that API.
+fn setup_wal_get_one() -> (Runtime, TempDir, WalStorageAdapter) {
     let rt = single_worker_runtime();
     let dir = tempfile::tempdir().unwrap();
     let adapter = rt.block_on(async {
-        let adapter = wal_adapter_in(dir.path());
+        let wal = WalConfig {
+            log_dir: dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        };
+        let config = StorageConfig {
+            wal,
+            cache_capacity: WAL_GET_CACHE_CAPACITY,
+            ..StorageConfig::default()
+        };
+        let adapter = WalStorageAdapter::new_with_config(config).expect("adapter builds");
         adapter.put(b"bench-key", &one_kib_value()).await.unwrap();
+        for i in 0..EVICTION_KEYS {
+            let key = format!("evict-{i}").into_bytes();
+            adapter.put(&key, b"x").await.unwrap();
+        }
         adapter
     });
     (rt, dir, adapter)
 }
 
-// `WalStorageAdapter::get` against a key already present (hit path). Free function, same
-// reasoning as `put_100` above.
+// `WalStorageAdapter::get` for a key evicted from cache (see `setup_wal_get_one`'s doc
+// comment): exercises the index lookup + WAL read path, not the cache-hit short-circuit.
+// Free function, same reasoning as `put_100` above.
 async fn get_one(adapter: &WalStorageAdapter) {
     let got = adapter.get(black_box(b"bench-key")).await.unwrap();
     black_box(got);
 }
 
-#[library_benchmark(setup = setup_wal_get_hit, config = whole_process())]
+#[library_benchmark(setup = setup_wal_get_one, config = whole_process())]
 fn bench_wal_get_one(
     (rt, dir, adapter): (Runtime, TempDir, WalStorageAdapter),
 ) -> (Runtime, TempDir, WalStorageAdapter) {

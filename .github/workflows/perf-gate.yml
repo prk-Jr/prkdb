@@ -120,6 +120,17 @@ jobs:
               --save-baseline=base --save-summary=json
             python3 scripts/perf_gate_deltas.py list-names target/gungraun \
               > base-benchmarks.txt
+            # `SummaryOutput::init` (gungraun-runner-0.19.4) only overwrites the
+            # summary.json of a benchmark that runs again at head with the same name —
+            # a benchmark renamed or removed at head (as Task 2.3 did for the WAL
+            # benches) leaves its base-run summary.json sitting under its old name.
+            # `extract` then sees that old name as Left-only ("bootstrap") with no
+            # comparison, and since it's also in base-benchmarks.txt (this file, just
+            # written) it's flagged "existed at base, no base comparison" and fails the
+            # gate for a rename that isn't a regression. The *baselines* gungraun's own
+            # `--baseline=base` comparison reads are separate `*.out.base@base` files,
+            # untouched by this — only the redundant summary.json copies need deleting.
+            find target/gungraun -name summary.json -delete
             echo "benched=true" >> "$GITHUB_OUTPUT"
           else
             echo "iai_hot_paths does not exist at base SHA; no prior baseline to compare against"
@@ -159,10 +170,21 @@ jobs:
       # head SHA's own summaries (already written above by "Bench head SHA").
       - name: Enforce the instruction-count floors
         run: |
+          {
+            echo "## Instruction-count floors (TST-09)"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
           python3 scripts/perf_gate_deltas.py floors target/gungraun \
             scripts/perf_gate_floors.toml >> "$GITHUB_STEP_SUMMARY"
 
+      # `if: steps.head_bench.outcome == 'success'` (not the step-less default): a
+      # floors failure above must not hide the deltas table below it (this step has no
+      # `if:` otherwise skips once any prior step fails) — but a real "Bench head SHA"
+      # failure (exit code outside {0, 3}, which that step already turns into a hard
+      # `exit "$code"`) means there is no usable target/gungraun to extract from, and
+      # should still skip everything after it, same as before this step gained an `if:`.
       - name: Compute instruction-count deltas
+        if: ${{ !cancelled() && steps.head_bench.outcome == 'success' }}
         run: |
           python3 scripts/perf_gate_deltas.py extract target/gungraun \
             --base-list base-benchmarks.txt > deltas.json

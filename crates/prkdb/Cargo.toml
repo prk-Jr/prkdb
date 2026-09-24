@@ -97,10 +97,17 @@ proptest = "1.4"
 #
 # `client_requests` (Task 2.3, TST-09) enables `gungraun::client_requests::callgrind::{
 # start_instrumentation, stop_instrumentation}`, used by the WAL benchmarks in
-# `iai_hot_paths.rs` to bracket the measured call so every thread's work is counted
-# process-wide, instead of relying on the default per-function `--toggle-collect` entry
-# point (which is per-thread and misses the WAL writer thread's work). Off Valgrind
-# (macOS, or any non-instrumented run) these client requests compile to no-ops.
+# `iai_hot_paths.rs` to bracket the measured call. The default per-function
+# `--toggle-collect` entry point undercounts the WAL work because the benchmark's
+# `async { .. }` block compiles to a closure that is itself a symbol under callgrind's
+# toggle pattern (`*::__gungraun_wrapper_mod::*`), so entering it flips collection back
+# *off* for the WAL work the closure performs — confirmed on Linux (TST-09 fix commit).
+# The client requests switch instrumentation process-wide instead of toggling a single
+# thread's collection state, which also happens to cover a future WAL writer thread
+# (Task 2.6) that a per-function toggle would never see, since that thread never enters
+# the benchmark function itself — but that is a concern for later, not the cause of the
+# ~500-instruction counts fixed here. Off Valgrind (macOS, or any non-instrumented run)
+# these client requests compile to no-ops.
 gungraun = { version = "=0.19.4", features = ["client_requests"] }
 # Test certificates for the mTLS peer-auth tests.
 #

@@ -216,6 +216,74 @@ def extract(root: Path, base_names: set[str] | None) -> tuple[list[dict], list[s
     return rows, problems
 
 
+def extract_self_test() -> int:
+    """Self-test for `extract`'s rename handling.
+
+    perf-gate.yml review (HIGH-1 follow-up): a benchmark renamed between base and head
+    (as Task 2.3 did for the WAL benches) must be reported as removed under its old name
+    and new under its new name, with no false "existed at base" failure — that failure
+    mode is exactly what happened when stale old-named `summary.json` files from the
+    base step survived into the head run's `target/gungraun` (fixed by deleting them
+    right after `list-names` in perf-gate.yml's base step). This exercises the pure
+    `extract`/`read_base_list` logic without needing the actual stale-file bug
+    reproduced on disk.
+    """
+
+    def make_summary(full_name: str, ir: int) -> dict:
+        return {
+            "module_path": full_name,
+            "id": None,
+            "profiles": [
+                {
+                    "tool": "Callgrind",
+                    "flamegraphs": [],
+                    "log_paths": [],
+                    "out_paths": [],
+                    "summaries": {
+                        "parts": [],
+                        "total": {
+                            "regressions": [],
+                            "summary": {
+                                "Callgrind": {"Ir": {"metrics": {"Left": {"Int": ir}}, "diffs": None}}
+                            },
+                        },
+                    },
+                }
+            ],
+        }
+
+    problems = []
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        bench_dir = root / "bench_wal_put_100"
+        bench_dir.mkdir()
+        new_name = "iai_hot_paths::hot_paths::bench_wal_put_100"
+        old_name = "iai_hot_paths::hot_paths::bench_wal_put"
+        (bench_dir / "summary.json").write_text(json.dumps(make_summary(new_name, 3_000_000)))
+
+        # base-list.txt as `list-names` would have written it before the rename: only
+        # the old name existed at base. Only the new name's summary.json exists at
+        # head (the base step no longer leaves the old one behind, once deleted).
+        rows, issues = extract(root, {old_name})
+
+        if issues:
+            problems.append(f"expected no problems for a clean rename, got: {issues}")
+
+        new_row = next((r for r in rows if r["name"] == new_name), None)
+        if new_row is None or not new_row.get("bootstrap") or not new_row.get("new"):
+            problems.append(f"expected the new name to report as new/bootstrap, got: {new_row}")
+
+        removed_row = next((r for r in rows if r["name"] == old_name), None)
+        if removed_row is None or not removed_row.get("removed"):
+            problems.append(f"expected the old name to report as removed, got: {removed_row}")
+
+    for p in problems:
+        print(f"extract self-test FAILED: {p}", file=sys.stderr)
+    if not problems:
+        print("perf_gate_deltas.py extract self-test: ok")
+    return 1 if problems else 0
+
+
 def list_names(root: Path) -> int:
     """Print one benchmark name per line, for capturing as a `--base-list` file."""
     for path in find_summaries(root):
@@ -350,7 +418,28 @@ def floors_check(ir_by_name: dict[str, float], floors: dict[str, dict]) -> tuple
             )
             all_ok = False
             continue
-        ratio = ir / ref_ir if ref_ir else float("inf")
+        # A non-positive Ir on either side means nothing plausible was measured (a
+        # negative count can't happen from `find_ir_total`, but 0 can, e.g. an
+        # instrumentation-never-turned-on benchmark). `ratio = ir / ref_ir` would divide
+        # by zero, and a naive `float("inf")` fallback would make a 0-Ir *reference*
+        # look like an infinitely-passing ratio instead of the broken measurement it is
+        # — fail explicitly instead of computing a ratio at all.
+        if ref_ir <= 0 or ir <= 0:
+            bad = name if ir <= 0 else reference
+            rows.append(
+                {
+                    "name": name,
+                    "ir": ir,
+                    "reference": reference,
+                    "reference_ir": ref_ir,
+                    "ratio": None,
+                    "ok": False,
+                    "note": f"non-positive Ir: {bad} measured {ir if bad == name else ref_ir}",
+                }
+            )
+            all_ok = False
+            continue
+        ratio = ir / ref_ir
         ok = ratio >= min_ratio
         rows.append(
             {
@@ -465,6 +554,31 @@ def floors_self_test() -> int:
         if fail_all or fail_row is None or fail_row["ok"]:
             problems.append(f"expected bench_wal_put_100 to fail its floor, got: {fail_rows}")
 
+    # Edge cases against `floors_check` directly (no summary trees needed): a floored
+    # bench missing from the run, a reference missing from the run, and a zero-Ir
+    # reference (the div-by-zero/`float("inf")` trap MEDIUM-3 fixed — a zero reference
+    # must fail, not report every ratio as an infinitely-passing "ok").
+    missing_bench_floors = {"bench_missing": {"reference": "bench_ref", "min_ratio": 1.0}}
+    missing_bench_rows, missing_bench_ok = floors_check({"bench_ref": 1000}, missing_bench_floors)
+    if missing_bench_ok or not any(
+        r["name"] == "bench_missing" and not r["ok"] and r["note"] for r in missing_bench_rows
+    ):
+        problems.append(f"expected a missing bench to fail with a note, got: {missing_bench_rows}")
+
+    missing_ref_floors = {"bench_x": {"reference": "bench_missing_ref", "min_ratio": 1.0}}
+    missing_ref_rows, missing_ref_ok = floors_check({"bench_x": 1000}, missing_ref_floors)
+    if missing_ref_ok or not any(
+        r["name"] == "bench_x" and not r["ok"] and r["note"] for r in missing_ref_rows
+    ):
+        problems.append(f"expected a missing reference to fail with a note, got: {missing_ref_rows}")
+
+    zero_ref_floors = {"bench_y": {"reference": "bench_zero_ref", "min_ratio": 1.0}}
+    zero_ref_rows, zero_ref_ok = floors_check({"bench_y": 1000, "bench_zero_ref": 0}, zero_ref_floors)
+    if zero_ref_ok or not any(
+        r["name"] == "bench_y" and not r["ok"] and r["ratio"] is None for r in zero_ref_rows
+    ):
+        problems.append(f"expected a zero-Ir reference to fail, not report inf/ok, got: {zero_ref_rows}")
+
     for p in problems:
         print(f"floors self-test FAILED: {p}", file=sys.stderr)
     if not problems:
@@ -483,6 +597,8 @@ def main() -> int:
         return floors_self_test()
     if len(sys.argv) == 4 and sys.argv[1] == "floors":
         return floors_cmd(sys.argv[2], sys.argv[3])
+    if len(sys.argv) == 3 and sys.argv[1] == "extract" and sys.argv[2] == "--self-test":
+        return extract_self_test()
     if len(sys.argv) >= 3 and sys.argv[1] == "extract":
         root = Path(sys.argv[2])
         rest = sys.argv[3:]
@@ -506,6 +622,7 @@ def main() -> int:
 
     print(
         "usage: perf_gate_deltas.py extract <gungraun-target-dir> [--base-list <file>]\n"
+        "       perf_gate_deltas.py extract --self-test\n"
         "       perf_gate_deltas.py list-names <gungraun-target-dir>\n"
         "       perf_gate_deltas.py floors <gungraun-target-dir> <floors.toml>\n"
         "       perf_gate_deltas.py floors --self-test\n"
