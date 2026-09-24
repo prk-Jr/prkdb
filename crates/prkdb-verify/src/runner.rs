@@ -45,15 +45,24 @@ pub enum Outcome {
 
 impl Outcome {
     /// True if `self` and `other` are the same kind of finding: for
-    /// `Mismatch`, that also requires the same key. Used by the minimizer to
-    /// confirm a shrunk sequence still reproduces the *same* bug rather than
-    /// a different one.
+    /// `Mismatch`, that also requires the same key AND the same shape (was
+    /// the key present in the model vs. the SUT, before vs. after) — a
+    /// missing-vs-present mismatch is a different bug from a
+    /// present-vs-different-value one, even on the same key. For
+    /// `SutError`, that also requires the same op discriminant (a `Put`
+    /// failing is a different bug from a `Reopen` failing, even though both
+    /// are `SutError`s). Used by the minimizer to confirm a shrunk sequence
+    /// still reproduces the *same* bug rather than a different one.
     pub fn same_kind(&self, other: &Outcome) -> bool {
         match (self, other) {
             (Outcome::Mismatch { mismatch: a, .. }, Outcome::Mismatch { mismatch: b, .. }) => {
                 a.key == b.key
+                    && (a.expected.is_some(), a.actual.is_some())
+                        == (b.expected.is_some(), b.actual.is_some())
             }
-            (Outcome::SutError { .. }, Outcome::SutError { .. }) => true,
+            (Outcome::SutError { op: a, .. }, Outcome::SutError { op: b, .. }) => {
+                std::mem::discriminant(a) == std::mem::discriminant(b)
+            }
             _ => false,
         }
     }
