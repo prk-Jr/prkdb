@@ -1,0 +1,18 @@
+# Minimum plausible instruction counts for the perf gate (TST-09). A benchmark whose Ir
+# falls below `min_ratio * Ir(reference)` measured nothing and fails the gate, whatever
+# its delta says. Reference benchmarks are pure single-threaded CPU work.
+[floors.bench_wal_put_100]
+reference = "bench_log_record_encode"
+min_ratio = 100.0   # 100 puts must at least encode 100 records
+
+[floors.bench_wal_get_one]
+reference = "bench_log_record_decode"
+min_ratio = 1.0     # a hit must at least decode one record
+
+[floors.bench_wal_batch_of_100]
+reference = "bench_log_record_encode"
+min_ratio = 50.0
+
+[floors.bench_indexed_insert_one]
+reference = "bench_log_record_encode"
+min_ratio = 1.0

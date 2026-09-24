@@ -153,6 +153,15 @@ jobs:
             exit "$code"
           fi
 
+      # TST-09: a benchmark whose Ir falls below its floor measured nothing, whatever its
+      # delta says — no perf_note override, unlike the regression gate below, because a
+      # vacuous measurement isn't a regression that can be justified. Runs against the
+      # head SHA's own summaries (already written above by "Bench head SHA").
+      - name: Enforce the instruction-count floors
+        run: |
+          python3 scripts/perf_gate_deltas.py floors target/gungraun \
+            scripts/perf_gate_floors.toml >> "$GITHUB_STEP_SUMMARY"
+
       - name: Compute instruction-count deltas
         run: |
           python3 scripts/perf_gate_deltas.py extract target/gungraun \
