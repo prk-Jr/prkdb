@@ -285,6 +285,11 @@ impl FaultFs {
     /// directory chain as it exists at the moment of the call.
     pub fn mkdir_durable(&self, path: &Path) -> io::Result<()> {
         self.create_dir_all(path)?;
+        if path.parent().is_none() {
+            // `path` is the filesystem root itself: it's always durable for
+            // free, nothing to sync.
+            return Ok(());
+        }
         let mut dir = parent(path);
         loop {
             self.sync_dir(&dir)?;
@@ -868,7 +873,7 @@ mod tests {
     /// once `power_loss` has run, every op on the old handle errors, with no
     /// window in which a stale handle could have mutated state.
     #[test]
-    fn write_after_power_loss_never_mutates_state_even_under_contention() {
+    fn write_after_power_loss_never_mutates_state() {
         let fs = FaultFs::new();
         fs.mkdir_durable(Path::new("/d")).unwrap();
         let f = fs.create(Path::new("/d/a")).unwrap();
@@ -916,6 +921,14 @@ mod tests {
         assert!(fs.exists(Path::new("/tmp/x/wal")).unwrap());
         assert!(fs.exists(Path::new("/tmp/x/wal/a")).unwrap());
         assert!(!fs.exists(Path::new("/tmp/x/wal/sub")).unwrap());
+    }
+
+    #[test]
+    fn mkdir_durable_on_the_root_itself_is_ok() {
+        let fs = FaultFs::new();
+        // The root has no parent to sync, so this must short-circuit to Ok
+        // rather than trying (and failing) to sync_dir an empty path.
+        fs.mkdir_durable(Path::new("/")).unwrap();
     }
 
     #[test]
