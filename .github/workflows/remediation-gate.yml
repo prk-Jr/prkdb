@@ -207,11 +207,13 @@ jobs:
           set -o pipefail
           SPIKE_REPS=3 cargo bench -p prkdb --bench wal_write_path_spike | tee head.md
       - name: Apply the Fast rule and publish the tables
+        env:
+          BASE_REF: ${{ inputs.base_ref }}
         run: |
           {
             echo "**PROBE — not gate evidence**"
             echo "## Host"; echo; nproc; lscpu | grep 'Model name'; df -hT . | tail -1
-            if [ -f base.md ]; then echo; echo "## Base (${{ inputs.base_ref }})"; cat base.md; fi
+            if [ -f base.md ]; then echo; echo "## Base ($BASE_REF)"; cat base.md; fi
             echo; echo "## Head"; cat head.md
             echo; echo "## Fast rule"
           } >> "$GITHUB_STEP_SUMMARY"
