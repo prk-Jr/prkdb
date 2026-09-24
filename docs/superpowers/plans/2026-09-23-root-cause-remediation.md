@@ -16,8 +16,8 @@
 
 | Phase | Detail level | Status |
 |---|---|---|
-| 0 Honesty and tracking | Full (code-level) | not started |
-| 1 Harness and baseline | Full (code-level) | not started |
+| 0 Honesty and tracking | Full (code-level) | gate passed — squash-merged as bc50b8e (PR #79) |
+| 1 Harness and baseline | Full (code-level) | gate passed — squash-merged as 2a7dcdb (PR #80) |
 | 2 Format v2 + single-node | Full (code-level), expanded 2026-09-24 after the Task 2.1 spike (decision: PROCEED) | in progress (2.1 done) |
 | 3 Semantics | Outline — expand at phase start | — |
 | 4 Raft | Outline — expand after the 4a spike | — |
@@ -28,7 +28,8 @@
 
 ## Conventions (apply to every task)
 
-- **Branch:** all work is on `remediation/root-cause`. Never push to `origin` except in a phase-gate task (§5.1).
+- **Branch:** each phase has its own branch `remediation/phase-<n>` (Phase 0 used `remediation/root-cause`), cut from the previous phase branch and synced with `main` after each phase merge. Never push to `origin` except in a phase-gate task (§5.1) or an explicitly approved STOP step.
+- **Merges are squash merges and head branches are auto-deleted.** Per-commit SHAs stay reachable only via `refs/pull/<n>/head`, so every fixed finding's `changes` must also include its PR URL (added in the phase-gate evidence commit).
 - **Commits:** conventional commits (`feat:`, `fix:`, `test:`, `docs:`, `chore:`, `ci:`). **No `Co-Authored-By` or other attribution trailers.**
 - **Finding workflow:** tripwire exists → change tripwire into a failing regression test → fix → test passes → ledger entry updated (`status`, `regression_tests`, `changes`) → `cargo xtask remediation check` passes → commit.
 - **Perf note:** for any task touching `crates/prkdb-core/src/wal/`, `crates/prkdb/src/storage/`, `indexed_storage.rs`, or `transaction.rs`, run the relevant Criterion bench before and after (`cargo bench -p prkdb --bench <name> -- --save-baseline before` / `--baseline before`) and put the delta in the commit body.

@@ -373,7 +373,7 @@ security = true
 sources = ["review-2026-09-07#R09"]
 evidence = ["crates/prkdb-schema/src/storage.rs:240-245,295-307"]
 regression_tests = ["test:crates/prkdb-schema/tests/collection_names.rs::sch01_traversal_names_are_rejected_before_any_write", "test:crates/prkdb-schema/tests/collection_names.rs::sch01_malformed_descriptor_is_rejected_before_any_write", "test:crates/prkdb-schema/tests/collection_names.rs::sch01_case_insensitive_collision_is_rejected_before_any_write", "test:crates/prkdb-schema/tests/collection_names.rs::sch01_storage_level_put_rejects_unsafe_names_before_any_write", "test:crates/prkdb-schema/tests/collection_names.rs::sch01_load_fails_closed_on_corrupt_index_with_unsafe_name"]
-changes = ["87efc53", "82f3351", "fd83391"]
+changes = ["87efc53", "82f3351", "fd83391", "https://github.com/prk-Jr/prkdb/pull/79"]
 ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35883454867"
 
 [[finding]]
@@ -428,7 +428,7 @@ regression_tests = [
   "test:crates/prkdb-verify/tests/harness.rs::meta_harness_catches_a_lossy_sut",
   "test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_on_current_code",
 ]
-changes = ["61cde01f69ff8ed1a2718a856c55e437fee38b85"]
+changes = ["61cde01f69ff8ed1a2718a856c55e437fee38b85", "https://github.com/prk-Jr/prkdb/pull/80"]
 ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35961505905"
 
 [[finding]]
@@ -439,7 +439,7 @@ severity = "low"
 phase = 1
 status = "verified"
 regression_tests = ["script:scripts/check_bench_harness.sh"]
-changes = ["67e1308"]
+changes = ["67e1308", "https://github.com/prk-Jr/prkdb/pull/80"]
 ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35961505905"
 
 [[finding]]
@@ -479,7 +479,7 @@ phase = 0
 status = "verified"
 sources = ["docs-audit-2026-09-23"]
 regression_tests = ["script:scripts/check_doc_claims.sh"]
-changes = ["27bd816", "6ebaaf5", "dcd2a6b"]
+changes = ["27bd816", "6ebaaf5", "dcd2a6b", "https://github.com/prk-Jr/prkdb/pull/79"]
 ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35883454867"
 
 [[finding]]
@@ -531,7 +531,7 @@ phase = 0
 status = "verified"
 sources = ["docs-audit-2026-09-23"]
 regression_tests = ["script:scripts/check_doc_claims.sh"]
-changes = ["27bd816", "6ebaaf5"]
+changes = ["27bd816", "6ebaaf5", "https://github.com/prk-Jr/prkdb/pull/79"]
 ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35883454867"
 
 [[finding]]
@@ -561,7 +561,7 @@ phase = 0
 status = "verified"
 sources = ["docs-audit-2026-09-23"]
 regression_tests = ["script:scripts/check_doc_claims.sh"]
-changes = ["27bd816", "6ebaaf5"]
+changes = ["27bd816", "6ebaaf5", "https://github.com/prk-Jr/prkdb/pull/79"]
 ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35883454867"
 
 [[finding]]
@@ -582,7 +582,7 @@ phase = 0
 status = "verified"
 sources = ["docs-audit-2026-09-23"]
 regression_tests = ["script:scripts/check_doc_claims.sh"]
-changes = ["27bd816", "6ebaaf5"]
+changes = ["27bd816", "6ebaaf5", "https://github.com/prk-Jr/prkdb/pull/79"]
 ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35883454867"
 
 [[finding]]
@@ -618,7 +618,7 @@ status = "verified"
 sources = ["batch-f-2026-09-23"]
 evidence = ["crates/prkdb/tests/replication_tests.rs:477"]
 regression_tests = ["test:crates/prkdb/tests/replication_tests.rs::test_replication_state_tracking"]
-changes = ["b6a6675"]
+changes = ["b6a6675", "https://github.com/prk-Jr/prkdb/pull/79"]
 ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35883454867"
 
 [[finding]]
