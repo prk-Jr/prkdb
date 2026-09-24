@@ -291,6 +291,12 @@ impl Builder {
             shard_count: Some(16),
             workload_profile: prkdb_core::wal::adaptive::WorkloadProfile::Balanced,
             adaptive_config: prkdb_core::wal::adaptive::AdaptiveBatchConfig::default(),
+            // Explicit so a later change to a preset cannot silently weaken this
+            // builder path (controller decision: Durable is the default everywhere).
+            sync_mode: prkdb_core::wal::SyncMode::Durable,
+            sync_interval_ms: 10,
+            max_batch_bytes: 16 * 1024 * 1024,
+            max_queued_bytes: 64 * 1024 * 1024,
         }
     }
 
@@ -310,6 +316,9 @@ impl Builder {
             segment_bytes,
             batch_size,
             compression: prkdb_core::wal::CompressionConfig::none(),
+            // Explicit so a later change to a preset cannot silently weaken this
+            // builder path (controller decision: Durable is the default everywhere).
+            sync_mode: prkdb_core::wal::SyncMode::Durable,
             ..prkdb_core::wal::WalConfig::benchmark_config()
         }
     }

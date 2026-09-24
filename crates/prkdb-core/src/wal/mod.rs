@@ -8,6 +8,7 @@ pub mod compaction;
 pub mod compression;
 pub mod config;
 pub mod frame;
+pub mod log;
 pub mod log_record;
 pub mod log_segment;
 pub mod metrics;
@@ -21,9 +22,12 @@ pub mod write_ahead_log;
 pub use compression::{
     compress, decompress, decompress_bounded, CompressionConfig, CompressionError, CompressionType,
 };
-pub use config::{CompactionPolicy, WalConfig};
+pub use config::{CompactionPolicy, SyncMode, WalConfig};
+pub use frame::Lsn;
+pub use log::{CommitHook, PendingAppend, RecoveryReport, Reservation, Wal, WalHealth, WalOptions};
 pub use log_record::{LogOperation, LogRecord};
 pub use log_segment::LogSegment;
+pub use segment::RecordLoc;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WalError {

@@ -17,8 +17,11 @@
 
 use prkdb::storage::WalStorageAdapter;
 use prkdb_core::vfs::{StdVfs, Vfs, VfsFile};
+use prkdb_core::wal::batch::{Batch, BatchOp};
 use prkdb_core::wal::mmap_parallel_wal::MmapParallelWal;
-use prkdb_core::wal::{LogOperation, LogRecord, WalConfig};
+use prkdb_core::wal::{
+    CompressionConfig, LogOperation, LogRecord, SyncMode, Wal, WalConfig, WalOptions,
+};
 use prkdb_types::storage::StorageAdapter;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -378,6 +381,9 @@ enum Target {
     /// pre-faulted memory. On Linux `MS_ASYNC` is close to a no-op, so this is a lower
     /// bound for what the current path costs there.
     MemcpyModel(tokio::sync::Mutex<(Vec<u8>, usize)>),
+    /// The real `Wal` (Task 2.6), compared against the spike's `SingleLog` prototype
+    /// above. `put` encodes a one-op `Batch` on the caller, as the future adapter will.
+    Wal(Wal),
 }
 
 const MODEL_BYTES: usize = 64 * 1024 * 1024;
@@ -423,6 +429,17 @@ impl Target {
                 }
                 buf[*pos..*pos + rec.len()].copy_from_slice(&rec);
                 *pos += rec.len();
+            }
+            Target::Wal(wal) => {
+                let payload = Batch {
+                    ops: vec![BatchOp::Put {
+                        key,
+                        value: value.to_vec(),
+                    }],
+                }
+                .encode(&CompressionConfig::none())
+                .expect("batch encode");
+                wal.append(payload, None).await.expect("wal append");
             }
         }
     }
@@ -698,6 +715,8 @@ fn main() {
         "current_adapter_put",
         "model_memcpy_only",
         "two_shard_fast",
+        "wal_durable",
+        "wal_fast",
     ];
     let mut cell_id = 0;
     for _ in 0..reps {
@@ -750,6 +769,32 @@ fn main() {
                                 vec![1u8; MODEL_BYTES],
                                 0,
                             ))),
+                            "wal_durable" => {
+                                let o = WalOptions {
+                                    sync_mode: SyncMode::Durable,
+                                    sync_interval: Duration::from_millis(10),
+                                    segment_bytes: 256 * 1024 * 1024,
+                                    max_batch_bytes: 16 * 1024 * 1024,
+                                    max_queued_bytes: 64 * 1024 * 1024,
+                                };
+                                let (wal, _) =
+                                    Wal::open(Arc::new(StdVfs), &dir, o, 1, &mut |_, _, _| Ok(()))
+                                        .expect("wal open");
+                                Target::Wal(wal)
+                            }
+                            "wal_fast" => {
+                                let o = WalOptions {
+                                    sync_mode: SyncMode::Fast,
+                                    sync_interval: Duration::from_millis(10),
+                                    segment_bytes: 256 * 1024 * 1024,
+                                    max_batch_bytes: 16 * 1024 * 1024,
+                                    max_queued_bytes: 64 * 1024 * 1024,
+                                };
+                                let (wal, _) =
+                                    Wal::open(Arc::new(StdVfs), &dir, o, 1, &mut |_, _, _| Ok(()))
+                                        .expect("wal open");
+                                Target::Wal(wal)
+                            }
                             _ => {
                                 let cfg = WalConfig {
                                     log_dir: dir.clone(),
