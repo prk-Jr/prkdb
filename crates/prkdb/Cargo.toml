@@ -91,6 +91,10 @@ sqlx = { version = "0.8.2", default-features = false, features = [
 ] }
 criterion = { workspace = true }
 proptest = "1.4"
+# Deterministic instruction-count benchmarks for the perf gate (spec §6.2). iai-callgrind's
+# development moved to this crate under a new name; pin the exact version so CI installs
+# the matching `gungraun-runner` binary (see .github/workflows/perf-gate.yml).
+gungraun = { version = "=0.19.4" }
 # Test certificates for the mTLS peer-auth tests.
 #
 # default-features = false is load-bearing: rcgen's default backend is `ring`, and the
@@ -142,4 +146,20 @@ harness = false
 
 [[bench]]
 name = "query_bench"
+harness = false
+
+[[bench]]
+name = "e2e_throughput_bench"
+harness = false
+
+[[bench]]
+name = "recovery_bench"
+harness = false
+
+[[bench]]
+name = "cluster_write_bench"
+harness = false
+
+[[bench]]
+name = "iai_hot_paths"
 harness = false

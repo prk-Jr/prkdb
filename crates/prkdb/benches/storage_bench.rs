@@ -11,21 +11,30 @@ fn bench_single_put(c: &mut Criterion) {
 
     let rt = Runtime::new().unwrap();
 
-    group.bench_function("single_put", |b| {
-        b.to_async(&rt).iter(|| async move {
-            // Create fresh adapter for each iteration to avoid lifetime issues
-            let dir = tempfile::tempdir().unwrap();
-            let config = WalConfig {
-                log_dir: dir.path().to_path_buf(),
-                ..WalConfig::test_config()
-            };
-            let adapter = WalStorageAdapter::new(config).unwrap();
+    // Adapter lifecycle (tempdir + WalStorageAdapter::new) is created once, outside the
+    // timed region. The original version created and tore down a fresh adapter inside
+    // `b.iter`'s async block, so the ~1.2ms it reported was mostly adapter setup, not the
+    // put itself.
+    let dir = tempfile::tempdir().unwrap();
+    let config = WalConfig {
+        log_dir: dir.path().to_path_buf(),
+        ..WalConfig::test_config()
+    };
+    let adapter = Arc::new(rt.block_on(async { WalStorageAdapter::new(config).unwrap() }));
 
-            let key = b"bench_key".to_vec();
+    group.bench_function("single_put", |b| {
+        let mut counter = 0u64;
+
+        b.to_async(&rt).iter(|| {
+            let adapter = Arc::clone(&adapter);
+            let key = format!("bench_key_{counter}").into_bytes();
+            counter += 1;
             let value = vec![b'x'; 100];
 
-            adapter.put(&key, &value).await.unwrap();
-            black_box(());
+            async move {
+                adapter.put(&key, &value).await.unwrap();
+                black_box(());
+            }
         });
     });
 
@@ -38,24 +47,31 @@ fn bench_batch_put(c: &mut Criterion) {
 
     let rt = Runtime::new().unwrap();
 
-    group.bench_function("batch_put_100", |b| {
-        b.to_async(&rt).iter(|| async move {
-            let dir = tempfile::tempdir().unwrap();
-            let config = WalConfig {
-                log_dir: dir.path().to_path_buf(),
-                ..WalConfig::test_config()
-            };
-            let adapter = WalStorageAdapter::new(config).unwrap();
+    // Same fix as bench_single_put: the adapter is built once, outside the timed region.
+    let dir = tempfile::tempdir().unwrap();
+    let config = WalConfig {
+        log_dir: dir.path().to_path_buf(),
+        ..WalConfig::test_config()
+    };
+    let adapter = Arc::new(rt.block_on(async { WalStorageAdapter::new(config).unwrap() }));
 
+    group.bench_function("batch_put_100", |b| {
+        let mut batch_counter = 0u64;
+
+        b.to_async(&rt).iter(|| {
+            let adapter = Arc::clone(&adapter);
             let mut items = vec![];
             for i in 0..100 {
-                let key = format!("batch_key_{}", i).into_bytes();
+                let key = format!("batch_key_{batch_counter}_{i}").into_bytes();
                 let value = vec![b'x'; 100];
                 items.push((key, value));
             }
+            batch_counter += 1;
 
-            adapter.put_many(items).await.unwrap();
-            black_box(());
+            async move {
+                adapter.put_many(items).await.unwrap();
+                black_box(());
+            }
         });
     });
 

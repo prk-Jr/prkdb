@@ -1488,16 +1488,16 @@ Register it: in `collectors/mod.rs` add `pub(super) mod ledger;` and in `collect
 slow-timeout = { period = "60s", terminate-after = 5 }
 
 [profile.ci]
-retries = 2            # retries are reported in the summary, never silent
+retries = 0            # flaky tests are findings; a retry would turn a flake green
 failure-output = "immediate-final"
 fail-fast = false
 
 [test-groups]
-process-spawning = { max-threads = 1 }
+serial-servers = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = "test(/_tripwire$/) | binary(raft_chaos_tests) | binary(in_process_cluster)"
-test-group = "process-spawning"
+test-group = "serial-servers"
 ```
 
 - [ ] **Step 2: Run locally**
@@ -1519,6 +1519,8 @@ In the `test` job replace `cargo test --workspace` with:
 ---
 
 ### Task 1.2: `Vfs` trait and `StdVfs`
+
+> **As built (review-hardened, commits b112104 + 33e419e):** the real API differs from the code below — `fn exists(&self, path: &Path) -> io::Result<bool>` (never hides I/O errors), `fn open(&self, path: &Path, mode: OpenMode) -> io::Result<Arc<dyn VfsFile>>` with `OpenMode::{Read, ReadWrite}`, and every method documents its durability contract. `crates/prkdb-core/src/vfs/` is the source of truth; later tasks must implement/consume that API, not the snippet below. The nextest group in Task 1.1 was also widened and renamed `serial-servers` (all prkdb-cli test binaries + every `mod helpers` binary + tripwires).
 
 **Files:**
 - Create: `crates/prkdb-core/src/vfs/mod.rs`, `crates/prkdb-core/src/vfs/std_vfs.rs`
@@ -1711,6 +1713,8 @@ Add to `crates/prkdb-core/Cargo.toml` `[features]`: `vfs-conformance = []`.
 ---
 
 ### Task 1.3: `prkdb-verify` crate and `faultfs`
+
+> **API note:** implement the as-built `Vfs` (see Task 1.2 note): `exists` returns `io::Result<bool>`, `open` takes `OpenMode` (writes through a `Read` handle must return an error), and `FaultFs` must honour exactly the durability rules documented on each trait method.
 
 **Files:**
 - Create: `crates/prkdb-verify/Cargo.toml`, `crates/prkdb-verify/src/lib.rs`, `crates/prkdb-verify/src/faultfs.rs`
@@ -2527,7 +2531,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-- [ ] **Step 2: Test** — spawns the child (`env!("CARGO_BIN_EXE_crash_child")`), reads stdout until `ACK 199`, sends `SIGKILL` (`child.kill()` sends SIGKILL on Unix), reopens with `open_async`, asserts `k0..k199` all present. It takes a few seconds, so it runs on every PR (not `#[ignore]`d); add `| binary(sigkill)` to the nextest `process-spawning` filter. Gate the file with `#![cfg(unix)]`.
+- [ ] **Step 2: Test** — spawns the child (`env!("CARGO_BIN_EXE_crash_child")`), reads stdout until `ACK 199`, sends `SIGKILL` (`child.kill()` sends SIGKILL on Unix), reopens with `open_async`, asserts `k0..k199` all present. It takes a few seconds, so it runs on every PR (not `#[ignore]`d); add `| binary(sigkill)` to the nextest `serial-servers` filter. Gate the file with `#![cfg(unix)]`.
 
 ```rust
 #[tokio::test(flavor = "multi_thread")]
@@ -2714,6 +2718,12 @@ Files: `crates/prkdb-core/src/wal/segment.rs` (open/scan), `crates/prkdb-core/sr
 Migrate every caller found by `grep -rlw "ParallelWal\|AsyncParallelWal\|MmapParallelWal\|WriteAheadLog" crates --include='*.rs'`; delete modules; `cargo build --workspace` and full tests green.
 
 ### Task 2.5: `PowerLoss` and Fast mode in the harness (TST-05)
+
+> **Design constraints from the Phase 1 harness review (apply before adding ops):**
+> - **Model answers "acceptable values", not one value.** Fast mode (acked-but-unsynced writes may or may not survive) and Phase 3 transactions break exact equality. Change `Model` to track, per key, the durable value plus pending values since the last sync/checkpoint/clean reopen, and `Mismatch.expected` to that acceptable set. Do this in 2.5, before the Fast profile lands, or the checker gets rewritten twice.
+> - **`Sut` grows without breaking implementations.** Either a single `async fn apply(&mut self, op: &Op) -> anyhow::Result<OpResult>` plus `get`, or new methods with default bodies returning `Unsupported` that the runner treats as a profile mismatch. `PowerLoss` needs the `FaultFs` handle and a seeded rng: derive one `ChaCha8Rng` stream per concern (workload, faults) from the seed in the runner, never ad hoc.
+> - **Op coverage is reported.** Count executed ops per kind in `Report`, so a green run can't hide a disabled op.
+> - The Phase 1 FaultFs already models: per-directory durable entries (including subdirectories), inode-reusing truncating `create`, stale handles after power loss (epoch), and `Tear::{None, Prefix, ZeroTail, Garbage}` with sector-granular tearing of in-place overwrites.
 Files: `crates/prkdb-verify/src/{ops.rs, sut.rs, checker.rs, bin/verify.rs}`. Failing tests in `crates/prkdb-verify/tests/harness.rs`: `fast_mode_checker_catches_lost_synced_data` (a Fast-mode SUT that discards already-synced data must be caught) and `blocking_profile_includes_power_loss` (generator). Extend `ops.rs` (`Op::PowerLoss`), `sut.rs` (`FaultFs`-backed SUT), `checker.rs` (Fast prefix check), `xtask verify --mode fast`. Blocking profile gains `PowerLoss` per §7.1.
 
 ### Task 2.6: Format v2 marker, open rules, migration registry, `prkdb-cli migrate` (D3, D4)

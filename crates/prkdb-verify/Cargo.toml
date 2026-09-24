@@ -1,0 +1,19 @@
+[package]
+name = "prkdb-verify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Model-based crash/restart verification harness for PrkDB (not published)"
+
+[dependencies]
+prkdb = { workspace = true }
+prkdb-core = { workspace = true, features = ["vfs-conformance"] }
+prkdb-types = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+rand = "0.8"
+rand_chacha = "0.3"
+tempfile = "3"
+parking_lot = "0.12"

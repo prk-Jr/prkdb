@@ -1,0 +1,9 @@
+# Fixture for scripts/check_guards_fail.sh: e2e_throughput_bench is declared, but without
+# harness = false (TST-04's original bug — Criterion's own main() then conflicts with the
+# default libtest bench harness and its output never appears).
+[[bench]]
+name = "e2e_throughput_bench"
+
+[[bench]]
+name = "other_bench"
+harness = false

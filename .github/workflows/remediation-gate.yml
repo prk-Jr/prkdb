@@ -24,8 +24,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Resolves `inputs.ref` to a commit SHA once, so every other job checks out the exact
+  # same commit instead of each re-resolving a free-text ref (which could move, or
+  # resolve differently on different runners/steps) independently. It also gives the
+  # run a durable, human-readable record of what was gated, in the summary.
+  resolve:
+    name: Resolve ref
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Resolve ref to a SHA
+        id: resolve
+        env:
+          REF: ${{ inputs.ref }}
+          PHASE: ${{ inputs.phase }}
+        run: |
+          sha="$(git rev-parse HEAD)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Gate phase $PHASE @ $sha (ref $REF)" >> "$GITHUB_STEP_SUMMARY"
+
   ledger-and-tests:
     name: Ledger and Tests
+    needs: resolve
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -36,7 +63,7 @@ jobs:
           sudo rm -rf /opt/ghc
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ needs.resolve.outputs.sha }}
           persist-credentials: false
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
@@ -46,4 +73,78 @@ jobs:
           save-if: false
       - run: cargo xtask remediation check
       - run: cargo test --workspace --no-fail-fast
-  # Phase 1 adds a sharded `harness` job here (Task 1.14).
+
+  harness:
+    name: Crash/Restart Harness
+    needs: resolve
+    # Phases 0 and 5 don't touch the storage/WAL path this harness exercises: phase 0
+    # only stands the gate workflow up, and phase 5 is close-out. Every other phase
+    # gate runs it.
+    if: ${{ inputs.phase != '0' && inputs.phase != '5' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    # Ten shards, not because ten are needed to fit the time budget, but for headroom
+    # and visibility: `run_seeds` stops at the first failing seed, so a single shard
+    # covering all 10k seeds would report only the first failure and hide the rest.
+    # Sharding lets up to 10 distinct failures surface in one run instead of one at a
+    # time across ten dispatches.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      # 10 shards x 1000 seeds = the 10k-seed gate (spec §5 step 3).
+      - name: Run harness shard
+        run: |
+          set -o pipefail
+          seed_offset=$(( ${{ matrix.shard }} * 1000 ))
+          {
+            echo "### Harness shard ${{ matrix.shard }}"
+            echo "seeds: $seed_offset..$(( seed_offset + 999 ))"
+          } >> "$GITHUB_STEP_SUMMARY"
+          cargo xtask verify --profile blocking --seeds 1000 --seed-offset "$seed_offset" --mode durable | tee harness.log
+          grep -E '^profile=.*seeds=.*checks=' harness.log | tail -1 >> "$GITHUB_STEP_SUMMARY"
+
+  # Keeps the required status check reporting under a fixed name regardless of whether
+  # `harness` ran at all: on phase 0/5 it is skipped by design (see the `if:` above),
+  # and a skipped job is otherwise indistinguishable from a passed one to anything
+  # reading only `needs.harness.result`. `if: always()` so a failed or cancelled shard
+  # set still produces a red result instead of being skipped itself.
+  harness-result:
+    name: Harness result
+    if: always()
+    needs: harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify harness passed or was legitimately skipped
+        env:
+          RESULT: ${{ needs.harness.result }}
+          PHASE: ${{ inputs.phase }}
+        run: |
+          if [ "$RESULT" = "success" ]; then
+            echo "Harness result: success" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$RESULT" = "skipped" ] && { [ "$PHASE" = "0" ] || [ "$PHASE" = "5" ]; }; then
+            echo "Harness result: skipped (phase $PHASE, expected)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "Harness result: $RESULT (phase $PHASE) — failing" >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::Harness did not pass and was not a legitimate phase 0/5 skip: $RESULT"
+          exit 1

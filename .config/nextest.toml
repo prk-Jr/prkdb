@@ -1,0 +1,35 @@
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+[profile.ci]
+# No retries: the repo treats flaky tests as findings (see
+# scripts/check_ignore_reasons.sh), and a retry would turn a flake green
+# instead of surfacing it.
+retries = 0
+failure-output = "immediate-final"
+fail-fast = false
+
+[test-groups]
+serial-servers = { max-threads = 1 }
+
+# Every test binary that spawns a server/cluster or re-executes itself as a
+# child process must run serialized: the OS-assigned ports and shared
+# fixtures in these binaries are not safe under nextest's default
+# per-binary-in-parallel execution.
+[[profile.default.overrides]]
+filter = """
+test(/_tripwire$/)
+| (package(prkdb-cli) & kind(test))
+| binary(client_credentials)
+| binary(distributed_writes)
+| binary(election_safety)
+| binary(extended_chaos_tests)
+| binary(in_process_cluster)
+| binary(jepsen_consistency_tests)
+| binary(peer_authz)
+| binary(peer_mtls)
+| binary(raft_chaos_tests)
+| binary(read_consistency_modes)
+| binary(sigkill)
+"""
+test-group = "serial-servers"

@@ -19,6 +19,7 @@ evidence = [
   "crates/prkdb/src/storage/checkpoint.rs:44-51",
   "crates/prkdb-core/src/wal/mmap_parallel_wal.rs:310",
   "crates/prkdb/src/storage/wal_adapter.rs:1737",
+  "test:crates/prkdb-verify/tests/harness.rs::sto01_discovery_profile_finds_checkpoint_loss_tripwire",
 ]
 tripwire = "test:crates/prkdb/tests/tripwires.rs::sto01_checkpoint_drops_pre_checkpoint_keys_tripwire"
 
@@ -422,7 +423,13 @@ title = "No restart/crash testing against a reference model"
 area = "tests"
 severity = "medium"
 phase = 1
-status = "open"
+status = "verified"
+regression_tests = [
+  "test:crates/prkdb-verify/tests/harness.rs::meta_harness_catches_a_lossy_sut",
+  "test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_on_current_code",
+]
+changes = ["61cde01f69ff8ed1a2718a856c55e437fee38b85"]
+ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35961505905"
 
 [[finding]]
 id = "TST-04"
@@ -430,7 +437,10 @@ title = "e2e_throughput_bench not declared harness = false; Criterion main likel
 area = "tests"
 severity = "low"
 phase = 1
-status = "open"
+status = "verified"
+regression_tests = ["script:scripts/check_bench_harness.sh"]
+changes = ["67e1308"]
+ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35961505905"
 
 [[finding]]
 id = "TST-05"
@@ -611,6 +621,26 @@ regression_tests = ["test:crates/prkdb/tests/replication_tests.rs::test_replicat
 changes = ["b6a6675"]
 ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35883454867"
 
+[[finding]]
+id = "STO-08"
+title = "WalConfig::segment_bytes ignored by the mmap WAL (segment size hardcoded to 64 MB)"
+area = "storage"
+severity = "low"
+phase = 2
+status = "open"
+sources = ["task-1.10-2026-09-24"]
+evidence = ["crates/prkdb-core/src/wal/mmap_log_segment.rs:50", "crates/prkdb-core/src/wal/write_ahead_log.rs:115"]
+
+[[finding]]
+id = "TST-09"
+title = "Perf gate WAL benches count ~500 instructions: the WAL work is outside the measured region"
+area = "tests"
+severity = "high"
+phase = 2
+status = "open"
+sources = ["pr-80-perf-gate-first-run"]
+evidence = ["crates/prkdb/benches/iai_hot_paths.rs", "https://github.com/prk-Jr/prkdb/actions/runs/35961505566"]
+
 [[phase]]
 id = 0
 title = "Honesty and tracking"
@@ -626,7 +656,7 @@ gate_evidence = ["https://github.com/prk-Jr/prkdb/actions/runs/35883454867"]
 [[phase]]
 id = 1
 title = "Harness and baseline"
-status = "not_started"
+status = "gate_passed"
 gate = [
   "blocking profile green",
   "discovery reproduces STO-01",
@@ -635,6 +665,7 @@ gate = [
   "nextest in CI",
   "then phase PR sequence",
 ]
+gate_evidence = ["https://github.com/prk-Jr/prkdb/actions/runs/35961505905", "https://github.com/prk-Jr/prkdb/actions/runs/35963074942"]
 
 [[phase]]
 id = 2

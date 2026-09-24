@@ -16,6 +16,7 @@ members = [
     "crates/prkdb-storage-sql",
     "crates/prkdb-storage-segmented",
     "crates/prkdb-types",
+    "crates/prkdb-verify",
 ]
 
 [workspace.package]
