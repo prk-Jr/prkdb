@@ -3,16 +3,29 @@
 //!
 //! Durability model:
 //! - A file's bytes are durable up to `sync_data`; anything written after
-//!   that (or an unsynced shrink) can be lost, zeroed, garbled, or partially
-//!   kept on power loss, in 512-byte sectors (see [`Tear`]).
+//!   that can be lost, zeroed, garbled, or partially kept on power loss, in
+//!   512-byte sectors (see [`Tear`]). An unsynced *truncation* (a shrinking
+//!   `set_len`, or a `create` over an existing file) is a separate failure
+//!   mode: on power loss it either reverts in full (the file comes back with
+//!   its old, pre-truncation content) or persists (the file comes back
+//!   truncated, and any bytes written after the truncation but before the
+//!   next `sync_data` are torn per `Tear` on top of that shorter baseline) —
+//!   modeling the same class of failure as an ext4 file that comes back
+//!   zero-length after a crash mid-truncate.
 //! - A directory entry (file or subdirectory) is durable only once
 //!   `sync_dir` has been called on its parent *while the entry was live*, and
 //!   only if the parent directory is itself durable. The filesystem root (a
-//!   path with no parent) is the one exception: it's always durable, the same
-//!   way a real WAL's `log_dir` is assumed to already exist on disk.
+//!   path with no parent) is the one exception: it's always durable for free,
+//!   the way a real filesystem's root already exists on disk. A *nested*
+//!   directory such as a WAL's `log_dir` is NOT durable for free — an
+//!   application-created directory tree must still be synced, ancestor by
+//!   ancestor, before it can be relied on to survive a crash; see
+//!   [`FaultFs::mkdir_durable`] for a helper that does this in one call.
 //! - A handle obtained before a `power_loss` call is stale afterward: every
 //!   operation on it errors, instead of silently reading/writing whatever the
-//!   inode now contains.
+//!   inode now contains. The epoch that makes a handle stale is checked under
+//!   the same lock as the operation it guards, so a `power_loss` can't slip
+//!   in between the check and the operation.
 
 use parking_lot::Mutex;
 use prkdb_core::vfs::{OpenMode, Vfs, VfsFile};
@@ -34,8 +47,12 @@ const SECTOR: usize = 512;
 /// (see the module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tear {
-    /// The tail is dropped entirely: the file reverts to exactly its last
-    /// synced length and content.
+    /// The unsynced tail (growth past the last synced/effective length) is
+    /// dropped entirely. This mode only governs *appended* bytes: sectors
+    /// that were overwritten in place within the already-durable region are
+    /// independently torn per sector (see the module docs) regardless of
+    /// `tear`, and can still keep their new, unsynced bytes even under
+    /// `None`.
     None,
     /// A random prefix of the tail survives (its length picked uniformly in
     /// `0..=tail_len`).
@@ -66,6 +83,23 @@ struct Content {
     /// Sector indices (byte range `[i*SECTOR, (i+1)*SECTOR)`) touched by a
     /// `write_at`/`set_len` since the last `sync_data`.
     dirty_sectors: BTreeSet<u64>,
+    /// The minimum length this file has been unsynced-truncated to (via a
+    /// shrinking `set_len`, or a `create` over an existing file) since the
+    /// last `sync_data`. `None` if no unsynced truncation has happened.
+    /// `power_loss` uses this to decide, per file, whether the truncation
+    /// persists (the file comes back at/around this length) or reverts (the
+    /// file comes back with its full old, pre-truncation content).
+    truncated_since_sync: Option<usize>,
+}
+
+/// Records an unsynced truncation of `c` down to `new_len`, keeping the
+/// smallest length seen across possibly multiple truncations before the next
+/// `sync_data` (the low-water mark is the worst case for what could persist).
+fn record_truncation(c: &mut Content, new_len: usize) {
+    c.truncated_since_sync = Some(match c.truncated_since_sync {
+        Some(existing) => existing.min(new_len),
+        None => new_len,
+    });
 }
 
 /// A live directory entry: either a file (by inode) or a subdirectory.
@@ -147,57 +181,84 @@ fn tear_content(c: &Content, tear: Tear, rng: &mut impl Rng) -> Vec<u8> {
     let synced_len = c.synced.len();
     let written_len = c.written.len();
 
-    // Step 1: the tail beyond `synced_len`. An unsynced *shrink* (or no
-    // growth at all) always reverts fully to `synced`, regardless of `tear`:
-    // none of the four modes describe how to handle a vanished truncation,
-    // only how to handle an unsynced append.
-    let mut result: Vec<u8> = if written_len > synced_len {
+    // Step 0: if this file was unsynced-truncated since the last sync, power
+    // loss decides — independently, per file — whether that truncation
+    // persists or reverts. This is the ext4-style failure class where a
+    // truncate-in-progress either lands (file comes back short) or is undone
+    // entirely (file comes back with its old, longer content); real
+    // filesystems don't reliably do the latter for *every* mode, but neither
+    // do they promise the former, so we let the rng pick rather than always
+    // reverting.
+    let (effective_synced, effective_len): (&[u8], usize) = match c.truncated_since_sync {
+        Some(trunc_len) if rng.gen_bool(0.5) => {
+            let len = trunc_len.min(synced_len);
+            (&c.synced[..len], len)
+        }
+        _ => (&c.synced[..], synced_len),
+    };
+
+    // Step 1: the tail beyond `effective_len`. With no unsynced truncation
+    // (or one that reverted above), `effective_len == synced_len` and this
+    // matches ordinary unsynced-append tearing. With a persisted truncation,
+    // `effective_len == trunc_len` and this tears whatever was written after
+    // the truncation but before the next `sync_data`, on top of the shorter
+    // baseline. If nothing was written past `effective_len` at all (no
+    // growth, or the growth didn't reach past the truncation point), the
+    // result is just the (possibly truncated) synced baseline.
+    let mut result: Vec<u8> = if written_len > effective_len {
         match tear {
-            Tear::None => c.synced.clone(),
+            Tear::None => effective_synced.to_vec(),
             Tear::Prefix => {
-                let mut v = c.synced.clone();
-                let extra = rng.gen_range(0..=written_len - synced_len);
-                v.extend_from_slice(&c.written[synced_len..synced_len + extra]);
+                let mut v = effective_synced.to_vec();
+                let extra = rng.gen_range(0..=written_len - effective_len);
+                v.extend_from_slice(&c.written[effective_len..effective_len + extra]);
                 v
             }
             Tear::ZeroTail => {
                 let mut v = c.written.clone();
-                v[synced_len..].fill(0);
+                v[effective_len..].fill(0);
                 v
             }
             Tear::Garbage => {
                 let mut v = c.written.clone();
-                for b in &mut v[synced_len..] {
+                for b in &mut v[effective_len..] {
                     *b = rng.gen();
                 }
                 v
             }
         }
     } else {
-        c.synced.clone()
+        effective_synced.to_vec()
     };
 
     // Step 2: independently tear dirty sectors that overlap the
-    // already-synced region (in-place overwrites of durable data) — this
+    // already-durable region (in-place overwrites of durable data) — this
     // applies regardless of `tear` and regardless of step 1's outcome, since
     // it models a different failure (a torn in-place update, not a torn
-    // append).
+    // append or truncation). NOTE: this is deliberately stricter than a real
+    // filesystem for the case of a `create`-truncate immediately followed by
+    // a short unsynced write: a real crash there can't tear that write into
+    // "new prefix + leftover old bytes" (the old bytes are gone, replaced by
+    // a fresh, initially-zero extent), but modeling it that way here only
+    // ever makes an already-incorrect `Vfs` implementation *more* likely to
+    // be caught, never less, so it's left as-is.
     for &sector in &c.dirty_sectors {
         let start = sector as usize * SECTOR;
-        if start >= synced_len || start >= written_len {
-            // Outside the synced region (pure append, handled above), or
-            // truncated away entirely: nothing new to reconsider here.
+        if start >= effective_len || start >= written_len {
+            // Outside the durable region (pure append/truncation-tail,
+            // handled above), or truncated away entirely: nothing new to
+            // reconsider here.
             continue;
         }
         let end = ((sector as usize + 1) * SECTOR)
-            .min(synced_len)
+            .min(effective_len)
             .min(written_len)
             .min(result.len());
         if start >= end {
             continue;
         }
         if rng.gen_bool(0.5) {
-            result[start..end].copy_from_slice(&c.synced[start..end]); // reverts
+            result[start..end].copy_from_slice(&effective_synced[start..end]); // reverts
         } else {
             result[start..end].copy_from_slice(&c.written[start..end]); // keeps
         }
@@ -209,6 +270,30 @@ fn tear_content(c: &Content, tear: Tear, rng: &mut impl Rng) -> Vec<u8> {
 impl FaultFs {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates `path` (and any missing ancestors, like `create_dir_all`) and
+    /// makes the whole ancestor chain durable in one call, by snapshotting
+    /// each ancestor directory's children as of right now (as `sync_dir`
+    /// would). This is a *setup* convenience, not something a real `Vfs`
+    /// user gets for free: on a real filesystem, only the true root already
+    /// exists, so an application-created directory tree (a WAL's `log_dir`,
+    /// say) genuinely needs `sync_dir` called on every level before it can be
+    /// relied on to survive a crash. Anything created *after* this call
+    /// (e.g. a file, or a further subdirectory) still needs its own
+    /// `sync_data`/`sync_dir` to become durable — this only covers the
+    /// directory chain as it exists at the moment of the call.
+    pub fn mkdir_durable(&self, path: &Path) -> io::Result<()> {
+        self.create_dir_all(path)?;
+        let mut dir = parent(path);
+        loop {
+            self.sync_dir(&dir)?;
+            if dir.parent().is_none() {
+                break;
+            }
+            dir = parent(&dir);
+        }
+        Ok(())
     }
 
     /// Simulates power loss: unsynced directory entries and unsynced file
@@ -264,20 +349,20 @@ impl FaultFs {
             let c = s.inodes.get_mut(&inode).expect("inode of tracked content");
             c.written = torn;
             c.dirty_sectors.clear();
+            // Whatever `tear_content` decided (persisted or reverted), the
+            // uncertainty about this truncation is now resolved: don't let a
+            // *later* power loss re-roll the same already-settled event.
+            c.truncated_since_sync = None;
         }
     }
 }
 
 impl FaultFile {
-    fn check_live(&self) -> io::Result<()> {
-        if self.state.lock().epoch != self.epoch {
-            return Err(stale_handle());
-        }
-        Ok(())
-    }
-
+    /// Checks this handle isn't writable-blocked (read-only mode). Does NOT
+    /// check liveness — that must happen under the same lock as the
+    /// operation it guards (see the module docs), not here beforehand, or a
+    /// `power_loss` could land in the gap between the check and the op.
     fn check_writable(&self) -> io::Result<()> {
-        self.check_live()?;
         if self.mode == OpenMode::Read {
             return Err(read_only(Path::new("<fault-fs handle>")));
         }
@@ -289,6 +374,9 @@ impl VfsFile for FaultFile {
     fn write_at(&self, offset: u64, buf: &[u8]) -> io::Result<()> {
         self.check_writable()?;
         let mut s = self.state.lock();
+        if s.epoch != self.epoch {
+            return Err(stale_handle());
+        }
         let c = s.inodes.get_mut(&self.inode).expect("inode of live handle");
         let start = offset as usize;
         let end = start + buf.len();
@@ -300,8 +388,10 @@ impl VfsFile for FaultFile {
         Ok(())
     }
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-        self.check_live()?;
         let s = self.state.lock();
+        if s.epoch != self.epoch {
+            return Err(stale_handle());
+        }
         let c = s.inodes.get(&self.inode).expect("inode of live handle");
         let start = (offset as usize).min(c.written.len());
         let n = buf.len().min(c.written.len() - start);
@@ -311,9 +401,15 @@ impl VfsFile for FaultFile {
     fn set_len(&self, len: u64) -> io::Result<()> {
         self.check_writable()?;
         let mut s = self.state.lock();
+        if s.epoch != self.epoch {
+            return Err(stale_handle());
+        }
         let c = s.inodes.get_mut(&self.inode).expect("inode of live handle");
         let old_len = c.written.len();
         let len = len as usize;
+        if len < old_len {
+            record_truncation(c, len);
+        }
         c.written.resize(len, 0);
         if len > old_len {
             mark_dirty(c, old_len, len);
@@ -321,8 +417,10 @@ impl VfsFile for FaultFile {
         Ok(())
     }
     fn len(&self) -> io::Result<u64> {
-        self.check_live()?;
         let s = self.state.lock();
+        if s.epoch != self.epoch {
+            return Err(stale_handle());
+        }
         Ok(s.inodes
             .get(&self.inode)
             .expect("inode of live handle")
@@ -330,11 +428,14 @@ impl VfsFile for FaultFile {
             .len() as u64)
     }
     fn sync_data(&self) -> io::Result<()> {
-        self.check_live()?;
         let mut s = self.state.lock();
+        if s.epoch != self.epoch {
+            return Err(stale_handle());
+        }
         let c = s.inodes.get_mut(&self.inode).expect("inode of live handle");
         c.synced = c.written.clone();
         c.dirty_sectors.clear();
+        c.truncated_since_sync = None;
         Ok(())
     }
 }
@@ -364,11 +465,14 @@ impl Vfs for FaultFs {
         match s.live.get(path).cloned() {
             Some(Entry::File(inode)) => {
                 // Reuse the inode: truncate `written`, but keep `synced` —
-                // an unsynced truncation is undone by a subsequent power
-                // loss, just like an unsynced write would be.
+                // this is an unsynced truncation to zero, so `power_loss`
+                // decides whether it persists or is undone (see
+                // `truncated_since_sync`), the same as any other unsynced
+                // truncation.
                 let c = s.inodes.get_mut(&inode).expect("inode of live handle");
                 c.written.clear();
                 c.dirty_sectors.clear();
+                record_truncation(c, 0);
                 Ok(Arc::new(FaultFile {
                     state: self.state.clone(),
                     inode,
@@ -406,12 +510,25 @@ impl Vfs for FaultFs {
         Ok(())
     }
     fn remove(&self, path: &Path) -> io::Result<()> {
-        self.state
-            .lock()
-            .live
-            .remove(path)
-            .map(|_| ())
-            .ok_or_else(|| not_found(path))
+        let mut s = self.state.lock();
+        match s.live.get(path) {
+            None => Err(not_found(path)),
+            Some(Entry::Dir) => {
+                let has_children = s.live.keys().any(|p| parent(p) == path);
+                if has_children {
+                    return Err(io::Error::new(
+                        io::ErrorKind::DirectoryNotEmpty,
+                        format!("directory not empty: {}", path.display()),
+                    ));
+                }
+                s.live.remove(path);
+                Ok(())
+            }
+            Some(Entry::File(_)) => {
+                s.live.remove(path);
+                Ok(())
+            }
+        }
     }
     fn create_dir_all(&self, path: &Path) -> io::Result<()> {
         let mut s = self.state.lock();
@@ -435,6 +552,9 @@ impl Vfs for FaultFs {
     }
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
         let mut s = self.state.lock();
+        if !matches!(s.live.get(dir), Some(Entry::Dir)) {
+            return Err(not_found(dir));
+        }
         let entries: BTreeMap<PathBuf, Entry> = s
             .live
             .iter()
@@ -452,16 +572,6 @@ mod tests {
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
 
-    /// Every test that wants a directory to survive `power_loss` must sync
-    /// its parent explicitly now (I6): only the filesystem root is durable
-    /// for free. This mirrors a real `Vfs` user, which must `sync_dir` a
-    /// newly created directory's parent before relying on the directory
-    /// itself surviving a crash.
-    fn mkdir_durable(fs: &FaultFs, dir: &Path) {
-        fs.create_dir_all(dir).unwrap();
-        fs.sync_dir(Path::new("/")).unwrap();
-    }
-
     #[test]
     fn conformance() {
         prkdb_core::vfs::conformance::run(&FaultFs::new(), Path::new("/r"));
@@ -470,7 +580,7 @@ mod tests {
     #[test]
     fn power_loss_drops_unsynced_bytes() {
         let fs = FaultFs::new();
-        mkdir_durable(&fs, Path::new("/d"));
+        fs.mkdir_durable(Path::new("/d")).unwrap();
         let f = fs.create(Path::new("/d/a")).unwrap();
         fs.sync_dir(Path::new("/d")).unwrap();
         f.write_at(0, b"durable").unwrap();
@@ -489,7 +599,7 @@ mod tests {
     #[test]
     fn power_loss_drops_unsynced_directory_entries() {
         let fs = FaultFs::new();
-        mkdir_durable(&fs, Path::new("/d"));
+        fs.mkdir_durable(Path::new("/d")).unwrap();
         let f = fs.create(Path::new("/d/new")).unwrap();
         f.write_at(0, b"x").unwrap();
         f.sync_data().unwrap(); // data synced, but directory entry never was
@@ -502,7 +612,7 @@ mod tests {
     #[test]
     fn power_loss_drops_unsynced_subdir() {
         let fs = FaultFs::new();
-        mkdir_durable(&fs, Path::new("/d"));
+        fs.mkdir_durable(Path::new("/d")).unwrap();
         // "/d/sub" is created but "/d" is never re-synced afterward, so
         // "/d/sub" never becomes a durable child of "/d".
         fs.create_dir_all(Path::new("/d/sub")).unwrap();
@@ -519,9 +629,9 @@ mod tests {
     }
 
     #[test]
-    fn create_over_existing_reuses_inode_and_unsynced_truncation_is_undone() {
+    fn create_over_existing_reuses_inode() {
         let fs = FaultFs::new();
-        mkdir_durable(&fs, Path::new("/d"));
+        fs.mkdir_durable(Path::new("/d")).unwrap();
         let f = fs.create(Path::new("/d/a")).unwrap();
         f.write_at(0, b"old-content").unwrap();
         f.sync_data().unwrap();
@@ -530,19 +640,61 @@ mod tests {
         // Truncate-create again without syncing the (now empty) content.
         let f2 = fs.create(Path::new("/d/a")).unwrap();
         assert_eq!(f2.len().unwrap(), 0);
+    }
 
-        fs.power_loss(&mut ChaCha8Rng::seed_from_u64(5), Tear::None);
+    /// I5: an unsynced truncation (here, a `create` over an existing file)
+    /// isn't an ordinary unsynced write — a real filesystem crashing
+    /// mid-truncate can either undo it entirely (old content comes back) or
+    /// land it while losing whatever was written afterward but never synced
+    /// (the ext4 "vanished truncation" class). Over many seeds, `power_loss`
+    /// must produce BOTH outcomes for the same truncate-then-crash sequence.
+    #[test]
+    fn truncate_then_power_loss_before_sync_can_revert_or_persist() {
+        let mut saw_reverted = false;
+        let mut saw_persisted = false;
+        for seed in 0..300 {
+            let fs = FaultFs::new();
+            fs.mkdir_durable(Path::new("/d")).unwrap();
+            let f = fs.create(Path::new("/d/a")).unwrap();
+            f.write_at(0, b"old-content").unwrap();
+            f.sync_data().unwrap();
+            fs.sync_dir(Path::new("/d")).unwrap();
 
-        let after = fs.open(Path::new("/d/a"), OpenMode::Read).unwrap();
-        let mut buf = vec![0u8; 11];
-        let n = after.read_at(0, &mut buf).unwrap();
-        assert_eq!(&buf[..n], b"old-content");
+            // Truncate-create again without syncing the (now empty) content.
+            let f2 = fs.create(Path::new("/d/a")).unwrap();
+            assert_eq!(f2.len().unwrap(), 0);
+
+            fs.power_loss(&mut ChaCha8Rng::seed_from_u64(seed), Tear::None);
+
+            let after = fs.open(Path::new("/d/a"), OpenMode::Read).unwrap();
+            let mut buf = vec![0u8; 11];
+            let n = after.read_at(0, &mut buf).unwrap();
+            match n {
+                11 if &buf == b"old-content" => saw_reverted = true,
+                0 => saw_persisted = true,
+                other => panic!(
+                    "unexpected length {other} after power loss on seed {seed}: {:?}",
+                    &buf[..other]
+                ),
+            }
+            if saw_reverted && saw_persisted {
+                break;
+            }
+        }
+        assert!(
+            saw_reverted,
+            "expected the truncation to revert (old content restored) on some seed"
+        );
+        assert!(
+            saw_persisted,
+            "expected the truncation to persist (truncated-to-new-length) on some seed"
+        );
     }
 
     #[test]
     fn create_over_existing_then_sync_makes_truncation_durable() {
         let fs = FaultFs::new();
-        mkdir_durable(&fs, Path::new("/d"));
+        fs.mkdir_durable(Path::new("/d")).unwrap();
         let f = fs.create(Path::new("/d/a")).unwrap();
         f.write_at(0, b"old-content").unwrap();
         f.sync_data().unwrap();
@@ -560,7 +712,7 @@ mod tests {
     #[test]
     fn stale_handle_after_power_loss_errors_on_every_op() {
         let fs = FaultFs::new();
-        mkdir_durable(&fs, Path::new("/d"));
+        fs.mkdir_durable(Path::new("/d")).unwrap();
         let f = fs.create(Path::new("/d/a")).unwrap();
         f.write_at(0, b"x").unwrap();
         f.sync_data().unwrap();
@@ -578,7 +730,7 @@ mod tests {
     #[test]
     fn tear_none_reverts_tail_to_last_sync() {
         let fs = FaultFs::new();
-        mkdir_durable(&fs, Path::new("/d"));
+        fs.mkdir_durable(Path::new("/d")).unwrap();
         let f = fs.create(Path::new("/d/a")).unwrap();
         f.write_at(0, b"0123456789").unwrap();
         f.sync_data().unwrap();
@@ -592,7 +744,7 @@ mod tests {
     #[test]
     fn tear_prefix_keeps_a_random_prefix_of_the_tail() {
         let fs = FaultFs::new();
-        mkdir_durable(&fs, Path::new("/d"));
+        fs.mkdir_durable(Path::new("/d")).unwrap();
         let f = fs.create(Path::new("/d/a")).unwrap();
         fs.sync_dir(Path::new("/d")).unwrap();
         f.write_at(0, b"0123456789").unwrap();
@@ -608,7 +760,7 @@ mod tests {
     #[test]
     fn tear_zero_tail_keeps_length_but_zeroes_unsynced_bytes() {
         let fs = FaultFs::new();
-        mkdir_durable(&fs, Path::new("/d"));
+        fs.mkdir_durable(Path::new("/d")).unwrap();
         let f = fs.create(Path::new("/d/a")).unwrap();
         f.write_at(0, b"0123456789").unwrap();
         f.sync_data().unwrap();
@@ -626,7 +778,7 @@ mod tests {
     #[test]
     fn tear_garbage_keeps_length_but_randomizes_unsynced_bytes() {
         let fs = FaultFs::new();
-        mkdir_durable(&fs, Path::new("/d"));
+        fs.mkdir_durable(Path::new("/d")).unwrap();
         let f = fs.create(Path::new("/d/a")).unwrap();
         f.write_at(0, b"0123456789").unwrap();
         f.sync_data().unwrap();
@@ -642,23 +794,41 @@ mod tests {
 
     #[test]
     fn tear_in_place_overwrite_reverts_or_keeps_whole_sectors() {
-        let fs = FaultFs::new();
-        mkdir_durable(&fs, Path::new("/d"));
-        let f = fs.create(Path::new("/d/a")).unwrap();
-        let original = vec![b'A'; 1536]; // 3 sectors
-        f.write_at(0, &original).unwrap();
-        f.sync_data().unwrap();
-        fs.sync_dir(Path::new("/d")).unwrap();
-        // Overwrite sector 1 in place, without syncing.
-        f.write_at(512, &vec![b'B'; 512]).unwrap();
-        fs.power_loss(&mut ChaCha8Rng::seed_from_u64(9), Tear::None);
-        let after = fs.open(Path::new("/d/a"), OpenMode::Read).unwrap();
-        let mut buf = vec![0u8; 1536];
-        after.read_at(0, &mut buf).unwrap();
-        let sector1 = &buf[512..1024];
-        assert!(sector1.iter().all(|&b| b == b'A') || sector1.iter().all(|&b| b == b'B'));
-        assert!(buf[..512].iter().all(|&b| b == b'A'));
-        assert!(buf[1024..].iter().all(|&b| b == b'A'));
+        let mut saw_reverted = false;
+        let mut saw_kept = false;
+        for seed in 0..200 {
+            let fs = FaultFs::new();
+            fs.mkdir_durable(Path::new("/d")).unwrap();
+            let f = fs.create(Path::new("/d/a")).unwrap();
+            let original = vec![b'A'; 1536]; // 3 sectors
+            f.write_at(0, &original).unwrap();
+            f.sync_data().unwrap();
+            fs.sync_dir(Path::new("/d")).unwrap();
+            // Overwrite sector 1 in place, without syncing.
+            f.write_at(512, &vec![b'B'; 512]).unwrap();
+            fs.power_loss(&mut ChaCha8Rng::seed_from_u64(seed), Tear::None);
+            let after = fs.open(Path::new("/d/a"), OpenMode::Read).unwrap();
+            let mut buf = vec![0u8; 1536];
+            after.read_at(0, &mut buf).unwrap();
+            let sector1 = &buf[512..1024];
+            assert!(buf[..512].iter().all(|&b| b == b'A'));
+            assert!(buf[1024..].iter().all(|&b| b == b'A'));
+            if sector1.iter().all(|&b| b == b'A') {
+                saw_reverted = true;
+            } else if sector1.iter().all(|&b| b == b'B') {
+                saw_kept = true;
+            } else {
+                panic!("sector 1 is neither wholly reverted nor wholly kept: {sector1:?}");
+            }
+            if saw_reverted && saw_kept {
+                break;
+            }
+        }
+        assert!(saw_reverted, "expected sector 1 to revert on some seed");
+        assert!(
+            saw_kept,
+            "expected sector 1 to keep its new bytes on some seed"
+        );
     }
 
     #[test]
@@ -689,5 +859,87 @@ mod tests {
         let fs = FaultFs::new();
         fs.create_dir_all(Path::new("/d")).unwrap();
         assert!(fs.rename(Path::new("/d"), Path::new("/d2")).is_err());
+    }
+
+    /// I7: a stale handle must be rejected under the *same* lock acquisition
+    /// as the operation it guards. Simulated here by having the epoch check
+    /// happen for every op via a fresh lock each call (rather than a
+    /// check-then-relock pattern) — this test pins the observable behavior:
+    /// once `power_loss` has run, every op on the old handle errors, with no
+    /// window in which a stale handle could have mutated state.
+    #[test]
+    fn write_after_power_loss_never_mutates_state_even_under_contention() {
+        let fs = FaultFs::new();
+        fs.mkdir_durable(Path::new("/d")).unwrap();
+        let f = fs.create(Path::new("/d/a")).unwrap();
+        f.write_at(0, b"first").unwrap();
+        f.sync_data().unwrap();
+        fs.sync_dir(Path::new("/d")).unwrap();
+
+        fs.power_loss(&mut ChaCha8Rng::seed_from_u64(1), Tear::None);
+
+        // A fresh writer opens the same path post-power-loss and writes new
+        // content.
+        let f2 = fs.create(Path::new("/d/a")).unwrap();
+        f2.write_at(0, b"second").unwrap();
+        f2.sync_data().unwrap();
+        fs.sync_dir(Path::new("/d")).unwrap();
+
+        // The stale handle must still error, and must never have been able
+        // to sneak a write into the new generation's content.
+        assert!(f.write_at(0, b"stale-write").is_err());
+        let after = fs.open(Path::new("/d/a"), OpenMode::Read).unwrap();
+        let mut buf = vec![0u8; 6];
+        let n = after.read_at(0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"second");
+    }
+
+    /// N2: `mkdir_durable` makes a whole nested directory chain durable in
+    /// one call — but anything created inside it afterward still needs its
+    /// own sync to survive.
+    #[test]
+    fn mkdir_durable_makes_the_whole_chain_durable_but_not_later_children() {
+        let fs = FaultFs::new();
+        fs.mkdir_durable(Path::new("/tmp/x/wal")).unwrap();
+
+        let f = fs.create(Path::new("/tmp/x/wal/a")).unwrap();
+        f.write_at(0, b"hello").unwrap();
+        f.sync_data().unwrap();
+        fs.sync_dir(Path::new("/tmp/x/wal")).unwrap();
+
+        // A subdir created later, without syncing "/tmp/x/wal" again, must
+        // not survive.
+        fs.create_dir_all(Path::new("/tmp/x/wal/sub")).unwrap();
+
+        fs.power_loss(&mut ChaCha8Rng::seed_from_u64(1), Tear::None);
+
+        assert!(fs.exists(Path::new("/tmp/x/wal")).unwrap());
+        assert!(fs.exists(Path::new("/tmp/x/wal/a")).unwrap());
+        assert!(!fs.exists(Path::new("/tmp/x/wal/sub")).unwrap());
+    }
+
+    #[test]
+    fn remove_rejects_non_empty_directory() {
+        let fs = FaultFs::new();
+        fs.create_dir_all(Path::new("/d")).unwrap();
+        let _f = fs.create(Path::new("/d/a")).unwrap();
+        let err = fs.remove(Path::new("/d")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::DirectoryNotEmpty);
+        assert!(fs.exists(Path::new("/d")).unwrap());
+    }
+
+    #[test]
+    fn remove_allows_empty_directory() {
+        let fs = FaultFs::new();
+        fs.create_dir_all(Path::new("/d")).unwrap();
+        fs.remove(Path::new("/d")).unwrap();
+        assert!(!fs.exists(Path::new("/d")).unwrap());
+    }
+
+    #[test]
+    fn sync_dir_on_missing_dir_returns_not_found() {
+        let fs = FaultFs::new();
+        let err = fs.sync_dir(Path::new("/missing")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 }
