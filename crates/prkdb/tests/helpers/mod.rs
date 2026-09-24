@@ -2,7 +2,14 @@
 //
 // These modules provide infrastructure for chaos and consistency testing.
 // Many items are reserved for future test scenarios.
-#![allow(dead_code)]
+//
+// `unused_imports` is allowed alongside `dead_code` because `crates/prkdb/benches/
+// cluster_write_bench.rs` also pulls this whole tree in via `#[path]` (spec §6.1's
+// 3-node cluster write bench, reusing this harness rather than duplicating it). Cargo
+// compiles bench targets with `cfg(test)` even under `harness = false`, so each
+// submodule's own `#[cfg(test)] mod tests` compiles there too — legitimately unused by
+// a benchmark binary that never runs `cargo test`.
+#![allow(dead_code, unused_imports)]
 
 pub mod in_process_cluster;
 pub mod jepsen_checker;
