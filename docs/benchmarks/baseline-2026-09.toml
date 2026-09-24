@@ -15,8 +15,26 @@
 # - 1-minute load average: ~1.9-2.1 when capture started, rising to ~4-5 during the
 #   run from unrelated activity on the machine.
 # - recovery_bench: default RECOVERY_BENCH_BYTES = 1 GiB of 1 KiB values,
-#   WalConfig::benchmark_config(), 10 samples.
+#   WalConfig::benchmark_config(), 10 samples. This exercises recovery with the WAL
+#   file already warm in the OS page cache (it was just written by the same process
+#   a moment before recovery runs) — a cold-cache recovery number is not captured
+#   here.
 # - cluster_write_bench: 3-node in-process cluster (tests/helpers/in_process_cluster.rs).
+# - storage_bench: single_put/batch_put_100 re-captured 2026-09-24 after fixing a bug
+#   where adapter creation was inside the timed region (see the [storage_bench] table
+#   below for the full explanation); the other four bench files still reflect the
+#   original 3fdd08b capture.
+#
+# Deferred to the Phase 2 durable baseline (docs/benchmarks/baseline-format-v2.toml),
+# not captured here:
+# - p50/p99 latency rows (spec §6.1 asks for these): Criterion's `--output-format
+#   bencher` reports a single ns/iter point estimate (mean of the timed samples), not
+#   a percentile distribution. Getting p50/p99 would need Criterion's own HTML/JSON
+#   report format (or a custom histogram), which is out of scope for this reference
+#   capture.
+# - 64 KiB value size rows (spec §6.1 lists value sizes beyond the 1 KiB used
+#   throughout this file): not swept here: this baseline exists to catch phase-to-phase
+#   regressions relative to itself, not to characterize value-size scaling.
 commit = "3fdd08b"
 machine = "Darwin 25.6.0 arm64 / Apple M3, 8 logical CPUs"
 
@@ -28,8 +46,18 @@ machine = "Darwin 25.6.0 arm64 / Apple M3, 8 logical CPUs"
 "e2e_wal/batch_100_wal" = 66172291
 
 [storage_bench]
-"storage_put/single_put" = 1181420
-"storage_batch/batch_put_100" = 1203207
+# Re-captured 2026-09-24: storage_put/single_put and storage_batch/batch_put_100
+# previously created and tore down a fresh WalStorageAdapter (tempdir + WAL init)
+# inside the timed region on every iteration, so those two rows measured adapter
+# lifecycle cost, not put cost. Fixed in crates/prkdb/benches/storage_bench.rs (adapter
+# built once, outside `b.iter`/`iter_batched`'s timed closure, matching the pattern
+# already used by storage_get/storage_mixed/storage_cache below). single_put dropped
+# ~8x (1181420 -> 146671) now that it isn't paying for adapter setup. batch_put_100 rose
+# (1203207 -> 1842204): the old number was dominated by the same one-time adapter setup
+# masking the real cost of 100 real WAL puts, which is genuinely more expensive than
+# that setup was. 1-minute load average at capture time: ~1.6-1.8.
+"storage_put/single_put" = 146671
+"storage_batch/batch_put_100" = 1842204
 "storage_get/single_get" = 106
 "storage_mixed/mixed_70_30" = 409943
 "storage_cache/cache_hit_rate" = 8798
