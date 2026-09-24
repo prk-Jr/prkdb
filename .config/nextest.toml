@@ -30,5 +30,6 @@ test(/_tripwire$/)
 | binary(peer_mtls)
 | binary(raft_chaos_tests)
 | binary(read_consistency_modes)
+| binary(sigkill)
 """
 test-group = "serial-servers"
