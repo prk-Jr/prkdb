@@ -249,3 +249,171 @@ The sharded-with-global-sequence fallback is therefore not needed now. It remain
 **Reads.** Use `VfsFile::read_at`, located through a sparse LSN → (segment, position) index built during the recovery scan and extended by the writer. mmap for reads is optional and never used for writes.
 
 **Deletion (spec 2a).** Once `WalStorageAdapter` and Raft storage are migrated, delete `WriteAheadLog`, `ParallelWal`, `AsyncParallelWal` and `MmapParallelWal`. Delete this spike bench with them, or keep it as a comparison bench against the real `Wal`.
+
+## 8. Linux probe results (Task 2.2, closes Risk 1)
+
+Risk 1 above required re-running the spike bench on Linux before Task 2.2 merges the
+writer, because the macOS numbers in §4 are inflated by an `msync` penalty this bench's
+`current_mmap_wal`/`current_adapter_put` cells pay on macOS but not on Linux (§4.1). The
+estimate in Risk 1 was "somewhere between parity and about −40%" at 1 writer.
+
+**How this ran.** `.github/workflows/remediation-gate.yml` gained a `probe` dispatch
+input (Task 2.2, D10: probe pushes of `remediation/phase-2` without a PR). Dispatched
+with `gh workflow run remediation-gate.yml --ref remediation/phase-2 -f
+ref=remediation/phase-2 -f phase=2 -f probe=bench -f bench_name=wal_write_path_spike -f
+bench_reps=2`, which skips the normal gate jobs (`ledger-and-tests`, `harness`) and runs
+only `cargo bench -p prkdb --bench wal_write_path_spike` on `ubuntu-latest`.
+
+- **Run:** <https://github.com/prk-Jr/prkdb/actions/runs/36023246514> (success), commit
+  `e8a011f9d1017ae0242ee537bd1e26d93fd4c6a7`.
+- **Machine:** GitHub-hosted `ubuntu-latest` runner, 4 vCPU (tokio worker threads = 4,
+  vs. 8 on the M3 Air in §3). Load average at start 5.43/3.14/1.38 (a shared runner, not
+  a quiet machine — see caveat below).
+- **Disk ceiling:** `pwrite` 1 MiB no sync 1492 MB/s; `pwrite` 1 MiB + `sync_data` 407
+  MB/s (388 writes/s); 4 KiB write + `sync_data` p50 261 µs / p99 417 µs; 4 KiB write +
+  plain `fsync(2)` p50 86 µs / p99 370 µs. Unlike the M3 Air, Linux `sync_data` here is a
+  real `fdatasync`-class call, not `F_FULLFSYNC`, so `Durable` costs are directly
+  meaningful on this machine (no macOS caveat).
+
+**Raw output (both reps, unedited):**
+
+```
+# wal_write_path_spike
+- warm-up 1000 ms, measure 3000 ms, reps 2, tokio worker threads = 4
+- load average at start: 5.43 3.14 1.38
+- disk ceiling, pwrite 1 MiB, no sync: 1492 MB/s (1423 writes/s)
+- disk ceiling, pwrite 1 MiB + sync_data: 407 MB/s (388 writes/s)
+- 4 KiB write + sync_data (F_FULLFSYNC on macOS): p50 261 µs, p99 417 µs (7198 samples)
+- 4 KiB write + plain fsync(2): p50 86 µs, p99 370 µs (11749 samples)
+| cell | writers | value | ops/s | MB/s | p50 µs | p99 µs | p99.9 µs | avg batch | max batch | writer idle % | writer write % | writer sync % | writer CPU % | load1 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| single_log_durable/1w/1k | 1 | 1 KiB | 3543 | 3.6 | 252.0 | 474.5 | 1307.9 | 1.0 | 1 | 13 | 3 | 81 | 23 | 4.75 3.07 1.38 |
+| single_log_durable_plain_fsync/1w/1k | 1 | 1 KiB | 3639 | 3.7 | 255.5 | 436.7 | 1672.7 | 1.0 | 1 | 14 | 3 | 80 | 24 | 4.45 3.03 1.38 |
+| single_log_fast/1w/1k | 1 | 1 KiB | 22582 | 23.1 | 44.1 | 61.1 | 110.9 | 1.0 | 1 | 76 | 8 | 0 | 44 | 4.09 2.98 1.37 |
+| current_mmap_wal/1w/1k | 1 | 1 KiB | 20810 | 21.3 | 5.9 | 253.7 | 418.2 |  |  |  |  |  |  | 3.85 2.95 1.37 |
+| current_adapter_put/1w/1k | 1 | 1 KiB | 19759 | 20.2 | 7.7 | 251.5 | 397.1 |  |  |  |  |  |  | 3.85 2.95 1.37 |
+| model_memcpy_only/1w/1k | 1 | 1 KiB | 376576 | 385.6 | 2.5 | 6.2 | 12.9 |  |  |  |  |  |  | 3.62 2.91 1.36 |
+| two_shard_fast/1w/1k | 1 | 1 KiB | 22393 | 22.9 | 44.6 | 62.0 | 114.5 |  |  |  |  |  |  | 3.33 2.87 1.36 |
+| single_log_durable/8w/1k | 8 | 1 KiB | 13648 | 14.0 | 590.6 | 834.9 | 2113.8 | 4.0 | 7 | 0 | 5 | 92 | 31 | 3.22 2.85 1.36 |
+| single_log_durable_plain_fsync/8w/1k | 8 | 1 KiB | 13272 | 13.6 | 594.8 | 927.8 | 2669.2 | 4.0 | 8 | 0 | 5 | 92 | 31 | 3.04 2.82 1.36 |
+| single_log_fast/8w/1k | 8 | 1 KiB | 268976 | 275.4 | 25.6 | 66.3 | 228.3 | 1.4 | 8 | 23 | 50 | 1 | 85 | 2.96 2.81 1.36 |
+| current_mmap_wal/8w/1k | 8 | 1 KiB | 19348 | 19.8 | 452.9 | 673.6 | 3073.0 |  |  |  |  |  |  | 2.96 2.81 1.36 |
+| current_adapter_put/8w/1k | 8 | 1 KiB | 18615 | 19.1 | 466.8 | 710.4 | 2610.6 |  |  |  |  |  |  | 2.88 2.79 1.37 |
+| model_memcpy_only/8w/1k | 8 | 1 KiB | 222278 | 227.6 | 29.5 | 60.7 | 68.2 |  |  |  |  |  |  | 2.73 2.76 1.36 |
+| two_shard_fast/8w/1k | 8 | 1 KiB | 178534 | 182.8 | 43.2 | 125.9 | 340.3 |  |  |  |  |  |  | 2.75 2.77 1.37 |
+| single_log_durable/64w/1k | 64 | 1 KiB | 90560 | 92.7 | 699.0 | 1088.5 | 3625.1 | 32.0 | 63 | 0 | 8 | 88 | 30 | 2.69 2.75 1.38 |
+| single_log_durable_plain_fsync/64w/1k | 64 | 1 KiB | 87686 | 89.8 | 732.6 | 1096.8 | 2316.9 | 32.0 | 60 | 0 | 8 | 88 | 29 | 2.69 2.75 1.38 |
+| single_log_fast/64w/1k | 64 | 1 KiB | 388355 | 397.7 | 85.9 | 265.0 | 3117.7 | 9.8 | 64 | 2 | 89 | 0 | 61 | 3.04 2.83 1.41 |
+| current_mmap_wal/64w/1k | 64 | 1 KiB | 19237 | 19.7 | 3236.8 | 4630.5 | 33269.7 |  |  |  |  |  |  | 2.95 2.81 1.41 |
+| current_adapter_put/64w/1k | 64 | 1 KiB | 18422 | 18.9 | 3354.2 | 5915.8 | 33222.6 |  |  |  |  |  |  | 2.80 2.78 1.41 |
+| model_memcpy_only/64w/1k | 64 | 1 KiB | 223746 | 229.1 | 233.3 | 402.8 | 419.5 |  |  |  |  |  |  | 2.65 2.75 1.40 |
+| two_shard_fast/64w/1k | 64 | 1 KiB | 392654 | 402.1 | 46.1 | 2188.2 | 4441.0 |  |  |  |  |  |  | 3.08 2.84 1.44 |
+| single_log_durable/1w/64k | 1 | 64 KiB | 1672 | 109.6 | 586.3 | 856.6 | 3378.3 | 1.0 | 1 | 33 | 6 | 54 | 24 | 3.08 2.84 1.44 |
+| single_log_durable_plain_fsync/1w/64k | 1 | 64 KiB | 1724 | 113.0 | 566.9 | 845.5 | 2311.2 | 1.0 | 1 | 34 | 6 | 54 | 23 | 2.92 2.81 1.44 |
+| single_log_fast/1w/64k | 1 | 64 KiB | 3870 | 253.6 | 254.6 | 386.5 | 482.6 | 1.0 | 1 | 76 | 11 | 0 | 27 | 2.68 2.76 1.43 |
+| current_mmap_wal/1w/64k | 1 | 64 KiB | 2678 | 175.5 | 371.7 | 591.0 | 7862.0 |  |  |  |  |  |  | 2.55 2.73 1.43 |
+| current_adapter_put/1w/64k | 1 | 64 KiB | 2677 | 175.4 | 386.1 | 600.2 | 3533.5 |  |  |  |  |  |  | 2.42 2.70 1.43 |
+| model_memcpy_only/1w/64k | 1 | 64 KiB | 6227 | 408.1 | 158.2 | 180.0 | 210.1 |  |  |  |  |  |  | 2.42 2.70 1.43 |
+| two_shard_fast/1w/64k | 1 | 64 KiB | 3875 | 254.0 | 254.1 | 387.3 | 474.1 |  |  |  |  |  |  | 2.31 2.67 1.42 |
+| single_log_durable/8w/64k | 8 | 64 KiB | 5747 | 376.7 | 1174.8 | 8185.2 | 22639.3 | 3.9 | 8 | 0 | 16 | 74 | 38 | 2.52 2.71 1.44 |
+| single_log_durable_plain_fsync/8w/64k | 8 | 64 KiB | 5643 | 369.8 | 1180.9 | 9446.5 | 25251.8 | 4.0 | 8 | 0 | 15 | 74 | 37 | 2.72 2.75 1.46 |
+| single_log_fast/8w/64k | 8 | 64 KiB | 6124 | 401.4 | 694.9 | 2269.2 | 248722.9 | 2.2 | 8 | 27 | 58 | 0 | 32 | 2.66 2.74 1.46 |
+| current_mmap_wal/8w/64k | 8 | 64 KiB | 2727 | 178.7 | 2663.2 | 5003.3 | 32283.0 |  |  |  |  |  |  | 2.53 2.71 1.46 |
+| current_adapter_put/8w/64k | 8 | 64 KiB | 2633 | 172.5 | 2749.6 | 8411.4 | 32425.9 |  |  |  |  |  |  | 2.53 2.71 1.46 |
+| model_memcpy_only/8w/64k | 8 | 64 KiB | 7648 | 501.2 | 1037.5 | 1251.3 | 1334.2 |  |  |  |  |  |  | 2.41 2.68 1.46 |
+| two_shard_fast/8w/64k | 8 | 64 KiB | 6348 | 416.0 | 642.5 | 20907.0 | 97070.8 |  |  |  |  |  |  | 2.70 2.74 1.48 |
+| single_log_durable/64w/64k | 64 | 64 KiB | 6204 | 406.6 | 5688.5 | 42926.4 | 45505.8 | 27.7 | 54 | 0 | 13 | 80 | 22 | 2.64 2.72 1.49 |
+| single_log_durable_plain_fsync/64w/64k | 64 | 64 KiB | 6188 | 405.5 | 5684.9 | 42801.6 | 47076.0 | 27.5 | 53 | 0 | 13 | 80 | 22 | 2.51 2.69 1.48 |
+| single_log_fast/64w/64k | 64 | 64 KiB | 6215 | 407.3 | 4320.8 | 329092.1 | 386339.5 | 5.0 | 63 | 20 | 70 | 0 | 25 | 2.51 2.69 1.48 |
+| current_mmap_wal/64w/64k | 64 | 64 KiB | 2695 | 176.6 | 21679.8 | 51762.9 | 52416.3 |  |  |  |  |  |  | 2.39 2.67 1.48 |
+| current_adapter_put/64w/64k | 64 | 64 KiB | 2658 | 174.2 | 22027.8 | 52097.0 | 52648.7 |  |  |  |  |  |  | 2.36 2.65 1.48 |
+| model_memcpy_only/64w/64k | 64 | 64 KiB | 7613 | 498.9 | 8401.8 | 8571.8 | 8667.6 |  |  |  |  |  |  | 2.25 2.63 1.48 |
+| two_shard_fast/64w/64k | 64 | 64 KiB | 6708 | 439.6 | 4845.2 | 90070.2 | 506490.3 |  |  |  |  |  |  | 2.55 2.68 1.50 |
+| single_log_durable/1w/1k | 1 | 1 KiB | 3709 | 3.8 | 253.8 | 399.8 | 1343.3 | 1.0 | 1 | 14 | 3 | 80 | 25 | 2.42 2.65 1.50 |
+| single_log_durable_plain_fsync/1w/1k | 1 | 1 KiB | 3726 | 3.8 | 251.1 | 402.6 | 1328.2 | 1.0 | 1 | 14 | 3 | 80 | 24 | 2.42 2.65 1.50 |
+| single_log_fast/1w/1k | 1 | 1 KiB | 22654 | 23.2 | 44.0 | 60.7 | 109.4 | 1.0 | 1 | 76 | 8 | 0 | 44 | 2.23 2.61 1.49 |
+| current_mmap_wal/1w/1k | 1 | 1 KiB | 20663 | 21.2 | 6.3 | 252.2 | 412.7 |  |  |  |  |  |  | 2.21 2.60 1.50 |
+| current_adapter_put/1w/1k | 1 | 1 KiB | 19588 | 20.1 | 8.2 | 268.6 | 440.6 |  |  |  |  |  |  | 2.11 2.57 1.49 |
+| model_memcpy_only/1w/1k | 1 | 1 KiB | 364506 | 373.3 | 2.6 | 6.3 | 13.0 |  |  |  |  |  |  | 2.02 2.55 1.49 |
+| two_shard_fast/1w/1k | 1 | 1 KiB | 22222 | 22.8 | 44.8 | 61.9 | 109.7 |  |  |  |  |  |  | 2.02 2.55 1.49 |
+| single_log_durable/8w/1k | 8 | 1 KiB | 14255 | 14.6 | 537.0 | 951.8 | 3243.6 | 4.0 | 6 | 0 | 5 | 92 | 29 | 1.94 2.52 1.49 |
+| single_log_durable_plain_fsync/8w/1k | 8 | 1 KiB | 15090 | 15.5 | 514.5 | 836.7 | 3394.1 | 4.0 | 7 | 0 | 5 | 92 | 29 | 1.87 2.50 1.48 |
+| single_log_fast/8w/1k | 8 | 1 KiB | 268223 | 274.7 | 25.6 | 67.0 | 201.8 | 1.5 | 8 | 23 | 50 | 1 | 85 | 1.96 2.50 1.49 |
+| current_mmap_wal/8w/1k | 8 | 1 KiB | 19424 | 19.9 | 450.6 | 661.3 | 1745.2 |  |  |  |  |  |  | 1.88 2.48 1.49 |
+| current_adapter_put/8w/1k | 8 | 1 KiB | 18762 | 19.2 | 461.4 | 695.8 | 2621.2 |  |  |  |  |  |  | 1.88 2.48 1.49 |
+| model_memcpy_only/8w/1k | 8 | 1 KiB | 219818 | 225.1 | 34.6 | 60.8 | 68.1 |  |  |  |  |  |  | 1.81 2.45 1.49 |
+| two_shard_fast/8w/1k | 8 | 1 KiB | 178312 | 182.6 | 42.7 | 128.4 | 322.1 |  |  |  |  |  |  | 1.83 2.45 1.49 |
+| single_log_durable/64w/1k | 64 | 1 KiB | 92587 | 94.8 | 677.8 | 1010.7 | 3644.2 | 32.0 | 62 | 0 | 8 | 88 | 29 | 1.84 2.44 1.49 |
+| single_log_durable_plain_fsync/64w/1k | 64 | 1 KiB | 93292 | 95.5 | 661.8 | 986.0 | 2008.7 | 32.0 | 58 | 0 | 9 | 87 | 31 | 1.77 2.41 1.49 |
+| single_log_fast/64w/1k | 64 | 1 KiB | 388127 | 397.4 | 86.1 | 269.5 | 3118.1 | 9.8 | 64 | 2 | 90 | 0 | 61 | 2.03 2.46 1.51 |
+| current_mmap_wal/64w/1k | 64 | 1 KiB | 19218 | 19.7 | 3230.9 | 4747.4 | 32563.7 |  |  |  |  |  |  | 2.03 2.46 1.51 |
+| current_adapter_put/64w/1k | 64 | 1 KiB | 18675 | 19.1 | 3314.9 | 4892.9 | 32907.1 |  |  |  |  |  |  | 1.95 2.43 1.51 |
+| model_memcpy_only/64w/1k | 64 | 1 KiB | 218082 | 223.3 | 291.5 | 403.2 | 452.0 |  |  |  |  |  |  | 1.87 2.41 1.50 |
+| two_shard_fast/64w/1k | 64 | 1 KiB | 365440 | 374.2 | 46.8 | 2200.1 | 5584.8 |  |  |  |  |  |  | 2.36 2.50 1.54 |
+| single_log_durable/1w/64k | 1 | 64 KiB | 1744 | 114.3 | 542.3 | 810.4 | 1881.4 | 1.0 | 1 | 35 | 6 | 54 | 23 | 2.25 2.48 1.54 |
+| single_log_durable_plain_fsync/1w/64k | 1 | 64 KiB | 1748 | 114.5 | 542.4 | 813.6 | 2775.5 | 1.0 | 1 | 34 | 6 | 54 | 23 | 2.25 2.48 1.54 |
+| single_log_fast/1w/64k | 1 | 64 KiB | 3847 | 252.1 | 256.2 | 388.4 | 485.7 | 1.0 | 1 | 76 | 11 | 0 | 27 | 2.15 2.45 1.53 |
+| current_mmap_wal/1w/64k | 1 | 64 KiB | 2734 | 179.2 | 379.2 | 571.7 | 7895.9 |  |  |  |  |  |  | 2.06 2.43 1.53 |
+| current_adapter_put/1w/64k | 1 | 64 KiB | 2394 | 156.9 | 382.0 | 1933.2 | 5934.2 |  |  |  |  |  |  | 1.98 2.40 1.53 |
+| model_memcpy_only/1w/64k | 1 | 64 KiB | 6191 | 405.7 | 159.5 | 177.8 | 208.1 |  |  |  |  |  |  | 1.90 2.38 1.52 |
+| two_shard_fast/1w/64k | 1 | 64 KiB | 3851 | 252.4 | 255.4 | 388.4 | 484.7 |  |  |  |  |  |  | 1.82 2.36 1.52 |
+| single_log_durable/8w/64k | 8 | 64 KiB | 5715 | 374.5 | 1102.4 | 9967.6 | 27197.7 | 4.0 | 7 | 0 | 15 | 74 | 37 | 1.82 2.36 1.52 |
+| single_log_durable_plain_fsync/8w/64k | 8 | 64 KiB | 5700 | 373.6 | 1119.1 | 10102.4 | 26332.2 | 3.9 | 7 | 0 | 15 | 74 | 37 | 1.84 2.35 1.52 |
+| single_log_fast/8w/64k | 8 | 64 KiB | 6181 | 405.1 | 694.4 | 2355.8 | 248389.0 | 2.4 | 8 | 28 | 58 | 0 | 31 | 2.09 2.40 1.54 |
+| current_mmap_wal/8w/64k | 8 | 64 KiB | 2710 | 177.6 | 2675.0 | 5409.8 | 32823.2 |  |  |  |  |  |  | 2.00 2.37 1.54 |
+| current_adapter_put/8w/64k | 8 | 64 KiB | 2661 | 174.4 | 2730.5 | 4962.4 | 32393.6 |  |  |  |  |  |  | 1.92 2.35 1.54 |
+| model_memcpy_only/8w/64k | 8 | 64 KiB | 7630 | 500.1 | 1042.3 | 1116.3 | 1334.1 |  |  |  |  |  |  | 1.92 2.35 1.54 |
+| two_shard_fast/8w/64k | 8 | 64 KiB | 6431 | 421.5 | 651.7 | 3212.4 | 107271.7 |  |  |  |  |  |  | 2.25 2.41 1.56 |
+| single_log_durable/64w/64k | 64 | 64 KiB | 6186 | 405.4 | 5801.2 | 42571.1 | 45436.9 | 25.4 | 58 | 0 | 13 | 80 | 22 | 2.47 2.45 1.58 |
+| single_log_durable_plain_fsync/64w/64k | 64 | 64 KiB | 6201 | 406.4 | 5775.1 | 42860.3 | 46201.8 | 26.8 | 57 | 0 | 13 | 80 | 22 | 2.59 2.48 1.59 |
+| single_log_fast/64w/64k | 64 | 64 KiB | 6170 | 404.4 | 4318.8 | 328645.9 | 381297.4 | 5.1 | 59 | 21 | 69 | 0 | 25 | 2.87 2.54 1.62 |
+| current_mmap_wal/64w/64k | 64 | 64 KiB | 2716 | 178.0 | 21506.4 | 51734.5 | 58009.8 |  |  |  |  |  |  | 2.88 2.55 1.62 |
+| current_adapter_put/64w/64k | 64 | 64 KiB | 2651 | 173.7 | 22096.7 | 52127.7 | 56264.1 |  |  |  |  |  |  | 2.88 2.55 1.62 |
+| model_memcpy_only/64w/64k | 64 | 64 KiB | 7615 | 499.0 | 8370.2 | 9953.8 | 10395.7 |  |  |  |  |  |  | 2.73 2.52 1.62 |
+| two_shard_fast/64w/64k | 64 | 64 KiB | 6346 | 415.9 | 4783.2 | 114106.7 | 502449.0 |  |  |  |  |  |  | 3.07 2.59 1.65 |
+```
+
+### 8.1 Fast-mode rule verdict
+
+`scripts/wal_fast_rule.py check` compares `single_log_fast` against `current_adapter_put`
+(the public write path) per (writers, value size) cell, using rep 2's rows (the later,
+lower-load rep, matching §4's convention of reporting detailed columns from rep 2):
+
+```
+$ python3 scripts/wal_fast_rule.py check <(cat probe-bench-output.txt)
+| writers | value | fast ops/s | current ops/s | ratio | loss % | verdict |
+|---|---|---|---|---|---|---|
+| 1 | 1 KiB | 22654 | 19588 | 1.157 | -15.7% | PASS |
+| 1 | 64 KiB | 3847 | 2394 | 1.607 | -60.7% | PASS |
+| 8 | 1 KiB | 268223 | 18762 | 14.296 | -1329.6% | PASS |
+| 8 | 64 KiB | 6181 | 2661 | 2.323 | -132.3% | PASS |
+| 64 | 1 KiB | 388127 | 18675 | 20.783 | -1978.3% | PASS |
+| 64 | 64 KiB | 6170 | 2651 | 2.327 | -132.7% | PASS |
+
+PASS: every cell is within the Fast-mode <=15% rule.
+```
+
+(A negative "loss %" means `Fast` is faster than the current path, not slower — the
+rule only ever escalates on a positive loss above 15%.) Rep 1's 1-writer, 1 KiB cell
+(22582 vs 19759 ops/s, ratio 1.14) and 1-writer, 64 KiB cell (3870 vs 2677, ratio 1.45)
+agree with rep 2 within noise: both PASS by a wide margin.
+
+**On the 1-writer condition specifically (Risk 1):** `Fast` at 1 writer beats
+`current_adapter_put` by 15–61% on this runner, not the estimated 0–40% *loss*. The
+reason the macOS-only estimate was pessimistic no longer holds on Linux:
+`current_mmap_wal`/`current_adapter_put` are not stuck behind a per-batch `msync`
+(§4.1's macOS-specific stall) here — Linux `MS_ASYNC` is cheap, as §6 Risk 1 predicted —
+so the current path's own 1-writer throughput is much higher on Linux (~19.6–20.8k
+ops/s vs. ~1.1–1.6k ops/s on the M3 Air). `single_log_fast` is still faster than that
+higher bar, because it avoids the shared-segment mutex the current path takes on every
+`put` (STO-06) regardless of platform.
+
+### 8.2 Decision
+
+**PROCEED.** Every required cell — 1, 8 and 64 writers, at both value sizes, across both
+reps — is a PASS under the Fast-mode ≤15% rule; several cells show `Fast` an order of
+magnitude *faster* than the current path (8 and 64 writers), consistent with §4's
+macOS findings. Risk 1 is closed: no mitigation (the bounded `try_recv` spin, or
+avoiding a second caller-side handoff) is needed before Task 2.2 proceeds with the
+single-writer design from §7. This is a measurement outcome, not a judgment call — the
+maintainer should still review the run linked above before Task 2.2's writer lands.
