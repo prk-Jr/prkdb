@@ -84,6 +84,7 @@ Sources: **A** = 2026-09-23 correctness audit (A#n), **R** = 2026-09-07 senior r
 | STO-06 | HIGH | Four WAL implementations in use; fixes do not propagate. The "parallel" WAL gives no parallelism for data: shards are chosen by hashing the collection name, but every data write passes `collection: String::new()` (`wal_adapter.rs:470,540`), so all user data lands in one shard and only `__raft_log` goes elsewhere. | `ParallelWal`, `AsyncParallelWal`, `MmapParallelWal`, `WriteAheadLog` referenced outside `wal/` | Verified | 2 |
 | STO-07 | HIGH | `BatchAccumulator::flush()` sleeps `linger_ms+10` and returns Ok; executor errors dropped; queue unbounded. | `batch_accumulator.rs:49,81,92,131-135`, `collection_handle.rs:177-187` (R06) | Reported | 2 |
 | STO-08 | LOW | `WalConfig::segment_bytes` is ignored by the WAL `WalStorageAdapter` uses: `MmapLogSegment` hardcodes `INITIAL_SEGMENT_SIZE`/`GROWTH_STEP` = 64 MB; only the legacy `WriteAheadLog` reads `segment_bytes`. Another config knob that does not do what it says (root cause 4). | `wal/mmap_log_segment.rs:50-51,77` (found by the Task 1.10 SIGKILL work) | Verified | 2 |
+| STO-09 | LOW | `WalStorageAdapter::new_with_config` ignores `StorageConfig::cache_capacity`: the cache is hard-coded to 100,000 entries ("Match default config cache capacity"), so `WalStorageAdapter::builder(..).with_cache_capacity(n)` has no effect. The `open`/`open_async`/replication constructors do read it. Another config knob that does not do what it says (root cause 4). | `storage/wal_adapter.rs:630` (found by the Task 2.1 WAL spike) | Verified | 2 |
 
 ### 3.2 Keys, indexes, partitioning (KEY)
 
@@ -515,6 +516,7 @@ No unrelated refactoring.
 |---|---|---|
 | 1 | 2026-09-23 | Initial spec from the 2026-09-23 audits and the 2026-09-07 review; decisions D1–D9 (D9: publishing policy). |
 | 2 | 2026-09-23 | Spec review pass 1: `Vfs` seam defined in Phase 1, WAL routed through it in 2a; per-area `verified`; tripwires instead of expected-failure lists; single-phase IDs (DOC-11, DOC-12, TST-05..07 split out); harness op profiles per phase (§7.1); Fast mode from 2a; commit-based workflow with phase-PR CI sequence; private backup repo with Actions off; storage-compat timing; single globally ordered WAL; like-for-like Raft gate; madsim budget; DOC-11 interim wording. |
+| 9 | 2026-09-24 | Execution: STO-09 added (`cache_capacity` ignored by `new_with_config`), found by the Task 2.1 WAL spike. |
 | 8 | 2026-09-24 | Execution: TST-09 added (perf gate WAL benches measure ~500 instructions). |
 | 7 | 2026-09-24 | Execution: STO-08 added (`segment_bytes` ignored by the mmap WAL). |
 | 6 | 2026-09-23 | Execution: RFT-10 added (hostnames rejected in `CLUSTER_NODES`), found by the Batch E docs review. |

@@ -10,7 +10,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 |---|---|---|---|
 | 0 | Honesty and tracking | gate_passed | 6/6 |
 | 1 | Harness and baseline | gate_passed | 2/2 |
-| 2 | Format v2 and single-node root fixes | not_started | 0/17 |
+| 2 | Format v2 and single-node root fixes | not_started | 0/18 |
 | 3 | Semantics | not_started | 0/9 |
 | 4 | Raft | not_started | 0/13 |
 | 5 | Documentation and release | not_started | 0/9 |
@@ -66,6 +66,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | TXN-04 | medium | 3 | open | Default isolation is ReadCommitted; D5 makes Serializable the default |
 | DOC-10 | low | 5 | open | ignoreDeadLinks: true hides orphaned methodology/status pages |
 | STO-08 | low | 2 | open | WalConfig::segment_bytes ignored by the mmap WAL (segment size hardcoded to 64 MB) |
+| STO-09 | low | 2 | open | WalStorageAdapter::new_with_config ignores StorageConfig::cache_capacity (hard-coded 100,000 entries) |
 | TST-07 | low | 2 | open | No fuzzing of WAL record, segment, snapshot, and proto decoding |
 | DOC-01 | high | 0 | verified | Cluster docs and compose files misdescribe multi-node setup (env vars, peer auth, metrics auth) |
 | SCH-01 | high | 0 | verified | Schema collection name joined into a path allows writes outside the registry dir |

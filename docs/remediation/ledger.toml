@@ -632,6 +632,16 @@ sources = ["task-1.10-2026-09-24"]
 evidence = ["crates/prkdb-core/src/wal/mmap_log_segment.rs:50", "crates/prkdb-core/src/wal/write_ahead_log.rs:115"]
 
 [[finding]]
+id = "STO-09"
+title = "WalStorageAdapter::new_with_config ignores StorageConfig::cache_capacity (hard-coded 100,000 entries)"
+area = "storage"
+severity = "low"
+phase = 2
+status = "open"
+sources = ["task-2.1-spike-2026-09-24"]
+evidence = ["crates/prkdb/src/storage/wal_adapter.rs:630", "docs/remediation/decisions/2026-09-24-single-log-spike.md"]
+
+[[finding]]
 id = "TST-09"
 title = "Perf gate WAL benches count ~500 instructions: the WAL work is outside the measured region"
 area = "tests"
