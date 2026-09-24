@@ -18,7 +18,7 @@
 |---|---|---|
 | 0 Honesty and tracking | Full (code-level) | gate passed — squash-merged as bc50b8e (PR #79) |
 | 1 Harness and baseline | Full (code-level) | gate passed — squash-merged as 2a7dcdb (PR #80) |
-| 2 Format v2 + single-node | Full (code-level), expanded 2026-09-24 after the Task 2.1 spike (decision: PROCEED) | in progress (2.1 done) |
+| 2 Format v2 + single-node | Full (code-level), expanded 2026-09-24 after the Task 2.1 spike (decision: PROCEED); revised 2026-09-24 per the plan review and D10–D12 (tasks 2.8a–d, 2.9b, 2.10a–b, 2.24b added) | in progress (2.1 done) |
 | 3 Semantics | Outline — expand at phase start | — |
 | 4 Raft | Outline — expand after the 4a spike | — |
 | 5 Docs and release | Outline — expand at phase start | — |
@@ -2698,51 +2698,66 @@ The job summary lists every delta either way.
 
 # Phase 2 — Format v2 and single-node root fixes
 
-Expanded to code level on 2026-09-24, after Task 2.1 decided **PROCEED** (`docs/remediation/decisions/2026-09-24-single-log-spike.md`, "the decision record" below). The decision record's §7 design notes are binding for Tasks 2.5–2.9. Where this section and the spec disagree, the spec wins; fix this section.
+Expanded to code level on 2026-09-24, after Task 2.1 decided **PROCEED** (`docs/remediation/decisions/2026-09-24-single-log-spike.md`, "the decision record" below). Revised the same day after the Phase 2 plan review and maintainer decisions D10–D12 (spec §0). The decision record's §7 design notes are binding for Tasks 2.5–2.9b, except where this section records a deviation. Where this section and the spec disagree, the spec wins; fix this section.
 
-**Branch.** Phase 2 work happens on `remediation/phase-2` (cut from `remediation/phase-1`; merge `remediation/phase-1` in again whenever it gains commits, as was done for TST-09). The Phase 2 PR is `remediation/phase-2 → main` after Phase 1 merges.
+**Branch.** Phase 2 work happens on `remediation/phase-2` (cut from `remediation/phase-1`, synced with `main` after the Phase 1 squash merge). The Phase 2 PR is `remediation/phase-2 → main`.
+
+**Maintainer decisions this section implements (spec §0, not open questions):**
+
+- **D10 — probe pushes.** `remediation/phase-2` may be pushed to `origin` without a PR so `workflow_dispatch` probes can run, provided the branch contains no open security finding (Task 2.2 step 1 checks this before every probe push).
+- **D11 — one WAL per data directory, no exceptions.** `WalStorageAdapter` and `CollectionPartitionedAdapter` both write one globally ordered log. The partitioned adapter keeps its routing API but has no per-collection WALs and no separate outbox WAL (Task 2.9b). The collection is part of the record (the key codec's collection id, Task 2.12), never recovered by splitting a key at its first `:`.
+- **D12 — accepted breaking changes.** A failed fsync poisons the WAL until reopen; `StorageConfig::sync_mode` moves to `WalConfig::sync_mode`; a write stuck behind a stalled writer returns `WriteNotConfirmed` on the client timeout; `IndexedStorage` ids switch from JSON to bincode; `CollectionHandle` keys drop the partition. None of these needs a STOP. Each task that lands one adds a line to the Phase 5 upgrade-note checklist (Phase 5 outline, item 5.4) in the same commit.
+- **Controller decisions (accepted, no STOP):** every `WalStorageAdapter` constructor, including `open`, creates a missing directory; `EventSeq::from_wal` packs `lsn << 16 | idx`; the default acknowledgement mode is `SyncMode::Durable` everywhere (spec §6.2), including `WalConfig::default()`, `test_config()`, `benchmark_config()` and both builder configs; a collection's persisted name derives from its type name unless `#[collection(name = "...")]` pins it (spec revision 11 records the deviation from 2c's wording; Task 2.12 implements the pinning).
 
 **Phase 2 additions to the Conventions (apply to every Phase 2 task):**
 
-- **Harness in every storage task.** Run `cargo xtask verify --profile blocking --seeds 200` before committing any task that touches `crates/prkdb-core/src/wal/`, `crates/prkdb/src/storage/`, `indexed_storage.rs`, `outbox.rs`, `consumer.rs` or `crates/prkdb-verify/`. From Task 2.10 on, also run it with `--mode fast`. Expected: `profile=blocking seeds=200 checks=<n>`, exit 0.
+- **Every commit builds and is green.** A task split into lettered sub-tasks (2.8a–2.8d, 2.10a–2.10b) is split so that each commit passes `cargo build --workspace --all-targets`, `cargo nextest run --workspace` and `cargo xtask verify --profile blocking --seeds 200` on its own. Never commit a red intermediate state "to be fixed in the next sub-task".
+- **Harness in every storage task.** Run `cargo xtask verify --profile blocking --seeds 200` before committing any task that touches `crates/prkdb-core/src/wal/`, `crates/prkdb/src/storage/`, `indexed_storage.rs`, `outbox.rs`, `consumer.rs` or `crates/prkdb-verify/`. From Task 2.10b on, also run it with `--mode fast`. Expected: `profile=blocking seeds=200 checks=<n>`, exit 0.
 - **Demotion rule (spec §7 Phase 1).** If a blocking-profile op trips an unknown bug, move that op (or op combination) to `Profile::Discovery`, add a ledger finding with a tripwire, and report to the maintainer before continuing.
 - **Tests that need `FaultFs` live in `crates/prkdb-verify/tests/`.** `prkdb-core` cannot dev-depend on `prkdb-verify`: `prkdb-verify` depends on `prkdb-core`, so the test build would link two copies of `prkdb-core` and `FaultFs` would implement the wrong copy's `Vfs`. `prkdb-core` tests use `StdVfs` plus small test doubles defined in the test file.
 - **Durability of test data.** `WalConfig::test_config()` stays `SyncMode::Durable` (the honest default). A test that becomes slow under Durable sets `sync_mode: SyncMode::Fast` explicitly and says why in a comment. Never flip the default to make the suite faster.
-- **Linux probes.** Tasks 2.3, 2.6, 2.7 and 2.8 need numbers from Linux (Valgrind and `fdatasync` do not exist or behave differently on macOS). Task 2.2 adds the dispatch path. Every probe run's URL goes into the commit body of the task that used it.
-- **Ledger follow-up commits.** When a task's "changes" SHA is only known after the fix commit, record it in a separate `docs:` commit (`docs: record <ID> as fixed`). Never amend a commit whose SHA the ledger already records.
+- **Linux probes.** Tasks 2.3, 2.6, 2.7 and 2.8d need numbers from Linux (Valgrind and `fdatasync` do not exist or behave differently on macOS). Task 2.2 adds the dispatch path. Every probe run's URL goes into the commit body of the task that used it.
+- **Ledger follow-up commits.** When a task's "changes" SHA is only known after the fix commit, record it in a separate `docs:` commit (`docs: record <ID> as fixed`). Never amend a commit whose SHA the ledger already records. The PR URL is added to every fixed finding's `changes` in the gate evidence commit (Task 2.25), because the phase PR is squash-merged.
+- **Upgrade notes (D12).** A commit that lands a user-visible breaking change ticks or adds its line in the Phase 5 upgrade-note checklist (Phase 5 outline, item 5.4).
+- **Scripts that gate use `grep -E`/`python3`, not `rg`.** ripgrep is not installed as a binary on the maintainer machine and is not guaranteed on runners, so anything run by `pre-push-check.sh` or CI (`check_single_wal.sh`, `check_let_underscore.sh`, …) uses `grep -rE --include='*.rs'`. `rg` in a step's *interactive* commands (inventories) is fine.
 - **`git commit` runs as its own command** (hook `block-no-verify`, see Conventions). Examples below write the message with `-m`; for multi-line bodies use `git commit -F <file>`.
 
 ## Phase 2 file structure
 
 | Path | Task | Responsibility |
 |---|---|---|
-| `.github/workflows/remediation-gate.yml` (modify) | 2.2, 2.10 | `probe` input + Linux probe jobs; harness in both modes |
-| `scripts/wal_fast_rule.py` (create) | 2.2 | parses the WAL bench table, applies the ≤ 15 % Fast rule |
-| `crates/prkdb/benches/iai_hot_paths.rs` (modify) | 2.3, 2.8 | instruction counts that include the WAL work |
-| `scripts/perf_gate_floors.toml`, `scripts/check_perf_gate_floors.sh` (create); `scripts/perf_gate_deltas.py` (modify) | 2.3 | floor ratios so a vacuous measurement fails |
+| `.github/workflows/remediation-gate.yml` (modify) | 2.2, 2.10b | `probe` input + Linux probe jobs; harness in both modes |
+| `scripts/wal_fast_rule.py` (create) | 2.2, 2.9, 2.25 | parses raw WAL bench rows, applies the ≤ 15 % Fast rule, `--self-test`, `--emit-toml` |
+| `scripts/testdata/wal_bench_sample.md` (create) | 2.2 | raw bench output fixture for `wal_fast_rule.py --self-test` |
+| `crates/prkdb/benches/iai_hot_paths.rs` (modify) | 2.3, 2.8d | instruction counts that include the WAL work |
+| `scripts/perf_gate_floors.toml`, `scripts/check_perf_gate_floors.sh` (create); `scripts/perf_gate_deltas.py` (modify) | 2.3, 2.8d | floor ratios so a vacuous measurement fails |
 | `crates/prkdb-core/src/format.rs` (create) | 2.5 | the one `FORMAT_VERSION` constant |
 | `crates/prkdb-core/src/wal/frame.rs` (create) | 2.5 | frame codec (length, CRC, LSN, kind, payload) |
 | `crates/prkdb-core/src/wal/segment.rs` (create) | 2.5 | segment header, file names, verified scan |
 | `crates/prkdb-core/src/wal/batch.rs` (create) | 2.5, 2.19, 2.20 | versioned payload of one atomic write batch |
-| `crates/prkdb-core/src/wal/log.rs` (create) | 2.6, 2.7, 2.14, 2.15 | `Wal`: writer thread, group commit, `SyncMode`, roll, recovery, reads |
-| `crates/prkdb-core/src/wal/config.rs` (modify) | 2.6, 2.8 | `SyncMode` and the new knobs; drop `segment_count`/`shard_count` |
+| `crates/prkdb-core/src/wal/log.rs` (create) | 2.6, 2.7, 2.14, 2.15 | `Wal`: writer thread, group commit, `SyncMode`, reservations, roll, recovery, reads |
+| `crates/prkdb-core/src/wal/config.rs` (modify) | 2.6, 2.8a | `SyncMode` and the new knobs; drop `segment_count`/`shard_count` |
 | `crates/prkdb-core/tests/wal_segment.rs`, `wal_log.rs` (create) | 2.5, 2.6 | StdVfs-level WAL tests |
-| `crates/prkdb-verify/tests/wal_power_loss.rs`, `power_loss.rs` (create) | 2.6, 2.8 | FaultFs power-loss tests (WAL and adapter) |
-| `crates/prkdb/src/storage/wal_adapter.rs` (rewrite of internals) | 2.8 | adapter on `Wal`; publish in LSN order |
-| `crates/prkdb/src/storage/checkpoint.rs` (rewrite) | 2.14 | index snapshot file |
-| `crates/prkdb/src/storage/recovery.rs` (rewrite) | 2.8, 2.14 | replay (+ snapshot load) into the index |
+| `crates/prkdb-verify/tests/wal_power_loss.rs`, `power_loss.rs` (create) | 2.6, 2.8a | FaultFs power-loss tests (WAL and adapter) |
+| `crates/prkdb/src/storage/wal_adapter.rs` (rewrite of internals) | 2.8a–2.8c | adapter on `Wal`; publish in LSN order |
+| `crates/prkdb/src/storage/wal_adapter.rs` `mod fault_injection` (modify) | 2.8b | test faults as a `Vfs` wrapper |
+| `crates/prkdb/src/storage/checkpoint.rs` (rewrite) | 2.8c, 2.14 | index snapshot file |
+| `crates/prkdb/src/storage/recovery.rs` (rewrite) | 2.8a, 2.14 | replay (+ snapshot load) into the index |
+| `crates/prkdb/src/storage/config.rs` (modify) | 2.8a, 2.8c, 2.15 | `sync_mode` removed; `CompactionConfig` moves here from `prkdb-core` |
 | `crates/prkdb/src/storage/compaction.rs` (create) | 2.15 | rewrite live records, remove dead segments |
+| `crates/prkdb/src/storage/collection_partitioned_adapter.rs` (rewrite of internals) | 2.9b, 2.12 | routing API over the one WAL (D11) |
 | `crates/prkdb/src/storage/format.rs`, `migrations.rs` (create) | 2.11 | `FORMAT` marker, open rules, migration registry |
 | `crates/prkdb-cli/src/commands/migrate.rs` (create) | 2.11 | `prkdb-cli migrate --data-dir` |
-| `crates/prkdb/src/keys.rs`, `catalog.rs` (create) | 2.12 | key codec, persisted collection catalog |
+| `crates/prkdb/src/keys.rs`, `catalog.rs` (create) | 2.12 | key codec, persisted collection catalog (one allocator per storage) |
 | `crates/prkdb/src/index_maintenance.rs` (create) | 2.17 | index diffing, unique checks, rebuild on first access |
 | `crates/prkdb-types/src/event.rs` (create) | 2.20 | opaque `EventSeq` |
 | `crates/prkdb/src/batch_accumulator.rs` (rewrite) | 2.16 | flush barrier, first-error reporting, byte-bounded admission |
-| `crates/prkdb-schema/src/storage.rs`, `registry.rs` (modify) | 2.22 | fail-closed load, atomic writes, serialized versions |
-| `crates/prkdb-verify/src/{model,ops,sut,checker,runner}.rs` (modify) | 2.10, 2.18, 2.21 | acceptable-prefix model, `PowerLoss`, typed/event SUTs |
+| `crates/prkdb-schema/src/storage.rs`, `registry.rs` (modify); `crates/prkdb/src/raft/grpc_service.rs` (modify) | 2.22 | fail-closed load, atomic writes, serialized versions; server startup fails on a bad registry |
+| `crates/prkdb-verify/src/{model,ops,sut,checker,runner}.rs` (modify) | 2.10a, 2.10b, 2.18, 2.21 | acceptable-prefix model, `PowerLoss`, typed/event SUTs |
 | `fuzz/` (create) + `crates/prkdb-verify/src/fuzz_entry.rs` | 2.23 | cargo-fuzz targets and a stable-toolchain corpus test |
-| `crates/prkdb-verify/src/golden.rs`, `tests/fixtures/format-v2/` (generated), `tests/storage_compat.rs` | 2.24 | golden data directory and compat tests |
-| `scripts/check_single_wal.sh` (create) | 2.9 | STO-06 regression: one WAL implementation |
+| `crates/prkdb-verify/src/golden.rs`, `tests/fixtures/format-v2/` (generated), `tests/storage_compat.rs` | 2.24 | golden data directories (adapter and builder paths) and compat tests |
+| `scripts/check_single_wal.sh` (create) | 2.9, 2.9b | STO-06/D11 regression: one WAL implementation, one WAL per directory |
+| `scripts/check_let_underscore.sh`, `scripts/let_underscore_allowlist.txt` (create) | 2.24b | spec §8: no unjustified `let _ =` on durability paths |
 
 ## Task map (old task-level numbers → code-level tasks)
 
@@ -2753,15 +2768,20 @@ Expanded to code level on 2026-09-24, after Task 2.1 decided **PROCEED** (`docs/
 | 2.3 Perf gate measures the WAL | new | TST-09 |
 | 2.4 `cache_capacity` honoured | new | STO-09 |
 | 2.5 Frame, segment, batch codecs | part of old 2.2 + 2.3 | — (building blocks) |
-| 2.6 `Wal`: writer thread, group commit, recovery | old 2.2 (core) + old 2.3 | — (building block; Linux ≤ 15 % rule) |
+| 2.6 `Wal`: writer thread, group commit, reservations, recovery | old 2.2 (core) + old 2.3 | — (building block; Linux ≤ 15 % rule) |
 | 2.7 Fast-mode sync placement | new (spike risk 2) | — |
-| 2.8 `WalStorageAdapter` on `Wal` | old 2.2 (switch), old 2.12 | STO-01, STO-02, STO-03, STO-04, STO-05, STO-08 |
+| 2.8a Adapter write/read/recovery on `Wal` | old 2.2 (switch), old 2.12 | — (fixes land here; ledger in 2.8d) |
+| 2.8b Fault injection through `Vfs`, liveness tests | old 2.2 (switch) | — |
+| 2.8c Delete the adapter's dead machinery | old 2.2 (switch) | — |
+| 2.8d Perf gate on the new path, Linux adapter rule, ledger | old 2.2 (switch) | STO-01, STO-02, STO-03, STO-04, STO-05, STO-08 |
 | 2.9 Delete the other WAL implementations | old 2.4 | STO-06 |
-| 2.10 `PowerLoss` and Fast mode in the harness | old 2.5 | TST-05 |
+| 2.9b `CollectionPartitionedAdapter` on the single WAL | new (D11) | — (STO-06 follow-through) |
+| 2.10a Harness model and checker for acceptable prefixes | old 2.5 (part) | — |
+| 2.10b `PowerLoss` and Fast mode in the harness | old 2.5 | TST-05 |
 | 2.11 Format v2 marker and migrations | old 2.6 | — (D3, D4) |
 | 2.12 Key codec and catalog | old 2.7 | KEY-01 |
 | 2.13 Stable partitioner | old 2.8 | KEY-03 |
-| 2.14 Checkpoint = index snapshot | old 2.10 | — (STO-01 already fixed in 2.8; adds the fast path back correctly) |
+| 2.14 Checkpoint = index snapshot | old 2.10 | — (STO-01 already fixed in 2.8a; adds the fast path back correctly) |
 | 2.15 Real compaction | old 2.11 | — (STO-01 follow-through) |
 | 2.16 `BatchAccumulator` flush barrier | old 2.13 | STO-07 |
 | 2.17 Index maintenance and unique enforcement | old 2.14 | KEY-02 (+ KEY-04, filed in step 1) |
@@ -2772,9 +2792,10 @@ Expanded to code level on 2026-09-24, after Task 2.1 decided **PROCEED** (`docs/
 | 2.22 Schema persistence | old 2.16 | SCH-02 |
 | 2.23 Fuzz targets | old 2.17 | TST-07 |
 | 2.24 Golden v2 data directory | old 2.18 | — |
+| 2.24b `let _ =` audit and lint | new (spec §8) | — |
 | 2.25 Phase 2 baseline and gate | old 2.19 | — |
 
-Two deliberate moves against the task-level order: STO-03 (publish order) is fixed inside 2.8, because the new adapter's publish path is written once and correctly rather than written wrong and repaired later (old task 2.12); and STO-01 is fixed in 2.8 by deleting the broken incremental recovery (full replay is always correct), with 2.14 re-adding checkpoints as index snapshots under the `recover(checkpoint, wal) == recover(∅, wal)` property. The harness profile still grows exactly as §7.1 lists: `PowerLoss` after 2a (Task 2.10), `Checkpoint`/`Compact`/multi-collection keys after 2d (Task 2.18), events after 2e (Task 2.21).
+Two deliberate moves against the task-level order: STO-03 (publish order) is fixed inside 2.8a, because the new adapter's publish path is written once and correctly rather than written wrong and repaired later (old task 2.12); and STO-01 is fixed in 2.8a by deleting the broken incremental recovery (full replay is always correct), with 2.14 re-adding checkpoints as index snapshots under the `recover(checkpoint, wal) == recover(∅, wal)` property. The harness profile still grows exactly as §7.1 lists: `PowerLoss` after 2a (Task 2.10b), `Checkpoint`/`Compact`/multi-collection keys after 2d (Task 2.18), events after 2e (Task 2.21).
 
 ---
 
@@ -2782,7 +2803,9 @@ Two deliberate moves against the task-level order: STO-03 (publish order) is fix
 
 Commits `0f25174` (`perf: add single-log group-commit WAL spike`) and `475b2bb` (`docs: record single-log WAL spike decision`). Decision: **PROCEED** with one globally ordered log per data directory, written by a dedicated group-commit writer thread through `Vfs`. Record: `docs/remediation/decisions/2026-09-24-single-log-spike.md`. Bench: `crates/prkdb/benches/wal_write_path_spike.rs` (lives in `crates/prkdb`, not `prkdb-core`, because it compares against `WalStorageAdapter`).
 
-Carried conditions (each is a step below, not a note): Linux 1-writer re-run before the new path replaces the old one (Task 2.6 step 9 and Task 2.8 step 12); in-writer vs syncer-thread Fast sync (Task 2.7); error poisoning, byte-bounded admission and writer supervision (Task 2.6); `put_batch`/`put_many` as one WAL record (Task 2.8); STO-09 added to the ledger (`bb06c0a`, `docs: add STO-09, cache_capacity ignored by new_with_config`).
+Carried conditions (each is a step below, not a note): Linux 1-writer re-run before the new path replaces the old one (Task 2.6 step 9 and Task 2.8d step 3); in-writer vs syncer-thread Fast sync (Task 2.7); error poisoning, byte-bounded admission and writer supervision (Task 2.6); `put_batch`/`put_many` as one WAL record (Task 2.8a); STO-09 added to the ledger (`bb06c0a`, `docs: add STO-09, cache_capacity ignored by new_with_config`).
+
+**Recorded deviations from the decision record §7** (spec revision 11 records the first): frames use CRC-32 (`crc32fast`), not CRC-32C (Task 2.5); segment files are named `{first_lsn:020}.wal`, not `.log`; batch payloads keep `WalConfig::compression` (Task 2.5); `append_group` is not a separate call, because every append is already one frame holding one `Batch` (Task 2.6).
 
 ---
 
@@ -2792,9 +2815,9 @@ GitHub dispatches a workflow only if a file with that name exists on the default
 
 **Files:**
 - Modify: `.github/workflows/remediation-gate.yml`
-- Create: `scripts/wal_fast_rule.py`
+- Create: `scripts/wal_fast_rule.py`, `scripts/testdata/wal_bench_sample.md`
 
-- [ ] **Step 1: STOP — maintainer approval to push the phase branch early.** Conventions allow a push to `origin` only in a phase-gate task. Ask the maintainer: "Tasks 2.3/2.6/2.7/2.8 need Linux numbers. May I push `remediation/phase-2` to `origin` (no PR) so `remediation-gate.yml` can be dispatched with `probe=…`? Phase 2 has no security findings; its correctness findings are already public in the ledger." Do not continue past step 4 without a yes. If the answer is no, the fallback for **iteration only** (never for a decision or ledger evidence) is Docker on the maintainer machine: `docker run --rm -v "$PWD":/w -w /w rust:1.98.1 bash -c 'apt-get update && apt-get install -y valgrind protobuf-compiler && cargo bench -p prkdb --bench <bench>'`, which runs Linux arm64 under a VM; its fsync numbers are not representative.
+- [ ] **Step 1: Probe pushes are approved (D10); check the one condition before each.** D10 allows pushing `remediation/phase-2` to `origin` without a PR so `remediation-gate.yml` can be dispatched with `probe=…`, provided the branch contains no open security finding. Before every probe push run `cargo xtask remediation check` and confirm no finding with a `(sec)` severity marker in spec §3 (today only SCH-01, fixed in Phase 0) is `open` or `in_progress` in `docs/remediation/ledger.toml`. If one is, do not push; ask the maintainer. For quick iteration without a push (never for a decision or ledger evidence), Docker on the maintainer machine works: `docker run --rm -v "$PWD":/w -w /w rust:1.98.1 bash -c 'apt-get update && apt-get install -y valgrind protobuf-compiler && cargo bench -p prkdb --bench <bench>'`, which runs Linux arm64 under a VM; its fsync numbers are not representative.
 
 - [ ] **Step 2: Inputs.** In `remediation-gate.yml` under `workflow_dispatch.inputs` add:
 
@@ -2845,6 +2868,7 @@ Change `run-name` to `Remediation gate — phase ${{ inputs.phase }} @ ${{ input
             echo; echo "## Head"; cat head.md
             echo; echo "## Fast rule"
           } >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/wal_fast_rule.py --self-test
           if [ -f base.md ]; then
             python3 scripts/wal_fast_rule.py --base base.md --head head.md | tee -a "$GITHUB_STEP_SUMMARY"
           else
@@ -2875,32 +2899,61 @@ Change `run-name` to `Remediation gate — phase ${{ inputs.phase }} @ ${{ input
 
 (The `floors` subcommand arrives in Task 2.3; until then the last command fails, which is expected for the first TST-09 diagnosis run.)
 
-- [ ] **Step 4: `scripts/wal_fast_rule.py`.**
+- [ ] **Step 4: The raw-output fixture.** The script parses the rows the bench prints, not the decision record's hand-formatted table (that table has backticks, two ops/s columns and thousands separators, so it never matched the row regex). Create `scripts/testdata/wal_bench_sample.md` in exactly the format `print_header`/`print_row` in `crates/prkdb/benches/wal_write_path_spike.rs` emit: `| {name} | {writers} | {value/1024} KiB | {ops/s:.0} | {MB/s:.1} | {p50:.1} | {p99:.1} | {p99.9:.1} | {avg batch} | {max batch} | {idle} | {write} | {sync} | {cpu} | {load1 load5 load15} |`, with the writer columns empty (`|  |`) for cells that have no writer thread. Its numbers are chosen so the verdicts are known in advance (the file says so in its first line, which the parser ignores):
+
+```text
+# wal_fast_rule.py self-test fixture: raw wal_write_path_spike rows. Expected verdicts are asserted by --self-test.
+- warm-up 1000 ms, measure 3000 ms, reps 2, tokio worker threads = 8
+- load average at start: 2.85 2.10 1.90
+- disk ceiling, pwrite 1 MiB, no sync: 1555 MB/s (1483 writes/s)
+| cell | writers | value | ops/s | MB/s | p50 µs | p99 µs | p99.9 µs | avg batch | max batch | writer idle % | writer write % | writer sync % | writer CPU % | load1 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| wal_fast/1w/1k | 1 | 1 KiB | 80000 | 81.9 | 10.4 | 17.3 | 853.6 | 1.0 | 1 | 52 | 39 | 0 | 39 | 7.28 6.10 5.02 |
+| current_mmap_wal/1w/1k | 1 | 1 KiB | 90000 | 92.2 | 11.3 | 5067.5 | 7758.0 |  |  |  |  |  |  | 7.28 6.10 5.02 |
+| current_adapter_put/1w/1k | 1 | 1 KiB | 1062 | 1.1 | 16.3 | 5443.3 | 12118.0 |  |  |  |  |  |  | 6.94 6.00 5.00 |
+| wal_fast/8w/1k | 8 | 1 KiB | 284392 | 291.2 | 15.8 | 49.2 | 2800.1 | 3.0 | 8 | 15 | 73 | 0 | 51 | 5.92 5.50 5.00 |
+| current_mmap_wal/8w/1k | 8 | 1 KiB | 1605 | 1.6 | 5012.2 | 8890.7 | 16516.8 |  |  |  |  |  |  | 5.53 5.40 5.00 |
+| wal_fast/1w/64k | 1 | 64 KiB | 400 | 26.2 | 152.7 | 2405.8 | 3224.4 | 1.0 | 1 | 66 | 31 | 0 | 8 | 3.44 3.40 3.30 |
+| current_mmap_wal/1w/64k | 1 | 64 KiB | 522 | 34.2 | 1905.1 | 4106.3 | 4487.0 |  |  |  |  |  |  | 3.33 3.30 3.20 |
+| wal_fast/1w/1k | 1 | 1 KiB | 76000 | 77.8 | 10.6 | 18.0 | 900.0 | 1.0 | 1 | 50 | 40 | 0 | 40 | 3.10 3.00 2.90 |
+| current_mmap_wal/1w/1k | 1 | 1 KiB | 90000 | 92.2 | 11.2 | 5000.0 | 7700.0 |  |  |  |  |  |  | 3.10 3.00 2.90 |
+| current_adapter_put/1w/1k | 1 | 1 KiB | 1062 | 1.1 | 16.0 | 5400.0 | 12000.0 |  |  |  |  |  |  | 3.00 3.00 2.90 |
+```
+
+Expected head-only verdicts: `wal_fast/1w/1k` median 78000 vs 90000 = 0.87 ok (two reps, so the median path is exercised); `wal_fast/8w/1k` ok; `wal_fast/1w/64k` 400 vs 522 = 0.77, LOSS; exit 1. Base/head with this file as both: `adapter_put/1w/1k` ratio 1.00 ok; exit 0.
+
+- [ ] **Step 5: `scripts/wal_fast_rule.py`.**
 
 ```python
 #!/usr/bin/env python3
-"""Apply the spec's 2a rule to the WAL write-path bench table (Task 2.2).
+"""Apply the spec's 2a rule to raw WAL write-path bench output (Task 2.2).
 
 Rule (spec §7 2a, decision record §6 risk 1): the new write path in Fast mode may lose at
 most 15 % put throughput against the path it replaces, per (writers, value size) cell.
 
-Head-only mode compares cells inside one table:   `wal_fast` vs `current_mmap_wal`
-(raw WAL vs raw WAL, same run). Base/head mode compares `current_adapter_put` in the head
-table (new adapter) against `current_adapter_put` in the base table (old adapter), both
-benched in the same job on the same runner. Exit status 1 if any cell loses more than 15 %.
+Input is the bench's raw stdout (`print_row` in the bench), never a hand-edited table.
+Head-only mode compares cells inside one run: `wal_fast` vs `current_mmap_wal`.
+Base/head mode compares `current_adapter_put` in the head run (new adapter) against the
+same cell in the base run (old adapter), both benched in the same job on the same runner.
+Exit status 1 if any cell loses more than 15 %. `--self-test` checks the parser and both
+modes against scripts/testdata/wal_bench_sample.md and exits non-zero on any surprise.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import re
 import statistics
 import sys
+from pathlib import Path
 
 ROW = re.compile(r"^\| (?P<cell>[a-z_]+)/(?P<w>\d+)w/(?P<v>\d+)k \| \d+ \| \d+ KiB \| (?P<ops>\d+) \|")
 LIMIT = 0.85
+FIXTURE = Path(__file__).resolve().parent / "testdata" / "wal_bench_sample.md"
 
 
-def parse(path: str) -> dict[tuple[str, int, int], float]:
+def parse(path: str | Path) -> dict[tuple[str, int, int], float]:
     samples: dict[tuple[str, int, int], list[float]] = {}
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -2909,31 +2962,13 @@ def parse(path: str) -> dict[tuple[str, int, int], float]:
                 key = (m["cell"], int(m["w"]), int(m["v"]))
                 samples.setdefault(key, []).append(float(m["ops"]))
     if not samples:
-        sys.exit(f"{path}: no bench rows found; the table format changed or the bench failed")
+        sys.exit(f"{path}: no bench rows found; the row format changed or the bench failed")
     return {k: statistics.median(v) for k, v in samples.items()}
 
 
-def compare(pairs: list[tuple[str, float, float]]) -> int:
-    print("| cell | new ops/s | old ops/s | ratio | verdict |")
-    print("|---|--:|--:|--:|---|")
-    failed = 0
-    for name, new, old in pairs:
-        ratio = new / old if old else float("inf")
-        ok = ratio >= LIMIT
-        failed += not ok
-        print(f"| {name} | {new:.0f} | {old:.0f} | {ratio:.2f} | {'ok' if ok else 'LOSS > 15 %'} |")
-    return failed
-
-
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--head", required=True)
-    ap.add_argument("--base")
-    args = ap.parse_args()
-    head = parse(args.head)
+def pairs_for(head: dict, base: dict | None) -> list[tuple[str, float, float]]:
     pairs = []
-    if args.base:
-        base = parse(args.base)
+    if base is not None:
         for (cell, w, v), old in sorted(base.items()):
             if cell == "current_adapter_put" and (cell, w, v) in head:
                 pairs.append((f"adapter_put/{w}w/{v}k", head[(cell, w, v)], old))
@@ -2941,27 +2976,75 @@ def main() -> int:
         for (cell, w, v), new in sorted(head.items()):
             if cell == "wal_fast" and ("current_mmap_wal", w, v) in head:
                 pairs.append((f"wal_fast/{w}w/{v}k", new, head[("current_mmap_wal", w, v)]))
+    return pairs
+
+
+def compare(pairs: list[tuple[str, float, float]]) -> dict[str, bool]:
+    print("| cell | new ops/s | old ops/s | ratio | verdict |")
+    print("|---|--:|--:|--:|---|")
+    verdicts = {}
+    for name, new, old in pairs:
+        ratio = new / old if old else float("inf")
+        verdicts[name] = ratio >= LIMIT
+        print(f"| {name} | {new:.0f} | {old:.0f} | {ratio:.2f} | {'ok' if verdicts[name] else 'LOSS > 15 %'} |")
+    return verdicts
+
+
+def run(head_path, base_path=None) -> tuple[int, dict[str, bool]]:
+    head = parse(head_path)
+    pairs = pairs_for(head, parse(base_path) if base_path else None)
     if not pairs:
-        sys.exit("no comparable cells: expected wal_fast + current_mmap_wal, or current_adapter_put in both tables")
-    failed = compare(pairs)
+        sys.exit("no comparable cells: expected wal_fast + current_mmap_wal, or current_adapter_put in both runs")
+    verdicts = compare(pairs)
+    failed = sum(not ok for ok in verdicts.values())
     print(f"\n{failed} cell(s) lose more than 15 %" if failed else "\nall cells within the 15 % rule")
-    return 1 if failed else 0
+    return (1 if failed else 0), verdicts
+
+
+def self_test() -> int:
+    with contextlib.redirect_stdout(io.StringIO()):
+        code, v = run(FIXTURE)
+        base_code, bv = run(FIXTURE, FIXTURE)
+    want = {"wal_fast/1w/1k": True, "wal_fast/8w/1k": True, "wal_fast/1w/64k": False}
+    problems = []
+    if v != want or code != 1:
+        problems.append(f"head-only: got {v} exit {code}, want {want} exit 1")
+    if bv != {"adapter_put/1w/1k": True} or base_code != 0:
+        problems.append(f"base/head: got {bv} exit {base_code}, want adapter_put/1w/1k ok, exit 0")
+    for p in problems:
+        print(f"self-test FAILED: {p}", file=sys.stderr)
+    if not problems:
+        print("wal_fast_rule.py self-test: ok")
+    return 1 if problems else 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--head")
+    ap.add_argument("--base")
+    ap.add_argument("--self-test", action="store_true")
+    args = ap.parse_args()
+    if args.self_test:
+        return self_test()
+    if not args.head:
+        ap.error("--head is required unless --self-test")
+    return run(args.head, args.base)[0]
 
 
 if __name__ == "__main__":
     sys.exit(main())
 ```
 
-- [ ] **Step 5: Self-check the parser locally** against the decision record's table: `python3 scripts/wal_fast_rule.py --head docs/remediation/decisions/2026-09-24-single-log-spike.md` → exits with "no comparable cells" (the record has no `wal_fast` rows yet; the rows it has must parse, which proves the regex). Then `sed 's/single_log_fast/wal_fast/' docs/remediation/decisions/2026-09-24-single-log-spike.md > /tmp/t.md && python3 scripts/wal_fast_rule.py --head /tmp/t.md` → prints a table with every ratio ≥ 0.85 and exits 0.
+- [ ] **Step 5b: Self-test** — `python3 scripts/wal_fast_rule.py --self-test` → `wal_fast_rule.py self-test: ok`, exit 0. Break it on purpose once (change `LIMIT` to `0.70`) → the self-test fails on `wal_fast/1w/64k`; revert. Add `step wal-fast-rule; python3 scripts/wal_fast_rule.py --self-test` to `scripts/pre-push-check.sh` and run it as the first command of the `probe-wal-bench` job's "Apply the Fast rule" step, so a parser that stopped matching the bench's output fails before it can report "no rows".
 - [ ] **Step 6: Lint the workflow** — `actionlint .github/workflows/remediation-gate.yml` (install with `brew install actionlint`) → no output.
 - [ ] **Step 7: Commit** — `ci: add Linux probe runs to the remediation gate workflow`.
-- [ ] **Step 8: After approval (step 1):** `git push -u origin remediation/phase-2`, then smoke-test: `gh workflow run remediation-gate.yml --ref remediation/phase-2 -f ref=remediation/phase-2 -f phase=2 -f probe=wal-bench`. Expected: only `resolve`, `probe-wal-bench` and `harness-result` run; the summary shows the head table; the Fast-rule step fails with "no comparable cells" (no `wal_fast` cells until Task 2.6). Record the run URL in the next task's commit body.
+- [ ] **Step 8: Probe push (D10, after the step 1 check):** `git push -u origin remediation/phase-2`, then smoke-test: `gh workflow run remediation-gate.yml --ref remediation/phase-2 -f ref=remediation/phase-2 -f phase=2 -f probe=wal-bench`. Expected: only `resolve`, `probe-wal-bench` and `harness-result` run; the summary shows the head table; the self-test passes and the Fast-rule step then fails with "no comparable cells" (no `wal_fast` cells until Task 2.6). Record the run URL in the next task's commit body.
 
 ---
 
 ### Task 2.3: The perf gate measures the WAL (TST-09)
 
-**Root-cause hypothesis to confirm first.** Callgrind's `--toggle-collect` *toggles* on entry to and exit from every function that matches the pattern, and gungraun's default pattern is `*::__gungraun_wrapper_mod::*`. The `async { .. }` block inside each WAL benchmark compiles to a closure whose symbol is also under `__gungraun_wrapper_mod`, so entering its `poll` flips collection **off** for exactly the code that does the WAL work. That explains ~500 instructions for 100 puts. The ledger's thread hypothesis is the second suspect, and becomes the main one after Task 2.8, when the write happens on the WAL writer `std::thread`: toggle state is per thread, and the writer thread never enters the benchmark function.
+**Root-cause hypothesis to confirm first.** Callgrind's `--toggle-collect` *toggles* on entry to and exit from every function that matches the pattern, and gungraun's default pattern is `*::__gungraun_wrapper_mod::*`. The `async { .. }` block inside each WAL benchmark compiles to a closure whose symbol is also under `__gungraun_wrapper_mod`, so entering its `poll` flips collection **off** for exactly the code that does the WAL work. That explains ~500 instructions for 100 puts. The ledger's thread hypothesis is the second suspect, and becomes the main one after Task 2.8a, when the write happens on the WAL writer `std::thread`: toggle state is per thread, and the writer thread never enters the benchmark function.
 
 The fix below does not depend on which hypothesis is right: each WAL benchmark disables the entry-point toggle and brackets the measured call with callgrind client requests, which switch instrumentation for the whole process, so every thread's work inside the bracket is counted.
 
@@ -2981,20 +3064,20 @@ The fix below does not depend on which hypothesis is right: each WAL benchmark d
 reference = "bench_log_record_encode"
 min_ratio = 100.0   # 100 puts must at least encode 100 records
 
-[floors.bench_wal_get_hit]
+[floors.bench_wal_get_one]
 reference = "bench_log_record_decode"
 min_ratio = 1.0     # a hit must at least decode one record
 
-[floors.bench_wal_put_batch_100]
+[floors.bench_wal_batch_of_100]
 reference = "bench_log_record_encode"
 min_ratio = 50.0
 
-[floors.bench_indexed_storage_insert]
+[floors.bench_indexed_insert_one]
 reference = "bench_log_record_encode"
 min_ratio = 1.0
 ```
 
-(Benchmark ids are the function names gungraun reports; `bench_wal_put` is renamed `bench_wal_put_100` in step 4 so the name states its unit. Task 2.8 replaces the `LogRecord` references with `bench_batch_encode`/`bench_batch_decode`.)
+(Benchmark ids are the function names gungraun reports. **Every benchmark whose measured region this task changes gets a new name in step 4**: `bench_wal_put` → `bench_wal_put_100`, `bench_wal_get_hit` → `bench_wal_get_one`, `bench_wal_put_batch_100` → `bench_wal_batch_of_100`, `bench_indexed_storage_insert` → `bench_indexed_insert_one`. On `main` these benchmarks measured ~500 instructions (TST-09); under their old names the perf gate would compare the real counts against those vacuous ones and report a 1000× "regression" that no `perf_note` could honestly explain. Under new names `perf_gate_deltas.py` reports them as new ("new: no comparison"), which is the truth: nothing comparable was ever measured. The two `LogRecord` references keep their names — their measured region does not change. Task 2.8d replaces them with `bench_batch_encode`/`bench_batch_decode`.)
 
 Add to `scripts/perf_gate_deltas.py` a `floors` subcommand: `floors <gungraun-dir> <floors.toml>` loads every `summary.json` (reusing `find_summaries`, `load_benchmark`, `benchmark_name`, `find_ir_total`), sums `Ir` over all thread/part entries of a benchmark (with `--separate-threads=yes` a summary has one part per thread; without it, one), and for each `[floors.X]` fails if `Ir(X) < min_ratio * Ir(reference)` or if X or the reference is missing. Output: a markdown table `benchmark | Ir | reference Ir | ratio | floor | verdict`, exit 1 on any failure. Parse TOML with `tomllib` (Python ≥ 3.11 on ubuntu-latest). Also add `floors --self-test`, which builds two fake summary trees in a temp dir (one that passes, one where `bench_wal_put_100` is 500 Ir and must fail) and asserts both verdicts, so the logic is testable without Valgrind.
 
@@ -3016,7 +3099,7 @@ done
 exit "$missing"
 ```
 
-`chmod +x scripts/check_perf_gate_floors.sh`. Run it now: it passes the self-test and reports `no floor for bench_wal_put` (the rename has not happened yet) → exit 1. That is the failing check.
+`chmod +x scripts/check_perf_gate_floors.sh`. Run it now: it passes the self-test and reports `no floor for bench_wal_put` and `no floor for bench_wal_get_hit` (the renames have not happened yet) → exit 1. That is the failing check.
 
 Wire the floors into `perf-gate.yml`: after "Bench head SHA", add a step `python3 scripts/perf_gate_deltas.py floors target/gungraun scripts/perf_gate_floors.toml >> "$GITHUB_STEP_SUMMARY"` whose failure fails the job unconditionally (no `perf_note` override: a vacuous measurement is not a regression that can be justified).
 
@@ -3068,14 +3151,14 @@ fn bench_wal_put_100(
 }
 ```
 
-Do the same for `bench_wal_get_hit` (`get_one`), `bench_wal_put_batch_100` (`put_batch_100`) and `bench_indexed_storage_insert` (`insert_one`). Leave the two `LogRecord` benchmarks on the default entry point: they are the single-threaded references the floors divide by. Update the module doc comment: replace the paragraph on `setup` and the default `EntryPoint` with the explanation above, and state that background threads of the runtime are counted while instrumentation is on (so counts include idle tokio workers; Task 2.8 moves these benches to a current-thread runtime once the adapter no longer needs `block_in_place`).
+Do the same, renaming as step 2 lists, for `bench_wal_get_hit` → `bench_wal_get_one` (body `get_one`), `bench_wal_put_batch_100` → `bench_wal_batch_of_100` (`put_batch_100`) and `bench_indexed_storage_insert` → `bench_indexed_insert_one` (`insert_one`); rename their `setup_*` functions and the `library_benchmark_group!` entries to match. Leave the two `LogRecord` benchmarks on the default entry point: they are the single-threaded references the floors divide by. Update the module doc comment: replace the paragraph on `setup` and the default `EntryPoint` with the explanation above, and state that background threads of the runtime are counted while instrumentation is on (so counts include idle tokio workers; Task 2.8d moves these benches to a current-thread runtime once the adapter no longer needs `block_in_place`).
 
 If gungraun rejects `config = ..` together with `setup = ..` in one attribute, use its documented per-benchmark form `#[bench::put(setup = setup_wal_put, config = whole_process())]` inside `#[library_benchmark]`; either form must compile with `--no-run`.
 
 - [ ] **Step 5: Local checks.** `cargo bench -p prkdb --bench iai_hot_paths --no-run` → builds. `scripts/check_perf_gate_floors.sh` → exit 0.
 - [ ] **Step 6: Linux verification.** Dispatch `probe=iai`. Expected in the summary: `bench_wal_put_100` Ir ≥ 100 × `bench_log_record_encode` Ir (on the old mmap path, expect well above 10⁶), every floor row `ok`. If a floor still fails, the fix did not take: inspect per-thread parts, do not relax the ratio. Iterate with further probe runs; each run URL goes in the commit body.
 - [ ] **Step 7: Ledger.** TST-09: `status = "fixed"`, `regression_tests = ["script:scripts/check_perf_gate_floors.sh", "ci-job:perf-gate.yml/instruction-count-gate"]`, `changes = ["<fix commit SHA>"]` (follow-up commit). `cargo xtask remediation check && cargo xtask remediation render`.
-- [ ] **Step 8: Commit** — `fix: count WAL work in the instruction-count perf gate` (body: diagnosis from step 1, probe URLs, Ir before/after for the four WAL benches). Ledger follow-up: `docs: record TST-09 as fixed`.
+- [ ] **Step 8: Commit** — `fix: count WAL work in the instruction-count perf gate` (body: diagnosis from step 1, probe URLs, Ir before/after for the four WAL benches, and the rename table from step 2 with the reason: renamed benches are new to the gate, so no TST-09 `perf_note` is needed). Ledger follow-up: `docs: record TST-09 as fixed`.
 
 ---
 
@@ -3121,14 +3204,14 @@ Run: `cargo nextest run -p prkdb --lib new_with_config_honors_cache_capacity` �
 
 ### Task 2.5: Frame, segment and batch codecs
 
-Pure, synchronous building blocks for the single log. Nothing in the product uses them until Task 2.8, so this task closes no finding; STO-04's CRC and torn-tail rules are written here and proven end to end in 2.6 and 2.8.
+Pure, synchronous building blocks for the single log. Nothing in the product uses them until Task 2.8a, so this task closes no finding; STO-04's CRC and torn-tail rules are written here and proven end to end in 2.6 and 2.8a.
 
 **Design (decision record §7, with two recorded deviations):**
-- Frame: `len u32 | crc u32 | lsn u64 | kind u8 | payload`, little-endian, header 17 bytes. The CRC covers `lsn | kind | payload`. **Deviation 1:** CRC-32 via `crc32fast` (already a `prkdb-core` dependency, hardware-accelerated) instead of CRC-32C, to add no dependency. The frame header has no algorithm field, so this is fixed for format 2.
+- Frame: `len u32 | crc u32 | lsn u64 | kind u8 | payload`, little-endian, header 17 bytes. The CRC covers `lsn | kind | payload`. **Deviation 1 (spec revision 11):** CRC-32 via `crc32fast` (already a `prkdb-core` dependency, hardware-accelerated) instead of CRC-32C, to add no dependency. The frame header has no algorithm field, so this is fixed for format 2.
 - `kind`: `1 = Batch` (one atomic write batch), `2 = Elided` (a record removed by compaction; header only, empty payload, keeps LSNs contiguous, Task 2.15). Unknown kinds are faults.
 - Segment file `{first_lsn:020}.wal`, 24-byte header `b"PRKDBWAL" | format u32 | reserved u32 (0) | first_lsn u64`. `format` is `prkdb_core::format::FORMAT_VERSION` (= 2), the single version number also written to the data directory's `FORMAT` file in Task 2.11, so the program has exactly one format version.
 - Scan: stop at the first frame that is short, all-zero header, oversized, bad CRC, unknown kind, or whose LSN is not the expected next one. The scan reports where and why it stopped; the caller (Task 2.6) decides between "torn tail, truncate" (last segment) and "corruption, refuse" (earlier segment).
-- Batch payload: `version u8 (=1) | codec u8 | raw_len u32 | body`, where `codec` is the existing `CompressionType` discriminant (`0` none, `1` LZ4, `2` Snappy, `3` Zstd) and `body` is the op list, compressed when `codec != 0`. **Deviation 2 (from the decision record, which had no compression):** `WalConfig::compression` defaults to LZ4 today; dropping it silently would add another knob that does nothing (root cause 4). Ops: `u32 count`, then per op a tag byte: `1 Put: u32 klen | key | u32 vlen | value`, `2 Delete: u32 klen | key`. Tags 3–4 (events) are added in Tasks 2.19–2.20, before the format is frozen by the golden directory in Task 2.24.
+- Batch payload: `version u8 (=1) | codec u8 | raw_len u32 | body`, where `codec` is the existing `CompressionType` discriminant (`0` none, `1` LZ4, `2` Snappy, `3` Zstd) and `body` is the op list, compressed when `codec != 0`. **Deviation 2 (from the decision record, which had no compression):** `WalConfig::compression` defaults to LZ4 today; dropping it silently would add another knob that does nothing (root cause 4). Ops: `u32 count`, then per op a tag byte: `1 Put: u32 klen | key | u32 vlen | value`, `2 Delete: u32 klen | key`. Tags 3–5 (outbox put, outbox remove, event) are added in Tasks 2.19–2.20, before the format is frozen by the golden directory in Task 2.24 (spec revision 11: the storage-compat check starts there, not at 2b).
 
 **Files:**
 - Create: `crates/prkdb-core/src/format.rs`, `crates/prkdb-core/src/wal/frame.rs`, `crates/prkdb-core/src/wal/segment.rs`, `crates/prkdb-core/src/wal/batch.rs`, `crates/prkdb-core/tests/wal_segment.rs`
@@ -3451,13 +3534,13 @@ Run: `cargo nextest run -p prkdb-core --test wal_segment` → every test panics 
 
 ---
 
-### Task 2.6: `Wal` — writer thread, group commit, recovery (library only)
+### Task 2.6: `Wal` — writer thread, group commit, reservations, recovery (library only)
 
 The real log, not yet wired into the adapter. Ported from the spike's `SingleLog` (`wal_write_path_spike.rs`, `writer_loop`) and completed with everything the spike omitted (decision record §6 risk 5).
 
 **Files:**
 - Create: `crates/prkdb-core/src/wal/log.rs`, `crates/prkdb-core/tests/wal_log.rs`, `crates/prkdb-verify/tests/wal_power_loss.rs`
-- Modify: `crates/prkdb-core/src/wal/mod.rs` (`pub mod log; pub use log::{Wal, WalOptions, WalHealth, RecoveryReport, CommitHook}; pub use frame::Lsn; pub use segment::RecordLoc;` and `SyncMode` added to the existing `pub use config::{…}`), `crates/prkdb-core/src/wal/config.rs`, `crates/prkdb/benches/wal_write_path_spike.rs`
+- Modify: `crates/prkdb-core/src/wal/mod.rs` (`pub mod log; pub use log::{Wal, WalOptions, WalHealth, RecoveryReport, CommitHook, Reservation, PendingAppend}; pub use frame::Lsn; pub use segment::RecordLoc;` and `SyncMode` added to the existing `pub use config::{…}`), `crates/prkdb-core/src/wal/config.rs`, `crates/prkdb/src/builder.rs` (`default_wal_config` lists every field), `crates/prkdb/benches/wal_write_path_spike.rs`
 
 - [ ] **Step 1: Config.** In `wal/config.rs`:
 
@@ -3474,7 +3557,7 @@ pub enum SyncMode {
 }
 ```
 
-and add to `WalConfig` (update `Default`, `test_config`, `benchmark_config`, `production_config`, `compression_optimized`, and every struct literal found by `rg -n 'WalConfig \{' crates --glob '*.rs'` — `builder.rs::default_wal_config` lists every field):
+and add to `WalConfig` (update `Default`, `test_config`, `benchmark_config`, `production_config`, `compression_optimized`, and every struct literal found by `rg -n 'WalConfig \{' crates --glob '*.rs'` — `builder.rs::default_wal_config` lists every field). **Every one of these sets `sync_mode: SyncMode::Durable`**, `benchmark_config()` included (controller decision: Durable is the default everywhere, spec §6.2); `builder.rs::default_wal_config` and `optimized_wal_config` write `sync_mode: SyncMode::Durable` explicitly so a later change to a preset cannot silently weaken the builder paths. A bench that wants Fast says so in its own literal (Task 2.25 lists them):
 ```rust
     /// Acknowledgement policy. Default `Durable` everywhere, including `test_config()`.
     pub sync_mode: SyncMode,
@@ -3485,7 +3568,7 @@ and add to `WalConfig` (update `Default`, `test_config`, `benchmark_config`, `pr
     /// Admission bound: bytes queued for the writer before appenders wait (default 64 MiB).
     pub max_queued_bytes: usize,
 ```
-`segment_bytes` is now honoured (STO-08); `test_config()` keeps 1 MiB. `segment_count` and `shard_count` stay until Task 2.8 removes them with their last reader.
+`segment_bytes` is now honoured (STO-08); `test_config()` keeps 1 MiB. `segment_count` and `shard_count` stay until Task 2.8a removes them with their last reader.
 
 `log.rs` public surface:
 
@@ -3524,14 +3607,33 @@ pub struct RecoveryReport {
 
 pub struct Wal { /* Arc<Shared>, request sender, writer JoinHandle */ }
 
+/// Admission permits for one payload of `len` bytes. Nothing is queued yet: dropping a
+/// `Reservation` returns the permits and leaves no trace in the log.
+pub struct Reservation { /* OwnedSemaphorePermit, len */ }
+
+/// An append that is already queued for the writer. Awaiting it yields the result; dropping
+/// it does not cancel the write (the writer still commits it), which is why a timeout on
+/// this future means "not confirmed", never "not written".
+pub struct PendingAppend { /* oneshot::Receiver<Result<RecordLoc, WalError>> */ }
+impl Future for PendingAppend { type Output = Result<RecordLoc, WalError>; }
+
 impl Wal {
-    /// Opens (creating `dir` if absent: create_dir_all + sync_dir of the parent) and
-    /// recovers: lists `*.wal`, sorts by first LSN, checks each segment's first LSN equals
+    /// Opens and recovers.
+    ///
+    /// Directory: if `dir` is absent, `create_dir_all(dir)` then `sync_dir` of its parent.
+    /// Recovery: lists `*.wal`, sorts by first LSN, checks each segment's first LSN equals
     /// the previous segment's `next_lsn`, scans every segment, and calls `replay` for every
     /// frame with lsn >= `replay_from` in LSN order. Last segment: a torn tail is logged,
     /// truncated (`set_len` + `sync_data`) and reported. Earlier segment: any fault is
     /// `CorruptSegment` and nothing is modified. A zero-length or header-only last segment
-    /// is valid (a crash right after a roll). An empty directory starts at LSN 1.
+    /// is valid (a crash right after a roll or right after creation); a zero-length one is
+    /// completed by writing its header (+ `sync_data`) before use.
+    ///
+    /// First segment: when the directory holds no segment, `open` creates
+    /// `{next_lsn:020}.wal` (next_lsn = 1 for a new log) **before returning**: `create` →
+    /// `write_segment_header` → `sync_data` → `sync_dir(dir)`. So the log's existence is
+    /// durable before the first append in either mode, and a power cut between `open` and the
+    /// first sync leaves a valid empty log, never a directory the next open cannot read.
     pub fn open(
         vfs: Arc<dyn Vfs>,
         dir: &Path,
@@ -3540,11 +3642,25 @@ impl Wal {
         replay: &mut dyn FnMut(RecordLoc, FrameKind, &[u8]) -> Result<(), WalError>,
     ) -> Result<(Wal, RecoveryReport), WalError>;
 
+    /// Waits for admission permits (`min(len, max_queued_bytes)` bytes). Refuses a `len`
+    /// over `MAX_PAYLOAD_LEN` with `RecordTooLarge`, and returns `Poisoned`/`Closed` without
+    /// waiting when the log cannot accept writes.
+    pub async fn reserve(&self, len: usize) -> Result<Reservation, WalError>;
+    /// Queues `payload` under `r` (synchronously: when this returns `Ok`, the writer owns the
+    /// request). Errors if `payload.len()` differs from the reserved length.
+    pub fn append_reserved(&self, r: Reservation, payload: Vec<u8>, hook: Option<CommitHook>) -> Result<PendingAppend, WalError>;
+    /// `reserve` + `append_reserved` + await.
     pub async fn append(&self, payload: Vec<u8>, hook: Option<CommitHook>) -> Result<RecordLoc, WalError>;
-    /// For callers outside a runtime (checkpoint, compaction, tests).
+    /// For callers that are not async (checkpoint, compaction, tests). Waits with
+    /// `futures::executor::block_on` on the same `reserve`/`PendingAppend` futures; never
+    /// with tokio's `blocking_recv`/`blocking_lock`, which panic when called from inside a
+    /// runtime. Safe on a runtime worker thread because the writer is a `std::thread`, not a
+    /// task that this blocked worker would have to run; it only blocks that worker for the
+    /// duration of the write.
     pub fn append_blocking(&self, payload: Vec<u8>, hook: Option<CommitHook>) -> Result<RecordLoc, WalError>;
     /// Makes every write acknowledged so far durable; returns the durable watermark.
     pub async fn sync(&self) -> Result<Lsn, WalError>;
+    /// `sync` for non-async callers; waits with `futures::executor::block_on` (see `append_blocking`).
     pub fn sync_blocking(&self) -> Result<Lsn, WalError>;
     pub fn read(&self, loc: RecordLoc) -> Result<Vec<u8>, WalError>;
     /// Visits committed frames with lsn >= `from`, in order (reads through Vfs).
@@ -3565,9 +3681,11 @@ impl Wal {
 3. Hooks run on the writer thread in LSN order.
 4. Any I/O error, or a panicking hook, **poisons** the log: the failing batch and every later append get `WalError::Poisoned`; a failed `fsync` is never retried (fsyncgate); `health()` reports `Poisoned`. The writer body runs under `catch_unwind` so a panic becomes poisoning, and remaining queued requests are answered, never dropped silently (each request's `oneshot` sender sits in a struct whose `Drop` sends `Err(Closed)`, mirroring today's `PendingWrite`).
 5. A batch never spans segments. Roll when the next batch would push the active segment past `segment_bytes` (a batch larger than `segment_bytes` gets a segment of its own): `sync_data` the old segment, `create` `{next_lsn:020}.wal`, write and `sync_data` its header, `sync_dir(dir)`, switch.
-6. Admission: an append acquires `min(payload.len(), max_queued_bytes)` permits from a `tokio::sync::Semaphore` of `max_queued_bytes` before queueing, released when the writer answers it. A payload over `MAX_PAYLOAD_LEN` is refused with `RecordTooLarge` before queueing. `append_blocking` acquires with `futures::executor::block_on`.
+6. Admission: `reserve` acquires `min(len, max_queued_bytes)` permits from a `tokio::sync::Semaphore` of `max_queued_bytes`; the permit travels inside the request and is released when the writer answers it. A payload over `MAX_PAYLOAD_LEN` is refused with `RecordTooLarge` before any permit is taken. The split lets a caller time "waiting to be admitted" (nothing queued: a definite refusal) separately from "queued, not yet answered" (may still land) — Task 2.8a maps them to `WriteBackpressure` and `WriteNotConfirmed`.
 7. Batching: block for the first request, drain what is already queued up to `max_batch_bytes`, no linger timer (decision record §7).
 8. `read` verifies CRC and LSN (`segment::read_frame`); it never trusts an offset blindly.
+9. A new or empty log has a durable first segment when `open` returns (header synced, directory synced), in both modes.
+10. Blocking waits (`append_blocking`, `sync_blocking`, `close`, `Drop`) use `futures::executor::block_on` or `JoinHandle::join`, never tokio's `blocking_*` methods. `futures` is already a `prkdb-core` dependency; tokio's `oneshot::Receiver` and `Semaphore::acquire_owned` futures do not need a runtime to be polled.
 
 - [ ] **Step 2: Failing tests (StdVfs)** — `crates/prkdb-core/tests/wal_log.rs`:
 
@@ -3775,7 +3893,7 @@ async fn a_corrupt_sealed_segment_refuses_to_open() {
 }
 ```
 
-(Admission is covered by `oversized_records_are_refused_before_queueing` plus a unit test inside `log.rs` that fills the semaphore with a `ProbeVfs`-style file whose `write_at` blocks on a `std::sync::Barrier`, asserts a further `append` stays pending for 100 ms, then releases the barrier and asserts it completes. Write it in `log.rs`'s `#[cfg(test)] mod tests`, where the blocking file type can be private.)
+(Admission is covered by `oversized_records_are_refused_before_queueing` plus a unit test inside `log.rs` that fills the semaphore with a `ProbeVfs`-style file whose `write_at` blocks on a `std::sync::Barrier`, asserts a further `reserve` stays pending for 100 ms (wrapped in `tokio::time::timeout`, so the test fails instead of hanging), then releases the barrier and asserts it completes within 2 s. A second unit test: `append_reserved` followed by dropping the `PendingAppend` still commits the payload (reopen, replay contains it). A third: `append_blocking` and `sync_blocking` called from inside a `#[tokio::test(flavor = "current_thread")]` body complete (proves no tokio `blocking_*` call and no dependence on the runtime making progress). Write them in `log.rs`'s `#[cfg(test)] mod tests`, where the blocking file type can be private.)
 
 Run: `cargo nextest run -p prkdb-core --test wal_log` → all fail (`todo!()`).
 
@@ -3920,6 +4038,24 @@ async fn a_new_segment_is_durable_after_roll() {
     assert_eq!(replayed, acked);
 }
 
+/// Invariant 9: a Fast-mode log that lost power before any sync still opens, keeps its
+/// first segment, and accepts writes from LSN 1.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fresh_fast_log_survives_power_loss_before_any_sync() {
+    for tear in TEARS {
+        let fs = fs();
+        let (wal, _) = recover(&fs, opts(SyncMode::Fast, 1 << 20));
+        wal.append(payload(0), None).await.unwrap(); // written, never synced
+        fs.power_loss(&mut ChaCha8Rng::seed_from_u64(11), tear);
+        drop(wal);
+        let (wal, replayed) = recover(&fs, opts(SyncMode::Fast, 1 << 20));
+        assert!(replayed.len() <= 1, "{tear:?}: {replayed:?}");
+        assert_eq!(wal.segments(), vec![1], "{tear:?}: the synced first segment must survive");
+        let loc = wal.append(payload(1), None).await.unwrap();
+        assert_eq!(loc.lsn, replayed.len() as u64 + 1, "{tear:?}");
+    }
+}
+
 /// Corruption in a sealed segment is refused, never truncated silently.
 #[tokio::test(flavor = "multi_thread")]
 async fn corruption_in_a_sealed_segment_refuses_to_open() {
@@ -3955,9 +4091,9 @@ async fn corruption_in_a_sealed_segment_refuses_to_open() {
 - [ ] **Step 7: Local sanity run** — `SPIKE_FILTER=/1w/ cargo bench -p prkdb --bench wal_write_path_spike` → `wal_fast/1w/1k` within 20 % of `single_log_fast/1w/1k` on the maintainer machine (the real `Wal` adds admission and hooks, not I/O).
 - [ ] **Step 8: Commit** — `feat: add single ordered WAL with group-commit writer thread` (body: local bench rows from step 7).
 - [ ] **Step 9: Linux ≤ 15 % rule (decision record risk 1).** Dispatch `probe=wal-bench` (no `base_ref`) at this commit. The Fast-rule step compares `wal_fast` against `current_mmap_wal` per cell.
-  - All cells ok → record the run URL and the rule table in the decision record under a new heading "## 8. Linux re-run (Task 2.6)", commit `docs: record Linux WAL bench for the Fast rule`, continue.
+  - All cells ok → record in the decision record under a new heading "## 8. Linux re-run (Task 2.6)": the run URL, the rule table, and **the raw bench rows exactly as the job printed them** (copy `head.md` from the run summary into a fenced `text` block, every line unchanged). The raw rows are what Task 2.9's `--reference` mode parses; a reformatted table would not match the row regex, which is the mistake the Task 2.2 fixture exists to catch. Check it: `python3 scripts/wal_fast_rule.py --head docs/remediation/decisions/2026-09-24-single-log-spike.md` → prints the `wal_fast` vs `current_mmap_wal` table (the spike's hand-formatted §4 table is ignored because it does not match). Commit `docs: record Linux WAL bench for the Fast rule`, continue.
   - A 1-writer cell fails → apply the mitigation from risk 1 once: after draining, spin on `try_recv` for up to 50 µs (`std::hint::spin_loop`, check elapsed every 64 iterations) before parking, and measure again. Commit it (`perf: spin briefly before the WAL writer parks`) only if it fixes the cell.
-  - **STOP.** If any cell still loses more than 15 %, do not start Task 2.8. Report to the maintainer with both probe tables, the mitigation tried, and the fallback the spec names (sharded logs with a global sequence assigned at commit). Continue only on the maintainer's decision, recorded in the decision record.
+  - **STOP.** If any cell still loses more than 15 %, do not start Task 2.8a. Report to the maintainer with both probe tables, the mitigation tried, and the fallback the spec names (sharded logs with a global sequence assigned at commit). Continue only on the maintainer's decision, recorded in the decision record.
 
 ---
 
@@ -3976,27 +4112,35 @@ The spike measured Fast p99 of 3–42 ms at 64 KiB because `pwrite` stalls while
 
 ---
 
-### Task 2.8: `WalStorageAdapter` on the single `Wal` (STO-01, STO-02, STO-03, STO-04, STO-05, STO-08)
+### Task 2.8a: `WalStorageAdapter` write, read and recovery on the single `Wal`
 
-The switch. `WalStorageAdapter` keeps its public API (constructors, `StorageAdapter`, `flush`, `save_checkpoint`, `take_snapshot`, `get_changes_since`, raft appends, `write_path_health`) and replaces its internals: `MmapParallelWal`, the accumulator + flush loop + supervisor task, the legacy checkpoint and the `Compactor` hook all go. The other WAL implementations are deleted in Task 2.9, not here, so this commit series stays reviewable.
+The switch, in four commits so each one builds and passes on its own (Phase 2 conventions): **2.8a** replaces the write, read and recovery paths; **2.8b** moves test fault injection onto a `Vfs` wrapper and restores the liveness tests on it; **2.8c** deletes the machinery 2.8a leaves unreachable; **2.8d** moves the perf gate onto the new path, runs the Linux adapter rule and records STO-01..05 and STO-08 in the ledger. `Wal::reserve`/`append_reserved`, which this series needs, already landed in Task 2.6. The other WAL implementations are deleted in Task 2.9, and `new_with_replication` is decided at Task 2.9's STOP, not here.
+
+`WalStorageAdapter` keeps its public API (constructors including `new_with_replication`, `StorageAdapter`, `flush`, `save_checkpoint`, `take_snapshot`, `get_changes_since`, raft appends, `write_path_health`). `MmapParallelWal`, the accumulator, the flush loop, the supervisor task, the legacy checkpoint read and the `Compactor` hook stop being used in this task.
 
 **Design:**
-- **One write = one frame.** `put`, `put_batch`, `put_many`, `delete`, `delete_many`, the raft appends and (Task 2.19) outbox writes each encode one `Batch` on the caller's task and call `wal.append(payload, Some(hook))`. `put_batch`/`put_many` are one frame and one sync (decision record risk 4).
-- **Publish in LSN order, on the writer thread (STO-03).** The hook captures the batch's keys and applies them to the index (`papaya::HashMap<Vec<u8>, RecordLoc>`) when the writer runs it. Hooks run in LSN order after the frame is durable (Durable) or written (Fast), so the live index can never hold an older location than recovery would compute, and in Durable mode it never exposes a write that a power cut could remove. The multi-key visibility guarantee (spec S-03) becomes a `parking_lot::RwLock<()>` taken for write by each hook for the duration of its index updates, and for read by `snapshot_get_many` while it resolves every key to a `RecordLoc` (no `.await` under the guard; values are read afterwards from those fixed locations).
+- **One write = one frame.** `put`, `put_batch`, `put_many`, `delete`, `delete_many`, the raft appends and (Task 2.19) outbox writes each encode one `Batch` on the caller's task and append it with one hook. `put_batch`/`put_many` are one frame and one sync (decision record risk 4).
+- **Publish in LSN order, on the writer thread (STO-03).** The hook captures the batch's keys and applies them to the index (`papaya::HashMap<Vec<u8>, RecordLoc>`) when the writer runs it. Hooks run in LSN order after the frame is durable (Durable) or written (Fast), so the live index can never hold an older location than recovery would compute, and in Durable mode it never exposes a write that a power cut could remove. The multi-key visibility guarantee (spec S-03) becomes a `parking_lot::RwLock<()>` taken for write by each hook for the duration of its index updates, and for read by `snapshot_get_many` while it resolves every key to a `RecordLoc` (no `.await` under the guard; values are read afterwards from those fixed locations). `parking_lot = "0.12"` becomes a `crates/prkdb` dependency in this task (the version `prkdb-verify` already uses, so `Cargo.lock` gains no new crate); `std::sync::RwLock` would work too, but a hook that panics would then poison the lock and turn every later read into a panic, while the WAL already turns that panic into `Poisoned`.
 - **The cache is a validated memo, not a second source of truth.** `ShardedLruCache<Vec<u8>, (Lsn, Vec<u8>)>`. `get`: look up the index → `loc`; if the cache holds `(loc.lsn, v)` return `v`, else `wal.read(loc)` → `Batch::decode` → the last op for the key → cache `(loc.lsn, value)`. Hooks never touch the cache, so a racing reader can at worst cache a value under an LSN the index no longer points to, which the next `get` ignores.
 - **Recovery = full replay** (`Wal::open` with `replay_from = 1`), rebuilding the index. The legacy `checkpoint.json` is never read, which removes STO-01's data loss; Task 2.14 adds a correct snapshot.
-- **Errors.** `WalError::Poisoned` → `StorageError::Internal("WAL poisoned: …")`; `WalError::Closed` → `StorageError::WriteAbandoned`; `RecordTooLarge` → `StorageError::Validation`. An append that does not complete within `LivenessBounds::client_bound` returns `StorageError::WriteNotConfirmed` (the write is with the writer and may still land). Waiting for admission permits past the bound returns `StorageError::WriteBackpressure` (nothing was queued, so the answer is definite).
+- **Errors (D12: accepted behaviour changes).** Waiting in `wal.reserve` past `LivenessBounds::client_bound` returns `StorageError::WriteBackpressure` (nothing was queued, so the answer is definite). Once `append_reserved` has queued the request, a result that does not arrive within `client_bound` returns `StorageError::WriteNotConfirmed` (the write is with the writer and may still land). `WalError::Poisoned` → `StorageError::Internal("WAL poisoned: …; reopen the database")` — a failed fsync poisons the log until reopen. `WalError::Closed` → `StorageError::WriteAbandoned`; `RecordTooLarge` → `StorageError::Validation`.
 - **No runtime needed to open.** `Wal::open` is synchronous, so `new`/`open`/`new_with_config`/`open_with_vfs` no longer call `block_in_place`; `open_async` runs the same code in `spawn_blocking` so a long replay does not block a runtime worker.
+- **Every constructor creates a missing directory** (controller decision). `open` used to fail on a missing directory; nothing depends on that — `rg -n 'WalStorageAdapter::open\(' crates` shows only reopen call sites. Say so in `open`'s doc comment.
 - **Old data directories are refused, not silently shadowed.** Until Task 2.11 adds the `FORMAT` marker, `open_inner` refuses a directory that contains `mmap_segment_0` with `StorageError::Corruption("data directory {dir} was created by an older PrkDB (format 1); this version reads format 2. See docs/guide/upgrade")`. Without this, the new log would start empty next to the old one and the database would look wiped.
+- **`new_with_replication` keeps working until Task 2.9 decides its fate.** Its `ReplicationManager::replicate_batch` takes `LogRecord`s. `commit` converts the batch's ops into `LogRecord`s only when `inner.replication` is `Some`, calls `replicate_batch(records, loc.lsn)` after the append resolves and logs an error exactly as the flush loop did. This conversion is temporary and is deleted with the constructor at Task 2.9's STOP (or kept, if the maintainer keeps core replication).
 
 **Files:**
-- Modify: `crates/prkdb/src/storage/wal_adapter.rs`, `storage/recovery.rs` (rewrite: replay into the index), `storage/checkpoint.rs` (strip to what `save_checkpoint` still needs), `storage/config.rs`, `storage/cache.rs`, `storage/writer_liveness.rs`, `storage/collection_partitioned_adapter.rs` (constructor call sites, fault-injection tests), `crates/prkdb-core/src/wal/config.rs` (remove `segment_count`, `shard_count`), `crates/prkdb/src/builder.rs`, `crates/prkdb/tests/{tripwires.rs,durability.rs,wal_adapter_surface.rs}`, `crates/prkdb-verify/{src/sut.rs,src/bin/crash_child.rs,tests/harness.rs,tests/sigkill.rs}`, `crates/prkdb/benches/iai_hot_paths.rs`, `scripts/perf_gate_floors.toml`
+- Modify: `crates/prkdb/Cargo.toml` (`parking_lot`), `crates/prkdb/src/storage/wal_adapter.rs`, `storage/recovery.rs` (rewrite: replay into the index), `storage/config.rs`, `storage/cache.rs`, `storage/writer_liveness.rs`, `storage/collection_partitioned_adapter.rs` (constructor call sites), `crates/prkdb-core/src/wal/config.rs` (remove `segment_count`, `shard_count`), `crates/prkdb/src/builder.rs`, `crates/prkdb/tests/{tripwires.rs,durability.rs,wal_adapter_surface.rs}`, `crates/prkdb-verify/{src/sut.rs,src/bin/crash_child.rs,tests/harness.rs,tests/sigkill.rs}`
 - Create: `crates/prkdb-verify/tests/power_loss.rs`
+
+Steps 1–3 are written and run (failing) before step 5, and committed together with the fix in step 9: `power_loss.rs` cannot compile before `open_with_vfs` exists, and every commit must build.
+
+- [ ] **Step 0: Bench baseline** — `cargo bench -p prkdb --bench storage_bench -- --save-baseline before` (Conventions perf note; compared in step 8).
 
 - [ ] **Step 1: Failing tests — adapter under power loss** (`crates/prkdb-verify/tests/power_loss.rs`). These do not compile until `open_with_vfs` exists; that is the failing state.
 
 ```rust
-//! The storage adapter under simulated power loss (Task 2.8): STO-02 and STO-04 end to end.
+//! The storage adapter under simulated power loss (Task 2.8a): STO-02 and STO-04 end to end.
 
 use prkdb::storage::config::StorageConfig;
 use prkdb::storage::WalStorageAdapter;
@@ -4104,7 +4248,7 @@ async fn a_corrupt_sealed_segment_fails_the_open_by_name() {
 }
 ```
 
-Run: `cargo nextest run -p prkdb-verify --test power_loss` → compile error (`open_with_vfs` missing, `sync_mode` not a `WalConfig` field until Task 2.6 — it is by now, so only the constructor is missing).
+Run: `cargo nextest run -p prkdb-verify --test power_loss` → compile error (`open_with_vfs` missing; `sync_mode` is a `WalConfig` field since Task 2.6).
 
 - [ ] **Step 2: Failing tests — ordering, segment size, old directories** (append to `crates/prkdb/tests/durability.rs`):
 
@@ -4237,8 +4381,8 @@ async fn discovery_profile_checkpoint_keeps_every_key() {
 ```
 
 - [ ] **Step 4: Config surgery.**
-  - `crates/prkdb-core/src/wal/config.rs`: delete `segment_count` and `shard_count` (their only reader, `MmapParallelWal` construction, goes in step 6); fix every literal and every `config.segment_count` use found by `rg -n 'segment_count|shard_count' crates --glob '*.rs'` outside `crates/prkdb-core/src/wal/{mmap_parallel_wal,parallel_wal,async_parallel_wal}.rs` and the streaming/sharded adapters (deleted in 2.9; until then they keep a local `const SEGMENTS: usize = 4;`). In `crates/prkdb-verify` the `--segments` flag of `crash_child` and its use in `tests/sigkill.rs` go away: the single log has no segment count, and the mid-stream tests' "force a resize" purpose becomes "force a roll" via a small `segment_bytes` (set `segment_bytes: 8 * 1024 * 1024` for the 100 MB mid-stream run and update the doc comment's arithmetic).
-  - `crates/prkdb/src/storage/config.rs`: delete the local `SyncMode` enum and `StorageConfig::sync_mode` (two knobs for one setting is root cause 4); add `pub use prkdb_core::wal::SyncMode;`. For source compatibility with the old variant name, add in `crates/prkdb-core/src/wal/config.rs` (an inherent impl must live in the defining crate):
+  - `crates/prkdb-core/src/wal/config.rs`: delete `segment_count` and `shard_count` (their only reader, `MmapParallelWal` construction in the adapter, goes in step 5); fix every literal and every `config.segment_count` use found by `rg -n 'segment_count|shard_count' crates --glob '*.rs'` outside `crates/prkdb-core/src/wal/{mmap_parallel_wal,parallel_wal,async_parallel_wal}.rs` and the streaming/sharded adapters (deleted in 2.9; until then they keep a local `const SEGMENTS: usize = 4;`). In `crates/prkdb-verify` the `--segments` flag of `crash_child` and its use in `tests/sigkill.rs` go away: the single log has no segment count, and the mid-stream tests' "force a resize" purpose becomes "force a roll" via a small `segment_bytes` (set `segment_bytes: 8 * 1024 * 1024` for the 100 MB mid-stream run and update the doc comment's arithmetic).
+  - `crates/prkdb/src/storage/config.rs`: delete the local `SyncMode` enum and `StorageConfig::sync_mode` (two knobs for one setting is root cause 4; D12 accepts the break); add `pub use prkdb_core::wal::SyncMode;`. For source compatibility with the old variant name, add in `crates/prkdb-core/src/wal/config.rs` (an inherent impl must live in the defining crate):
     ```rust
     impl SyncMode {
         /// The old name for [`SyncMode::Fast`].
@@ -4247,9 +4391,10 @@ async fn discovery_profile_checkpoint_keeps_every_key() {
         pub const Performance: SyncMode = SyncMode::Fast;
     }
     ```
-  - `WalStorageAdapterBuilder::with_sync_mode` sets `self.config.wal.sync_mode`.
+  - `WalStorageAdapterBuilder::with_sync_mode` sets `self.config.wal.sync_mode`. `PrkDbBuilder` gains `pub fn with_sync_mode(mut self, mode: SyncMode) -> Self`, applied by `build_storage` to both `default_wal_config` and `optimized_wal_config` (default `Durable`), so a `with_data_dir` database can choose Fast without hand-building a `WalConfig` (Task 2.25's e2e bench uses it).
+  - Upgrade checklist (Phase 5 item 5.4): tick "`StorageConfig::sync_mode` moved to `WalConfig::sync_mode`; `SyncMode::Performance` is a deprecated alias of `Fast`", "a failed fsync poisons the WAL until reopen", "`WriteNotConfirmed` on client timeout", "`WalStorageAdapter::open` creates a missing directory".
 
-- [ ] **Step 5: Rewrite the adapter internals.** `WalStorageInner` becomes:
+- [ ] **Step 5: Rewrite the write, read and recovery paths.** `WalStorageInner` becomes:
 
 ```rust
 struct WalStorageInner {
@@ -4272,7 +4417,7 @@ struct WalStorageInner {
 }
 ```
 
-Constructors all delegate to one function:
+(`replication: Option<tokio::sync::Mutex<ReplicationManager>>` stays until Task 2.9, see the design.) Constructors all delegate to one function:
 
 ```rust
 impl WalStorageAdapter {
@@ -4286,11 +4431,9 @@ impl WalStorageAdapter {
 }
 ```
 
-(`open` used to fail on a missing directory; nothing depends on that — `rg -n 'WalStorageAdapter::open\(' crates` shows only reopen call sites — so all constructors now create-if-missing. Say so in `open`'s doc comment.)
+`open_inner`: refuse a format-1 directory (design above); `Wal::open(vfs, &log_dir, WalOptions::from_config(&config.wal), 1, &mut replay)` where `replay` decodes each `Batch` and applies it to a fresh index (put → insert `loc`, delete → remove); set `applied_lsn` to the last replayed LSN; build the cache with `config.cache_capacity` (keeps STO-09 fixed). Test fault injection is not wired in yet (Task 2.8b).
 
-`open_inner`: refuse a format-1 directory (design above); wrap `vfs` with `fault_injection::wrap(vfs, &log_dir)` under `#[cfg(test)]` (step 8); `Wal::open(vfs, &log_dir, WalOptions::from_config(&config.wal), 1, &mut replay)` where `replay` decodes each `Batch` and applies it to a fresh index (put → insert `loc`, delete → remove); set `applied_lsn` to the last replayed LSN; build the cache with `config.cache_capacity` (keeps STO-09 fixed).
-
-Write path, one helper used by every mutating method:
+Write path, one helper used by every mutating method. Admission and completion are timed separately, which is what makes the two error kinds honest:
 
 ```rust
     /// Encodes `batch`, appends it as one frame, and publishes it into the index from
@@ -4311,15 +4454,21 @@ Write path, one helper used by every mutating method:
             }
             applied.store(loc.lsn, Ordering::Release);
         });
-        match tokio::time::timeout(self.inner.bounds.client_bound, self.inner.wal.append(payload, Some(hook))).await {
+        let bound = self.inner.bounds.client_bound;
+        let reservation = match tokio::time::timeout(bound, self.inner.wal.reserve(payload.len())).await {
+            Ok(r) => r.map_err(wal_err)?,
+            Err(_) => return Err(StorageError::WriteBackpressure(format!(
+                "WAL admission queue full for {}ms; nothing was written", bound.as_millis()))),
+        };
+        // From here the writer owns the request: a timeout means "not confirmed", not "not written".
+        let pending = self.inner.wal.append_reserved(reservation, payload, Some(hook)).map_err(wal_err)?;
+        match tokio::time::timeout(bound, pending).await {
             Ok(r) => r.map_err(wal_err),
             Err(_) => Err(StorageError::WriteNotConfirmed(format!(
-                "no result from the WAL writer within {}ms", self.inner.bounds.client_bound.as_millis()))),
+                "no result from the WAL writer within {}ms", bound.as_millis()))),
         }
     }
 ```
-
-(Admission waits happen inside `wal.append`; split them out with a `Wal::reserve(len) -> Permit` if the timeout must distinguish "never queued" (`WriteBackpressure`) from "queued, unanswered" (`WriteNotConfirmed`). Do split: add `pub async fn reserve(&self, len: usize) -> Result<Reservation, WalError>` and `pub async fn append_reserved(&self, r: Reservation, payload, hook)` to `Wal` in this task, with `append` = reserve + append_reserved. Time the two separately.)
 
 Metrics: keep `record_write`/`record_write_batch`/`record_read` calls at the same points. `put`/`put_batch`/`put_many`/`delete`/`delete_many` take `transaction_barrier.read()` as today; `put_batch_unlocked`/`delete_many_unlocked` skip it (transactions hold the write side).
 
@@ -4327,101 +4476,235 @@ Read path: `get` as in the design; `get_many` = `get` per key (the ≥ 100-key "
 
 `write_path_health()` maps `wal.health()`: `Healthy` → `healthy: true`; `Stalled{queued_bytes, oldest_ms}` → `healthy: false`, reason "WAL writer stalled: …", `queue_depth` = queued requests, `oldest_unpublished_age_ms = oldest_ms`; `Poisoned(r)` → `healthy: false`, reason r; `Closed` → `healthy: false`. `publishes_total` counts completed frames; `direct_appends_total` stays 0 (there is one path now; keep the field for the probe schema and say so in `WritePathHealth`'s doc).
 
-`Drop for WalStorageAdapter`: nothing special — dropping the last `Arc<WalStorageInner>` drops the `Wal`, which closes (drain, sync, join). Delete `flush_on_last_handle_drop` and its helper thread.
+`Drop for WalStorageAdapter`: nothing special — dropping the last `Arc<WalStorageInner>` drops the `Wal`, which closes (drain, sync, join). Remove the `Drop` body that called `flush_on_last_handle_drop`.
 
-Delete: `PendingWrite`, `WriterTasks`, `run_flush_loop`, `run_writer_supervisor`, `observe_write_path`, `fail_write_path`, `discharge_pending`, `discharge_report`, `enqueue_write(s)`, `await_write`, `flush_accumulator_inner`, `publish_batch`, `rebuild_index_async`, the `Compactor` field and its trigger, `new_with_replication` and the `replication` field (the core `ReplicationManager` it fed is deleted in Task 2.9; it has no production caller: `rg -n new_with_replication crates` shows only its own tests), `checkpoint_path`/`max_offset` fields. In `writer_liveness.rs` keep `LivenessBounds` and `unix_millis`; delete `WritePathProgress`, `SharedProgress` and `WriterFailure` if the compiler reports them unused (it should).
+**What goes now, what waits for 2.8c.** Delete in this task everything that no longer compiles against the new `WalStorageInner` — anything that reads the old `wal`, accumulator, task-handle, `checkpoint_path`, `max_offset` or `compactor` fields: `run_flush_loop`, `run_writer_supervisor`, `observe_write_path`, `fail_write_path`, `enqueue_write(s)`, `await_write`, `flush_accumulator_inner`, `publish_batch`, `rebuild_index_async`, the `Compactor` field and its trigger (a `Compactor` wraps `MmapParallelWal` and cannot be attached to `Wal`). What still compiles but is now unreachable — `PendingWrite`, `WriterTasks`, `discharge_pending`, `discharge_report`, `flush_on_last_handle_drop` and its helper thread, the JSON `Checkpoint` type and its functions in `checkpoint.rs`, `recovery.rs`'s `repair_segments`, `writer_liveness.rs`'s `WritePathProgress`/`SharedProgress`/`WriterFailure` — gets `#[allow(dead_code)] // deleted in Task 2.8c` so clippy stays clean, and nothing new may call it. If the compiler forces one of those out earlier, delete it here; never keep an old-field function alive with a shim.
 
-- [ ] **Step 6: Recovery and checkpoint modules.** `storage/recovery.rs`: `RecoveryManager` now holds `log_dir` and the `Arc<dyn Vfs>`; `check_health()` re-scans every segment with `segment::scan_segment` and maps any fault to `StorageError::Corruption`; `recover()` returns `StorageError::Recovery("run the database open path; torn tails are truncated there and mid-log corruption is not repaired automatically")` — the old `repair_segments` silently truncated at the first bad record anywhere, which the new rules forbid. `create_backup` unchanged. `storage/checkpoint.rs`: delete the JSON `Checkpoint` type, `save_checkpoint`/`load_checkpoint` and their tests (Task 2.14 writes the new file format in this module).
+- [ ] **Step 6: Recovery module.** `storage/recovery.rs`: `RecoveryManager` now holds `log_dir` and the `Arc<dyn Vfs>`; `check_health()` re-scans every segment with `segment::scan_segment` and maps any fault to `StorageError::Corruption`; `recover()` returns `StorageError::Recovery("run the database open path; torn tails are truncated there and mid-log corruption is not repaired automatically")` — the old `repair_segments` silently truncated at the first bad record anywhere, which the new rules forbid. `create_backup` unchanged.
 
-- [ ] **Step 7: Existing adapter tests.** Keep every test in `wal_adapter.rs`'s `mod tests` that tests behaviour a user can observe; retarget or delete the ones that test deleted machinery. Required mapping (apply by name):
+- [ ] **Step 7: Minimal test retarget.** Keep every test in `wal_adapter.rs`'s `mod tests` that tests behaviour a user can observe. **Rule for this commit:** a test that calls a `fault_injection` hook other than `fail_flush_at` (which `flush` still checks before the WAL) depends on the writer-fault hooks that 2.8b re-implements on `Vfs`; remove it in this commit and list it in the commit body — 2.8b adds its new form back (table there). The same rule applies to the hook-based tests in `collection_partitioned_adapter.rs` (`queue_depths_sum_across_collections`, `the_aggregate_publish_total_sums_across_collections`, `one_stalled_collection_makes_the_adapter_unhealthy`). Retarget the rest now, by name:
 
-| Old test | New form |
+| Old test | New form (this commit) |
 |---|---|
-| `replication_constructor_uses_the_supplied_wal_config`, `test_wal_adapter_replication` | deleted with `new_with_replication` |
-| `test_wal_adapter_compaction` | deleted (Task 2.15 adds a real compaction test) |
+| `test_wal_adapter_compaction` | deleted (a `Compactor` cannot drive `Wal`; Task 2.15 adds a real compaction test) |
 | `test_wal_adapter_auto_recovery_on_startup`, `test_wal_adapter_runtime_corruption_detection` | rewrite against the new rules: torn tail → opens, key before the tear readable; corrupt sealed segment → open fails naming the file |
 | `dropping_the_last_handle_publishes_what_is_still_queued` | `dropping_the_last_handle_closes_the_log_durably`: `put_many` 100 pairs, drop, reopen, all present |
 | `a_batch_reports_its_bytes_and_flush_publishes_what_is_queued` | keep the metrics assertions; "flush publishes" becomes "flush syncs" (`wal.durable_lsn() == applied_lsn` after `flush`) |
 | `a_mixed_batch_applies_its_puts_and_deletes_in_order` | keep (one `Batch`, ops applied in order by the hook) |
-| `queued_puts_and_deletes_keep_their_collection_names` | deleted: `LogOperation::collection` no longer exists; key namespacing is Task 2.12 |
+| `queued_puts_and_deletes_keep_their_collection_names` | deleted: `LogOperation::collection` is no longer written; key namespacing is Task 2.12 |
 | `a_write_is_refused_when_no_writer_was_started` | `a_write_after_close_is_refused` (`WalError::Closed` → `WriteAbandoned`) |
 | `a_direct_write_is_counted_without_disturbing_the_stall_detector`, `an_idle_watchdog_does_not_wake_at_all`, `the_watchdog_returns_to_waiting_once_the_queue_drains`, `a_write_into_an_empty_queue_wakes_the_watchdog`, `a_discharge_of_nothing_is_silent` | deleted: there is no watchdog task and no direct/queued split; health is computed on demand (liveness spec acceptance 1 now holds by construction — say so in `write_path_health`'s doc) |
 | `a_stale_index_entry_does_not_return_another_keys_value` | keep |
-| `dropping_a_queued_write_answers_its_caller`, `taking_a_write_apart_disarms_the_drop_guard` | move to `log.rs` unit tests against `Reply`'s drop guard |
-| `a_panicking_writer_discharges_its_waiters_with_the_panic` | `a_panicking_write_poisons_and_answers_every_waiter` via the test Vfs's `panic_writer_at` |
-| `a_writer_that_publishes_nothing_is_detected_and_reported_unhealthy` | `a_stalled_writer_is_reported_unhealthy` via `stall_writer_at` (blocks `write_at`) |
-| `a_working_writer_is_never_reported_as_stalled`, `the_not_confirmed_variant_survives_the_storage_adapter_boundary`, `the_write_path_publishes_the_numbers_that_show_a_stall_forming` | keep, retargeted at `Wal` counters |
-| `a_full_queue_refuses_new_writes_instead_of_growing` | `a_full_queue_makes_writers_wait_then_refuses` (small `max_queued_bytes`, stalled writer, the extra write returns `WriteBackpressure` after the client bound) |
-| `a_failed_append_does_not_count_as_a_publish` | `a_failed_append_is_never_visible` (`fail_append_at` → put errors, `get` returns `None`, later writes `Poisoned`) |
 | `dropping_an_adapter_stops_its_background_tasks_promptly` | `dropping_an_adapter_joins_the_writer_thread` (drop returns within 1 s; `prkdb-wal-writer` thread gone) |
+| `replication_constructor_uses_the_supplied_wal_config`, `test_wal_adapter_replication` | keep (the constructor stays until Task 2.9) |
 
-Then re-read `docs/superpowers/specs/2026-08-11-wal-writer-liveness.md` "Acceptance" and confirm each item maps to a test above; list the mapping in the commit body.
+Other callers:
+  - `crates/prkdb/tests/wal_adapter_surface.rs`: the tests that write compressed batches through `MmapParallelWal` directly (`compressed_batches_round_trip`, `compressed_batch_deletes_are_applied`, `scan_range_reads_compressed_batches`, `get_changes_since_expands_compressed_batches`, `scan_prefix_honours_a_compressed_batch_delete`, `get_many_reads_each_key_out_of_a_compressed_batch`) produce compressed frames through the adapter instead: `compressing_adapter` already sets LZ4; write with `put_batch` (≥ `min_compress_bytes`) and assert the same things. `the_adapter_accessors_report_real_state` asserts `max_offset()` advances and `save_checkpoint()` makes `durable_lsn == max_offset` instead of asserting a JSON file appears.
+  - `crates/prkdb-verify/src/sut.rs`: unchanged API; `WalSut::crash` comment updated ("drop now closes the log, which syncs; this is a clean process exit, and power loss is `PowerLoss` from Task 2.10b").
+  - `crates/prkdb/src/storage/collection_partitioned_adapter.rs`: `WalStorageAdapter::new` no longer needs `spawn_blocking` (it does not call `block_in_place`); keep `spawn_blocking` anyway, because a replay can be long — only fix the comment that justifies it. (Its per-collection WALs go in Task 2.9b.)
+  - `crates/prkdb/benches/iai_hot_paths.rs` compiles unchanged (public API); it moves to the new path's fixtures in 2.8d.
 
-- [ ] **Step 8: Test-only fault injection through `Vfs`.** Keep the `fault_injection` module's public test API and its directory-keyed registry (so `collection_partitioned_adapter.rs` tests keep working unchanged), but implement the writer faults as a `Vfs` wrapper instead of hooks in the deleted flush loop:
-  - `fail_flush_at`/`clear_flush_failure`: unchanged (checked at the top of `WalStorageAdapter::flush`, before the WAL; it tests that wrappers forward errors, and must not poison the log).
-  - `fail_append_at`: the wrapper's `write_at` returns `Err` for files under the directory (poisons the log, as a real disk error would).
-  - `stall_writer_at`/`clear_writer_stall`: `write_at` blocks on a `Condvar` until cleared.
-  - `panic_writer_at`: `write_at` panics.
-  - `never_start_writer_at`: deleted with its test.
-  `open_inner` applies `#[cfg(test)] let vfs: Arc<dyn Vfs> = Arc::new(fault_injection::FaultInjectingVfs::new(vfs, log_dir.clone()));`. The `queue_depths_sum_across_collections` test keeps passing because `queue_depth` is now the WAL's queued-request count.
-
-- [ ] **Step 9: Other callers.**
-  - `crates/prkdb/tests/wal_adapter_surface.rs`: the four tests that write compressed batches through `MmapParallelWal` directly (`compressed_batches_round_trip`, `compressed_batch_deletes_are_applied`, `scan_range_reads_compressed_batches`, `get_changes_since_expands_compressed_batches`, `scan_prefix_honours_a_compressed_batch_delete`, `get_many_reads_each_key_out_of_a_compressed_batch`) produce compressed frames through the adapter instead: `compressing_adapter` already sets LZ4; write with `put_batch` (≥ `min_compress_bytes`) and assert the same things. `the_adapter_accessors_report_real_state` asserts `max_offset()` advances and `save_checkpoint()` makes `durable_lsn == max_offset` instead of asserting a JSON file appears.
-  - `crates/prkdb-verify/src/sut.rs`: unchanged API; `WalSut::crash` comment updated ("drop now closes the log, which syncs; this is a clean process exit, and power loss is `PowerLoss` from Task 2.10").
-  - `crates/prkdb/benches/iai_hot_paths.rs`: WAL fixtures use a `current_thread` runtime (the adapter no longer needs `block_in_place`), so no idle worker threads are counted; replace `bench_log_record_encode`/`decode` with `bench_batch_encode`/`bench_batch_decode` (one 1 KiB put, `Batch::encode`/`decode`); update `scripts/perf_gate_floors.toml` references to the new names. The perf gate will show these as new benchmarks (no base comparison), which the deltas script already handles.
-  - `crates/prkdb/src/storage/collection_partitioned_adapter.rs`: `WalStorageAdapter::new` no longer needs `spawn_blocking` (it does not call `block_in_place`); keep `spawn_blocking` anyway, because a replay can be long — only fix the comment that justifies it.
-- [ ] **Step 10: Run everything.**
-  - `cargo build --workspace --all-targets` → clean.
+- [ ] **Step 8: Run everything.**
+  - `cargo build --workspace --all-targets` → clean; `cargo clippy --workspace --all-targets -- -D warnings` → clean (the `dead_code` allows above are the only additions).
   - `cargo nextest run -p prkdb-verify --test power_loss --test wal_power_loss` → pass.
   - `cargo nextest run -p prkdb --test durability --test tripwires --test wal_adapter_surface` → pass.
   - `cargo nextest run --workspace` → pass. If wall time grew more than 2× on the maintainer machine, list the slowest tests (`cargo nextest run --workspace --final-status-level slow`) and switch only those that do not test durability to `SyncMode::Fast` with a comment (Phase 2 conventions).
   - `cargo xtask verify --profile blocking --seeds 200` and `--profile discovery --seeds 200` → both green (discovery now includes a working `Checkpoint`).
   - `cargo nextest run -p prkdb-verify --test sigkill` five times → green.
-- [ ] **Step 11: Local bench delta** (Conventions): `cargo bench -p prkdb --bench storage_bench -- --baseline before` (baseline saved before step 5) → table in the commit body.
-- [ ] **Step 12: Linux adapter rule.** Dispatch `probe=wal-bench` with `ref` = this task's head and `base_ref` = the commit before step 5. The rule compares `current_adapter_put` (new adapter, Fast is not the default — the bench builds it from `test_config()`, so set `sync_mode: SyncMode::Fast` for the adapter cells in the bench as part of this task) against the base run's `current_adapter_put` (old adapter). **STOP** if any cell loses more than 15 %: report both tables to the maintainer before the ledger step.
-- [ ] **Step 13: Ledger.** Set `fixed` with these `regression_tests` (and `changes` in the follow-up commit):
+  - `cargo bench -p prkdb --bench storage_bench -- --baseline before` → table for the commit body.
+
+- [ ] **Step 9: Commit** — `fix: run WalStorageAdapter on the single ordered WAL` (body: bench delta, the tests removed for 2.8b by name, the `dead_code` items left for 2.8c).
+
+---
+
+### Task 2.8b: Test fault injection through `Vfs`; liveness tests restored
+
+The writer faults that the liveness tests inject (fail, stall, panic) used hooks inside the deleted flush loop. Real disk faults reach the `Wal` through `Vfs`, so that is where the test faults go now.
+
+**Files:** `crates/prkdb/src/storage/wal_adapter.rs` (`mod fault_injection`, `open_inner`, `mod tests`), `crates/prkdb/src/storage/collection_partitioned_adapter.rs` (tests)
+
+- [ ] **Step 1: The wrapper.** Keep the `fault_injection` module's public test API and its directory-keyed registry (so `collection_partitioned_adapter.rs` tests keep their calls), and add `pub(crate) struct FaultInjectingVfs { inner: Arc<dyn Vfs>, dir: PathBuf }` implementing `Vfs`; its files implement `VfsFile` by consulting the registry for `dir` on every `write_at`:
+  - `fail_append_at`: `write_at` returns `Err(io::Error::other("injected append failure"))` (poisons the log, as a real disk error would).
+  - `stall_writer_at`/`clear_writer_stall`: `write_at` blocks on a `Condvar` until cleared.
+  - `panic_writer_at`: `write_at` panics.
+  - `fail_flush_at`/`clear_flush_failure`: unchanged (checked at the top of `WalStorageAdapter::flush`, before the WAL; it tests that wrappers forward errors, and must not poison the log).
+  - `never_start_writer_at`: no equivalent (the writer thread always starts with the `Wal`); it is deleted in 2.8c with its last test.
+  `open_inner` applies `#[cfg(test)] let vfs: Arc<dyn Vfs> = Arc::new(fault_injection::FaultInjectingVfs::new(vfs, log_dir.clone()));`. Unit tests of the wrapper itself (a registered directory's `write_at` fails/stalls; an unregistered one does not) go in `fault_injection`'s own `#[cfg(test)]` block.
+- [ ] **Step 2: Restore the removed tests in their new form**:
+
+| Removed in 2.8a | New form |
+|---|---|
+| `a_panicking_writer_discharges_its_waiters_with_the_panic` | `a_panicking_write_poisons_and_answers_every_waiter` via `panic_writer_at` |
+| `a_writer_that_publishes_nothing_is_detected_and_reported_unhealthy` | `a_stalled_writer_is_reported_unhealthy` via `stall_writer_at` (blocks `write_at`) |
+| `a_working_writer_is_never_reported_as_stalled`, `the_not_confirmed_variant_survives_the_storage_adapter_boundary`, `the_write_path_publishes_the_numbers_that_show_a_stall_forming` | same names, retargeted at `Wal` counters and `stall_writer_at` |
+| `a_full_queue_refuses_new_writes_instead_of_growing` | `a_full_queue_makes_writers_wait_then_refuses` (small `max_queued_bytes`, stalled writer, the extra write returns `WriteBackpressure` after the client bound) |
+| `a_failed_append_does_not_count_as_a_publish` | `a_failed_append_is_never_visible` (`fail_append_at` → put errors, `get` returns `None`, later writes `Poisoned`) |
+| partitioned: `queue_depths_sum_across_collections`, `the_aggregate_publish_total_sums_across_collections`, `one_stalled_collection_makes_the_adapter_unhealthy` | same names; `queue_depth` is now the WAL's queued-request count (Task 2.9b rewrites them again for one WAL) |
+| any other test the 2.8a commit body lists | its closest behavioural equivalent through the wrapper; name it in this commit body |
+
+Every stall test waits with `tokio::time::timeout` (fail, never hang) and clears the stall in a guard's `Drop`, so a failing assertion cannot leave the writer blocked for the rest of the test binary.
+- [ ] **Step 3: Liveness acceptance.** Re-read `docs/superpowers/specs/2026-08-11-wal-writer-liveness.md` "Acceptance" and confirm each item maps to a test above (or to "holds by construction" with the reason); list the mapping in the commit body.
+- [ ] **Step 4: Run** — `cargo nextest run -p prkdb --lib` → pass; workspace → pass; harness 200 seeds → green.
+- [ ] **Step 5: Commit** — `test: inject WAL writer faults through Vfs and restore the liveness tests` (body: the acceptance mapping).
+
+---
+
+### Task 2.8c: Delete the adapter's dead machinery; `CompactionConfig` moves into `prkdb`
+
+**Files:** `crates/prkdb/src/storage/{wal_adapter.rs,checkpoint.rs,recovery.rs,writer_liveness.rs,config.rs,mod.rs}`, `crates/prkdb-core/src/wal/log.rs` (tests), `crates/prkdb/src/builder.rs`
+
+- [ ] **Step 1: Delete** every item 2.8a marked `#[allow(dead_code)] // deleted in Task 2.8c`, the allows with them, `never_start_writer_at`, and the JSON checkpoint's tests. `storage/checkpoint.rs` keeps only its module doc until Task 2.14 writes the new format there. In `writer_liveness.rs` keep `LivenessBounds` and `unix_millis`.
+- [ ] **Step 2: Drop-guard tests move to the log.** `dropping_a_queued_write_answers_its_caller` and `taking_a_write_apart_disarms_the_drop_guard` tested `PendingWrite`; rewrite them in `log.rs`'s `#[cfg(test)] mod tests` against `Reply`'s drop guard (an unanswered `Reply` sends `Err(Closed)`; a `Reply` whose sender was taken sends nothing).
+- [ ] **Step 3: `CompactionConfig` moves out of `prkdb-core`** before Task 2.9 deletes `prkdb_core::wal::compaction`: define `pub struct CompactionConfig { pub min_wal_size_bytes: u64, pub min_interval: Duration, pub keep_segments: usize }` with the same `Default` (100 MB, 300 s, 2) in `crates/prkdb/src/storage/config.rs`, switch `StorageConfig::compaction` and `WalStorageAdapterBuilder::with_compaction_config` to it, and re-export it as `prkdb::storage::CompactionConfig`. After this commit `rg -n 'wal::compaction' crates/prkdb` finds nothing; `prkdb_core::wal::compaction::CompactionConfig` keeps existing only for `Compactor` until 2.9. (Task 2.15 adds `min_dead_ratio` and deletes `keep_segments`.)
+- [ ] **Step 4: Run** — `rg -n 'allow\(dead_code\)\] // deleted in Task 2.8c' crates` → nothing; `cargo clippy --workspace --all-targets -- -D warnings` → clean; workspace → pass; harness 200 seeds → green.
+- [ ] **Step 5: Commit** — `refactor: delete the WAL adapter's flush loop, supervisor and JSON checkpoint`.
+
+---
+
+### Task 2.8d: Perf gate on the new path, Linux adapter rule, ledger (STO-01, STO-02, STO-03, STO-04, STO-05, STO-08)
+
+**Files:** `crates/prkdb/benches/iai_hot_paths.rs`, `scripts/perf_gate_floors.toml`, `crates/prkdb/benches/wal_write_path_spike.rs`, `docs/remediation/ledger.toml`, `docs/status/remediation.md`
+
+- [ ] **Step 1: Instruction-count benches.** WAL fixtures use a `current_thread` runtime (the adapter no longer needs `block_in_place`), so no idle worker threads are counted; replace `bench_log_record_encode`/`decode` with `bench_batch_encode`/`bench_batch_decode` (one 1 KiB put, `Batch::encode`/`decode`); update `scripts/perf_gate_floors.toml` references to the new names. The perf gate shows these as new benchmarks (no base comparison), which the deltas script already handles. `scripts/check_perf_gate_floors.sh` → exit 0; `cargo bench -p prkdb --bench iai_hot_paths --no-run` → builds. Dispatch `probe=iai` → every floor row `ok`; URL in the commit body.
+- [ ] **Step 2: Bench the adapter in Fast mode.** In `wal_write_path_spike.rs`, the `current_adapter_put` cells build `WalConfig { sync_mode: SyncMode::Fast, ..WalConfig::test_config() }`: the rule is about the Fast path, and `test_config()` is Durable.
+- [ ] **Step 3: Linux adapter rule.** Dispatch `probe=wal-bench` with `ref` = this task's head and `base_ref` = the commit before Task 2.8a. The rule compares `current_adapter_put` (new adapter, Fast) against the base run's `current_adapter_put` (old adapter, which never synced whatever its config said). **STOP** if any cell loses more than 15 %: report both tables to the maintainer before the ledger step.
+- [ ] **Step 4: Ledger.** Set `fixed` with these `regression_tests` (and `changes` = the 2.8a–2.8d SHAs in the follow-up commit):
   - STO-01: `test:crates/prkdb/tests/tripwires.rs::sto01_checkpoint_keeps_pre_checkpoint_keys`, `test:crates/prkdb-verify/tests/harness.rs::discovery_profile_checkpoint_keeps_every_key`; clear `tripwire`; remove the harness tripwire from `evidence`.
   - STO-02: `test:crates/prkdb-verify/tests/power_loss.rs::durable_put_survives_power_loss`, `test:crates/prkdb-verify/tests/wal_power_loss.rs::durable_acks_survive_power_loss_with_any_tear`, `test:crates/prkdb-core/tests/wal_log.rs::durable_appends_are_synced_before_the_ack`.
   - STO-03: `test:crates/prkdb/tests/durability.rs::concurrent_same_key_live_equals_recovered`, `test:crates/prkdb-core/tests/wal_log.rs::commit_hooks_run_in_lsn_order`.
-  - STO-04: `test:crates/prkdb-verify/tests/wal_power_loss.rs::torn_tail_is_truncated_and_later_appends_survive`, `…::a_new_segment_is_durable_after_roll`, `…::corruption_in_a_sealed_segment_refuses_to_open`, `test:crates/prkdb-verify/tests/power_loss.rs::a_torn_adapter_tail_keeps_earlier_keys_and_accepts_new_writes`.
+  - STO-04: `test:crates/prkdb-verify/tests/wal_power_loss.rs::torn_tail_is_truncated_and_later_appends_survive`, `…::a_new_segment_is_durable_after_roll`, `…::corruption_in_a_sealed_segment_refuses_to_open`, `…::a_fresh_fast_log_survives_power_loss_before_any_sync`, `test:crates/prkdb-verify/tests/power_loss.rs::a_torn_adapter_tail_keeps_earlier_keys_and_accepts_new_writes`.
   - STO-05: `test:crates/prkdb-core/tests/wal_log.rs::replay_order_equals_append_order_across_segment_roll`, `test:crates/prkdb/tests/durability.rs::concurrent_same_key_live_equals_recovered`.
   - STO-08: `test:crates/prkdb/tests/durability.rs::segment_bytes_is_honored`.
-  - STO-01 is critical: re-render `docs/status/repo-status.md` (`cargo xtask repo-status render`) if the Verification dimension changes (pre-push script note). STO-02 is critical too.
-- [ ] **Step 14: Commits** (one series): `test: add power-loss, ordering and segment-size tests for the WAL adapter` (steps 1–3, failing), `refactor: remove WalConfig segment_count and shard_count` (step 4), `fix: run WalStorageAdapter on the single ordered WAL` (steps 5–10; body: bench delta, probe URL, liveness acceptance mapping), then `docs: record STO-01..STO-05 and STO-08 as fixed`.
+  - STO-01 and STO-02 are critical: re-render `docs/status/repo-status.md` (`cargo xtask repo-status render`) if the Verification dimension changes (pre-push script note).
+  `cargo xtask remediation check && cargo xtask remediation render`.
+- [ ] **Step 5: Commits** — `perf: measure the single-WAL adapter in the instruction-count gate` (steps 1–2; body: probe URLs, the Linux rule table from step 3), then `docs: record STO-01..STO-05 and STO-08 as fixed`.
 
 ---
 
 ### Task 2.9: Delete the other WAL implementations (STO-06)
 
-**Files:** delete `crates/prkdb-core/src/wal/{mmap_parallel_wal,mmap_log_segment,parallel_wal,async_parallel_wal,async_log_segment,log_segment,write_ahead_log,offset_index,compaction}.rs` and whatever else the compiler then reports unused in `wal/` (candidates: `async_fsync.rs`, `adaptive.rs` if `WalConfig` no longer needs it, `buffer_pool.rs` in `wal/`, `metrics.rs` if only the deleted WALs used it); `crates/prkdb-core/src/replication/{follower_server,manager,replica_client,protocol}.rs` + `crates/prkdb-core/tests/replication_integration_tests.rs` + `crates/prkdb-core/benches/{replication_bench,parallel_wal_bench,async_parallel_wal_bench,mmap_parallel_wal_bench,wal_bench,wal_recovery_bench,wal_random_read_bench,wal_single_write_bench,batching_bench}.rs` (their `[[bench]]` entries too, keeping any that no longer reference deleted types); `crates/prkdb-core/tests/format_version.rs`; `crates/prkdb/src/storage/{sharded_wal_adapter,streaming_adapter,partitioned_streaming_adapter,write_queue}.rs`; `crates/prkdb/examples/{raw_wal_bench,streaming_bench,partitioned_bench}.rs` and the streaming/sharded sections of `comprehensive_bench.rs`/`ultra_performance.rs`.
+**Files:** delete `crates/prkdb-core/src/wal/{mmap_parallel_wal,mmap_log_segment,parallel_wal,async_parallel_wal,async_log_segment,log_segment,write_ahead_log,offset_index,compaction}.rs` and whatever else the compiler then reports unused in `wal/` (candidates: `async_fsync.rs`, `adaptive.rs` if `WalConfig` no longer needs it, `buffer_pool.rs` in `wal/`, `metrics.rs` if only the deleted WALs used it); `crates/prkdb-core/src/replication/{follower_server,manager,replica_client,protocol}.rs` + `crates/prkdb-core/tests/replication_integration_tests.rs` + `crates/prkdb-core/benches/{replication_bench,parallel_wal_bench,async_parallel_wal_bench,mmap_parallel_wal_bench,wal_bench,wal_recovery_bench,wal_random_read_bench,wal_single_write_bench,batching_bench}.rs` (their `[[bench]]` entries too, keeping any that no longer reference deleted types); `crates/prkdb-core/tests/format_version.rs`; `crates/prkdb/src/storage/{sharded_wal_adapter,streaming_adapter,partitioned_streaming_adapter,write_queue}.rs`; `crates/prkdb/examples/{raw_wal_bench,streaming_bench,partitioned_bench}.rs` and the streaming/sharded sections of `comprehensive_bench.rs`/`ultra_performance.rs`; `WalStorageAdapter::new_with_replication`, its `replication` field and the `LogRecord` conversion Task 2.8a kept for it. Create `scripts/check_single_wal.sh`.
 
-- [ ] **Step 1: STOP — confirm the deletion list with the maintainer.** Public API disappears: `prkdb::storage::{ShardedWalAdapter, StreamingStorageAdapter, StreamingConfig, StreamingRecord, PartitionedStreamingAdapter, PartitionedStreamingConfig, PartitionStrategy}` and `prkdb_core::replication::{FollowerServer, ReplicationManager, ReplicaClient, …}` (the core leader/follower replication fed only by the `new_with_replication` constructor deleted in Task 2.8; `prkdb::replication` is a separate module and stays). Recommendation: delete all of it — each exists to showcase the parallel mmap WAL (spec 2a: "Delete the other WAL implementations after migrating their callers"; these adapters *are* the callers, and a second, unverified log path per data directory is root cause 4). If the maintainer wants the streaming adapters kept, port them instead: `StreamingStorageAdapter` becomes a thin wrapper over `Wal` (`append_batch(records)` → one `append` of the encoded records, returning the LSN; `read_from(offset)` → `wal.scan_from(offset)`), and `PartitionedStreamingAdapter` holds one such wrapper per partition directory. Record the decision in the commit body.
-- [ ] **Step 2: Inventory.** `rg -lw 'ParallelWal|AsyncParallelWal|MmapParallelWal|WriteAheadLog|MmapLogSegment|LogSegment|AsyncLogSegment|OffsetIndex|Compactor' crates --glob '*.rs'` → expected before this task: only the files listed above plus `wal/mod.rs` and `wal_write_path_spike.rs`.
-- [ ] **Step 3: The spike bench becomes the comparison bench.** Rename `crates/prkdb/benches/wal_write_path_spike.rs` → `wal_write_path.rs` (and its `[[bench]]`), delete the `SingleLog` prototype, `current_mmap_wal` and `two_shard_fast` cells; keep `wal_durable`, `wal_fast`, `current_adapter_put` (renamed `adapter_put`), `model_memcpy_only`, and the device ceilings. Update `scripts/wal_fast_rule.py`: base/head mode compares the cell named `adapter_put` or `current_adapter_put` (whichever each table has), and head-only mode compares `wal_fast` against the `wal_fast` rows recorded in the decision record §8 (`--reference docs/remediation/decisions/2026-09-24-single-log-spike.md`), since the old path it used to compare against no longer exists. Update `remediation-gate.yml`'s `probe-wal-bench` job to run `wal_write_path`. Update the decision record's "Bench" line with the new path.
-- [ ] **Step 4: Delete, then build.** Remove the files, the `pub mod`/`pub use` lines in `wal/mod.rs`, `replication/mod.rs` (keep the re-exports of `prkdb_types::replication` types if anything still uses them; else delete the module), `storage/mod.rs`, and the `[[bench]]`/`[[example]]` entries. `LogRecord`/`LogOperation` go too if the compiler reports no users (after Task 2.8 only the deleted modules and `write_queue.rs` used them). `cargo build --workspace --all-targets` → clean.
-- [ ] **Step 5: Regression check that nothing re-adds a second log.** Create `scripts/check_single_wal.sh`:
+- [ ] **Step 1: STOP — confirm the deletion list with the maintainer.** This is the one Phase 2 STOP that D12 does not cover. Public API disappears:
+  - `prkdb::storage::{ShardedWalAdapter, StreamingStorageAdapter, StreamingConfig, StreamingRecord, PartitionedStreamingAdapter, PartitionedStreamingConfig, PartitionStrategy}`;
+  - `prkdb_core::replication::{FollowerServer, ReplicationManager, ReplicaClient, …}` — the core leader/follower replication, fed only by `WalStorageAdapter::new_with_replication` (`rg -n new_with_replication crates` shows only its own tests), which goes with it, together with the adapter's `replication` field, the 2.8a `LogRecord` conversion and the test `replication_constructor_uses_the_supplied_wal_config`. (`test_wal_adapter_replication` tests `get_changes_since`, not the constructor, and stays. `prkdb::replication` is a separate module and stays.)
+
+  Recommendation: delete all of it — each exists to showcase the parallel mmap WAL (spec 2a: "Delete the other WAL implementations after migrating their callers"; these adapters *are* the callers, and a second, unverified log path per data directory is root cause 4). Alternatives if the maintainer wants to keep parts:
+  - streaming adapters kept → port them: `StreamingStorageAdapter` becomes a thin wrapper over `Wal` (`append_batch(records)` → one `append` of the encoded records, returning the LSN; `read_from(offset)` → `wal.scan_from(offset)`), and `PartitionedStreamingAdapter` holds one such wrapper per partition directory;
+  - core replication kept → `new_with_replication` stays on the 2.8a conversion path, `LogRecord`/`LogOperation` stay for its protocol, and the replication files are removed from the deletion list.
+
+  Record the decision in the commit body.
+- [ ] **Step 2: The regression check first, and watch it fail.** Create `scripts/check_single_wal.sh`:
 
 ```bash
 #!/usr/bin/env bash
 # STO-06 regression: exactly one WAL implementation. Fails if a deleted type returns.
+# D11 (Task 2.9b) extends it: one WAL per data directory.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-if rg -nw 'ParallelWal|AsyncParallelWal|MmapParallelWal|WriteAheadLog|MmapLogSegment|AsyncLogSegment' crates --glob '*.rs'; then
+if grep -rnwE 'ParallelWal|AsyncParallelWal|MmapParallelWal|WriteAheadLog|MmapLogSegment|AsyncLogSegment' crates --include='*.rs'; then
   echo "a second WAL implementation is back (STO-06)"; exit 1
 fi
-test "$(rg -l 'impl Wal \{' crates/prkdb-core/src/wal | wc -l | tr -d ' ')" = "1"
+test "$(grep -rlF 'impl Wal {' crates/prkdb-core/src/wal | wc -l | tr -d ' ')" = "1"
 ```
 
-`chmod +x`; run → exit 0. Add `step single-wal; bash scripts/check_single_wal.sh` to `scripts/pre-push-check.sh`.
-- [ ] **Step 6: Tests** — `cargo nextest run --workspace` → pass; harness blocking 200 seeds → green.
-- [ ] **Step 7: Ledger** — STO-06 `fixed`, `regression_tests = ["script:scripts/check_single_wal.sh", "test:crates/prkdb-core/tests/wal_log.rs::replay_order_equals_append_order_across_segment_roll"]`.
-- [ ] **Step 8: Commit** — `refactor: delete the parallel, async, mmap and legacy WAL implementations` (body: the maintainer's decision from step 1, deleted public types). Follow-up `docs: record STO-06 as fixed`.
+`chmod +x`; run it now → it prints every current use of the old types (`mmap_parallel_wal.rs`, `wal_write_path_spike.rs`, the streaming/sharded adapters, …) and exits 1. Paste the list into the commit body: it is the failing state and the inventory in one.
+- [ ] **Step 3: Inventory.** `rg -lw 'ParallelWal|AsyncParallelWal|MmapParallelWal|WriteAheadLog|MmapLogSegment|LogSegment|AsyncLogSegment|OffsetIndex|Compactor' crates --glob '*.rs'` → expected: only the files listed above plus `wal/mod.rs` and `wal_write_path_spike.rs`. Anything else is a caller to migrate first.
+- [ ] **Step 4: The spike bench becomes the comparison bench.** Rename `crates/prkdb/benches/wal_write_path_spike.rs` → `wal_write_path.rs` (and its `[[bench]]`), delete the `SingleLog` prototype, `current_mmap_wal` and `two_shard_fast` cells; keep `wal_durable`, `wal_fast`, `current_adapter_put` (renamed `adapter_put`), `model_memcpy_only`, and the device ceilings. Update `scripts/wal_fast_rule.py`:
+  - base/head mode compares the cell named `adapter_put` or `current_adapter_put` (whichever each run has; old base refs print the old name);
+  - head-only mode can no longer compare against `current_mmap_wal`, so it gains `--reference <file>`: compares head `wal_fast` against the `wal_fast` rows in the reference file, by default the raw rows Task 2.6 stored in the decision record §8 (`--reference docs/remediation/decisions/2026-09-24-single-log-spike.md`);
+  - `--self-test` gains a reference-mode case (the fixture as both head and reference → every `wal_fast` cell ratio 1.00, exit 0) and a check that `adapter_put` rows are accepted in base/head mode (append two `adapter_put/1w/1k` rows to `scripts/testdata/wal_bench_sample.md` and assert the pair is found).
+
+  Update `remediation-gate.yml`'s `probe-wal-bench` job to run `wal_write_path` and pass `--reference` in head-only mode. Update the decision record's "Bench" line with the new path.
+- [ ] **Step 5: Delete, then build.** Remove the files, the `pub mod`/`pub use` lines in `wal/mod.rs`, `replication/mod.rs` (keep the re-exports of `prkdb_types::replication` types if anything still uses them; else delete the module), `storage/mod.rs`, and the `[[bench]]`/`[[example]]` entries. `LogRecord`/`LogOperation` go too if the compiler reports no users (after Task 2.8c only the deleted modules, `write_queue.rs` and the 2.8a replication conversion used them). `prkdb_core::wal::compaction::CompactionConfig` goes with `compaction.rs`; `prkdb` has used its own copy since Task 2.8c. `cargo build --workspace --all-targets` → clean.
+- [ ] **Step 6: The check passes.** `scripts/check_single_wal.sh` → exit 0. Add `step single-wal; bash scripts/check_single_wal.sh` to `scripts/pre-push-check.sh`. The script is committed together with the deletions (step 9), so no commit carries a red check; the failing run from step 2 is in the commit body.
+- [ ] **Step 7: Tests** — `python3 scripts/wal_fast_rule.py --self-test` → ok; `cargo nextest run --workspace` → pass; harness blocking 200 seeds → green.
+- [ ] **Step 8: Ledger** — STO-06 `fixed`, `regression_tests = ["script:scripts/check_single_wal.sh", "test:crates/prkdb-core/tests/wal_log.rs::replay_order_equals_append_order_across_segment_roll"]` (Task 2.9b adds its D11 test).
+- [ ] **Step 9: Commit** — `refactor: delete the parallel, async, mmap and legacy WAL implementations` (body: the maintainer's decision from step 1, deleted public types, the step 2 failing output). Follow-up `docs: record STO-06 as fixed`. Upgrade checklist (Phase 5 item 5.4): add the deleted public types.
 
 ---
 
-### Task 2.10: `PowerLoss` and Fast mode in the harness (TST-05)
+### Task 2.9b: `CollectionPartitionedAdapter` on the single WAL (D11)
 
-§7.1 row "Phase 2 (after 2a)": the blocking profile gains `PowerLoss` (via `Vfs`) and runs in Durable and Fast. This task applies the Phase 1 harness review's constraints (see the note kept below) before adding the op.
+`PrkDb::builder().with_data_dir(..)` builds a `CollectionPartitionedAdapter` (`with_data_dir` sets `OptimizationLevel::Legendary`, and `build_storage` routes every optimization level there), so this adapter is the default on-disk path, not a side feature. Today it opens one `WalStorageAdapter` per collection under `collections/{name}/`, splits every key at its first `:` to pick one, and drops outbox writes (EVT-02). D11: one globally ordered WAL per data directory, no exceptions — global order, atomic cross-collection writes and one recovery path (spec 2a). This task lands before the key codec (Task 2.12) on purpose: once keys are binary, a first-`:` split would route them wrongly, so the split must be gone first.
+
+**Design:**
+- The adapter holds one `Arc<WalStorageAdapter>` opened at `config.log_dir` (the data directory root). No `collections/` directory, no per-collection map, no `__outbox` WAL.
+- **Trait methods forward unchanged, with no key parsing:** `get`, `put`, `delete`, `put_batch`, `scan_prefix`, `scan_range`, `take_snapshot`, `flush`, `write_path_health`, the outbox methods and `put_with_outbox`/`delete_with_outbox` (one frame, so atomic — until Task 2.19 the outbox is the inner adapter's memory-only map, as for `WalStorageAdapter`, but it is no longer dropped). `get_changes_since` is now supported: one log has one order. The old refusal (spec S-09, `durability.rs::get_changes_since_is_unsupported_and_says_so`) inverts.
+- **The routing API stays** (`get_from_collection`, `put_to_collection`, `delete_from_collection`, `put_batch_to_collection`, `multi_collection_get`, `get_metrics`). It builds the stored key with one private helper, `fn collection_key(&self, collection: &str, key: &[u8]) -> Result<Vec<u8>, StorageError>`, which in this task returns `collection ++ b":" ++ key` (exactly the bytes a trait-path caller such as `CollectionHandle` writes today, so both paths address the same record) and which Task 2.12 re-implements with the key codec. `put_batch_to_collection` is one inner `put_batch`, so one frame; `multi_collection_get` is a `get` per key.
+- **The collection is a record field, never parsed.** Per-collection metrics attribute routing-API operations by their explicit `collection` argument, and trait-path operations by `fn collection_of(&self, key: &[u8]) -> Option<String>`, which returns `None` in this task (the op counts toward totals only) and which Task 2.12 implements with `keys::decode_key` and the catalog. `parse_collection_key`, `single_collection_bound` and `prefix_change` (the first-`:` machinery) are deleted.
+- `load_all_collections` and `collection_names_on_disk` returned per-collection adapters and are replaced by `pub fn collection_names(&self) -> Vec<String>` (names the metrics have seen; Task 2.12 switches it to the catalog's `list()`). Upgrade checklist (Phase 5 item 5.4): "`CollectionPartitionedAdapter` stores every collection in one WAL at the data directory root; `load_all_collections` is replaced by `collection_names`".
+- **The old layout is refused.** Until Task 2.11's `FORMAT` marker, `WalStorageAdapter::open_inner`'s format-1 guard (Task 2.8a) also refuses a directory that contains `collections/`, with the same "older PrkDB (format 1)" message, so an old partitioned directory is never opened as an empty database.
+
+**Files:** `crates/prkdb/src/storage/collection_partitioned_adapter.rs` (internals and tests), `crates/prkdb/src/storage/wal_adapter.rs` (format-1 guard), `crates/prkdb/src/raft/grpc_service.rs` (comment at the `FetchSegment` error arm that cites the missing `get_changes_since`), `crates/prkdb/tests/{durability.rs,property_tests.rs}`, `crates/prkdb-cli/tests/backup_restore.rs` (module doc), `scripts/check_single_wal.sh`
+
+- [ ] **Step 1: Failing tests** (in `collection_partitioned_adapter.rs`'s `mod tests`):
+
+```rust
+    /// D11: every collection lands in the one WAL at the directory root, in one order.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_partitioned_directory_has_one_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = CollectionPartitionedAdapter::new(WalConfig {
+            log_dir: dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        })
+        .unwrap();
+        db.put_to_collection("users", b"1", b"alice").await.unwrap();
+        db.put(b"orders:1", b"book").await.unwrap();
+        db.put_to_collection("invoices", b"1", b"paid").await.unwrap();
+        db.put_with_outbox(b"users:2", b"bob", "users:0:1", b"event").await.unwrap();
+        db.flush().await.unwrap();
+
+        let entries: Vec<_> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().path()).collect();
+        assert!(entries.iter().all(|p| !p.is_dir()), "no per-collection directories: {entries:?}");
+        assert!(entries.iter().any(|p| p.extension().is_some_and(|e| e == "wal")), "{entries:?}");
+
+        let keys: Vec<Vec<u8>> = db.get_changes_since(0).await.unwrap().into_iter()
+            .map(|c| match c { Change::Put { key, .. } | Change::Delete { key, .. } => key })
+            .collect();
+        assert_eq!(keys, vec![b"users:1".to_vec(), b"orders:1".to_vec(), b"invoices:1".to_vec(), b"users:2".to_vec()],
+            "one global commit order across collections");
+        assert_eq!(db.outbox_list().await.unwrap(), vec![("users:0:1".to_string(), b"event".to_vec())]);
+    }
+
+    /// The pre-D11 layout is refused, not opened as an empty database.
+    #[test]
+    fn a_per_collection_layout_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("collections/users")).unwrap();
+        let err = CollectionPartitionedAdapter::new(WalConfig { log_dir: dir.path().to_path_buf(), ..WalConfig::test_config() })
+            .err()
+            .expect("must refuse");
+        assert!(err.to_string().contains("format 1"), "{err}");
+    }
+```
+
+(Adjust the `Change` import to `prkdb_types::replication::Change`.) Run → fail (per-collection directories exist; `get_changes_since` refuses; the outbox is empty; the old layout opens).
+- [ ] **Step 2: Implement** per the design.
+- [ ] **Step 3: Existing tests.** In `collection_partitioned_adapter.rs`: `the_single_collection_detector_answers_exactly` goes with the detector; `a_collection_not_yet_on_disk_is_still_listed` becomes `collection_names_lists_what_was_written`; `the_outbox_stub_reports_nothing_rather_than_something` becomes `the_outbox_is_the_inner_adapters` (a saved entry is listed); `queue_depths_sum_across_collections`, `the_aggregate_publish_total_sums_across_collections` and `one_stalled_collection_makes_the_adapter_unhealthy` become `a_stalled_wal_makes_the_partitioned_adapter_unhealthy` (one writer, one health); `flush_reports_a_collection_failure_rather_than_swallowing_it` uses `fail_flush_at` on the one directory; keep the rest. In `crates/prkdb/tests/durability.rs`, invert `get_changes_since_is_unsupported_and_says_so` into `get_changes_since_spans_collections_in_commit_order` and fix the S-09 doc comment above it (the `FetchSegment` error arm stays: an unreadable log must still not look empty); retarget `property_tests.rs::adapter_at` if it relies on subdirectories. Update the doc comment of `grpc_service.rs`'s `FetchSegment` error arm and `backup_restore.rs`'s module doc.
+- [ ] **Step 4: Extend the regression check.** Append to `scripts/check_single_wal.sh`:
+
+```bash
+# D11: one WAL per data directory; no per-collection or outbox WALs beside it.
+# (The format-1 guard's check for an old `collections/` directory is allowed; a map of
+# adapters or an `__outbox` directory is not. The behavioural proof is the test
+# a_partitioned_directory_has_one_wal.)
+if grep -rnE 'DashMap<String, Arc<WalStorageAdapter>>|"__outbox' crates/prkdb/src/storage; then
+  echo "a second WAL per data directory is back (D11)"; exit 1
+fi
+```
+
+Run it → exit 0.
+- [ ] **Step 5: Run** — `cargo nextest run -p prkdb --lib collection_partitioned` and `--test durability --test property_tests`, `-p prkdb-cli --test backup_restore` → pass; workspace → pass; harness 200 seeds → green.
+- [ ] **Step 6: Ledger** — append `test:crates/prkdb/src/storage/collection_partitioned_adapter.rs::a_partitioned_directory_has_one_wal` to STO-06's `regression_tests`.
+- [ ] **Step 7: Commit** — `refactor: store every collection of a partitioned adapter in one WAL`.
+
+---
+
+### Task 2.10a: Harness model and checker for acceptable prefixes
+
+§7.1 row "Phase 2 (after 2a)": the blocking profile gains `PowerLoss` (via `Vfs`) and runs in Durable and Fast. Split in two commits so each is green on its own: **2.10a** reshapes the model, checker, runner and `Sut` for the Phase 1 harness review's constraints (quoted below) without changing what the blocking profile runs; **2.10b** adds `PowerLoss`, `FaultSut` and Fast mode on top.
 
 > **Design constraints from the Phase 1 harness review (apply before adding ops):**
 > - **Model answers "acceptable values", not one value.** Fast mode (acked-but-unsynced writes may or may not survive) and Phase 3 transactions break exact equality. Change `Model` to track, per key, the durable value plus pending values since the last sync/checkpoint/clean reopen, and `Mismatch.expected` to that acceptable set. Do this in 2.5, before the Fast profile lands, or the checker gets rewritten twice.
@@ -4429,10 +4712,76 @@ test "$(rg -l 'impl Wal \{' crates/prkdb-core/src/wal | wc -l | tr -d ' ')" = "1
 > - **Op coverage is reported.** Count executed ops per kind in `Report`, so a green run can't hide a disabled op.
 > - The Phase 1 FaultFs already models: per-directory durable entries (including subdirectories), inode-reusing truncating `create`, stale handles after power loss (epoch), and `Tear::{None, Prefix, ZeroTail, Garbage}` with sector-granular tearing of in-place overwrites.
 
-How this task meets them: the model keeps a durable state plus an ordered list of pending mutations and exposes every **prefix** state as a candidate — stronger than per-key acceptable sets, because the WAL can only lose a suffix (spec §7 checker: "SUT state equals the model at some prefix no earlier than the last completed sync"). `Mismatch` keeps `expected` (the full-model value, so existing code and reports keep working) and gains `acceptable`. `Sut` grows by default-bodied methods returning a typed `Unsupported` error, which the runner reports as a harness error, never as a finding. Fault randomness is carried inside the op (`fault_seed`), so replay and minimization are deterministic.
+How 2.10a/2.10b meet them: the model keeps a durable state plus an ordered list of pending mutations and exposes every **prefix** state as a candidate — stronger than per-key acceptable sets, because the WAL can only lose a suffix (spec §7 checker: "SUT state equals the model at some prefix no earlier than the last completed sync"). `Mismatch` keeps `expected` (the full-model value, so existing code and reports keep working) and gains `acceptable`. `Sut` grows by default-bodied methods returning a typed `Unsupported` error, which the runner reports as a harness error, never as a finding. Fault randomness is carried inside the op (`fault_seed`, 2.10b), so replay and minimization are deterministic.
 
-**Files:**
-- Modify: `crates/prkdb-verify/src/{model.rs,ops.rs,sut.rs,checker.rs,runner.rs,bin/verify.rs}`, `crates/prkdb-verify/tests/{harness.rs,self_test.rs}`, `xtask/src/verify.rs` (usage text only), `.github/workflows/{ci.yml,remediation-gate.yml}`, `scripts/pre-push-check.sh`
+**Files:** `crates/prkdb-verify/src/{model.rs,ops.rs,sut.rs,checker.rs,runner.rs,bin/verify.rs}`, `crates/prkdb-verify/tests/{harness.rs,self_test.rs}`, `xtask/src/verify.rs` (usage text only)
+
+- [ ] **Step 1: Failing tests.** In `model.rs`'s tests: `prefix_zero_is_the_durable_state` (put a, `mark_durable`, put b → `prefix(0)` has only a, `state()` has both), `settle_keeps_exactly_n_pending` (three pending puts, `settle(1)` → `state()` = durable + first put, `pending` empty). In `harness.rs`: `report_counts_ops_per_kind` (a 20-seed `Profile::Blocking` run over `WalSut` has `op_counts["Put"] > 0` and `op_counts["Reopen"] > 0`). In `self_test.rs`: `an_unsupported_op_is_a_harness_error_not_a_finding` — a wrapper around `WalSut` whose `checkpoint` returns `Err(Unsupported("checkpoint").into())`, run under `Profile::Discovery` (which generates `Checkpoint`) → `run(..)` returns `Err` whose text contains "does not support checkpoint", and no `Failure` is reported. Run → compile errors (`prefix`, `settle`, `op_counts`, `Unsupported`, `run` do not exist).
+
+- [ ] **Step 2: Model** (`model.rs`), replacing `kv`:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode { Durable, Fast }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Mutation { Put(Key, Value), Delete(Key) }
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Model {
+    /// State as of the last point the SUT certainly made durable.
+    pub durable: BTreeMap<Key, Value>,
+    /// Acknowledged mutations since then, oldest first.
+    pub pending: Vec<Mutation>,
+    pub touched: BTreeSet<Key>,
+}
+
+impl Model {
+    pub fn put(&mut self, k: Key, v: Value);          // touched + pending.push
+    pub fn delete(&mut self, k: &Key);                // touched + pending.push
+    /// The state if every acknowledged mutation survived.
+    pub fn state(&self) -> BTreeMap<Key, Value>;
+    pub fn get(&self, k: &Key) -> Option<Value>;      // from state()
+    /// `durable` with the first `n` pending mutations applied, for n in 0..=pending.len().
+    pub fn prefix(&self, n: usize) -> BTreeMap<Key, Value>;
+    /// A clean reopen, flush or checkpoint happened: everything pending is durable.
+    pub fn mark_durable(&mut self);
+    /// Power loss kept exactly the first `n` pending mutations.
+    pub fn settle(&mut self, n: usize);
+}
+```
+
+Update the two model unit tests to use `state()`.
+
+- [ ] **Step 3: Profiles** (`ops.rs`): add `Profile::Core`, the Phase 1 blocking table, so self-test seeds keep reproducing exactly when `Blocking` changes in 2.10b. In this commit `Blocking` uses the same table (`BLOCKING_WEIGHTS = CORE_WEIGHTS`), so every existing seed runs exactly as before. `Profile::parse` accepts `core`. Update `blocking_never_checkpoints` to cover `Core` too.
+
+- [ ] **Step 4: `Unsupported`** (`sut.rs`):
+
+```rust
+/// Returned by `Sut` methods a SUT does not implement. The runner treats it as a harness
+/// error (the profile asked for an op this SUT cannot do), never as a finding.
+#[derive(Debug)]
+pub struct Unsupported(pub &'static str);
+impl std::fmt::Display for Unsupported { /* "SUT does not support {0}" */ }
+impl std::error::Error for Unsupported {}
+```
+
+- [ ] **Step 5: Checker and runner.**
+  - `Mismatch` gains `pub acceptable: Vec<Option<Value>>`.
+  - `check_durable(model, sut)` compares against `model.state()` (`acceptable = vec![expected]`).
+  - `RunConfig { first_seed, seeds, ops, profile, mode, repro_attempts }` and `pub async fn run(make, &RunConfig) -> anyhow::Result<Report>`. `run_seeds`/`run_seeds_with` stay as wrappers with `mode: Durable` (existing callers compile unchanged). In this commit `run` rejects `Mode::Fast` with an error ("Fast mode arrives with PowerLoss in Task 2.10b").
+  - `run_ops` takes `mode`: after an acked op in Durable mode nothing changes (every ack is durable, so the full state is the only candidate); after `Reopen` or `Checkpoint` → `model.mark_durable()`; after `Crash` → `check_durable` (a process exit loses nothing that was written) and, in Durable mode, `mark_durable()`. A `Sut` error that downcasts to `Unsupported` returns `Err` from `run_ops` (harness error).
+  - `Report` gains `op_counts: BTreeMap<&'static str, u64>` (executed ops per kind, including the implicit trailing reopen as `"Reopen"`); `Outcome::same_kind` compares `acceptable` shape as it does `expected`.
+- [ ] **Step 6: Self-tests** (`self_test.rs`): replace `Profile::Blocking` with `Profile::Core` (they wrap `WalSut`, and `Core` keeps reproducing the seeds they were tuned on after 2.10b changes `Blocking`).
+- [ ] **Step 7: Binary and xtask.** `verify` prints `profile=<p> mode=<m> seeds=<n> checks=<c> ops=<Put:…,Delete:…,…>` and fails a run in which any op kind enabled by the profile has count 0 ("vacuous for <kind>"). `--mode` still accepts only `durable`. Update the usage text in the binary and `xtask/src/verify.rs`'s doc.
+- [ ] **Step 8: Run** — `cargo nextest run -p prkdb-verify` → pass; `cargo xtask verify --profile blocking --seeds 200` → green with the same `checks=` count as before this task (the profile did not change; a different count means the refactor changed behaviour — find out why before committing).
+- [ ] **Step 9: Commit** — `refactor: let the harness model accept any durable prefix`.
+
+---
+
+### Task 2.10b: `PowerLoss` and Fast mode in the harness (TST-05)
+
+**Files:** `crates/prkdb-verify/src/{ops.rs,sut.rs,checker.rs,runner.rs,bin/verify.rs}`, `crates/prkdb-verify/tests/{harness.rs,self_test.rs}`, `xtask/src/verify.rs` (usage text only), `.github/workflows/{ci.yml,remediation-gate.yml}`, `scripts/pre-push-check.sh`
 
 - [ ] **Step 1: Failing tests** (append to `crates/prkdb-verify/tests/harness.rs`; adjust imports to `use prkdb_verify::model::Mode; use prkdb_verify::sut::FaultSut; use prkdb_verify::faultfs::Tear; use prkdb_verify::runner::{run, RunConfig};`):
 
@@ -4487,44 +4836,9 @@ async fn blocking_profile_is_green_in_fast_mode() {
 }
 ```
 
-Change `blocking_profile_is_green_on_current_code` (keep the name: TST-03 cites it) to run `FaultSut::new(Mode::Durable)` with `Profile::Blocking` through `run(..)`, and additionally assert `op_counts["PowerLoss"] > 0`. Change `meta_harness_catches_a_lossy_sut` to wrap `FaultSut` (forward `power_loss`), and `discovery_profile_checkpoint_keeps_every_key` to use `FaultSut::new(Mode::Durable)` (Discovery now includes `PowerLoss`, which `WalSut` does not support). Run: `cargo nextest run -p prkdb-verify --test harness` → compile errors (`Mode`, `FaultSut`, `RunConfig`, `Op::PowerLoss`, `Profile::Core` do not exist).
+Change `blocking_profile_is_green_on_current_code` (keep the name: TST-03 cites it) to run `FaultSut::new(Mode::Durable)` with `Profile::Blocking` through `run(..)`, and additionally assert `op_counts["PowerLoss"] > 0`. Change `meta_harness_catches_a_lossy_sut` to wrap `FaultSut` (forward `power_loss`), and `discovery_profile_checkpoint_keeps_every_key` to use `FaultSut::new(Mode::Durable)` (Discovery now includes `PowerLoss`, which `WalSut` does not support). Add to `self_test.rs`: a `Sut` without `power_loss` run under `Profile::Blocking` produces `Err` mentioning "does not support power_loss", not a finding. Run: `cargo nextest run -p prkdb-verify --test harness` → compile errors (`FaultSut`, `Op::PowerLoss` do not exist).
 
-- [ ] **Step 2: Model** (`model.rs`), replacing `kv`:
-
-```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode { Durable, Fast }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Mutation { Put(Key, Value), Delete(Key) }
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Model {
-    /// State as of the last point the SUT certainly made durable.
-    pub durable: BTreeMap<Key, Value>,
-    /// Acknowledged mutations since then, oldest first.
-    pub pending: Vec<Mutation>,
-    pub touched: BTreeSet<Key>,
-}
-
-impl Model {
-    pub fn put(&mut self, k: Key, v: Value);          // touched + pending.push
-    pub fn delete(&mut self, k: &Key);                // touched + pending.push
-    /// The state if every acknowledged mutation survived.
-    pub fn state(&self) -> BTreeMap<Key, Value>;
-    pub fn get(&self, k: &Key) -> Option<Value>;      // from state()
-    /// `durable` with the first `n` pending mutations applied, for n in 0..=pending.len().
-    pub fn prefix(&self, n: usize) -> BTreeMap<Key, Value>;
-    /// A clean reopen, flush or checkpoint happened: everything pending is durable.
-    pub fn mark_durable(&mut self);
-    /// Power loss kept exactly the first `n` pending mutations.
-    pub fn settle(&mut self, n: usize);
-}
-```
-
-Update the two model unit tests to use `state()`.
-
-- [ ] **Step 3: Ops and profiles** (`ops.rs`): add `Op::PowerLoss { tear: Tear, fault_seed: u64 }` and `Kind::PowerLoss`; add `Profile::Core` (the Phase 1 blocking table, unchanged, so self-test seeds reproduce exactly as before) and retune:
+- [ ] **Step 2: Ops and profiles** (`ops.rs`): add `Op::PowerLoss { tear: Tear, fault_seed: u64 }` and `Kind::PowerLoss`, and retune (`Core` unchanged from 2.10a):
 
 ```rust
 const CORE_WEIGHTS: &[(Kind, u32)] = &[(Kind::Put, 60), (Kind::Delete, 20), (Kind::Reopen, 10), (Kind::Crash, 10)];
@@ -4535,18 +4849,11 @@ const DISCOVERY_WEIGHTS: &[(Kind, u32)] = &[
 ];
 ```
 
-The generator draws `tear` (`Tear::random`) and `fault_seed` (`rng.gen()`) from a second `ChaCha8Rng` seeded with `seed ^ 0xFA17_FA17_FA17_FA17` (one stream per concern), only when it emits a `PowerLoss`, so workload draws for a given seed are unaffected by fault draws. `Profile::parse` accepts `core`. Update `blocking_never_checkpoints` to cover `Core` too.
+The generator draws `tear` (`Tear::random`) and `fault_seed` (`rng.gen()`) from a second `ChaCha8Rng` seeded with `seed ^ 0xFA17_FA17_FA17_FA17` (one stream per concern), only when it emits a `PowerLoss`, so workload draws for a given seed are unaffected by fault draws.
 
-- [ ] **Step 4: SUT** (`sut.rs`):
+- [ ] **Step 3: SUT** (`sut.rs`):
 
 ```rust
-/// Returned by `Sut` methods a SUT does not implement. The runner treats it as a harness
-/// error (the profile asked for an op this SUT cannot do), never as a finding.
-#[derive(Debug)]
-pub struct Unsupported(pub &'static str);
-impl std::fmt::Display for Unsupported { /* "SUT does not support {0}" */ }
-impl std::error::Error for Unsupported {}
-
 // Added to trait Sut, with a default body:
     async fn power_loss(&mut self, _tear: Tear, _fault_seed: u64) -> anyhow::Result<()> {
         Err(Unsupported("power_loss").into())
@@ -4566,19 +4873,14 @@ impl FaultSut {
 
 `FaultSut`'s `put/delete/get` forward; `reopen` = `flush` (sync) + drop + open; `crash` = drop + open (process exit: written data stays in FaultFs's page cache); `power_loss(tear, seed)` = `fs.power_loss(&mut ChaCha8Rng::seed_from_u64(seed), tear)` **first**, then drop the adapter (its handles are stale, so the drop-time sync fails harmlessly and cannot make anything durable after the fact), then open; `checkpoint` = `save_checkpoint`. `WalSut` stays (StdVfs) for `Profile::Core`, the self-tests and `sigkill.rs`.
 
-- [ ] **Step 5: Checker and runner.**
-  - `Mismatch` gains `pub acceptable: Vec<Option<Value>>`.
-  - `check_durable(model, sut)` compares against `model.state()` (`acceptable = vec![expected]`).
+- [ ] **Step 4: Checker and runner.**
   - New `check_after_power_loss(model: &mut Model, sut, mode) -> CheckOutcome`: read the SUT value of every checked key once; Durable → compare with `state()`; Fast → find the largest `n` in `(0..=pending.len()).rev()` with `prefix(n) == sut_state` restricted to checked keys; on success `model.settle(n)`, on failure report the first key where the SUT differs from `state()`, with `acceptable` = that key's value in every prefix.
-  - `RunConfig { first_seed, seeds, ops, profile, mode, repro_attempts }` and `pub async fn run(make, &RunConfig) -> anyhow::Result<Report>`. `run_seeds`/`run_seeds_with` stay as wrappers with `mode: Durable` (existing callers compile unchanged).
-  - `run_ops` takes `mode`: after an acked op in Durable mode nothing changes (every ack is durable, so the full state is the only candidate); after `Reopen` or `Checkpoint` → `model.mark_durable()`; after `Crash` → `check_durable` (a process exit loses nothing that was written) and, in Durable mode, `mark_durable()`; after `PowerLoss` → `check_after_power_loss`. A `Sut` error that downcasts to `Unsupported` returns `Err` from `run_ops` (harness error).
-  - `Report` gains `op_counts: BTreeMap<&'static str, u64>` (executed ops per kind, including the implicit trailing reopen as `"Reopen"`); `Outcome::same_kind` compares `acceptable` shape as it does `expected`.
-- [ ] **Step 6: Self-tests** (`self_test.rs`): replace `Profile::Blocking` with `Profile::Core` (they wrap `WalSut`, which has no `power_loss`; `Core` reproduces the seeds they were tuned on). Add one self-test that a `Sut` without `power_loss` run under `Profile::Blocking` produces `Err` mentioning "does not support power_loss", not a finding.
-- [ ] **Step 7: Binary and xtask.** `verify` accepts `--mode durable|fast` (default durable) and `--sut fault|std` (default `fault` for `blocking`/`discovery`, `std` for `core`), builds `RunConfig`, prints `profile=<p> mode=<m> seeds=<n> checks=<c> ops=<Put:…,Delete:…,…>`, and fails a run in which any op kind enabled by the profile has count 0 ("vacuous for <kind>"). Update the usage text in the binary and `xtask/src/verify.rs`'s doc.
-- [ ] **Step 8: CI and gate.** `ci.yml` `harness` job: run both `cargo xtask verify --profile blocking --seeds 200 --mode durable` and `… --mode fast`. `nightly-harness`: both modes. `remediation-gate.yml`: add a job `harness-fast`, a copy of `harness` with `--mode fast` and `if: ${{ inputs.probe == 'none' && contains(fromJSON('["2","3","4"]'), inputs.phase) }}` (Fast mode exists from Phase 2 on), and make `harness-result` need both jobs, accepting `skipped` for `harness-fast` only when the phase is outside that list. `pre-push-check.sh`: add the Fast run after the Durable one.
-- [ ] **Step 9: Run** — `cargo nextest run -p prkdb-verify` → all pass; `cargo xtask verify --profile blocking --seeds 200 --mode durable` and `--mode fast` → green, `PowerLoss` count > 0 in both. If a seed fails, it is a real finding in Tasks 2.5–2.8's code: minimize, fix, add a regression test at the WAL level, re-run (not the demotion rule: PowerLoss is the op this phase exists to pass).
-- [ ] **Step 10: Ledger** — TST-05 `fixed`, `regression_tests = ["test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_on_current_code", "test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_in_fast_mode", "test:crates/prkdb-verify/tests/harness.rs::fast_mode_checker_catches_lost_synced_data"]`. Add the same two harness tests to STO-02's and STO-04's `regression_tests` (§7.1: this row proves STO-02, STO-04, TST-05).
-- [ ] **Step 11: Commit** — `feat: add power loss and Fast mode to the crash/restart harness`; follow-up `docs: record TST-05 as fixed`.
+  - `run_ops`: after `PowerLoss` → `check_after_power_loss`. `run` accepts `Mode::Fast`.
+- [ ] **Step 5: Binary and xtask.** `verify` accepts `--mode durable|fast` (default durable) and `--sut fault|std` (default `fault` for `blocking`/`discovery`, `std` for `core`). Update the usage text in the binary and `xtask/src/verify.rs`'s doc.
+- [ ] **Step 6: CI and gate.** `ci.yml` `harness` job: run both `cargo xtask verify --profile blocking --seeds 200 --mode durable` and `… --mode fast`. `nightly-harness`: both modes. `remediation-gate.yml`: add a job `harness-fast`, a copy of `harness` with `--mode fast` and `if: ${{ inputs.probe == 'none' && contains(fromJSON('["2","3","4"]'), inputs.phase) }}` (Fast mode exists from Phase 2 on), and make `harness-result` need both jobs, accepting `skipped` for `harness-fast` only when the phase is outside that list. `pre-push-check.sh`: add the Fast run after the Durable one.
+- [ ] **Step 7: Run** — `cargo nextest run -p prkdb-verify` → all pass; `cargo xtask verify --profile blocking --seeds 200 --mode durable` and `--mode fast` → green, `PowerLoss` count > 0 in both. If a seed fails, it is a real finding in Tasks 2.5–2.9b's code: minimize, fix, add a regression test at the WAL level, re-run (not the demotion rule: PowerLoss is the op this phase exists to pass).
+- [ ] **Step 8: Ledger** — TST-05 `fixed`, `regression_tests = ["test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_on_current_code", "test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_in_fast_mode", "test:crates/prkdb-verify/tests/harness.rs::fast_mode_checker_catches_lost_synced_data"]`. Add the same two harness tests to STO-02's and STO-04's `regression_tests` (§7.1: this row proves STO-02, STO-04, TST-05).
+- [ ] **Step 9: Commit** — `feat: add power loss and Fast mode to the crash/restart harness`; follow-up `docs: record TST-05 as fixed`.
 
 ---
 
@@ -4588,7 +4890,7 @@ The format-version mechanism that existed before this phase (`LogSegment`'s `PRK
 
 **Files:**
 - Create: `crates/prkdb/src/storage/format.rs`, `crates/prkdb/src/storage/migrations.rs`, `crates/prkdb/tests/format_v2.rs`, `crates/prkdb-cli/src/commands/migrate.rs`, `crates/prkdb-cli/tests/migrate.rs`
-- Modify: `crates/prkdb/src/storage/mod.rs`, `crates/prkdb/src/storage/wal_adapter.rs` (`open_inner`), `crates/prkdb/src/storage/collection_partitioned_adapter.rs` (root marker), `crates/prkdb-types/src/error.rs` (variant), `crates/prkdb-cli/src/{main.rs,commands.rs}`
+- Modify: `crates/prkdb/src/storage/mod.rs`, `crates/prkdb/src/storage/wal_adapter.rs` (`open_inner`), `crates/prkdb-types/src/error.rs` (variant), `crates/prkdb-cli/src/{main.rs,commands.rs}`
 
 - [ ] **Step 1: Failing tests** — `crates/prkdb/tests/format_v2.rs`:
 
@@ -4698,7 +5000,9 @@ pub fn ensure_format(vfs: &dyn Vfs, dir: &Path) -> Result<FormatMarker, StorageE
 
 File syntax, parsed by hand (two `key = value` lines; unknown keys ignored so a later version can add fields): `format = 2` and `created_by = "<CARGO_PKG_VERSION>"`. Errors are a new `StorageError::UnsupportedFormat(String)` variant (`#[error("{0}")]`) whose text follows spec 2b exactly: `data directory {dir} was created by an older PrkDB (format {n}); this version reads format 2. See docs/guide/upgrade.` (older, including "no FORMAT file: format 1"), or `… by a newer PrkDB (format {n}) …`. "Empty" means `read_dir` returns nothing; a directory holding only `FORMAT.tmp` (a crash during creation) counts as empty and the stale temp file is removed first.
 
-In `WalStorageAdapter::open_inner`: `ensure_format(vfs.as_ref(), &log_dir)?` before `Wal::open`, replacing Task 2.8's `mmap_segment_0` guard (its test keeps passing: that directory is non-empty without `FORMAT`). `CollectionPartitionedAdapter::new` calls `ensure_format` on its root before creating `collections/` (each per-collection directory gets its own `FORMAT` through its adapter).
+In `WalStorageAdapter::open_inner`: `ensure_format(vfs.as_ref(), &log_dir)?` before `Wal::open` (so `FORMAT` exists before the first segment), replacing the format-1 guards of Tasks 2.8a (`mmap_segment_0`) and 2.9b (`collections/`); their tests keep passing, because those directories are non-empty without `FORMAT`. `CollectionPartitionedAdapter` needs nothing of its own: since Task 2.9b its one inner adapter's `log_dir` is the data directory root, so the root gets exactly one `FORMAT` through `open_inner`.
+
+**Multi-raft server layout (`prkdb-server`, `STORAGE_PATH`).** `PrkDb::new_multi_raft` lays out `STORAGE_PATH/meta/` (the facade's `WalStorageAdapter`), `STORAGE_PATH/partition_<n>/` (one `WalStorageAdapter` per Raft group, from `PartitionManager::new`) and `STORAGE_PATH/schemas/` (the file schema registry). `STORAGE_PATH` itself is a container, not a data directory: it holds no WAL and gets no `FORMAT`. Each `meta/` and `partition_<n>/` is a data directory in the D3/D11 sense — one WAL, one `FORMAT`, written by its adapter's `open_inner` — so a format-1 cluster is refused partition by partition with the standard message, and `partition_manager.rs` needs no change (it creates each partition directory empty, then opens the adapter). Each Raft group's log still lives inside its partition's WAL as `__raft_log/` keys until Phase 4 moves it to a separate store under `raft/` with its own format marker (spec 2b, 4a), frozen at the Phase 4 gate; clustering is experimental until then, and the golden directory (Task 2.24) does not cover this layout. Test in `format_v2.rs`, `multi_raft_partitions_are_format_2_data_directories`: `PrkDb::new_multi_raft(1, config, root)` on an empty `root` (constructor only — nothing binds a port before `start_multi_raft`; if the constructor turns out to bind, build the partition adapter the way `PartitionManager::new` does instead) → `root/meta/FORMAT` and `root/partition_0/FORMAT` exist and `root/FORMAT` does not; then, on a second root containing `partition_0/mmap_segment_0`, the constructor fails with a message containing "format 1".
 
 - [ ] **Step 3: `migrations.rs`.**
 
@@ -4721,13 +5025,13 @@ pub fn plan(found: u32) -> Result<Vec<Box<dyn Migration>>, StorageError>;
 
 - [ ] **Step 4: CLI.** `commands/migrate.rs`: `#[derive(Args, Clone, Debug)] pub struct MigrateArgs { #[arg(long)] pub data_dir: PathBuf, #[arg(long)] pub dry_run: bool }` and `pub fn handle_migrate(args: MigrateArgs) -> anyhow::Result<()>`: `read_format`; `Some(2)` → print `data directory {dir} is at format 2; no migrations available for format 2` and succeed; `None` on a non-empty directory → treat as format 1; any other `n` → `plan(n)`: empty plan → error `no migrations available for format {n} → 2; format {n} directories cannot be converted by this version. See docs/guide/upgrade.`; non-empty → list them (dry run) or run them in order. Register: `pub mod migrate;` in `commands.rs`, a `Migrate(migrate::MigrateArgs)` variant in `Commands` (doc comment `/// Upgrade a data directory to this version's format (offline)`) and its match arm (no `init_database_manager`, it is offline).
 - [ ] **Step 5: Run** — `cargo nextest run -p prkdb --test format_v2` and `cargo nextest run -p prkdb-cli --test migrate` → pass; `cargo nextest run --workspace` → pass; harness 200 seeds both modes → green.
-- [ ] **Step 6: Commit** — `feat: add format v2 marker, open rules and migrate command`.
+- [ ] **Step 6: Commit** — `feat: add format v2 marker, open rules and migrate command`. Upgrade checklist (Phase 5 item 5.4): "format 1 directories are refused; `prkdb-cli migrate` reports what can be done".
 
 ---
 
 ### Task 2.12: Key codec and collection catalog (KEY-01)
 
-Spec 2c: `[namespace_len u8][namespace][collection_id u32 BE][key bytes]`, where `collection_id` comes from a persisted catalog keyed by the collection's persisted name. `IndexedStorage` today stores `serde_json(id)` with no namespace at all (KEY-01); `CollectionHandle` prefixes `std::any::type_name::<C>()`, which changes with module paths and compiler versions. Both move to the codec. Extracting the codec from `indexed_storage.rs` follows spec §9.
+Spec 2c: `[namespace_len u8][namespace][collection_id u32 BE][key bytes]`, where `collection_id` comes from a persisted catalog keyed by the collection's persisted name. `IndexedStorage` today stores `serde_json(id)` with no namespace at all (KEY-01); `CollectionHandle` prefixes `std::any::type_name::<C>()`, which changes with module paths and compiler versions. Both move to the codec. Extracting the codec from `indexed_storage.rs` follows spec §9. Two accepted breaking changes land here (D12): `IndexedStorage` primary keys switch from JSON to bincode ids, and `CollectionHandle` keys drop the partition.
 
 **Persisted name.** Add to `prkdb_types::collection::Collection`:
 
@@ -4744,11 +5048,13 @@ Spec 2c: `[namespace_len u8][namespace][collection_id u32 BE][key bytes]`, where
     }
 ```
 
-and `pub fn default_persisted_name(type_name: &str) -> String` (strip generics, take the segment after the last `::`, CamelCase → snake_case). The `Collection` derive (`prkdb-macros`) overrides it with `#[collection(name = "...")]` (the attribute is already declared and currently unused) or `snake_case(ident)`, emitted as `Cow::Borrowed("…")`. The name is `persisted_name`, not `collection_name`, because the derive also implements `ProtoSchema::collection_name`, and two trait methods with one name make `T::collection_name()` ambiguous. **Spec deviation to record:** spec 2c says renaming the type does not change the persisted name; with a derived default it does, unless `#[collection(name)]` pins it — the catalog cannot know two names are the same collection. Document on the trait and in the spec's revision history at this task.
+and `pub fn default_persisted_name(type_name: &str) -> String` (strip generics, take the segment after the last `::`, CamelCase → snake_case). The `Collection` derive (`prkdb-macros`) overrides it with `#[collection(name = "...")]` (the attribute is already declared and currently unused) or `snake_case(ident)`, emitted as `Cow::Borrowed("…")`. The name is `persisted_name`, not `collection_name`, because the derive also implements `ProtoSchema::collection_name`, and two trait methods with one name make `T::collection_name()` ambiguous. **Accepted deviation from spec 2c's wording (spec revision 11, maintainer-approved):** renaming a type changes its derived default name, unless `#[collection(name = "...")]` pins it — the catalog cannot know two names are the same collection. This task implements the pinning (the derive reads the attribute; `persisted_names_are_snake_case_and_pinnable` proves it) and documents the rule on the trait method and on the derive's `#[collection(name)]` docs: "pin the name before the first write if the type may ever be renamed".
+
+**One allocator per storage (catalog races).** `PrkDb`, `IndexedStorage` and `CollectionPartitionedAdapter` each build a `Catalog`, often over the same adapter (a user wraps `db.storage()` in `IndexedStorage`). Allocation is read-counter, write-counter, write-entry; two `Catalog`s with their own locks can both read counter 5 and hand id 5 to two names. The lock therefore belongs to the storage, not the `Catalog`: `StorageAdapter` gains a default-bodied `fn allocation_lock(&self) -> Option<Arc<tokio::sync::Mutex<()>>> { None }` (`prkdb-types` adds tokio's `sync` feature). `WalStorageAdapter` and `InMemoryAdapter` return one `Arc` field created at open; `CollectionPartitionedAdapter` returns its inner adapter's; the sled, SQL and segmented adapters return their own field; `custom_adapter.rs`'s test adapter keeps the default. `Catalog` allocates under `storage.allocation_lock()` (or, when it is `None`, a per-`Catalog` lock, and the trait doc says such an adapter must be used through a single `Catalog`), and **re-reads the name entry after taking the lock**, so a name another `Catalog` allocated a moment ago is returned, not allocated twice.
 
 **Files:**
 - Create: `crates/prkdb/src/keys.rs`, `crates/prkdb/src/catalog.rs`, `crates/prkdb/tests/key_codec.rs`
-- Modify: `crates/prkdb-types/src/collection.rs`, `crates/prkdb-macros/src/lib.rs`, `crates/prkdb/src/lib.rs`, `crates/prkdb/src/indexed_storage.rs`, `crates/prkdb/src/collection_handle.rs`, `crates/prkdb/src/db.rs` (catalog on `PrkDb`), `crates/prkdb/src/consumer.rs` (collection names), `crates/prkdb/tests/tripwires.rs`
+- Modify: `crates/prkdb-types/{Cargo.toml,src/collection.rs,src/storage.rs}` (`allocation_lock`), `crates/prkdb-macros/src/lib.rs`, `crates/prkdb/src/lib.rs`, `crates/prkdb/src/indexed_storage.rs`, `crates/prkdb/src/collection_handle.rs`, `crates/prkdb/src/db.rs` (catalog on `PrkDb`, admin scans), `crates/prkdb/src/{builder.rs,consumer.rs,outbox.rs,retention.rs,replication.rs,dlq.rs}` (persisted names), `crates/prkdb/src/storage/{wal_adapter.rs,in_memory.rs,collection_partitioned_adapter.rs}` (`allocation_lock`, codec routing), `crates/prkdb-storage-{sled,sql,segmented}/src/*.rs` (`allocation_lock`), `crates/prkdb/tests/tripwires.rs`
 
 - [ ] **Step 1: Invert the tripwire into the failing regression test.** In `tripwires.rs` replace `key01_collections_share_primary_keys_tripwire` with:
 
@@ -4822,6 +5128,34 @@ async fn catalog_ids_survive_restart() {
     assert!(gamma != a && gamma != b, "an id was reused after restart");
 }
 
+/// Two catalogs over one storage (PrkDb's and IndexedStorage's) race on first use: every
+/// name gets exactly one id, and no id is handed to two names.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_first_use_from_two_catalogs_allocates_each_name_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage: Arc<dyn prkdb_types::storage::StorageAdapter> = Arc::new(
+        WalStorageAdapter::new(WalConfig { log_dir: dir.path().to_path_buf(), ..WalConfig::test_config() }).unwrap(),
+    );
+    let (a, b) = (Arc::new(Catalog::new(storage.clone(), Vec::new())), Arc::new(Catalog::new(storage.clone(), Vec::new())));
+    let mut tasks = Vec::new();
+    for i in 0..64u32 {
+        let cat = if i % 2 == 0 { a.clone() } else { b.clone() };
+        let name = format!("c{}", i % 16); // every name requested by both catalogs, concurrently
+        tasks.push(tokio::spawn(async move { (name.clone(), cat.id_for_name(&name).await.unwrap()) }));
+    }
+    let mut by_name = std::collections::BTreeMap::new();
+    for t in tasks {
+        let (name, id) = t.await.unwrap();
+        assert_eq!(*by_name.entry(name.clone()).or_insert(id), id, "{name} got two ids");
+    }
+    let ids: std::collections::BTreeSet<_> = by_name.values().copied().collect();
+    assert_eq!(ids.len(), 16, "an id was handed to two names: {by_name:?}");
+    let fresh = Catalog::new(storage, Vec::new());
+    for (name, id) in &by_name {
+        assert_eq!(fresh.id_for_name(name).await.unwrap(), *id, "{name} persisted differently");
+    }
+}
+
 #[test]
 fn persisted_names_are_snake_case_and_pinnable() {
     #[derive(prkdb_macros::Collection, serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -4859,7 +5193,9 @@ pub struct Catalog {
     storage: Arc<dyn StorageAdapter>,
     ns: Vec<u8>,
     cache: DashMap<String, CollectionId>,
-    alloc: tokio::sync::Mutex<()>,
+    names: DashMap<CollectionId, String>,
+    /// Used only when `storage.allocation_lock()` is `None`.
+    fallback: Arc<tokio::sync::Mutex<()>>,
 }
 impl Catalog {
     pub fn new(storage: Arc<dyn StorageAdapter>, ns: Vec<u8>) -> Self;
@@ -4868,13 +5204,36 @@ impl Catalog {
     /// Returns the id for `name`, allocating and persisting one on first use.
     pub async fn id_for_name(&self, name: &str) -> Result<CollectionId, StorageError>;
     pub async fn id_for<C: Collection>(&self) -> Result<CollectionId, StorageError>;
+    /// The id for `name` if one was ever allocated; never allocates (admin and read paths).
+    pub async fn lookup(&self, name: &str) -> Result<Option<CollectionId>, StorageError>;
+    /// Reverse lookup for ids this storage has allocated (cached; reads the entry on a miss).
+    pub async fn name_for(&self, id: CollectionId) -> Result<Option<String>, StorageError>;
     pub async fn list(&self) -> Result<Vec<(String, CollectionId)>, StorageError>;
 }
 ```
 
-Storage: entry `encode_key(ns, SYSTEM_COLLECTION, b"catalog/name/" ++ name)` → `id u32 BE`; counter `encode_key(ns, SYSTEM_COLLECTION, b"catalog/next")` → `u32 BE`, starting at 1. Allocation under `alloc`: read counter, **write the bumped counter first, then the entry** (two plain `put`s, so it is safe on adapters without atomic batches: a crash between them wastes an id, never reuses one). `IndexedStorage::new(storage)` builds a `Catalog` with an empty namespace; `PrkDb` builds one with its namespace in `builder.rs::finish` and exposes `pub(crate) fn catalog(&self)`.
+Storage: entry `encode_key(ns, SYSTEM_COLLECTION, b"catalog/name/" ++ name)` → `id u32 BE`, reverse entry `encode_key(ns, SYSTEM_COLLECTION, b"catalog/id/" ++ id BE)` → name; counter `encode_key(ns, SYSTEM_COLLECTION, b"catalog/next")` → `u32 BE`, starting at 1. `id_for_name`: cache hit → return; else read the entry → found: cache, return; else take the allocation lock (see above), **read the entry again** (another `Catalog` may have allocated it while this one waited), then read the counter and **write the bumped counter first, then the reverse entry, then the entry** (plain `put`s, so it is safe on adapters without atomic batches: a crash between them wastes an id, never reuses one; a reverse entry without its forward entry is ignored by `list`). `IndexedStorage::new(storage)` builds a `Catalog` with an empty namespace; `PrkDb` builds one with its namespace in `builder.rs::finish` and exposes `pub(crate) fn catalog(&self)`; `CollectionPartitionedAdapter` builds one over its inner adapter (whose lock it also returns from `allocation_lock`, so all three share one lock).
 
-- [ ] **Step 4: Use the codec everywhere a record key is built.** `rg -n 'serde_json::to_vec\((record\.)?id\(?\)?|serde_json::to_vec\(id\)|type_name::<T>\(\)' crates/prkdb/src/indexed_storage.rs` lists the sites (13 primary-key sites plus the collection-name sites for the in-memory index maps). Add to `IndexedStorage`:
+- [ ] **Step 4: Use the codec and the persisted name everywhere a record key or collection name is built — in all of `crates/prkdb/src`, not only `indexed_storage.rs`.** Start from the inventory: `rg -n 'type_name::<|serde_json::to_vec\((record\.)?id|serde_json::to_vec\(id\)|push\(b.:.\)|format!\("\{\}:' crates/prkdb/src`. As of this plan it finds these sites; each must be handled, and any site the command finds that is not listed is handled the same way and added to the commit body:
+
+| Site | What it builds | Change |
+|---|---|---|
+| `indexed_storage.rs` (24 `type_name::<` sites, 13 primary-key sites) | primary keys, in-memory index map names | `primary_key::<T>` below; index maps keyed by `T::persisted_name()` |
+| `collection_handle.rs:23-47` `get_namespaced_key` + `apply_namespace` (callers at ~276, 363, 475, 511, 594, 659) | `type_name:partition:id` keys, namespace prefix | `encode_key(ns, catalog.id_for::<C>(), encode_id(id))`; partition dropped (D12); `apply_namespace` deleted (the namespace is inside the codec) |
+| `collection_handle.rs:~677-682` `scan_prefix` | `type_name ++ ':' ++ prefix` | `collection_prefix(ns, id) ++ prefix` (the caller's prefix applies to encoded id bytes; say so in the doc comment) |
+| `collection_handle.rs:~693-702` `scan_range_by_id_bytes` | range bounds via `get_namespaced_key` with partitions | bounds via `encode_key`, no partition |
+| `retention.rs:78` | outbox-id prefix from `type_name` | `C::persisted_name()` |
+| `replication.rs:678` | metrics label from `type_name` | `C::persisted_name()` |
+| `dlq.rs:32` `dlq_topic_name` (and the raw DLQ key at `dlq.rs:~69`) | DLQ topic `"{type_name}.dlq"`, key `"{topic}:{partition}:{now}"` | topic `format!("{}.dlq", C::persisted_name())`; the key stays a raw system key in Phase 2 (DLQ records are not collection records; see below) |
+| `builder.rs:322` `add_collection` | registry name = last `::` segment of `type_name` | `C::persisted_name().into_owned()` (the registry feeds the dashboard and the admin calls below, which must agree with the catalog) |
+| `db.rs:~539, 596, 647, 772, 842, 880` (`get_collection_stats`, `get_collection_latest_offset`, `sample_collection`, `get_partition_metrics`, `get_partitions`, the per-partition details call) | `"{collection}:"` / `"{collection}:{partition}:"` record-key scans | record scans use `collection_prefix(ns, id)` with `id` from `catalog.lookup(name)` (an unknown name is an empty collection, never an allocation); per-partition figures come from the collection's event stream ids (`"{name}:{partition}:{seq}"`, Task 2.20), because record keys no longer carry the partition |
+| `consumer.rs:167, 217, 290, 443, 507, 572, 677` | outbox-stream prefixes and labels from `type_name` | `C::persisted_name()` |
+| `outbox.rs:127, 150, 172, 184, 344, 449, 540, 573` | outbox and DLQ id prefixes from `type_name` | `C::persisted_name()` (`make_outbox_id_for_type` keeps its counter until Task 2.20; only the name changes here) |
+| `storage/collection_partitioned_adapter.rs` `collection_key`, `collection_of`, `collection_names` (Task 2.9b) | routing-API keys, metrics attribution | `encode_key(&[], catalog.id_for_name(collection)?, key)`; `decode_key` + `catalog.name_for`; `catalog.list()` |
+
+System keyspaces stay raw in Phase 2 and are not collection records: `__consumer_offset:` (`consumer.rs:41-48`), `__ttl:` (`ttl.rs:48`), `meta:col:` and `__replication:` (`db.rs`), the authz principal keys, `__raft_log/`, and the DLQ keys above. They cannot collide with codec keys in practice (a codec key starts with a namespace-length byte followed by that many namespace bytes and a 4-byte id), but moving them under `SYSTEM_COLLECTION` is left for the phase that next changes each of them; list them in the `keys.rs` module doc.
+
+Add to `IndexedStorage`:
 
 ```rust
     async fn primary_key<T: Collection>(&self, id: &T::Id) -> Result<Vec<u8>, StorageError> {
@@ -4883,10 +5242,10 @@ Storage: entry `encode_key(ns, SYSTEM_COLLECTION, b"catalog/name/" ++ name)` →
     }
 ```
 
-and replace every site; key the in-memory index maps by `T::persisted_name()` instead of `type_name`. Functions that list a collection (`all`, `count`, `filter`, `query_active`, `snapshot`, …) that currently iterate the in-memory index or the whole store switch to `storage.scan_prefix(&collection_prefix(&[], coll))`. The transaction path (`Transaction::commit`, ~line 3309) builds keys with the same helper. In `collection_handle.rs`, `get_namespaced_key` becomes `encode_key(db.namespace or [], db.catalog().id_for::<C>(), encode_id(id))` — the partition is no longer part of the key (partitions are logical, spec 2c; the partition is still computed for the outbox stream and metrics), and `apply_namespace` is deleted (the namespace is inside the codec). `consumer.rs`'s `collection_name` values (`type_name::<C>()`) become `C::persisted_name()`, and so do the outbox/DLQ prefixes in `outbox.rs` (`make_outbox_id_for_type` keeps its counter until Task 2.20; only the name changes here).
+and replace every site; key the in-memory index maps by `T::persisted_name()` instead of `type_name`. Functions that list a collection (`all`, `count`, `filter`, `query_active`, `snapshot`, …) that currently iterate the in-memory index or the whole store switch to `storage.scan_prefix(&collection_prefix(&[], coll))`. The transaction path (`Transaction::commit`, ~line 3309) builds keys with the same helper. In `collection_handle.rs` the partition is no longer part of the key (partitions are logical, spec 2c; the partition is still computed for the outbox stream and metrics). After this step `rg -n 'type_name::<' crates/prkdb/src` prints nothing (the one remaining use is the `persisted_name` default in `prkdb-types`); the commit body shows the empty output.
 - [ ] **Step 5: Run** — `cargo nextest run -p prkdb --test tripwires --test key_codec --test indexed_db_tests` → pass; `cargo nextest run --workspace` → pass (fix any test that constructed raw keys by hand to use the public API or the codec); harness 200 seeds both modes → green.
-- [ ] **Step 6: Ledger** — KEY-01 `fixed`, `regression_tests = ["test:crates/prkdb/tests/tripwires.rs::key01_collections_with_same_id_are_independent", "test:crates/prkdb/tests/key_codec.rs::catalog_ids_survive_restart"]`, clear `tripwire`. Spec: add a revision-history row for the persisted-name deviation above.
-- [ ] **Step 7: Commit** — `fix: namespace every record key by a persisted collection id` (body: perf delta for `indexed_storage` insert/get — the catalog lookup is a cached `DashMap` hit after first use). Follow-up `docs: record KEY-01 as fixed`.
+- [ ] **Step 6: Ledger** — KEY-01 `fixed`, `regression_tests = ["test:crates/prkdb/tests/tripwires.rs::key01_collections_with_same_id_are_independent", "test:crates/prkdb/tests/key_codec.rs::catalog_ids_survive_restart", "test:crates/prkdb/tests/key_codec.rs::concurrent_first_use_from_two_catalogs_allocates_each_name_once"]`, clear `tripwire`. (The persisted-name deviation is already spec revision 11.) Upgrade checklist (Phase 5 item 5.4): "`IndexedStorage` ids are bincode, not JSON", "`CollectionHandle` keys no longer contain the partition", "a collection's stored name is its snake_case type name unless `#[collection(name)]` pins it; renaming an unpinned type orphans its data".
+- [ ] **Step 7: Commit** — `fix: namespace every record key by a persisted collection id` (body: perf delta for `indexed_storage` insert/get — the catalog lookup is a cached `DashMap` hit after first use — and the inventory output from step 4). Follow-up `docs: record KEY-01 as fixed`.
 
 ---
 
@@ -4960,7 +5319,7 @@ fn default_partitioner_golden_vectors() {
 
 ### Task 2.14: Checkpoint = index snapshot
 
-Task 2.8 made recovery correct by always replaying the whole log. This task makes it fast again without giving up correctness: `save_checkpoint` writes a snapshot of the index at a known LSN, and recovery loads it and replays only what follows. The invariant (spec 2d) is `recover(checkpoint, wal) == recover(∅, wal)` for every log, proven by a property test.
+Task 2.8a made recovery correct by always replaying the whole log. This task makes it fast again without giving up correctness: `save_checkpoint` writes a snapshot of the index at a known LSN, and recovery loads it and replays only what follows. The invariant (spec 2d) is `recover(checkpoint, wal) == recover(∅, wal)` for every log, proven by a property test.
 
 **Design:**
 - **Fuzzy snapshot.** Read `covered = applied_lsn` (every frame ≤ `covered` is published), then iterate the index while writes continue. Entries published after `covered` may or may not be in the snapshot; replaying every frame with LSN > `covered` on top makes the result exact, because replay applies puts and deletes in LSN order and the last one wins. No writer pause.
@@ -5089,13 +5448,13 @@ async fn a_corrupt_checkpoint_falls_back_to_full_replay() {
 `MmapParallelWal::truncate_before` was a stub and the `Compactor` that called it is gone (Task 2.9). Spec 2d: "compaction rewrites live records into new segments, fsyncs, then removes old segments; `truncate_before` becomes real or is deleted" — it is deleted; this task adds compaction.
 
 **Design:**
-- Only **sealed** segments are compacted (never the active one), one run at a time (`Mutex<()>`).
-- A frame is **live** if any of its ops is the current index entry for its key (`index[key].lsn == frame.lsn`), or (from Task 2.19) holds an outbox entry still present. Live frames are rewritten with only their live ops, **keeping their LSN**. Dead frames become `Elided` frames (17-byte header, empty payload) so every segment keeps contiguous LSNs and recovery's continuity check is unchanged. Trade-off to record: an elided record still costs 17 bytes until its segment becomes entirely elided and is removed from the front of the log.
-- Per chosen segment: write `{first:020}.wal.compact` (header + frames) → `sync_data` → **delete every checkpoint + `sync_dir`** (their locations are about to change) → `rename` over `{first:020}.wal` → `sync_dir` → swap the `Wal`'s read handle for that segment → update the index with compare-and-set (only entries whose `lsn` still equals the rewritten frame's LSN get the new `offset`; a key overwritten meanwhile keeps its newer location) → after all segments, write a fresh checkpoint.
+- Only **sealed** segments are compacted (never the active one), one run at a time (`Mutex<()>`), and always **as a prefix, oldest first**: a run rewrites every sealed segment from the oldest up to the newest sealed one, in order, each made durable (rename + `sync_dir`) before the next starts. This is what makes tombstones safe to drop (next bullet).
+- **Liveness is decided per op, then per frame.** A `Put` op is live iff `index[key].lsn == frame.lsn`. A `Delete` op is never live: every older put of its key is dead (the index cannot point at a put older than a delete of the same key), and because compaction runs oldest first, those older puts were already rewritten as dead — durably — earlier in the same run or in an earlier run, so no replay can resurrect them once the delete is gone. (Dropping a delete from a segment while an older segment still held the put would resurrect the key on the next replay; the prefix rule is what rules that out, so it is not an optimisation to relax.) Tasks 2.19 and 2.20 extend these rules to the outbox and event ops (tags 3–5). A frame is **live** if any op in it is live. Live frames are rewritten with only their live ops, **keeping their LSN**. Dead frames become `Elided` frames (17-byte header, empty payload) so every segment keeps contiguous LSNs and recovery's continuity check is unchanged. Trade-off to record: an elided record still costs 17 bytes until its segment becomes entirely elided and is removed from the front of the log.
+- Per segment, oldest first: write `{first:020}.wal.compact` (header + frames) → `sync_data` → **delete every checkpoint + `sync_dir`** (their locations are about to change) → `rename` over `{first:020}.wal` → `sync_dir` → swap the `Wal`'s read handle for that segment → update the index with compare-and-set (only entries whose `lsn` still equals the rewritten frame's LSN get the new `offset`; a key overwritten meanwhile keeps its newer location) → after all segments, write a fresh checkpoint.
 - A leading run of segments that are entirely `Elided` is removed (`remove` + `sync_dir`); the log then starts at a later LSN, which `Wal::open` accepts (the first segment's first LSN is the log start).
 - A read racing a rename can pair an old location with the new file. `Wal::read` detects it (CRC/LSN mismatch → `WalError::CorruptSegment` is wrong here): add `WalError::Moved` for "the frame at this location is not the one asked for, and the segment was rewritten since" (the `Wal` keeps a per-segment generation counter bumped on swap), and the adapter's `get` retries up to 3 times by re-reading the index. Any other mismatch stays `CorruptSegment`.
 - API: `pub async fn compact(&self) -> Result<CompactionReport, StorageError>` with `#[derive(Debug)] pub struct CompactionReport { pub segments_rewritten: usize, pub segments_removed: usize, pub bytes_before: u64, pub bytes_after: u64 }`.
-- Trigger: `WalStorageAdapter::compact()` (public, blocking-safe: runs on `spawn_blocking` from async callers) plus, when a runtime exists at open, a background task that every `CompactionConfig::min_interval` runs `compact()` if total segment bytes ≥ `min_wal_size_bytes` and the sealed segments' dead ratio ≥ `min_dead_ratio` (new field, default 0.5). `CompactionConfig` moves from the deleted `prkdb_core::wal::compaction` to `crates/prkdb/src/storage/compaction.rs`; `keep_segments` is deleted (it meant "history to keep" for the stub and has no meaning now).
+- Trigger: `WalStorageAdapter::compact()` (public, blocking-safe: runs on `spawn_blocking` from async callers) plus, when a runtime exists at open, a background task that every `CompactionConfig::min_interval` runs `compact()` if total segment bytes ≥ `min_wal_size_bytes` and the sealed segments' dead ratio ≥ `min_dead_ratio` (new field, default 0.5). `CompactionConfig` has lived in `crates/prkdb/src/storage/config.rs` since Task 2.8c; this task adds `min_dead_ratio` and deletes `keep_segments` (it meant "history to keep" for the stub and has no meaning now). The compaction logic itself goes in `crates/prkdb/src/storage/compaction.rs`.
 
 **Files:**
 - Create: `crates/prkdb/src/storage/compaction.rs`
@@ -5143,6 +5502,29 @@ async fn compaction_keeps_only_live_values_and_removes_old_segments() {
     };
     check(db).await;
     check(WalStorageAdapter::open_async(cfg()).await.unwrap()).await;
+}
+
+/// A delete survives compaction: the key stays deleted after compact() + reopen even though
+/// the put it deleted sat in an older segment.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_compacted_delete_does_not_resurrect_an_older_put() {
+    use prkdb_core::wal::{SyncMode, WalConfig};
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = || WalConfig { log_dir: dir.path().to_path_buf(), segment_bytes: 8 * 1024, sync_mode: SyncMode::Fast, ..WalConfig::test_config() };
+    let db = WalStorageAdapter::new(cfg()).unwrap();
+    db.put(b"victim", &[1u8; 512]).await.unwrap();
+    for i in 0..64u32 {
+        db.put(format!("filler{i}").as_bytes(), &[2u8; 512]).await.unwrap(); // roll past the put
+    }
+    db.delete(b"victim").await.unwrap();
+    for i in 0..64u32 {
+        db.put(format!("filler{i}").as_bytes(), &[3u8; 512]).await.unwrap(); // seal the delete's segment
+    }
+    db.flush().await.unwrap();
+    db.compact().await.unwrap();
+    assert_eq!(db.get(b"victim").await.unwrap(), None);
+    drop(db);
+    assert_eq!(WalStorageAdapter::open_async(cfg()).await.unwrap().get(b"victim").await.unwrap(), None);
 }
 
 /// Writers keep writing while compaction runs; nothing they wrote is lost or reverted.
@@ -5194,7 +5576,7 @@ Add a FaultFs test to `crates/prkdb-verify/tests/power_loss.rs`: `compaction_is_
 
 Today `flush()` sleeps `linger_ms + 10` and returns `Ok`, executor errors are dropped with `let _ =`, the queue is an unbounded `crossbeam_channel`, and `CollectionHandle::with_batching`'s executor turns per-item failures into a `warn!` and `Ok(())`.
 
-**Design:** one `tokio::sync::mpsc::UnboundedSender<Msg<C>>` whose memory is bounded by a byte `Semaphore` (`BatchConfig::max_buffer_bytes`), because an item's permit travels with it:
+**Design:** one `tokio::sync::mpsc::UnboundedSender<Msg<C>>` whose memory is bounded by a byte `Semaphore` (`BatchConfig::max_buffer_bytes`), because an item's permit travels with it until the worker takes it:
 
 ```rust
 enum Msg<C> {
@@ -5205,7 +5587,7 @@ enum Msg<C> {
 }
 ```
 
-The worker task batches items (linger timer or `max_batch_size`), executes, remembers the first error; on `Flush` it executes what it holds, then answers. Channel FIFO order makes that a sequence barrier: everything sent before the flush is in the batch that runs before the answer. `add_put` computes the item's size with a counting `std::io::Write` sink and `bincode::serde::encode_into_writer` (no allocation), acquires that many permits (`min(size, max_buffer_bytes)`), and waits when the buffer is full. On drop, the worker drains and executes what is left and logs any error with `tracing::error!` (nobody is left to return it to; this replaces `let _ =`, spec §8).
+The worker task batches items (linger timer or `max_batch_size`), executes, remembers the first error; on `Flush` it executes what it holds, then answers. Channel FIFO order makes that a sequence barrier: everything sent before the flush is in the batch that runs before the answer. `add_put` computes the item's size with a counting `std::io::Write` sink and `bincode::serde::encode_into_writer` (no allocation), acquires that many permits (`min(size, max_buffer_bytes)`), and waits when the buffer is full. **The permit is released when the worker moves the item out of the channel into its batch** (it drops the `OwnedSemaphorePermit` as it pushes `C` onto the batch `Vec`), not when the batch finishes executing: the bound is on bytes *waiting* in the channel, which is the memory that can grow without limit; the batch being executed is already bounded by `max_batch_size`. Holding permits through execution would also make a buffer smaller than one batch deadlock (the worker could never fill the batch it needs to execute). On drop, the worker drains and executes what is left and logs any error with `tracing::error!` (nobody is left to return it to; this replaces `let _ =`, spec §8).
 
 **Files:** `crates/prkdb/src/batch_accumulator.rs` (rewrite), `crates/prkdb/src/collection_handle.rs` (executor reports failures), `crates/prkdb/tests/batch_accumulator_flush.rs` (create); `batch_accumulator` is a private module, so the new test file drives it through `CollectionHandle::with_batching` + `flush`, and the unit-level barrier tests go in the module's `#[cfg(test)] mod tests`.
 
@@ -5248,24 +5630,36 @@ The worker task batches items (linger timer or `max_batch_size`), executes, reme
         acc.flush().await.expect("the error is reported once, then cleared");
     }
 
+    /// Bytes waiting in the channel are bounded; the item being executed no longer counts.
+    /// Every wait is under a timeout, so a broken bound fails the test instead of hanging it.
     #[tokio::test]
     async fn admission_is_bounded_by_bytes() {
-        let release = Arc::new(tokio::sync::Notify::new());
-        let r = release.clone();
+        const T: Duration = Duration::from_secs(5);
+        let started = Arc::new(tokio::sync::Semaphore::new(0));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0)); // one permit per batch the executor may finish
+        let (st, g) = (started.clone(), gate.clone());
+        let big = || TestItem { id: "x".repeat(100), value: 0 };
+        let size = item_size(&big()); // the same counting-sink size add_put uses, ~102 bytes
         let acc = Arc::new(BatchAccumulator::new(
-            BatchConfig { linger_ms: 1, max_batch_size: 1, max_buffer_bytes: 256, ..Default::default() },
-            move |_: Vec<TestItem>| { let r = r.clone(); async move { r.notified().await; Ok(()) } },
+            // Room for exactly two queued items, not three.
+            BatchConfig { linger_ms: 1, max_batch_size: 1, max_buffer_bytes: 2 * size + size / 2, ..Default::default() },
+            move |_: Vec<TestItem>| {
+                let (st, g) = (st.clone(), g.clone());
+                async move { st.add_permits(1); g.acquire().await.unwrap().forget(); Ok(()) }
+            },
         ));
-        let big = || TestItem { id: "x".repeat(100), value: 0 }; // ~100 bytes encoded
-        acc.add_put(big()).await.unwrap(); // taken by the (blocked) executor
-        acc.add_put(big()).await.unwrap();
-        acc.add_put(big()).await.unwrap();
+        tokio::time::timeout(T, acc.add_put(big())).await.unwrap().unwrap();
+        // Wait until the worker has taken item 1 into its batch (its permit is released) and is
+        // blocked executing it; only then is the channel empty, whatever the scheduling.
+        tokio::time::timeout(T, started.acquire()).await.unwrap().unwrap().forget();
+        tokio::time::timeout(T, acc.add_put(big())).await.unwrap().unwrap(); // queued: 1 × size
+        tokio::time::timeout(T, acc.add_put(big())).await.unwrap().unwrap(); // queued: 2 × size
         let blocked = { let acc = acc.clone(); tokio::spawn(async move { acc.add_put(big()).await }) };
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(!blocked.is_finished(), "admission must wait when the byte budget is used up");
-        release.notify_waiters();
-        for _ in 0..8 { release.notify_one(); tokio::time::sleep(Duration::from_millis(10)).await; }
-        blocked.await.unwrap().unwrap();
+        assert!(!blocked.is_finished(), "a third queued item must wait: the byte budget is used up");
+        gate.add_permits(16); // let every batch finish
+        tokio::time::timeout(T, blocked).await.expect("admission never resumed").unwrap().unwrap();
+        tokio::time::timeout(T, acc.flush()).await.unwrap().unwrap();
     }
 ```
 
@@ -5302,7 +5696,7 @@ async fn a_batched_handle_flush_reports_failed_writes() {
 }
 ```
 
-(Adjust the `prelude` import to whatever exports `Collection`, `PrkDb`; see `crates/prkdb/tests/prkdb_orm_macro.rs` for the working pattern.) Run → `flush_stays_pending…` fails (flush returns after the sleep), `flush_returns_the_executor_error` fails (`Ok`), the end-to-end test fails (`Ok`).
+(Adjust the `prelude` import to whatever exports `Collection`, `PrkDb`; see `crates/prkdb/tests/prkdb_orm_macro.rs` for the working pattern.) (`item_size` is the module's counting-sink helper that `add_put` uses, `pub(crate)` so the test sizes the budget from the real encoding instead of a guess.) Run → `flush_stays_pending…` fails (flush returns after the sleep), `flush_returns_the_executor_error` fails (`Ok`), `admission_is_bounded_by_bytes` fails to compile (`max_buffer_bytes`, `item_size`), the end-to-end test fails (`Ok`).
 
 - [ ] **Step 2: Implement** per the design; `CollectionHandle::with_batching`'s executor returns `Err(StorageError::Internal(format!("{failed} of {n} batched writes failed; first: {first}")))` when any item failed, instead of `warn!` + `Ok`.
 - [ ] **Step 3: Run** — `cargo nextest run -p prkdb --lib batch_accumulator` and `--test batch_accumulator_flush --test batching_window_perf_test` → pass; workspace → pass.
@@ -5473,22 +5867,22 @@ async fn typed_harness_catches_colliding_collections() {
 
 ### Task 2.19: Outbox persisted with its data (EVT-02)
 
-`WalStorageAdapter` keeps the outbox in a `papaya` map that is never written to disk; `CollectionPartitionedAdapter` discards every outbox write and returns `Ok`.
+`WalStorageAdapter` keeps the outbox in a `papaya` map that is never written to disk. `CollectionPartitionedAdapter` used to discard every outbox write and return `Ok`; since Task 2.9b it forwards to its one inner adapter, so fixing `WalStorageAdapter` fixes both, and its `put_with_outbox` is atomic like the inner adapter's (one WAL, one frame — D11).
 
 **Design:**
 - Two batch ops (tags 3 and 4, added before the format freeze in Task 2.24): `OutboxPut { id: String, payload: Vec<u8> }` and `OutboxRemove { id: String }`.
 - `outbox_save(id, payload)` commits `[OutboxPut]`; `outbox_remove(id)` commits `[OutboxRemove]`; `put_with_outbox(key, value, id, payload)` commits `[Put, OutboxPut]` and `delete_with_outbox` commits `[Delete, OutboxPut]` — one frame each, so the data and its event are atomic (they were two independent in-memory steps).
-- The outbox map becomes `papaya::HashMap<String, RecordLoc>`, published by the commit hook like the key index and rebuilt by replay; `outbox_list` reads payloads through `wal.read`. Compaction (Task 2.15) treats a frame holding a present outbox id as live. The checkpoint (Task 2.14) gains an outbox section after the key entries (`outbox_entries u64 | (idlen u32 | id | loc)…`) — the checkpoint format is not frozen until Task 2.24.
-- `CollectionPartitionedAdapter`: the outbox is persisted in one dedicated inner `WalStorageAdapter` at `collections/__outbox/` (opened eagerly), so `outbox_save`/`outbox_list`/`outbox_remove` forward to it. `put_with_outbox`/`delete_with_outbox` cannot be atomic across two logs, so they return the new `StorageError::UnsupportedCapability(String)` **before mutating anything** (spec §8), which makes `CollectionHandle` take its existing fallback (write, then `outbox_save`). That fallback is not atomic — that is EVT-05, Phase 3 — but it no longer loses the event. Record this interaction in EVT-05's `evidence`.
+- The outbox map becomes `papaya::HashMap<String, RecordLoc>`, published by the commit hook like the key index and rebuilt by replay; `outbox_list` reads payloads through `wal.read`. The checkpoint (Task 2.14) gains an outbox section after the key entries (`outbox_entries u64 | (idlen u32 | id | loc)…`) — the checkpoint format is not frozen until Task 2.24.
+- **Compaction liveness for the new ops** (extends Task 2.15's per-op rules): an `OutboxPut { id }` op is live iff `outbox[id].lsn == frame.lsn`; an `OutboxRemove` op is never live, for the same reason as a `Delete` (every older `OutboxPut` of that id is already dead and, by the oldest-first prefix rule, already rewritten). Compaction's rewrite keeps the live `OutboxPut` ops of a frame and drops the rest.
+- `CollectionPartitionedAdapter` needs no code of its own: its outbox methods forward to the inner adapter (Task 2.9b). There is no `collections/__outbox/` WAL and no `UnsupportedCapability` path, and `CollectionHandle`'s non-atomic fallback is no longer reached on the default `with_data_dir` path (the fallback itself is EVT-05, Phase 3).
 
-**Files:** `crates/prkdb-core/src/wal/batch.rs`, `crates/prkdb/src/storage/{wal_adapter.rs,checkpoint.rs,compaction.rs,collection_partitioned_adapter.rs}`, `crates/prkdb-types/src/error.rs`, `crates/prkdb/tests/outbox_cdc_tests.rs`, `crates/prkdb-verify/tests/power_loss.rs`
+**Files:** `crates/prkdb-core/src/wal/batch.rs`, `crates/prkdb/src/storage/{wal_adapter.rs,checkpoint.rs,compaction.rs}`, `crates/prkdb/tests/{outbox_cdc_tests.rs,compaction_test.rs}`, `crates/prkdb-verify/tests/power_loss.rs`
 
 - [ ] **Step 1: Failing tests** (append to `crates/prkdb/tests/outbox_cdc_tests.rs`):
 
 ```rust
 use prkdb::storage::{CollectionPartitionedAdapter, WalStorageAdapter};
 use prkdb_core::wal::WalConfig;
-use prkdb_types::error::StorageError;
 use prkdb_types::storage::StorageAdapter;
 
 fn wal(dir: &std::path::Path) -> WalConfig {
@@ -5516,29 +5910,33 @@ async fn wal_outbox_survives_restart() {
     assert_eq!(db.get(b"k1").await.unwrap().as_deref(), Some(&b"v1"[..]));
 }
 
-/// EVT-02: the partitioned adapter persists outbox entries instead of dropping them, and
-/// refuses the atomic variants it cannot honour, before writing anything.
+/// EVT-02 on the default `with_data_dir` path: the partitioned adapter persists outbox
+/// entries (it used to drop them) and writes data + event in one frame (D11: one WAL).
 #[tokio::test(flavor = "multi_thread")]
-async fn partitioned_outbox_persists_or_refuses() {
+async fn partitioned_outbox_survives_restart_with_its_data() {
     let dir = tempfile::tempdir().unwrap();
     {
         let db = CollectionPartitionedAdapter::new(wal(dir.path())).unwrap();
         db.outbox_save("users:0:1", b"event-1").await.unwrap();
-        let err = db.put_with_outbox(b"users:k", b"v", "users:0:2", b"event-2").await.unwrap_err();
-        assert!(matches!(err, StorageError::UnsupportedCapability(_)), "{err}");
-        assert!(db.get(b"users:k").await.unwrap().is_none(), "refused before mutating");
+        db.put_with_outbox(b"users:k", b"v", "users:0:2", b"event-2").await.unwrap();
         db.flush().await.unwrap();
     }
     let db = CollectionPartitionedAdapter::new(wal(dir.path())).unwrap();
-    assert_eq!(db.outbox_list().await.unwrap(), vec![("users:0:1".to_string(), b"event-1".to_vec())]);
+    let mut list = db.outbox_list().await.unwrap();
+    list.sort();
+    assert_eq!(
+        list,
+        vec![("users:0:1".to_string(), b"event-1".to_vec()), ("users:0:2".to_string(), b"event-2".to_vec())]
+    );
+    assert_eq!(db.get(b"users:k").await.unwrap().as_deref(), Some(&b"v"[..]));
 }
 ```
 
-and in `power_loss.rs`, `put_with_outbox_is_atomic_under_power_loss`: Fast mode, 50 `put_with_outbox` calls with distinct keys/ids, `power_loss(Tear::Prefix)`, reopen → for every key present, its event is present, and vice versa. Run → fail (outbox empty after restart; partitioned adapter returns `Ok` and an empty list).
+and in `power_loss.rs`, `put_with_outbox_is_atomic_under_power_loss`: Fast mode, 50 `put_with_outbox` calls with distinct keys/ids, `power_loss(Tear::Prefix)`, reopen → for every key present, its event is present, and vice versa. In `crates/prkdb/tests/compaction_test.rs`, `compaction_keeps_live_outbox_entries`: `outbox_save` 20 ids, overwrite unrelated keys until several segments seal, `outbox_remove` half the ids, `compact()`, reopen → exactly the other half is listed. Run → fail (outbox empty after restart, for both adapters).
 
 - [ ] **Step 2: Implement** per the design.
 - [ ] **Step 3: Run** — `cargo nextest run -p prkdb --test outbox_cdc_tests --test atomic_outbox_tests --test consumer_tests` and `-p prkdb-verify --test power_loss --test checkpoint` → pass; workspace → pass; harness both modes → green.
-- [ ] **Step 4: Ledger** — EVT-02 `fixed`, `regression_tests = ["test:crates/prkdb/tests/outbox_cdc_tests.rs::wal_outbox_survives_restart", "test:crates/prkdb/tests/outbox_cdc_tests.rs::partitioned_outbox_persists_or_refuses", "test:crates/prkdb-verify/tests/power_loss.rs::put_with_outbox_is_atomic_under_power_loss"]`.
+- [ ] **Step 4: Ledger** — EVT-02 `fixed`, `regression_tests = ["test:crates/prkdb/tests/outbox_cdc_tests.rs::wal_outbox_survives_restart", "test:crates/prkdb/tests/outbox_cdc_tests.rs::partitioned_outbox_survives_restart_with_its_data", "test:crates/prkdb-verify/tests/power_loss.rs::put_with_outbox_is_atomic_under_power_loss"]`.
 - [ ] **Step 5: Commit** — `fix: persist the outbox in the WAL with the data it describes`; follow-up `docs: record EVT-02 as fixed`.
 
 ---
@@ -5548,8 +5946,8 @@ and in `power_loss.rs`, `put_with_outbox_is_atomic_under_power_loss`: Fast mode,
 `static OUTBOX_SEQ` restarts at 1 in every process, so persisted consumer offsets skip new events after a restart. Spec 2c: an event's sequence **is** the WAL position of its commit record; no counter exists that could reset. Consumers see an opaque, ordered `EventSeq` so the Raft index can replace the WAL position in Phase 4 without changing types.
 
 **Design:**
-- `prkdb_types::event::EventSeq(u64)`: `Ord`, `Copy`, `Display` as 20 zero-padded digits (the outbox id suffix, so string order = sequence order), `EventSeq::from_raw(u64)`/`raw()` for adapters, and `EventSeq::from_wal(lsn, index_in_frame: u16)` = `lsn << 16 | index` for the WAL adapter (a frame carries at most 65,536 events, enforced with `StorageError::Validation`). **Design decision to review:** packing keeps one `u64` offset type for consumers while letting one atomic frame carry several events (Phase 3 transactions will emit several). It limits LSNs to 2⁴⁸ (≈ 2.8 × 10¹⁴ frames).
-- New `StorageAdapter` methods (default: `Err(StorageError::UnsupportedCapability("event_append"…))`):
+- `prkdb_types::event::EventSeq(u64)`: `Ord`, `Copy`, `Display` as 20 zero-padded digits (the outbox id suffix, so string order = sequence order), `EventSeq::from_raw(u64)`/`raw()` for adapters, and `EventSeq::from_wal(lsn, index_in_frame: u16)` = `lsn << 16 | index` for the WAL adapter (a frame carries at most 65,536 events, enforced with `StorageError::Validation`). Packing is a controller decision, accepted: it keeps one `u64` offset type for consumers while letting one atomic frame carry several events (Phase 3 transactions will emit several), and limits LSNs to 2⁴⁸ (≈ 2.8 × 10¹⁴ frames).
+- New `StorageAdapter` methods, whose default is the new `StorageError::UnsupportedCapability(String)` variant (`#[error("unsupported: {0}")]`), returned before anything is written (spec §8):
 
 ```rust
     /// Appends an event to `stream`; the adapter assigns its sequence, which is strictly
@@ -5563,13 +5961,14 @@ and in `power_loss.rs`, `put_with_outbox_is_atomic_under_power_loss`: Fast mode,
 ```
 
   `outbox_save`/`outbox_remove` stay: `prkdb::replication` mirrors a leader's ids verbatim on followers, and draining removes by id.
-- WAL adapter: batch op tag 5 `Event { stream: String, payload: Vec<u8> }`; the commit hook computes each event's id from the frame's LSN and the event's index among the frame's events and publishes it into the outbox map; the method returns the `EventSeq`. Replay does the same, so ids are identical after restart.
+- WAL adapter: batch op tag 5 `Event { idx: u16, stream: String, payload: Vec<u8> }` (encoding `idx u16 | u32 slen | stream | u32 plen | payload`). **`idx` is written explicitly, assigned by the caller when it builds the batch (0, 1, 2… over the batch's events), never derived from the op's position.** The commit hook, replay and compaction all compute an event's id as `"{stream}:{EventSeq::from_wal(frame.lsn, idx)}"` from the stored `idx`. Deriving it from the position would renumber every later event of a frame the moment compaction drops an earlier one (a consumed, removed event), so ids that consumers have already committed would change under them. `Batch::decode` rejects two events with the same `idx` in one frame. The method returns the `EventSeq`.
+- **Compaction liveness for events** (extends Tasks 2.15 and 2.19): an `Event { idx, stream }` op in frame `lsn` is live iff the outbox map still holds `"{stream}:{EventSeq::from_wal(lsn, idx)}"` at that `lsn`; the rewrite keeps live events **with their original `idx`** and the frame keeps its LSN, so the id is unchanged; a frame whose events were all removed and whose other ops are dead becomes `Elided`.
 - sled: `EventSeq::from_raw(db.generate_id()?)` (sled persists its id generator and jumps ahead on restart: monotonic across restarts, not contiguous). The two-tree write stays non-atomic — that is EVT-04 (Phase 3).
 - SQL: table `outbox_seq (id INTEGER PRIMARY KEY CHECK (id = 1), next INTEGER NOT NULL)`, created with the other tables (`INSERT OR IGNORE INTO outbox_seq VALUES (1, 1)`), and `UPDATE outbox_seq SET next = next + 1 WHERE id = 1 RETURNING next - 1` inside the same transaction as the outbox row (and the kv row for `put_with_event`).
-- In-memory adapter: an `AtomicU64` (its data does not survive a restart either). `prkdb-storage-segmented`'s wrapper forwards the three methods.
+- In-memory adapter: an `AtomicU64` (its data does not survive a restart either). `prkdb-storage-segmented`'s wrapper and `CollectionPartitionedAdapter` forward the three methods to their inner adapter.
 - `outbox.rs`: delete `OUTBOX_SEQ`, `make_outbox_id_for_type`, `make_dlq_id_for_type`; add `pub fn event_stream<C: Collection>(partition: Option<u32>) -> String` = `format!("{}:{}", C::persisted_name(), partition.unwrap_or(0))`; `save_outbox_event`/`outbox_save_batch` take a stream and return `EventSeq`; DLQ records use stream `dlq:{persisted_name}` through `event_append`. `collection_handle.rs` calls `put_with_event`/`delete_with_event` and keeps today's fallback shape (on any error: plain write, then `event_append`; narrowing that fallback is EVT-05, Phase 3). `replication.rs::replicate_change` uses `event_append`. `consumer.rs` already parses the last `:` segment as a `u64`; `get_latest_offset` returns `max + 1` as before — offsets are now `EventSeq` raw values.
 
-**Files:** `crates/prkdb-types/src/{event.rs,lib.rs,storage.rs}`, `crates/prkdb-core/src/wal/batch.rs`, `crates/prkdb/src/{outbox.rs,collection_handle.rs,consumer.rs,replication.rs}`, `crates/prkdb/src/storage/{wal_adapter.rs,in_memory.rs,collection_partitioned_adapter.rs}`, `crates/prkdb-storage-sled/src/lib.rs`, `crates/prkdb-storage-sql/src/lib.rs`, `crates/prkdb-storage-segmented/src/uring.rs`, `crates/prkdb/tests/{tripwires.rs,consumer_tests.rs}`
+**Files:** `crates/prkdb-types/src/{event.rs,lib.rs,storage.rs,error.rs}`, `crates/prkdb-core/src/wal/batch.rs`, `crates/prkdb/src/storage/compaction.rs`, `crates/prkdb/tests/compaction_test.rs`, `crates/prkdb/src/{outbox.rs,collection_handle.rs,consumer.rs,replication.rs}`, `crates/prkdb/src/storage/{wal_adapter.rs,in_memory.rs,collection_partitioned_adapter.rs}`, `crates/prkdb-storage-sled/src/lib.rs`, `crates/prkdb-storage-sql/src/lib.rs`, `crates/prkdb-storage-segmented/src/uring.rs`, `crates/prkdb/tests/{tripwires.rs,consumer_tests.rs}`
 
 - [ ] **Step 1: Invert the tripwire into the failing regression test.** The tripwire's own doc names its blind spot (the child opened no storage), so the regression test opens a real data directory in each child:
 
@@ -5624,11 +6023,51 @@ async fn a_committed_consumer_sees_new_events_after_restart() {
 }
 ```
 
-(Match the existing consumer-construction API used elsewhere in `consumer_tests.rs`; the names `consumer`, `ConsumerConfig`, `r.value` above follow that file — adjust to what it actually calls them.) Run → the tripwire replacement fails to compile (`event_append`), the consumer test sees `[]` after the restart (new ids restart below the committed offset).
+(Match the existing consumer-construction API used elsewhere in `consumer_tests.rs`; the names `consumer`, `ConsumerConfig`, `r.value` above follow that file — adjust to what it actually calls them.)
+
+Append to `crates/prkdb/tests/compaction_test.rs`:
+
+```rust
+/// EVT-01 x compaction: event ids are stable. Removing (consuming) some events of a
+/// multi-event frame and compacting must not renumber the survivors, before or after reopen.
+#[tokio::test(flavor = "multi_thread")]
+async fn event_ids_survive_compaction_and_reopen() {
+    use prkdb_core::wal::{SyncMode, WalConfig};
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = || WalConfig { log_dir: dir.path().to_path_buf(), segment_bytes: 8 * 1024, sync_mode: SyncMode::Fast, ..WalConfig::test_config() };
+    let db = WalStorageAdapter::new(cfg()).unwrap();
+    for i in 0..40u32 {
+        db.event_append("s:0", &i.to_le_bytes()).await.unwrap();
+        db.put(format!("k{}", i % 4).as_bytes(), &[0u8; 512]).await.unwrap(); // dead weight, seals segments
+    }
+    let mut before = db.outbox_list().await.unwrap();
+    before.sort();
+    for (id, _) in before.iter().step_by(2) {
+        db.outbox_remove(id).await.unwrap(); // consume every other event
+    }
+    let mut kept = db.outbox_list().await.unwrap();
+    kept.sort();
+    for _ in 0..16 {
+        db.put(b"filler", &[1u8; 512]).await.unwrap(); // seal the segment holding the removes
+    }
+    db.flush().await.unwrap();
+    let report = db.compact().await.unwrap();
+    assert!(report.segments_rewritten > 0, "{report:?}");
+    let mut after = db.outbox_list().await.unwrap();
+    after.sort();
+    assert_eq!(after, kept, "ids or payloads changed by compaction");
+    drop(db);
+    let mut reopened = WalStorageAdapter::open_async(cfg()).await.unwrap().outbox_list().await.unwrap();
+    reopened.sort();
+    assert_eq!(reopened, kept, "ids or payloads changed by compaction + reopen");
+}
+```
+
+and a unit test in `batch.rs`, `event_idx_is_stored_not_positional`: a batch whose events carry `idx` 0 and 2 (as a rewritten frame would) round-trips with those indexes, and a batch with a repeated `idx` is rejected. The multi-event frame case is covered at unit level here because the public API emits one event per frame until Phase 3 transactions; the compaction test above covers the id-stability path end to end. Run → the tripwire replacement fails to compile (`event_append`), the consumer test sees `[]` after the restart (new ids restart below the committed offset), the compaction test fails to compile.
 
 - [ ] **Step 2: Implement** per the design.
-- [ ] **Step 3: Run** — `cargo nextest run -p prkdb --test tripwires --test consumer_tests --test outbox_cdc_tests --test dlq_tests --test dlq_retry_tests --test replication_tests`, `-p prkdb-storage-sled`, `-p prkdb-storage-sql` → pass; workspace → pass; harness both modes → green.
-- [ ] **Step 4: Ledger** — EVT-01 `fixed`, `regression_tests = ["test:crates/prkdb/tests/tripwires.rs::evt01_event_ids_do_not_repeat_across_processes", "test:crates/prkdb/tests/consumer_tests.rs::a_committed_consumer_sees_new_events_after_restart"]`, clear `tripwire`.
+- [ ] **Step 3: Run** — `cargo nextest run -p prkdb --test tripwires --test consumer_tests --test outbox_cdc_tests --test compaction_test --test dlq_tests --test dlq_retry_tests --test replication_tests`, `-p prkdb-core --lib batch`, `-p prkdb-storage-sled`, `-p prkdb-storage-sql` → pass; workspace → pass; harness both modes → green.
+- [ ] **Step 4: Ledger** — EVT-01 `fixed`, `regression_tests = ["test:crates/prkdb/tests/tripwires.rs::evt01_event_ids_do_not_repeat_across_processes", "test:crates/prkdb/tests/consumer_tests.rs::a_committed_consumer_sees_new_events_after_restart", "test:crates/prkdb/tests/compaction_test.rs::event_ids_survive_compaction_and_reopen"]`, clear `tripwire`.
 - [ ] **Step 5: Commit** — `fix: derive event sequence numbers from the WAL instead of a process counter`; follow-up `docs: record EVT-01 as fixed`.
 
 ---
@@ -5649,7 +6088,9 @@ async fn a_committed_consumer_sees_new_events_after_restart() {
 
 ### Task 2.22: Schema persistence (SCH-02)
 
-**Files:** `crates/prkdb-schema/src/{storage.rs,registry.rs,types.rs,error.rs}`, `crates/prkdb-schema/tests/schema_persistence.rs` (create)
+**Files:** `crates/prkdb-schema/src/{storage.rs,registry.rs,types.rs,error.rs}`, `crates/prkdb-schema/tests/schema_persistence.rs` (create), `crates/prkdb/src/raft/grpc_service.rs` (`with_schema_storage_path`), its callers `crates/prkdb/src/bin/prkdb-server.rs` (~243), `crates/prkdb-cli/src/commands/serve.rs` (~584), `crates/prkdb/tests/security_tests.rs` (~114, ~138)
+
+Failing closed in `FileSchemaStorage::load` is only half the fix: `PrkDbGrpcService::with_schema_storage_path` (`grpc_service.rs` ~90-100) calls `load()`, logs `"Failed to load schema storage: …. Starting fresh."` on error and serves an empty registry — so a server with a damaged registry would start, report no schemas, and let clients re-register versions over the lost ones. It also ignores `create_dir_all` failures (`.ok()`). Both must reach the caller so the server refuses to start.
 
 - [ ] **Step 1: Failing tests** — `crates/prkdb-schema/tests/schema_persistence.rs` (first one from `docs/reviews/probes/schema_review.rs`, inverted):
 
@@ -5716,14 +6157,41 @@ async fn a_leftover_temp_index_is_ignored() {
 }
 ```
 
-Run → the first two load successfully (bug), the concurrency test sees duplicate versions (or a lost index write).
+And in `crates/prkdb/tests/security_tests.rs`, next to `test_schema_registry_persists_across_restart` (which shows how to register through a service):
+
+```rust
+/// SCH-02: a server whose schema registry cannot be loaded must not start with an empty one.
+#[tokio::test]
+async fn a_damaged_schema_registry_fails_service_startup() {
+    let schema_dir = TempDir::new().unwrap();
+    let schema_path = PathBuf::from(schema_dir.path());
+    {
+        let registry = prkdb_schema::SchemaRegistry::new(std::sync::Arc::new(
+            prkdb_schema::FileSchemaStorage::new(schema_path.clone()),
+        ));
+        registry
+            .register("users", test_schema_bytes(), prkdb_schema::CompatibilityMode::Backward, None)
+            .await
+            .unwrap();
+    }
+    std::fs::remove_file(schema_path.join("descriptors/users/v1.binpb")).unwrap();
+    let err = PrkDbGrpcService::with_schema_storage_path(create_test_db(), ADMIN_TOKEN.to_string(), schema_path)
+        .await
+        .err()
+        .expect("startup must fail on a missing descriptor");
+    assert!(err.to_string().contains("v1.binpb"), "{err}");
+}
+```
+
+(Use the crate paths `security_tests.rs` already imports for the schema types; `prkdb_schema::…` above is the fallback.) Run → the first two load successfully (bug), the concurrency test sees duplicate versions (or a lost index write), `a_damaged_schema_registry_fails_service_startup` does not compile (`with_schema_storage_path` returns `Self`, not a `Result`).
 
 - [ ] **Step 2: Implement.**
   - Fail closed: `load()` returns `SchemaError::Storage("missing descriptor {path} for {collection} v{version}; restore it from backup or remove the entry from schemas.json")` when a descriptor is absent, and a checksum error when it does not match. The checksum: new `Schema` field `#[serde(default)] pub descriptor_crc32: Option<u32>`, written by `put`; `None` (an index written before this change) skips only the checksum, never the existence check.
   - Atomic writes: one helper `async fn write_atomic(path, bytes)` = write `path.tmp` → `File::sync_all` → `rename` → `sync` the parent directory (on Unix, `std::fs::File::open(parent)?.sync_all()`, inside `spawn_blocking`), used for descriptors and `schemas.json`. Descriptor first, index second, so a crash leaves at worst an unreferenced descriptor. `load()` removes stale `*.tmp` files.
   - Serialized allocation: `SchemaRegistry` holds `register_lock: tokio::sync::Mutex<()>` around the whole read-check-allocate-put sequence in `register`; `FileSchemaStorage::put` refuses to overwrite an existing `(collection, version)` with `SchemaError::VersionConflict { collection, version }` (new variant) as a second line of defence for other callers of the storage trait.
-- [ ] **Step 3: Run** — `cargo nextest run -p prkdb-schema` → pass; `cargo nextest run -p prkdb-cli --test http_api_integration` (schema routes) → pass.
-- [ ] **Step 4: Ledger** — SCH-02 `fixed`, `regression_tests` = the four tests above.
+  - Startup fails closed: `with_schema_storage_path(..) -> Result<Self, SchemaError>` — `create_dir_all` errors map to `SchemaError::Storage("cannot create schema directory {path}: {e}")`, and a `load()` error is returned, not logged. Callers propagate it: `prkdb-server.rs` with `?` from `main` (the process exits non-zero with the message, before binding any port); `serve.rs` with `?`/`.context("loading the schema registry")`; `security_tests.rs`'s two existing calls with `.unwrap()`.
+- [ ] **Step 3: Run** — `cargo nextest run -p prkdb-schema` → pass; `cargo nextest run -p prkdb --test security_tests` → pass; `cargo nextest run -p prkdb-cli --test http_api_integration` (schema routes) → pass.
+- [ ] **Step 4: Ledger** — SCH-02 `fixed`, `regression_tests` = the four `schema_persistence.rs` tests above plus `test:crates/prkdb/tests/security_tests.rs::a_damaged_schema_registry_fails_service_startup`.
 - [ ] **Step 5: Commit** — `fix: fail closed on missing schema descriptors and serialize version allocation`; follow-up `docs: record SCH-02 as fixed`.
 
 ---
@@ -5853,18 +6321,26 @@ A crash found by the job becomes a new corpus seed plus a ledger finding.
 
 ### Task 2.24: Golden v2 data directory and compat check
 
-Freezes format 2 (D3): from this commit on, any change to the bytes a v2 build writes, or to what it reads back, fails CI unless it comes with `FORMAT_VERSION + 1` and a registered migration (D4). The test lives in `prkdb-verify` because the generator does, and `prkdb-verify` already depends on `prkdb` (a dev-dependency from `prkdb` back to `prkdb-verify` would link two copies of `prkdb`).
+Freezes format 2 (D3): from this commit on, any change to the bytes a v2 build writes, or to what it reads back, fails CI unless it comes with `FORMAT_VERSION + 1` and a registered migration (D4). The check starts here rather than at 2b (spec revision 11), because the event and outbox ops only exist from Tasks 2.19–2.20, and a golden directory frozen earlier would have to be regenerated twice. It covers both on-disk paths a user can reach: `WalStorageAdapter` directly, and `PrkDb::builder().with_data_dir(..)`, which builds the optimized-storage `CollectionPartitionedAdapter` (Task 2.9b) with its own `WalConfig` (no compression, 512 MiB segments). The multi-raft `STORAGE_PATH` layout is not covered: its `raft/` store is frozen at the Phase 4 gate (Task 2.11). The test lives in `prkdb-verify` because the generator does, and `prkdb-verify` already depends on `prkdb` (a dev-dependency from `prkdb` back to `prkdb-verify` would link two copies of `prkdb`).
 
-**Files:** `crates/prkdb-verify/src/golden.rs` (generator library), `crates/prkdb-verify/src/bin/golden_v2.rs` (thin `main`), `crates/prkdb-verify/tests/fixtures/format-v2/{data/…,expected.json}` (generated, committed), `crates/prkdb-verify/tests/storage_compat.rs`, `.gitattributes`, `scripts/pre-push-check.sh`
+**Files:** `crates/prkdb-verify/src/golden.rs` (generator library), `crates/prkdb-verify/src/bin/golden_v2.rs` (thin `main`), `crates/prkdb-verify/tests/fixtures/format-v2/{data/…,builder/…,expected.json,expected-builder.json}` (generated, committed), `crates/prkdb-verify/tests/fixtures/format-v2/README.md`, `crates/prkdb-verify/tests/storage_compat.rs`, `.gitattributes`, `scripts/pre-push-check.sh`
 
-- [ ] **Step 1: Generator.** `pub async fn write_golden_v2(out: &Path) -> anyhow::Result<()>` writes `out/data/` — a data directory built with fixed keys and values and no timestamps, covering every record type: `FORMAT`; puts and deletes; a 50-item `put_batch` with LZ4; `outbox_save` + `outbox_remove`; `put_with_event` and `delete_with_event`; catalog entries for two collections (two record types through `IndexedStorage`, same ids in both); ≥ 3 segments (`segment_bytes` 4 KiB); one compaction (so an `Elided` frame and a rewritten segment exist); a checkpoint after the compaction; then 5 more puts (a replayed tail) — and `out/expected.json`:
+- [ ] **Step 1: Generator.** `pub async fn write_golden_v2(out: &Path) -> anyhow::Result<()>` writes two data directories.
+
+`out/data/` — through `WalStorageAdapter`, built with fixed keys and values and no timestamps, covering every record type: `FORMAT`; puts and deletes; a 50-item `put_batch` with LZ4; `outbox_save` + `outbox_remove`; `put_with_event` and `delete_with_event`; catalog entries for two collections (two record types through `IndexedStorage`, same ids in both); ≥ 3 segments (`segment_bytes` 4 KiB); one compaction (so an `Elided` frame and a rewritten segment exist); a checkpoint after the compaction; then 5 more puts (a replayed tail).
+
+`out/builder/` — through `PrkDb::builder().with_data_dir(out/builder)` (the `CollectionPartitionedAdapter` path, left at its builder `WalConfig`): two `#[derive(Collection)]` types with the same ids written through `db.collection::<T>().put(..)` (codec keys and catalog entries as `CollectionHandle` writes them, events through `put_with_event`), one delete, one `put_to_collection` through the routing API, and a flush.
+
+`FORMAT` records `created_by = "<CARGO_PKG_VERSION>"`, which changes at every release and would break byte identity for no format reason. After writing each directory the generator therefore rewrites its `FORMAT` (atomically, through `Vfs`, as `ensure_format` does) with a **fixed** `created_by = "golden-v2"`; readers ignore `created_by`, and `golden_v2_directory_reads_back` proves that a directory created by a different build opens. Timestamps: none are written (the generator uses no API that stores wall-clock time; if one sneaks in, `regenerating_golden_v2_is_byte_identical` fails and the API gets an injectable clock, not the test a tolerance).
+
+Next to each directory the generator writes its expectations — `out/expected.json` for `data/` and `out/expected-builder.json` for `builder/`:
 
 ```json
 { "kv": { "<hex key>": "<hex value>" }, "absent": ["<hex key>"],
   "outbox": [["<id>", "<hex payload>"]], "catalog": { "<name>": 1 } }
 ```
 
-produced by reading the directory back through the public API right after writing it. `golden_v2.rs`: `fn main() { tokio runtime; write_golden_v2(&PathBuf::from(std::env::args().nth(1).expect("out dir"))) }`.
+produced by reading each directory back through the public API right after writing it (`expected-builder.json` additionally has `"typed": { "<collection>": { "<id>": <json value> } }`, read through `db.collection::<T>().get(..)`). `golden_v2.rs`: `fn main() { tokio runtime; write_golden_v2(&PathBuf::from(std::env::args().nth(1).expect("out dir"))) }`.
 - [ ] **Step 2: Tests** — `crates/prkdb-verify/tests/storage_compat.rs`:
 
 ```rust
@@ -5933,6 +6409,17 @@ async fn golden_v2_directory_reads_back() {
     }
 }
 
+/// The default on-disk path users get: `PrkDb::builder().with_data_dir(..)`.
+#[tokio::test(flavor = "multi_thread")]
+async fn golden_v2_builder_directory_reads_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixture().join("builder"), tmp.path());
+    let expected: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixture().join("expected-builder.json")).unwrap()).unwrap();
+    let db = prkdb::PrkDb::builder().with_data_dir(tmp.path()).build().expect("a format-2 builder directory must open");
+    prkdb_verify::golden::check_builder_expectations(&db, &expected).await; // typed gets, events, catalog; panics with the key on mismatch
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn regenerating_golden_v2_is_byte_identical() {
     let tmp = tempfile::tempdir().unwrap();
@@ -5942,18 +6429,103 @@ async fn regenerating_golden_v2_is_byte_identical() {
 ```
 
 (`serde_json` becomes a `prkdb-verify` dev-dependency.) Run → fail (no fixture).
-- [ ] **Step 3: Generate and commit the fixture** — `cargo run -p prkdb-verify --bin golden_v2 crates/prkdb-verify/tests/fixtures/format-v2`; run the two tests → pass; add `crates/prkdb-verify/tests/fixtures/format-v2/data/** binary` to `.gitattributes`. If `regenerating_golden_v2_is_byte_identical` is flaky, something in the write path is nondeterministic (a timestamp, a hash-map iteration order in the checkpoint): fix the writer (sort checkpoint entries by key), do not weaken the test.
+(`check_builder_expectations` lives in `golden.rs` next to the generator, because the typed record types are defined there.)
+- [ ] **Step 3: Generate and commit the fixture** — `cargo run -p prkdb-verify --bin golden_v2 crates/prkdb-verify/tests/fixtures/format-v2`; run the three tests → pass; add `crates/prkdb-verify/tests/fixtures/format-v2/data/** binary` and `crates/prkdb-verify/tests/fixtures/format-v2/builder/** binary` to `.gitattributes`. If `regenerating_golden_v2_is_byte_identical` is flaky, something in the write path is nondeterministic (a timestamp, a hash-map iteration order in the checkpoint): fix the writer (sort checkpoint entries by key), do not weaken the test.
+- [ ] **Step 3b: Document when regeneration is allowed.** Add to `golden.rs`'s module doc and to a new `crates/prkdb-verify/tests/fixtures/format-v2/README.md`:
+  - The two read-back tests are the format contract. **If either fails, the build broke format 2: fix the code, never the fixture** (or bump `FORMAT_VERSION` with a registered migration, D4).
+  - `regenerating_golden_v2_is_byte_identical` can also fail when only the *bytes a compressor produces* change: LZ4 (and Snappy/Zstd) output is not guaranteed stable across crate versions, and `data/` holds LZ4 batches. That is not a format change: the frame and batch layout are the same, and old bytes still decode. Regeneration is allowed only when all of these hold: the read-back tests pass **against the old fixture**; `Cargo.lock` changes the `lz4`, `snap` or `zstd` crate (or their `-sys` crates) in the same change; and the only differing files are segments that contain compressed batches (compare the old and new trees with `cmp`). Then regenerate with the step 3 command, in a commit titled `test: regenerate golden v2 after <crate> <old> → <new>` whose body holds the `cmp` output.
+  - Any other byte difference is a format change or nondeterminism, and is fixed in the code.
 - [ ] **Step 4: Pre-push and CI** — `pre-push-check.sh`: `step storage-compat; cargo nextest run -p prkdb-verify --test storage_compat` (also covered by the workspace run; the named step makes a compat failure obvious). The nightly Iggy-style check (the `main` binary writes, HEAD reads) is added after the Phase 2 PR merges — spec 2b says not before, because `main` writes format 1 until then; it is the first task of the Phase 3 plan.
 - [ ] **Step 5: Commit** — `test: freeze format v2 with a golden data directory`.
 
 ---
 
+### Task 2.24b: No unjustified `let _ =` on durability paths (spec §8)
+
+Spec §8: "No `let _ =` on durability, commit, or offset paths. Enforced by a clippy lint allowlist review in Phase 2." A discarded `Result` is how STO-07 (`BatchAccumulator` dropping executor errors) and EVT-06 (`let _ = self.commit()`) hid. This task audits the storage-side files Phase 2 rewrote and makes the compiler refuse new discards.
+
+**Files:** `crates/prkdb/src/lib.rs`, `crates/prkdb-core/src/lib.rs` (lint attributes); `crates/prkdb/src/storage/*.rs`, `crates/prkdb/src/{outbox.rs,consumer.rs,transaction.rs,batch_accumulator.rs,collection_handle.rs}` and the not-yet-audited modules (file-level allows); create `scripts/check_let_underscore.sh`, `scripts/let_underscore_allowlist.txt`; modify `scripts/pre-push-check.sh`
+
+- [ ] **Step 1: Inventory.** `rg -n 'let _ =' crates/prkdb/src/storage crates/prkdb/src/{outbox,consumer,transaction,batch_accumulator,collection_handle}.rs crates/prkdb-core/src` → the audit list (at plan time: 35 in `wal_adapter.rs` before the 2.8 series rewrote it, 12 in `outbox.rs`, 8 in `collection_handle.rs`, 3 in `batch_accumulator.rs`, 2 each in `transaction.rs` and `collection_partitioned_adapter.rs`, 1 in `consumer.rs`, 9 in `prkdb-core`; recount now). Paste the list in the commit body.
+- [ ] **Step 2: Turn the lints on (deny), library code only.** Add to the top of `crates/prkdb/src/lib.rs` and `crates/prkdb-core/src/lib.rs`:
+
+```rust
+// Spec §8: a discarded Result or future on a durability, commit or offset path hides the
+// failure the caller needed. Every exception is an item-level allow with a reason, and
+// scripts/check_let_underscore.sh keeps it that way.
+#![deny(clippy::let_underscore_must_use, clippy::let_underscore_future)]
+```
+
+Inner attributes in `lib.rs` cover the library and its `#[cfg(test)]` modules, not `tests/`, `benches/` or `examples/` (70 `let _ =` in `crates/prkdb/{tests,benches,examples}` today are test scaffolding, out of scope). `let_underscore_must_use` is in clippy's restriction group and `let_underscore_future` warns by default; `deny` makes both errors under the existing `cargo clippy --workspace --all-targets -- -D warnings`.
+- [ ] **Step 3: Audit each site in the listed files.** For each `let _ = expr;` that clippy now rejects, one of:
+  - **propagate** (`expr?`) — the default on durability, commit and offset paths;
+  - **handle and log** — `if let Err(e) = expr { tracing::warn!/error!(…) }` where nobody can receive the error (e.g. `Drop`, a background task with no caller), naming the consequence;
+  - **justified discard** — `#[allow(clippy::let_underscore_must_use, reason = "…")]` on the statement's enclosing item or the `let` itself, only when ignoring is correct: a `oneshot::Sender::send` whose receiver may legitimately have gone (the caller timed out), a `broadcast::Sender::send` with no subscribers. The reason names why the loss is harmless.
+  Test modules that discard on purpose take one `#[allow(…, reason = "test scaffolding")]` on the `mod tests` item.
+- [ ] **Step 4: Modules not audited in Phase 2 get a file-level allow, listed.** `indexed_storage.rs` (61 sites; its transaction path is TXN-02, Phase 3), `ttl.rs` (TTL-01, Phase 3), `raft/*.rs` (Phase 4), `replication.rs`, `dashboard.rs`, and anything else clippy flags outside the audited files: add `#![allow(clippy::let_underscore_must_use, clippy::let_underscore_future, reason = "not yet audited for spec §8: <phase and finding>")]` as the file's first inner attribute, on one line (`#[rustfmt::skip]` is not needed: rustfmt leaves attributes alone unless they exceed `max_width`; keep the reason short enough), and add the file path to `scripts/let_underscore_allowlist.txt` with the same reason. The phase that rewrites the file removes its line (Phase 3 and Phase 4 outlines get a reminder in their plans when expanded).
+- [ ] **Step 5: `scripts/check_let_underscore.sh`:**
+
+```bash
+#!/usr/bin/env bash
+# Spec §8 regression: no unjustified `let _ =` on durability paths.
+# Uses grep and python3, not rg: ripgrep is not installed on every machine that runs it.
+# 1. every allow of the two lints carries a reason;
+# 2. file-level (inner) allows appear only in files listed in the allowlist;
+# 3. the audited files carry no file-level allow;
+# 4. both crates still deny the lints.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+fail=0
+# Attributes may be wrapped over several lines by rustfmt, so match whole attributes.
+python3 - <<'PY' || fail=1
+import pathlib, re, sys
+attr = re.compile(r"allow\((?:[^()]|\([^()]*\))*let_underscore_(?:must_use|future)(?:[^()]|\([^()]*\))*\)")
+bad = [f"{p}: {m.group(0)}" for p in pathlib.Path("crates").rglob("*.rs")
+       for m in attr.finditer(p.read_text(encoding="utf-8")) if "reason" not in m.group(0)]
+for b in bad:
+    print(f"allow without a reason: {b}")
+sys.exit(1 if bad else 0)
+PY
+# File-level allows are written on one line (step 4), so a line match is enough here.
+while IFS= read -r f; do
+  if ! cut -d' ' -f1 scripts/let_underscore_allowlist.txt | grep -qxF "$f"; then
+    echo "$f: file-level allow not in scripts/let_underscore_allowlist.txt"; fail=1
+  fi
+done < <(grep -rlE '#!\[allow\(.*let_underscore_' crates --include='*.rs' || true)
+for f in crates/prkdb/src/storage/*.rs crates/prkdb/src/{outbox,consumer,transaction,batch_accumulator,collection_handle}.rs; do
+  if grep -qE '#!\[allow\(.*let_underscore_' "$f"; then echo "$f is audited: no file-level allow"; fail=1; fi
+done
+for f in crates/prkdb/src/lib.rs crates/prkdb-core/src/lib.rs; do
+  grep -q 'deny(clippy::let_underscore_must_use, clippy::let_underscore_future)' "$f" || { echo "$f: lints not denied"; fail=1; }
+done
+exit "$fail"
+```
+
+`scripts/let_underscore_allowlist.txt`: one line per file, `<path> <reason>`. `chmod +x`; run → exit 0. Add `step let-underscore; bash scripts/check_let_underscore.sh` to `scripts/pre-push-check.sh` (clippy, which already runs there, enforces the lints themselves).
+- [ ] **Step 6: Prove the lint bites.** Temporarily add `let _ = self.inner.wal.sync_blocking();` to a function in `wal_adapter.rs` → `cargo clippy -p prkdb -- -D warnings` fails with `let_underscore_must_use`; remove it. Put the failing output in the commit body.
+- [ ] **Step 7: Run** — `cargo clippy --workspace --all-targets -- -D warnings` → clean; `scripts/check_let_underscore.sh` → exit 0; workspace → pass; harness 200 seeds both modes → green.
+- [ ] **Step 8: Commit** — `fix: propagate or justify every discarded result on storage paths` (body: the step 1 inventory with each site's resolution, the step 6 output).
+
+---
+
 ### Task 2.25: Phase 2 durable baseline and gate
 
-- [ ] **Step 1: Baseline.** Extend `scripts/capture_baseline.sh` to accept `--mode durable|fast` (sets `PRKDB_BENCH_SYNC_MODE`, which the §6.1 benches read to build their `WalConfig`) and to include `wal_write_path` and `recovery_bench`. On a quiet, cooled machine (decision record risk 3; or Linux), run `scripts/capture_baseline.sh docs/benchmarks/baseline-format-v2.toml --mode durable` and again with `--mode fast` appending a `[fast]` table. Commit `perf: record the phase 2 durable and fast baseline`.
-- [ ] **Step 2: Perf notes.** For every `iai_hot_paths` benchmark the Phase 2 PR regresses by more than 5 % (expected: put and index insert — fsync bookkeeping, prior-record reads), add a `perf_note` to the responsible finding naming the durability or correctness reason (STO-02 for put, KEY-02 for index insert).
-- [ ] **Step 3: Local gate.** `scripts/pre-push-check.sh` green (fmt, clippy, nextest, doctests, harness 200 seeds both modes, ledger check + render check, repo-status, readme tests, doc claims, single-WAL, storage-compat). `cargo xtask remediation check` shows every phase-2 finding `fixed` (STO-01..09, KEY-01..04, EVT-01..02, SCH-02, TST-05, TST-07, TST-09).
-- [ ] **Step 4: Phase PR sequence** (spec §5): push; open `Phase 2: format v2 and single-node root fixes` (`remediation/phase-2 → main`); CI green including the perf gate (with floors); dispatch `remediation-gate` with `phase=2` (10k seeds × durable and fast, sharded). Record run URLs: `ci_evidence` for every phase-2 finding, `harness = "<sha> seeds=10000 mode=durable+fast profile=phase2 run=<gate URL>"` for STO/KEY (except KEY-03)/EVT findings, `gate_evidence` for phase 2; set findings `verified`, phase 2 `gate_passed`; render; commit `docs: record phase 2 gate evidence` (not `[skip ci]`); push; the maintainer merges with a merge commit (keep the branch).
+- [ ] **Step 1: Baseline, both modes, without an environment variable.** Spec §6.1 wants every metric in Durable and Fast. Each §6.1 bench builds its own `WalConfig`, so the mode is chosen in the bench source, per benchmark id, and one run captures both:
+
+| §6.1 bench | Storage it builds today | Durable vs Fast |
+|---|---|---|
+| `storage_bench` | `WalStorageAdapter::new(WalConfig { .., ..test_config() })` | loop `for mode in [SyncMode::Durable, SyncMode::Fast]`, `WalConfig { sync_mode: mode, ..WalConfig::test_config() }`, ids `storage_put/durable/…` and `storage_put/fast/…` |
+| `recovery_bench` | `WalStorageAdapter::new(WalConfig { .., ..benchmark_config() })`, then `open_async` | same loop over `benchmark_config()`, ids `recovery/durable/…`, `recovery/fast/…` (the write phase differs; replay does not) |
+| `e2e_throughput_bench` | `InMemoryAdapter` groups, plus one `PrkDb::builder().with_data_dir(dir)` group | the `with_data_dir` group runs twice via `.with_sync_mode(mode)` (added in Task 2.8a), ids `e2e/durable/…`, `e2e/fast/…`; the `InMemoryAdapter` groups have no WAL and run once |
+| `wal_write_path` | raw `Wal` cells `wal_durable`/`wal_fast`; `adapter_put` built with `sync_mode: Fast` (Task 2.8d) | add an `adapter_put_durable` cell (`sync_mode: Durable`); the custom harness prints rows, not bencher lines, so capture with `wal_fast_rule.py --emit-toml` (below) |
+| `batch_bench`, `query_bench` | `InMemoryAdapter` | mode-independent: run once, recorded under `[mode_independent]` |
+| `consumer_bench` | an in-bench mock consumer, no storage | mode-independent |
+| `cluster_write_bench` | `PartitionManager::new`, which opens every partition with `WalConfig::default()` (Durable) | Durable only: `PartitionManager` has no mode knob, clustering is experimental, and spec 4b compares against the Durable baseline; record `fast = "n/a: no mode knob in PartitionManager"` |
+
+`scripts/capture_baseline.sh` takes no `--mode` flag. It runs each bench once and writes ids containing `/durable/` into `[durable.<bench>]`, ids containing `/fast/` into `[fast.<bench>]`, and the rest into `[mode_independent.<bench>]`; it adds `wal_write_path` (`SPIKE_REPS=3 cargo bench -p prkdb --bench wal_write_path | python3 scripts/wal_fast_rule.py --emit-toml wal_write_path` → one `"<cell>/<w>w/<v>k" = { ops_s = …, p50_us = …, p99_us = … }` line per cell, medians over reps; `--emit-toml` reuses `parse` and gains its own case in `--self-test`) and fails if any table is empty. On a quiet, cooled machine (decision record risk 3; or Linux), run `scripts/capture_baseline.sh docs/benchmarks/baseline-format-v2.toml`. Commit `perf: record the phase 2 durable and fast baseline`.
+- [ ] **Step 2: Perf notes.** For every `iai_hot_paths` benchmark the Phase 2 PR regresses by more than 5 % against `main` (expected: put and index insert — fsync bookkeeping, prior-record reads), add a `perf_note` to the responsible finding naming the durability or correctness reason (STO-02 for put, KEY-02 for index insert). The benchmarks Task 2.3 renamed and Task 2.8d replaced are new to the gate ("new: no comparison") and need no note; `main`'s vacuous TST-09 counts are never compared.
+- [ ] **Step 3: Local gate.** `scripts/pre-push-check.sh` green (fmt, clippy with the `let_underscore` lints, nextest, doctests, harness 200 seeds both modes, ledger check + render check, repo-status, readme tests, doc claims, WAL Fast-rule self-test, single-WAL, let-underscore, storage-compat). `cargo xtask remediation check` shows every phase-2 finding `fixed` (STO-01..09, KEY-01..04, EVT-01..02, SCH-02, TST-05, TST-07, TST-09).
+- [ ] **Step 4: Phase PR sequence** (spec §5; Conventions: squash merge, PR URL in the ledger). Push; open `Phase 2: format v2 and single-node root fixes` (`remediation/phase-2 → main`); CI green including the perf gate (with floors); dispatch `remediation-gate` with `phase=2` (10k seeds × durable and fast, sharded). Record in the ledger: `ci_evidence` (CI run URL) for every phase-2 finding; `harness = "<sha> seeds=10000 mode=durable+fast profile=phase2 run=<gate URL>"` for STO/KEY (except KEY-03)/EVT findings; **the PR URL appended to `changes` of every phase-2 finding** (the squash merge makes the branch SHAs unreachable except via `refs/pull/<n>/head`); `gate_evidence` for phase 2. Set findings `verified`, phase 2 `gate_passed`; render; commit `docs: record phase 2 gate evidence` (not `[skip ci]`); push. The maintainer squash-merges with the admin override (the head branch is auto-deleted); then update this plan's Status table with the squash SHA and PR number, as Phases 0 and 1 did.
 
 ---
 
@@ -5966,6 +6538,7 @@ async fn regenerating_golden_v2_is_byte_identical() {
 - 3.5 Partition-aware batches (EVT-03), sled single-transaction outbox (EVT-04), no silent non-atomic fallback (EVT-05).
 - 3.6 TTL single record, conditional expiry, auto-start (TTL-01).
 - 3.7 Harness Phase 3 profile (`Txn`, concurrency, `Poll`/`Commit`, consumer restart, `AdvanceClock`); gate.
+- Carried from Phase 2: remove `indexed_storage.rs` and `ttl.rs` (and any other Phase 3 file) from `scripts/let_underscore_allowlist.txt` when that task rewrites it, auditing its `let _ =` sites (Task 2.24b); add the nightly `main`-writes/HEAD-reads storage-compat job as the first task (Task 2.24 step 4).
 
 # Phase 4 — Raft (outline; expand after 4a)
 
@@ -5973,13 +6546,26 @@ async fn regenerating_golden_v2_is_byte_identical() {
 - 4.2 Adopt or repair (RFT-01..07); `raft/` store with `truncate_after` / `purge_before`.
 - 4.3 madsim simulation (TST-06) with `faultfs` behind `Vfs`; turmoil fallback.
 - 4.4 RFT-08 peer auth, RFT-09 flaky baseline root cause, TST-02 workloads; invert RFT tripwires.
-- 4.5 Freeze `raft/` format; remove experimental labels only if the gate holds.
+- 4.5 Freeze `raft/` format (its own marker under `raft/`, spec 2b; Task 2.11 records the Phase 2 multi-raft layout it replaces); remove experimental labels only if the gate holds.
+- Carried from Phase 2: remove `raft/*.rs` from `scripts/let_underscore_allowlist.txt` as those files are replaced or repaired (Task 2.24b).
 
 # Phase 5 — Docs and release (outline)
 
 - 5.1 Compiled doc samples (DOC-03), credentialed clients and Python client (DOC-02), global `--credential` (DOC-04).
 - 5.2 Compose + 3-node smoke in CI (DOC-12); CLI reference from clap (DOC-05, DOC-07); new pages (DOC-08); strict dead links (DOC-10).
 - 5.3 Release packaging (REL-01).
+- 5.4 Upgrade page (DOC-08) — **Phase 2 breaking changes checklist** (D3, D11, D12; Phase 2 tasks tick their lines as they land, and the page must cover every line):
+  - [ ] Format 1 data directories are refused with a message naming the format; `prkdb-cli migrate --data-dir` explains what can be done (Task 2.11).
+  - [ ] A failed fsync poisons the WAL: every later write fails until the database is reopened (Tasks 2.6, 2.8a).
+  - [ ] `StorageConfig::sync_mode` moved to `WalConfig::sync_mode`; `SyncMode::Performance` is a deprecated alias of `SyncMode::Fast`; the default is `Durable` everywhere, with its throughput cost stated (decision record risk 4) (Task 2.8a).
+  - [ ] A write that gets no answer from a stalled writer within the client bound returns `WriteNotConfirmed` (it may still land); a full admission queue returns `WriteBackpressure` (it did not) (Task 2.8a).
+  - [ ] `WalStorageAdapter::open` creates a missing directory (Task 2.8a).
+  - [ ] Deleted public types: the parallel/async/mmap WALs, the streaming and sharded adapters, and core leader/follower replication with `new_with_replication`, as decided at Task 2.9's STOP.
+  - [ ] `CollectionPartitionedAdapter` (the `with_data_dir` default) stores every collection in one WAL at the data directory root; `load_all_collections` is replaced by `collection_names` (Task 2.9b, D11).
+  - [ ] `IndexedStorage` primary keys are bincode, not JSON; `CollectionHandle` keys no longer contain the partition (Task 2.12).
+  - [ ] A collection's stored name is its snake_case type name unless `#[collection(name = "...")]` pins it; renaming an unpinned type orphans its data (Task 2.12, spec revision 11).
+  - [ ] Fast mode: a power cut can lose up to `sync_interval` of acknowledged writes, and the sequence of an event lost that way may be reused by a later event; a consumer that read the lost event is ahead of the log (Task 2.21).
+  - [ ] A server whose schema registry cannot be loaded refuses to start instead of starting empty (Task 2.22).
 
 # Phase 6 — AI
 
