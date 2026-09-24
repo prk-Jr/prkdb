@@ -66,6 +66,20 @@ pub enum WalError {
         reason: String,
     },
 
+    /// A caller's `replay` closure (passed to `Wal::open`) failed to decode a frame whose
+    /// own CRC/LSN checks passed. Distinct from `CorruptSegment` (a fault the WAL's own
+    /// frame/segment scan found) so callers can tell "the WAL bytes are fine, the payload
+    /// inside them is not" apart from "the WAL itself is corrupt" (spec §8: refuse to
+    /// open, name the file).
+    #[error("WAL replay failed for lsn {lsn} in {path} at byte {offset}: {source}")]
+    ReplayFailed {
+        path: std::path::PathBuf,
+        offset: u64,
+        lsn: Lsn,
+        #[source]
+        source: Box<WalError>,
+    },
+
     #[error("record of {len} bytes in {path} exceeds the {max}-byte limit")]
     RecordTooLarge {
         path: std::path::PathBuf,

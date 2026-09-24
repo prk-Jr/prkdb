@@ -122,7 +122,14 @@ impl Shared {
             let oldest = self.oldest_enqueued_ms.load(Ordering::Acquire);
             let stall_bound_ms = std::cmp::max(1000, 100 * self.sync_interval.as_millis() as u64);
             let now = now_ms();
-            if now.saturating_sub(last_progress) > stall_bound_ms {
+            // Measure elapsed time from whichever of "the last batch completed" or "the
+            // oldest still-queued request arrived" is more recent. Using only
+            // `last_progress_ms` would misreport a freshly queued request as long-stalled
+            // right after any idle period longer than the stall bound, because
+            // `last_progress_ms` is stale from before the idle time even though the
+            // request itself has waited no time at all.
+            let reference = std::cmp::max(last_progress, oldest);
+            if now.saturating_sub(reference) > stall_bound_ms {
                 return WalHealth::Stalled {
                     queued_bytes,
                     oldest_ms: now.saturating_sub(oldest),
@@ -297,10 +304,11 @@ impl Wal {
             let scan = scan_segment(&*file, &path, first_lsn, &mut |loc, kind, payload| {
                 report.frames += 1;
                 if loc.lsn >= replay_from {
-                    replay(loc, kind, payload).map_err(|e| WalError::CorruptSegment {
+                    replay(loc, kind, payload).map_err(|e| WalError::ReplayFailed {
                         path: path.clone(),
                         offset: loc.offset,
-                        reason: format!("replay of lsn {} failed: {e}", loc.lsn),
+                        lsn: loc.lsn,
+                        source: Box::new(e),
                     })?;
                 }
                 Ok(())
@@ -349,6 +357,14 @@ impl Wal {
             .get(&active_first_lsn)
             .expect("just inserted")
             .clone();
+        // H2: a frame can be physically present and get replayed above without ever having
+        // been fsynced (Fast mode, or a process restart that is not an actual power loss —
+        // the bytes simply never left the page cache with a durability guarantee). Syncing
+        // the active segment once here, before `durable_lsn` is set to cover everything we
+        // just replayed, closes that gap: whatever we are about to report as durable really
+        // is, so a real power loss right after `open` returns cannot lose it a second time.
+        // Idempotent and cheap when the segment was already fully synced.
+        active_file.sync_data()?;
         let write_pos = active_file.len()?;
         let active = ActiveSegment {
             first_lsn: active_first_lsn,
@@ -516,6 +532,16 @@ impl Wal {
     }
 
     /// Visits committed frames with lsn >= `from`, in order (reads through `Vfs`).
+    ///
+    /// M3: a frame on the *active* segment past the current `durable_lsn` was written but
+    /// not yet synced (`SyncMode::Fast`) and is skipped, never visited — a scan consumer
+    /// (compaction, a checkpoint) must never base persisted state on data that a crash
+    /// right now could still lose. Earlier (sealed) segments are always fully durable by
+    /// construction (`roll_segment` syncs the old segment before switching), so the cap
+    /// applies only to the last one. A scan fault on an earlier segment is corruption and
+    /// returns `CorruptSegment`; a fault on the active segment's tail is expected (a write
+    /// in flight, or a crash not yet recovered from) and is silently bounded by the
+    /// `durable_lsn` cap above regardless of whether `scan_segment` itself reports a fault.
     pub fn scan_from(&self, from: Lsn, visit: &mut ScanVisitor<'_>) -> Result<(), WalError> {
         let segments: Vec<(Lsn, Arc<dyn VfsFile>)> = self
             .shared
@@ -525,14 +551,29 @@ impl Wal {
             .iter()
             .map(|(k, v)| (*k, v.clone()))
             .collect();
-        for (first_lsn, file) in segments {
-            let path = self.shared.dir.join(segment_file_name(first_lsn));
-            scan_segment(&*file, &path, first_lsn, &mut |loc, kind, payload| {
-                if loc.lsn >= from {
-                    visit(loc, kind, payload)?;
+        let durable = self.durable_lsn();
+        let last_idx = segments.len().saturating_sub(1);
+        for (idx, (first_lsn, file)) in segments.iter().enumerate() {
+            let is_last = idx == last_idx;
+            let path = self.shared.dir.join(segment_file_name(*first_lsn));
+            let scan = scan_segment(&**file, &path, *first_lsn, &mut |loc, kind, payload| {
+                if loc.lsn < from {
+                    return Ok(());
                 }
-                Ok(())
+                if is_last && loc.lsn > durable {
+                    return Ok(());
+                }
+                visit(loc, kind, payload)
             })?;
+            if let Some((offset, fault)) = scan.stopped {
+                if !is_last {
+                    return Err(WalError::CorruptSegment {
+                        path: path.clone(),
+                        offset,
+                        reason: format!("{fault:?}"),
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -749,14 +790,45 @@ fn writer_body(
                         }
                     }
                 }
-                if !drained.is_empty() {
+                // L2: chunk by `max_batch_bytes` rather than committing everything queued
+                // as one giant write, so a close under heavy backlog does not bypass the
+                // same batch-size cap every other write goes through.
+                let mut poisoned_during_drain = false;
+                let mut chunk: Vec<Request> = Vec::new();
+                let mut chunk_bytes = 0usize;
+                for item in drained {
+                    let len = request_payload_len(&item);
+                    if !chunk.is_empty() && chunk_bytes + len > opts.max_batch_bytes {
+                        commit_batch(
+                            shared,
+                            active,
+                            opts,
+                            dir,
+                            vfs,
+                            drained_into(std::mem::take(&mut chunk)),
+                            &mut last_written_lsn,
+                            &mut unsynced_since,
+                        );
+                        chunk_bytes = 0;
+                        if matches!(
+                            &*shared.health.read().expect("health lock poisoned"),
+                            InternalHealth::Poisoned(_)
+                        ) {
+                            poisoned_during_drain = true;
+                            break;
+                        }
+                    }
+                    chunk_bytes += len;
+                    chunk.push(item);
+                }
+                if !poisoned_during_drain && !chunk.is_empty() {
                     commit_batch(
                         shared,
                         active,
                         opts,
                         dir,
                         vfs,
-                        drained_into(drained),
+                        drained_into(chunk),
                         &mut last_written_lsn,
                         &mut unsynced_since,
                     );
@@ -764,16 +836,18 @@ fn writer_body(
                         &*shared.health.read().expect("health lock poisoned"),
                         InternalHealth::Poisoned(_)
                     ) {
-                        let reason = match &*shared.health.read().expect("health lock poisoned") {
-                            InternalHealth::Poisoned(r) => r.clone(),
-                            _ => unreachable!(),
-                        };
-                        let _ = reply.send(Err(WalError::Poisoned(reason)));
-                        *shared.health.write().expect("health lock poisoned") =
-                            InternalHealth::Closed;
-                        drain_after_poison(shared, rx);
-                        return;
+                        poisoned_during_drain = true;
                     }
+                }
+                if poisoned_during_drain {
+                    let reason = match &*shared.health.read().expect("health lock poisoned") {
+                        InternalHealth::Poisoned(r) => r.clone(),
+                        _ => unreachable!(),
+                    };
+                    let _ = reply.send(Err(WalError::Poisoned(reason)));
+                    *shared.health.write().expect("health lock poisoned") = InternalHealth::Closed;
+                    drain_after_poison(shared, rx);
+                    return;
                 }
                 let final_result = if unsynced_since.is_some() {
                     active.file.sync_data().map_err(WalError::Io)
@@ -876,8 +950,31 @@ fn writer_body(
                     &*shared.health.read().expect("health lock poisoned"),
                     InternalHealth::Poisoned(_)
                 ) {
+                    // M1: a request already dequeued into `pending` (deferred past this
+                    // batch's `max_batch_bytes` cap, or a Sync/Close that arrived behind
+                    // it) must not simply be dropped here — that would answer it `Closed`
+                    // via `Reply`'s drop guard instead of `Poisoned`.
+                    if let Some(p) = pending.take() {
+                        answer_poisoned(shared, p);
+                    }
                     drain_after_poison(shared, rx);
                     return;
+                }
+                // M2: keep `oldest_enqueued_ms` tracking the oldest request that is still
+                // actually queued, using its own `enqueued_at_ms` rather than a shared
+                // counter that a straight reset-to-zero could desynchronize from
+                // `queued_bytes` when something is still outstanding (see `health_snapshot`).
+                match &pending {
+                    Some(Request::Append { enqueued_at_ms, .. }) => {
+                        shared
+                            .oldest_enqueued_ms
+                            .store(*enqueued_at_ms, Ordering::Release);
+                    }
+                    _ => {
+                        if shared.queued_bytes.load(Ordering::Acquire) == 0 {
+                            shared.oldest_enqueued_ms.store(0, Ordering::Release);
+                        }
+                    }
                 }
             }
         }
@@ -976,32 +1073,79 @@ fn commit_batch(
     shared.next_lsn.store(lsn, Ordering::Release);
     *last_written_lsn = lsn - 1;
 
-    let should_sync = match opts.sync_mode {
-        SyncMode::Durable => true,
-        SyncMode::Fast => false,
-    };
-    if should_sync {
-        if let Err(e) = active.file.sync_data() {
-            fail_batch(shared, items, format!("sync_data failed: {e}"));
-            return;
+    // H1: under saturation, batches keep draining via `try_recv` inside the Append arm and
+    // the writer never reaches the idle `recv_timeout` branch that would otherwise run the
+    // periodic Fast sync. Checking the interval here too means a continuously busy writer
+    // still syncs at least every `sync_interval`, whether it is ever idle or not.
+    let mut poison_reason: Option<String> = None;
+    match opts.sync_mode {
+        SyncMode::Durable => {
+            if let Err(e) = active.file.sync_data() {
+                fail_batch(shared, items, format!("sync_data failed: {e}"));
+                return;
+            }
+            shared
+                .durable_lsn
+                .store(*last_written_lsn, Ordering::Release);
+            *unsynced_since = None;
         }
-        shared
-            .durable_lsn
-            .store(*last_written_lsn, Ordering::Release);
-        *unsynced_since = None;
-    } else if unsynced_since.is_none() {
-        *unsynced_since = Some(Instant::now());
+        SyncMode::Fast => {
+            if unsynced_since.is_none() {
+                *unsynced_since = Some(Instant::now());
+            }
+            if unsynced_since.is_some_and(|since| since.elapsed() >= opts.sync_interval) {
+                match active.file.sync_data() {
+                    Ok(()) => {
+                        shared
+                            .durable_lsn
+                            .store(*last_written_lsn, Ordering::Release);
+                        *unsynced_since = None;
+                    }
+                    Err(e) => {
+                        // This batch's own writes are already answered under Fast
+                        // semantics (ack-after-write, never ack-after-sync); a failed
+                        // *catch-up* sync poisons the log for everything from here on,
+                        // per fsyncgate, without retroactively failing what was already
+                        // acked.
+                        poison_reason = Some(format!("periodic Fast sync failed: {e}"));
+                    }
+                }
+            }
+        }
     }
 
     shared
         .queued_bytes
         .fetch_sub(total_queued, Ordering::AcqRel);
-    shared.oldest_enqueued_ms.store(0, Ordering::Release);
     shared.last_progress_ms.store(now_ms(), Ordering::Release);
+    if let Some(reason) = poison_reason {
+        poison(shared, reason);
+    }
 
+    // M1: a hook is caller code running on the writer thread; a panic in it must not take
+    // the whole writer thread down (that would also lose every later-in-batch item's
+    // answer to a bare `Closed`, via `Reply`'s drop guard, instead of `Poisoned`). Once a
+    // hook panics, the frames for this item and everything after it in the batch are
+    // still durably on disk (or written, in Fast mode), but we can no longer trust that
+    // hook-driven side effects ran in order, so the log is poisoned and every remaining
+    // item in this batch — including the one whose hook panicked — is answered Poisoned.
+    let mut mid_batch_poison: Option<String> = None;
     for (item, loc) in items.into_iter().zip(locs) {
+        if let Some(reason) = &mid_batch_poison {
+            item.reply.answer(Err(WalError::Poisoned(reason.clone())));
+            continue;
+        }
         if let Some(hook) = item.hook {
-            hook(loc);
+            match catch_unwind(AssertUnwindSafe(move || hook(loc))) {
+                Ok(()) => {}
+                Err(panic) => {
+                    let reason = format!("commit hook panicked: {}", panic_message(&panic));
+                    poison(shared, reason.clone());
+                    mid_batch_poison = Some(reason.clone());
+                    item.reply.answer(Err(WalError::Poisoned(reason)));
+                    continue;
+                }
+            }
         }
         item.reply.answer(Ok(loc));
     }
@@ -1145,8 +1289,8 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let w2 = wal.clone();
-        let second = tokio::spawn(async move { w2.reserve(8).await });
-        let res = tokio::time::timeout(Duration::from_millis(100), second).await;
+        let mut second = tokio::spawn(async move { w2.reserve(8).await });
+        let res = tokio::time::timeout(Duration::from_millis(100), &mut second).await;
         assert!(
             res.is_err(),
             "reserve must stay pending while admission is exhausted"
@@ -1155,6 +1299,13 @@ mod tests {
         barrier.wait(); // release the writer
         let first_result = first.await.unwrap();
         assert!(first_result.is_ok());
+
+        // L1: the second reservation must complete promptly once admission frees up.
+        let second_result = tokio::time::timeout(Duration::from_secs(2), second)
+            .await
+            .expect("second reservation must complete within 2s of the barrier releasing")
+            .expect("join");
+        assert!(second_result.is_ok());
 
         Arc::try_unwrap(wal).ok().unwrap().close().unwrap();
     }

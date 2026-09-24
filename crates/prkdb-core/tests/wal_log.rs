@@ -10,8 +10,8 @@ use prkdb_core::wal::{
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Barrier, Mutex};
+use std::time::{Duration, Instant};
 
 fn opts(mode: SyncMode, segment_bytes: u64) -> WalOptions {
     WalOptions {
@@ -332,13 +332,321 @@ async fn a_corrupt_batch_body_in_an_otherwise_valid_frame_names_the_segment_and_
     .err()
     .expect("a corrupt batch body must refuse to open");
 
+    match &err {
+        WalError::ReplayFailed {
+            path, offset, lsn, ..
+        } => {
+            assert_eq!(*path, seg_path, "error must name the segment file");
+            assert_eq!(*lsn, loc.lsn, "error must name the LSN");
+            assert_eq!(*offset, loc.offset, "error must name the byte offset");
+        }
+        other => panic!("expected WalError::ReplayFailed, got {other:?}"),
+    }
+    // The rendered message also carries the same information (spec §8 "name the file").
     let msg = err.to_string();
     assert!(
         msg.contains(&seg_path.display().to_string()),
-        "error must name the segment file: {msg}"
+        "error message must name the segment file: {msg}"
     );
     assert!(
         msg.contains(&loc.lsn.to_string()),
-        "error must name the LSN: {msg}"
+        "error message must name the LSN: {msg}"
+    );
+}
+
+/// H1: a continuously saturated Fast-mode writer never reaches the idle `recv_timeout`
+/// branch (there is always more work already queued by the time it finishes a batch), so
+/// the periodic sync must also run from inside `commit_batch` itself, not only while idle.
+/// Reviewer repro: 64 writers, 1 KiB payloads, `max_batch_bytes` small enough that most
+/// batches hold only one or two items, `sync_interval` short — `durable_lsn` must not
+/// freeze for multiples of `sync_interval`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn fast_mode_keeps_syncing_under_saturation() {
+    let dir = tempfile::tempdir().unwrap();
+    let o = WalOptions {
+        sync_mode: SyncMode::Fast,
+        sync_interval: Duration::from_millis(20),
+        segment_bytes: 64 << 20,
+        max_batch_bytes: 2048,
+        max_queued_bytes: 16 << 20,
+    };
+    let (wal, _) = open(Arc::new(StdVfs), dir.path(), o);
+    let wal = Arc::new(wal);
+
+    // Payloads bigger than half of `max_batch_bytes`, so most batches hold very few items
+    // and the writer is constantly draining the channel rather than idling.
+    let payload = vec![0u8; 1500];
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut tasks = Vec::new();
+    for _ in 0..64 {
+        let wal = wal.clone();
+        let payload = payload.clone();
+        let stop = stop.clone();
+        tasks.push(tokio::spawn(async move {
+            while !stop.load(Ordering::Relaxed) {
+                if wal.append(payload.clone(), None).await.is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    // Generous deadline (tens of `sync_interval`s): the writer must sync at least once
+    // even while continuously saturated with work.
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let mut saw_progress = false;
+    while Instant::now() < deadline {
+        if wal.durable_lsn() > 0 {
+            saw_progress = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    for t in tasks {
+        let _ = t.await;
+    }
+
+    assert!(
+        saw_progress,
+        "durable_lsn must advance even under continuous saturation"
+    );
+    Arc::try_unwrap(wal).ok().unwrap().close().unwrap();
+}
+
+/// H2: a frame that was replayed at `open` (because it is physically present in the file)
+/// must be made genuinely durable before `open` reports it as covered by `durable_lsn` —
+/// otherwise a Fast-mode write that was never fsynced, but survived only because this was
+/// a process restart rather than a real power loss, would be reported durable and a
+/// following real power loss could still lose it.
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_syncs_the_last_segment_before_reporting_it_durable() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = Arc::new(Probe::default());
+    {
+        let (wal, _) = open(
+            Arc::new(ProbeVfs(probe.clone())),
+            dir.path(),
+            opts(SyncMode::Fast, 1 << 20),
+        );
+        wal.append(b"x".to_vec(), None).await.unwrap(); // written, not (yet) synced
+                                                        // Simulate a process restart (not a graceful shutdown): skip `Drop`'s own
+                                                        // close-time sync, so any sync found on reopen must come from `open` itself.
+        std::mem::forget(wal);
+    }
+
+    let before = probe.syncs.load(Ordering::SeqCst);
+    let (wal, replayed) = open(
+        Arc::new(ProbeVfs(probe.clone())),
+        dir.path(),
+        opts(SyncMode::Fast, 1 << 20),
+    );
+    assert_eq!(replayed, vec![(1, b"x".to_vec())]);
+    assert!(
+        probe.syncs.load(Ordering::SeqCst) > before,
+        "open must sync the recovered segment before trusting it as durable"
+    );
+    assert!(wal.durable_lsn() >= 1);
+}
+
+/// M1: a panicking commit hook must not bring down the writer thread in a way that answers
+/// later-in-batch items (or a request already dequeued into `pending`) with a bare
+/// `Closed` instead of `Poisoned`. The item whose hook panics, and everything queued after
+/// it, are answered `Poisoned`; everything answered *before* the panic keeps its `Ok`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_panicking_hook_poisons_the_log_and_the_rest_of_the_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let (wal, _) = open(Arc::new(StdVfs), dir.path(), opts(SyncMode::Fast, 1 << 20));
+
+    // Enqueue synchronously and in order (reserve + append_reserved, without awaiting the
+    // ack in between) so the LSN order — and therefore which item panics — is
+    // deterministic, whether or not the writer batches them together.
+    let mut pendings = Vec::new();
+    for i in 0..5u8 {
+        let r = wal.reserve(1).await.unwrap();
+        let hook: prkdb_core::wal::CommitHook = if i == 1 {
+            Box::new(|_loc| panic!("boom"))
+        } else {
+            Box::new(|_loc| {})
+        };
+        pendings.push(wal.append_reserved(r, vec![i], Some(hook)).unwrap());
+    }
+
+    let mut results = Vec::new();
+    for p in pendings {
+        results.push(p.await);
+    }
+
+    assert!(results[0].is_ok(), "item 0: {:?}", results[0]);
+    for (i, r) in results.iter().enumerate().skip(1) {
+        assert!(matches!(r, Err(WalError::Poisoned(_))), "item {i}: {r:?}");
+    }
+
+    let later = wal.append(vec![9], None).await;
+    assert!(matches!(later, Err(WalError::Poisoned(_))), "{later:?}");
+    assert!(matches!(wal.health(), WalHealth::Poisoned(_)));
+}
+
+/// M2: `health()` must not report `Stalled` for a request that just arrived, merely
+/// because the log had been idle (with nothing queued) for longer than the stall bound —
+/// only the age of what is actually queued should count.
+#[tokio::test(flavor = "multi_thread")]
+async fn health_is_not_stalled_right_after_a_long_idle_period() {
+    struct BlockOnceFile {
+        inner: Arc<dyn VfsFile>,
+        barrier: Arc<Barrier>,
+        calls: AtomicU64,
+    }
+    impl VfsFile for BlockOnceFile {
+        fn write_at(&self, o: u64, b: &[u8]) -> io::Result<()> {
+            // Skip call 0 (the header write during `Wal::open`, on the caller's thread);
+            // block on call 1 (the writer thread's first real batch write).
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                self.barrier.wait();
+            }
+            self.inner.write_at(o, b)
+        }
+        fn read_at(&self, o: u64, b: &mut [u8]) -> io::Result<usize> {
+            self.inner.read_at(o, b)
+        }
+        fn set_len(&self, l: u64) -> io::Result<()> {
+            self.inner.set_len(l)
+        }
+        fn len(&self) -> io::Result<u64> {
+            self.inner.len()
+        }
+        fn sync_data(&self) -> io::Result<()> {
+            self.inner.sync_data()
+        }
+    }
+    struct BlockOnceVfs {
+        barrier: Arc<Barrier>,
+    }
+    impl Vfs for BlockOnceVfs {
+        fn open(&self, p: &Path, m: OpenMode) -> io::Result<Arc<dyn VfsFile>> {
+            StdVfs.open(p, m)
+        }
+        fn create(&self, p: &Path) -> io::Result<Arc<dyn VfsFile>> {
+            Ok(Arc::new(BlockOnceFile {
+                inner: StdVfs.create(p)?,
+                barrier: self.barrier.clone(),
+                calls: AtomicU64::new(0),
+            }))
+        }
+        fn rename(&self, a: &Path, b: &Path) -> io::Result<()> {
+            StdVfs.rename(a, b)
+        }
+        fn remove(&self, p: &Path) -> io::Result<()> {
+            StdVfs.remove(p)
+        }
+        fn create_dir_all(&self, p: &Path) -> io::Result<()> {
+            StdVfs.create_dir_all(p)
+        }
+        fn read_dir(&self, p: &Path) -> io::Result<Vec<PathBuf>> {
+            StdVfs.read_dir(p)
+        }
+        fn exists(&self, p: &Path) -> io::Result<bool> {
+            StdVfs.exists(p)
+        }
+        fn sync_dir(&self, d: &Path) -> io::Result<()> {
+            StdVfs.sync_dir(d)
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let barrier = Arc::new(Barrier::new(2));
+    let vfs = Arc::new(BlockOnceVfs {
+        barrier: barrier.clone(),
+    });
+    let (wal, _) = open(vfs, dir.path(), opts(SyncMode::Fast, 1 << 20));
+
+    // `health_snapshot`'s stall bound floors at 1000ms regardless of `sync_interval`; go
+    // well past it while genuinely idle (nothing queued at all).
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_eq!(wal.health(), WalHealth::Healthy);
+
+    let wal = Arc::new(wal);
+    let w = wal.clone();
+    let appended = tokio::spawn(async move { w.append(b"x".to_vec(), None).await });
+
+    // Give the writer a moment to pick the request up and block mid-write, so it is
+    // "queued, not yet answered" while we check health.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        wal.health(),
+        WalHealth::Healthy,
+        "a freshly queued item must not be Stalled just because the log was idle before it"
+    );
+
+    barrier.wait();
+    assert!(appended.await.unwrap().is_ok());
+    Arc::try_unwrap(wal).ok().unwrap().close().unwrap();
+}
+
+/// M3: a scan fault in a sealed (non-active) segment is corruption, same as at `open`.
+#[tokio::test(flavor = "multi_thread")]
+async fn scan_from_refuses_corruption_in_a_sealed_segment() {
+    let dir = tempfile::tempdir().unwrap();
+    let (wal, _) = open(Arc::new(StdVfs), dir.path(), opts(SyncMode::Durable, 4096));
+    for i in 0..200 {
+        wal.append(format!("record-{i}").into_bytes(), None)
+            .await
+            .unwrap();
+    }
+    let segments = wal.segments();
+    assert!(segments.len() >= 2);
+    let sealed = segments[0];
+    let seg_path = dir
+        .path()
+        .join(prkdb_core::wal::segment::segment_file_name(sealed));
+    let f = StdVfs.open(&seg_path, OpenMode::ReadWrite).unwrap();
+    f.write_at(
+        prkdb_core::wal::segment::SEGMENT_HEADER_LEN + 20,
+        &[0xAB; 4],
+    )
+    .unwrap();
+
+    let err = wal.scan_from(1, &mut |_, _, _| Ok(())).unwrap_err();
+    assert!(
+        matches!(err, WalError::CorruptSegment { ref path, .. } if *path == seg_path),
+        "{err}"
+    );
+}
+
+/// M3: frames on the active segment that are not yet durable (written but unsynced under
+/// `SyncMode::Fast`) must never reach `scan_from`'s visitor.
+#[tokio::test(flavor = "multi_thread")]
+async fn scan_from_never_visits_unsynced_frames_on_the_active_segment() {
+    let dir = tempfile::tempdir().unwrap();
+    // An hour: only explicit `sync()` calls move `durable_lsn`, so the "unsynced" window
+    // below is deterministic rather than racing a background timer.
+    let o = WalOptions {
+        sync_mode: SyncMode::Fast,
+        sync_interval: Duration::from_secs(3600),
+        segment_bytes: 1 << 20,
+        max_batch_bytes: 1 << 20,
+        max_queued_bytes: 8 << 20,
+    };
+    let (wal, _) = open(Arc::new(StdVfs), dir.path(), o);
+
+    wal.append(b"synced".to_vec(), None).await.unwrap();
+    wal.sync().await.unwrap();
+    let unsynced = wal.append(b"unsynced".to_vec(), None).await.unwrap();
+    assert!(
+        wal.durable_lsn() < unsynced.lsn,
+        "the second record must not be durable yet"
+    );
+
+    let mut seen = Vec::new();
+    wal.scan_from(1, &mut |loc, _, p| {
+        seen.push((loc.lsn, p.to_vec()));
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        seen,
+        vec![(1, b"synced".to_vec())],
+        "unsynced frames must not be visited"
     );
 }
