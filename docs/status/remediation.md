@@ -45,7 +45,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | STO-06 | high | 2 | open | Four WAL implementations in use; all data writes hash to one shard so fixes do not propagate |
 | STO-07 | high | 2 | open | BatchAccumulator::flush() sleeps and returns Ok while dropping executor errors |
 | TST-01 | high | 4 | open | Chaos monkey tolerates 20% of acknowledged writes missing |
-| TST-09 | high | 2 | open | Perf gate WAL benches count ~500 instructions: the WAL work is outside the measured region |
+| TST-09 | high | 2 | fixed | Perf gate WAL benches count ~500 instructions: the WAL work is outside the measured region |
 | TXN-01 | high | 3 | open | Commit writes puts then deletes in separate append_batch calls; crash between leaves a torn commit |
 | TXN-02 | high | 3 | open | Indexed "atomic" transaction loops over independent puts |
 | TXN-03 | high | 3 | open | Serializable read set keeps only the last read hash; ReadCommitted writers bypass the barrier, losing updates |

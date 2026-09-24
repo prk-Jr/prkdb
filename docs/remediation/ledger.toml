@@ -649,9 +649,11 @@ title = "Perf gate WAL benches count ~500 instructions: the WAL work is outside 
 area = "tests"
 severity = "high"
 phase = 2
-status = "open"
+status = "fixed"
 sources = ["pr-80-perf-gate-first-run"]
-evidence = ["crates/prkdb/benches/iai_hot_paths.rs", "https://github.com/prk-Jr/prkdb/actions/runs/35961505566"]
+evidence = ["crates/prkdb/benches/iai_hot_paths.rs", "https://github.com/prk-Jr/prkdb/actions/runs/35961505566", "https://github.com/prk-Jr/prkdb/actions/runs/36029778339", "https://github.com/prk-Jr/prkdb/actions/runs/36072484141"]
+regression_tests = ["script:scripts/check_perf_gate_floors.sh", "ci-job:perf-gate.yml/instruction-count-gate"]
+changes = ["ac19322"]
 
 [[phase]]
 id = 0
