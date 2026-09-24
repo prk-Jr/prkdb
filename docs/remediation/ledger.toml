@@ -617,6 +617,16 @@ regression_tests = ["test:crates/prkdb/tests/replication_tests.rs::test_replicat
 changes = ["b6a6675"]
 ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35883454867"
 
+[[finding]]
+id = "STO-08"
+title = "WalConfig::segment_bytes ignored by the mmap WAL (segment size hardcoded to 64 MB)"
+area = "storage"
+severity = "low"
+phase = 2
+status = "open"
+sources = ["task-1.10-2026-09-24"]
+evidence = ["crates/prkdb-core/src/wal/mmap_log_segment.rs:50", "crates/prkdb-core/src/wal/write_ahead_log.rs:115"]
+
 [[phase]]
 id = 0
 title = "Honesty and tracking"

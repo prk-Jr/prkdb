@@ -10,7 +10,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 |---|---|---|---|
 | 0 | Honesty and tracking | gate_passed | 6/6 |
 | 1 | Harness and baseline | not_started | 0/2 |
-| 2 | Format v2 and single-node root fixes | not_started | 0/15 |
+| 2 | Format v2 and single-node root fixes | not_started | 0/16 |
 | 3 | Semantics | not_started | 0/9 |
 | 4 | Raft | not_started | 0/13 |
 | 5 | Documentation and release | not_started | 0/9 |
@@ -65,6 +65,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | TTL-01 | medium | 3 | open | Expiry deletes without re-checking the version; value and TTL metadata written non-atomically |
 | TXN-04 | medium | 3 | open | Default isolation is ReadCommitted; D5 makes Serializable the default |
 | DOC-10 | low | 5 | open | ignoreDeadLinks: true hides orphaned methodology/status pages |
+| STO-08 | low | 2 | open | WalConfig::segment_bytes ignored by the mmap WAL (segment size hardcoded to 64 MB) |
 | TST-04 | low | 1 | open | e2e_throughput_bench not declared harness = false; Criterion main likely never runs |
 | TST-07 | low | 2 | open | No fuzzing of WAL record, segment, snapshot, and proto decoding |
 | DOC-01 | high | 0 | verified | Cluster docs and compose files misdescribe multi-node setup (env vars, peer auth, metrics auth) |
