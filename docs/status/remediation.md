@@ -10,7 +10,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 |---|---|---|---|
 | 0 | Honesty and tracking | gate_passed | 6/6 |
 | 1 | Harness and baseline | not_started | 0/2 |
-| 2 | Format v2 and single-node root fixes | not_started | 0/16 |
+| 2 | Format v2 and single-node root fixes | not_started | 0/17 |
 | 3 | Semantics | not_started | 0/9 |
 | 4 | Raft | not_started | 0/13 |
 | 5 | Documentation and release | not_started | 0/9 |
@@ -45,6 +45,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | STO-06 | high | 2 | open | Four WAL implementations in use; all data writes hash to one shard so fixes do not propagate |
 | STO-07 | high | 2 | open | BatchAccumulator::flush() sleeps and returns Ok while dropping executor errors |
 | TST-01 | high | 4 | open | Chaos monkey tolerates 20% of acknowledged writes missing |
+| TST-09 | high | 2 | open | Perf gate WAL benches count ~500 instructions: the WAL work is outside the measured region |
 | TXN-01 | high | 3 | open | Commit writes puts then deletes in separate append_batch calls; crash between leaves a torn commit |
 | TXN-02 | high | 3 | open | Indexed "atomic" transaction loops over independent puts |
 | TXN-03 | high | 3 | open | Serializable read set keeps only the last read hash; ReadCommitted writers bypass the barrier, losing updates |

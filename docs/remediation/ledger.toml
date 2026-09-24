@@ -629,6 +629,16 @@ status = "open"
 sources = ["task-1.10-2026-09-24"]
 evidence = ["crates/prkdb-core/src/wal/mmap_log_segment.rs:50", "crates/prkdb-core/src/wal/write_ahead_log.rs:115"]
 
+[[finding]]
+id = "TST-09"
+title = "Perf gate WAL benches count ~500 instructions: the WAL work is outside the measured region"
+area = "tests"
+severity = "high"
+phase = 2
+status = "open"
+sources = ["pr-80-perf-gate-first-run"]
+evidence = ["crates/prkdb/benches/iai_hot_paths.rs", "https://github.com/prk-Jr/prkdb/actions/runs/35961505566"]
+
 [[phase]]
 id = 0
 title = "Honesty and tracking"
