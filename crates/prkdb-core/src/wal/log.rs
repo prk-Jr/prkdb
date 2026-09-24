@@ -90,6 +90,14 @@ fn now_ms() -> u64 {
 struct Shared {
     next_lsn: AtomicU64,
     durable_lsn: AtomicU64,
+    /// Watermark of LSNs that have been answered `Ok` to their caller (spec MEDIUM review
+    /// fix): `== durable_lsn` in `SyncMode::Durable` (the sync happens before any reply is
+    /// sent), but ahead of `durable_lsn` in `SyncMode::Fast`, where a reply is answered
+    /// right after the write, before the periodic sync catches up. A batch item answered
+    /// `Poisoned` (including one whose commit hook panicked, and everything after it in
+    /// the same batch) never raises this watermark, even though its frame may already be
+    /// physically written — "acked" means the caller was told `Ok`, nothing else.
+    acked_lsn: AtomicU64,
     health: RwLock<InternalHealth>,
     /// Read handles for `read`/`scan_from`, keyed by each segment's first LSN.
     segments: RwLock<BTreeMap<Lsn, Arc<dyn VfsFile>>>,
@@ -375,6 +383,9 @@ impl Wal {
         let shared = Arc::new(Shared {
             next_lsn: AtomicU64::new(next_lsn),
             durable_lsn: AtomicU64::new(next_lsn.saturating_sub(1)),
+            // Recovery: everything replayed was just made durable by the sync above, and
+            // was reported to `replay` as if committed, so it counts as acked too.
+            acked_lsn: AtomicU64::new(next_lsn.saturating_sub(1)),
             health: RwLock::new(InternalHealth::Running),
             segments: RwLock::new(segments),
             queued_bytes: AtomicUsize::new(0),
@@ -460,19 +471,26 @@ impl Wal {
         }
         let sender = self.sender.as_ref().ok_or(WalError::Closed)?;
         let (tx, rx) = oneshot::channel();
+        let now = now_ms();
+        // L-b: claim the "oldest still queued" stamp *before* `queued_bytes` goes above
+        // zero, and only if the queue was genuinely empty (`compare_exchange`, not a
+        // load-then-store): otherwise a health check that runs in the gap between the two
+        // could see `queued_bytes > 0` with a stale-or-missing timestamp, and a second
+        // appender racing this one could clobber the first appender's own stamp.
+        let _ = self.shared.oldest_enqueued_ms.compare_exchange(
+            0,
+            now,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        );
         let request = Request::Append {
             payload,
             hook,
             reply: Reply(Some(tx)),
-            enqueued_at_ms: now_ms(),
+            enqueued_at_ms: now,
             _permit: r.permit,
         };
         self.shared.queued_bytes.fetch_add(r.len, Ordering::AcqRel);
-        if self.shared.oldest_enqueued_ms.load(Ordering::Acquire) == 0 {
-            self.shared
-                .oldest_enqueued_ms
-                .store(now_ms(), Ordering::Release);
-        }
         sender.send(request).map_err(|_| WalError::Closed)?;
         Ok(PendingAppend { rx })
     }
@@ -531,18 +549,44 @@ impl Wal {
         read_frame(&*file, &path, loc)
     }
 
-    /// Visits committed frames with lsn >= `from`, in order (reads through `Vfs`).
-    ///
-    /// M3: a frame on the *active* segment past the current `durable_lsn` was written but
-    /// not yet synced (`SyncMode::Fast`) and is skipped, never visited — a scan consumer
-    /// (compaction, a checkpoint) must never base persisted state on data that a crash
-    /// right now could still lose. Earlier (sealed) segments are always fully durable by
-    /// construction (`roll_segment` syncs the old segment before switching), so the cap
-    /// applies only to the last one. A scan fault on an earlier segment is corruption and
-    /// returns `CorruptSegment`; a fault on the active segment's tail is expected (a write
-    /// in flight, or a crash not yet recovered from) and is silently bounded by the
-    /// `durable_lsn` cap above regardless of whether `scan_segment` itself reports a fault.
+    /// Visits acked frames with lsn >= `from`, in order (reads through `Vfs`). "Acked"
+    /// means answered `Ok` to the caller (`acked_lsn`, see `Shared`'s field docs) — in
+    /// `SyncMode::Fast` this is ahead of `durable_lsn`, since a write is answered right
+    /// after it reaches the OS, before the periodic sync catches up. This is the right
+    /// default for a consumer whose own cursor must not skip an acked write (Task 2.8a's
+    /// `get_changes_since`/`read_from`): capping at `durable_lsn` instead would let a
+    /// cursor jump straight past a Fast-acked record that hasn't synced yet. A caller that
+    /// must never see anything that could still be lost to a crash (compaction, a
+    /// checkpoint) wants [`Wal::scan_durable_from`] instead.
     pub fn scan_from(&self, from: Lsn, visit: &mut ScanVisitor<'_>) -> Result<(), WalError> {
+        self.scan_from_capped(from, self.acked_lsn(), visit)
+    }
+
+    /// Like [`Wal::scan_from`], but bounded by `durable_lsn` instead of `acked_lsn`: never
+    /// visits a frame that a crash right now could still lose. For compaction and
+    /// checkpoint callers, which must only ever persist state built from data that is
+    /// already durable.
+    pub fn scan_durable_from(
+        &self,
+        from: Lsn,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), WalError> {
+        self.scan_from_capped(from, self.durable_lsn(), visit)
+    }
+
+    /// M3: a frame on the *active* segment past `cap` is skipped, never visited. Earlier
+    /// (sealed) segments are always fully durable by construction (`roll_segment` syncs
+    /// the old segment before switching), so the cap applies only to the last one. A scan
+    /// fault on an earlier segment is corruption and returns `CorruptSegment`; a fault on
+    /// the active segment's tail is expected (a write in flight, or a crash not yet
+    /// recovered from) and is silently bounded by `cap` regardless of whether
+    /// `scan_segment` itself reports a fault.
+    fn scan_from_capped(
+        &self,
+        from: Lsn,
+        cap: Lsn,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<(), WalError> {
         let segments: Vec<(Lsn, Arc<dyn VfsFile>)> = self
             .shared
             .segments
@@ -551,7 +595,6 @@ impl Wal {
             .iter()
             .map(|(k, v)| (*k, v.clone()))
             .collect();
-        let durable = self.durable_lsn();
         let last_idx = segments.len().saturating_sub(1);
         for (idx, (first_lsn, file)) in segments.iter().enumerate() {
             let is_last = idx == last_idx;
@@ -560,7 +603,7 @@ impl Wal {
                 if loc.lsn < from {
                     return Ok(());
                 }
-                if is_last && loc.lsn > durable {
+                if is_last && loc.lsn > cap {
                     return Ok(());
                 }
                 visit(loc, kind, payload)
@@ -584,6 +627,12 @@ impl Wal {
 
     pub fn durable_lsn(&self) -> Lsn {
         self.shared.durable_lsn.load(Ordering::Acquire)
+    }
+
+    /// The watermark of LSNs answered `Ok` to their caller so far (see `Shared::acked_lsn`
+    /// docs). `>= durable_lsn` always; equal to it in `SyncMode::Durable`.
+    pub fn acked_lsn(&self) -> Lsn {
+        self.shared.acked_lsn.load(Ordering::Acquire)
     }
 
     pub fn health(&self) -> WalHealth {
@@ -796,7 +845,8 @@ fn writer_body(
                 let mut poisoned_during_drain = false;
                 let mut chunk: Vec<Request> = Vec::new();
                 let mut chunk_bytes = 0usize;
-                for item in drained {
+                let mut drained_iter = drained.into_iter();
+                while let Some(item) = drained_iter.next() {
                     let len = request_payload_len(&item);
                     if !chunk.is_empty() && chunk_bytes + len > opts.max_batch_bytes {
                         commit_batch(
@@ -814,6 +864,15 @@ fn writer_body(
                             &*shared.health.read().expect("health lock poisoned"),
                             InternalHealth::Poisoned(_)
                         ) {
+                            // L-a: `item` (the one that just triggered this chunk boundary)
+                            // and everything still unconsumed in `drained_iter` must not
+                            // fall through to a bare `Closed` via `Reply`'s drop guard when
+                            // we `break` below — answer them `Poisoned`, like every other
+                            // still-queued request once the log is poisoned.
+                            answer_poisoned(shared, item);
+                            for rest in drained_iter {
+                                answer_poisoned(shared, rest);
+                            }
                             poisoned_during_drain = true;
                             break;
                         }
@@ -972,7 +1031,35 @@ fn writer_body(
                     }
                     _ => {
                         if shared.queued_bytes.load(Ordering::Acquire) == 0 {
-                            shared.oldest_enqueued_ms.store(0, Ordering::Release);
+                            // L-b: clear only if nothing has claimed the marker since we
+                            // observed it above (`compare_exchange`, not a plain store) —
+                            // an appender's own `compare_exchange(0, now)` in
+                            // `append_reserved` could otherwise be undone by a writer that
+                            // last checked `queued_bytes` a moment too early.
+                            let current = shared.oldest_enqueued_ms.load(Ordering::Acquire);
+                            let cleared = current == 0
+                                || shared
+                                    .oldest_enqueued_ms
+                                    .compare_exchange(
+                                        current,
+                                        0,
+                                        Ordering::AcqRel,
+                                        Ordering::Relaxed,
+                                    )
+                                    .is_ok();
+                            // Re-check: if an appender raced in between our `queued_bytes`
+                            // read and the clear above, restore a fresh timestamp rather
+                            // than leave the marker at 0 while something is now queued. If
+                            // that appender's own stamp is already in place (its
+                            // `compare_exchange` ran first), this one is a harmless no-op.
+                            if cleared && shared.queued_bytes.load(Ordering::Acquire) > 0 {
+                                let _ = shared.oldest_enqueued_ms.compare_exchange(
+                                    0,
+                                    now_ms(),
+                                    Ordering::AcqRel,
+                                    Ordering::Relaxed,
+                                );
+                            }
                         }
                     }
                 }
@@ -1147,6 +1234,12 @@ fn commit_batch(
                 }
             }
         }
+        // MEDIUM (review): raise the acked watermark right before answering `Ok`, so a
+        // concurrent `scan_from` can never observe `acked_lsn >= loc.lsn` before the
+        // caller could possibly have observed the same `Ok`. Items answered `Poisoned`
+        // above (including one whose hook panicked, and everything after it) never reach
+        // this line, so `acked_lsn` only ever covers what was actually acked.
+        shared.acked_lsn.fetch_max(loc.lsn, Ordering::Release);
         item.reply.answer(Ok(loc));
     }
 }
@@ -1170,6 +1263,15 @@ fn roll_segment(
 ) -> Result<(), WalError> {
     active.file.sync_data()?;
     let new_first_lsn = shared.next_lsn.load(Ordering::Acquire);
+    // L-c: the sync just above made the whole old segment durable, in every `SyncMode`
+    // (Fast included). Nothing else would otherwise advance `durable_lsn` for it until the
+    // next periodic/explicit sync, so a Fast-mode `durable_lsn` reader could lag behind
+    // what a crash right now would actually still keep. `fetch_max` because this can race
+    // a `commit_batch` sync completing concurrently is not possible here (single writer
+    // thread calls both), but stays monotonic regardless.
+    shared
+        .durable_lsn
+        .fetch_max(new_first_lsn.saturating_sub(1), Ordering::Release);
     let path = dir.join(segment_file_name(new_first_lsn));
     let file = vfs.create(&path)?;
     write_segment_header(&*file, new_first_lsn)?;

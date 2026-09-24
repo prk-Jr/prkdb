@@ -614,10 +614,13 @@ async fn scan_from_refuses_corruption_in_a_sealed_segment() {
     );
 }
 
-/// M3: frames on the active segment that are not yet durable (written but unsynced under
-/// `SyncMode::Fast`) must never reach `scan_from`'s visitor.
+/// MEDIUM (review): `scan_from` is capped at `acked_lsn`, not `durable_lsn` — it must see
+/// a Fast-mode write as soon as it is acked (answered `Ok`), even before the periodic sync
+/// catches up, so a consumer built on it (Task 2.8a's `get_changes_since`) never skips an
+/// acked change. `scan_durable_from` is the durability-bounded alternative for compaction
+/// and checkpoint callers, which must wait for the sync.
 #[tokio::test(flavor = "multi_thread")]
-async fn scan_from_never_visits_unsynced_frames_on_the_active_segment() {
+async fn scan_from_sees_fast_acked_writes_scan_durable_from_waits_for_sync() {
     let dir = tempfile::tempdir().unwrap();
     // An hour: only explicit `sync()` calls move `durable_lsn`, so the "unsynced" window
     // below is deterministic rather than racing a background timer.
@@ -630,23 +633,91 @@ async fn scan_from_never_visits_unsynced_frames_on_the_active_segment() {
     };
     let (wal, _) = open(Arc::new(StdVfs), dir.path(), o);
 
-    wal.append(b"synced".to_vec(), None).await.unwrap();
-    wal.sync().await.unwrap();
-    let unsynced = wal.append(b"unsynced".to_vec(), None).await.unwrap();
+    let loc = wal.append(b"fast".to_vec(), None).await.unwrap();
     assert!(
-        wal.durable_lsn() < unsynced.lsn,
-        "the second record must not be durable yet"
+        wal.durable_lsn() < loc.lsn,
+        "must not be durable yet: nothing has synced"
+    );
+    assert!(
+        wal.acked_lsn() >= loc.lsn,
+        "must be acked immediately: the append already returned Ok"
     );
 
-    let mut seen = Vec::new();
+    let mut seen_by_scan_from = Vec::new();
     wal.scan_from(1, &mut |loc, _, p| {
-        seen.push((loc.lsn, p.to_vec()));
+        seen_by_scan_from.push((loc.lsn, p.to_vec()));
         Ok(())
     })
     .unwrap();
     assert_eq!(
-        seen,
-        vec![(1, b"synced".to_vec())],
-        "unsynced frames must not be visited"
+        seen_by_scan_from,
+        vec![(1, b"fast".to_vec())],
+        "scan_from must see an acked-but-unsynced Fast write"
+    );
+
+    let mut seen_by_scan_durable_from = Vec::new();
+    wal.scan_durable_from(1, &mut |loc, _, p| {
+        seen_by_scan_durable_from.push((loc.lsn, p.to_vec()));
+        Ok(())
+    })
+    .unwrap();
+    assert!(
+        seen_by_scan_durable_from.is_empty(),
+        "scan_durable_from must not see an unsynced write: {seen_by_scan_durable_from:?}"
+    );
+
+    wal.sync().await.unwrap();
+
+    let mut seen_from_after_sync = Vec::new();
+    wal.scan_from(1, &mut |loc, _, p| {
+        seen_from_after_sync.push((loc.lsn, p.to_vec()));
+        Ok(())
+    })
+    .unwrap();
+    let mut seen_durable_after_sync = Vec::new();
+    wal.scan_durable_from(1, &mut |loc, _, p| {
+        seen_durable_after_sync.push((loc.lsn, p.to_vec()));
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(seen_from_after_sync, vec![(1, b"fast".to_vec())]);
+    assert_eq!(seen_durable_after_sync, vec![(1, b"fast".to_vec())]);
+}
+
+/// L-c: rolling a segment fsyncs the outgoing one as its first step, so `durable_lsn` must
+/// reflect that immediately — a Fast-mode reader must not have to wait for the (here,
+/// 1-hour) periodic sync or an explicit `sync()` to see the old segment's frames as durable.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_segment_roll_advances_durable_lsn_for_the_old_segment_in_fast_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let o = WalOptions {
+        sync_mode: SyncMode::Fast,
+        sync_interval: Duration::from_secs(3600),
+        segment_bytes: 1024,
+        max_batch_bytes: 1 << 20,
+        max_queued_bytes: 8 << 20,
+    };
+    let (wal, _) = open(Arc::new(StdVfs), dir.path(), o);
+
+    let mut old_segment_last_lsn = None;
+    for i in 0..200u32 {
+        wal.append(format!("record-{i:04}").into_bytes(), None)
+            .await
+            .unwrap();
+        let segs = wal.segments();
+        if segs.len() >= 2 {
+            old_segment_last_lsn = Some(segs[1] - 1);
+            break;
+        }
+    }
+    let old_segment_last_lsn =
+        old_segment_last_lsn.expect("small segments must roll within 200 records");
+
+    assert!(
+        wal.durable_lsn() >= old_segment_last_lsn,
+        "durable_lsn ({}) must cover the rolled-from segment's last lsn ({}) without a \
+         periodic or explicit sync",
+        wal.durable_lsn(),
+        old_segment_last_lsn
     );
 }
