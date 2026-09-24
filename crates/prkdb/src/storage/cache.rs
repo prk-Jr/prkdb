@@ -17,6 +17,7 @@ use tokio::sync::RwLock;
 pub struct ShardedLruCache<K, V> {
     shards: Vec<Arc<RwLock<LruCache<K, V>>>>,
     shard_count: usize,
+    capacity_per_shard: usize,
 }
 
 impl<K: Eq + Hash + Clone, V: Clone> ShardedLruCache<K, V> {
@@ -37,7 +38,13 @@ impl<K: Eq + Hash + Clone, V: Clone> ShardedLruCache<K, V> {
         Self {
             shards,
             shard_count,
+            capacity_per_shard,
         }
+    }
+
+    /// Total entries this cache holds before evicting, across all shards.
+    pub fn capacity(&self) -> usize {
+        self.capacity_per_shard * self.shards.len()
     }
 
     /// Create with metrics tracking
@@ -57,6 +64,7 @@ impl<K: Eq + Hash + Clone, V: Clone> ShardedLruCache<K, V> {
         Self {
             shards,
             shard_count,
+            capacity_per_shard,
         }
     }
 

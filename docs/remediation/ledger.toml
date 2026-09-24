@@ -637,9 +637,11 @@ title = "WalStorageAdapter::new_with_config ignores StorageConfig::cache_capacit
 area = "storage"
 severity = "low"
 phase = 2
-status = "open"
+status = "fixed"
 sources = ["task-2.1-spike-2026-09-24"]
 evidence = ["crates/prkdb/src/storage/wal_adapter.rs:630", "docs/remediation/decisions/2026-09-24-single-log-spike.md"]
+regression_tests = ["test:crates/prkdb/src/storage/wal_adapter.rs::new_with_config_honors_cache_capacity"]
+changes = ["9c9e00a"]
 
 [[finding]]
 id = "TST-09"

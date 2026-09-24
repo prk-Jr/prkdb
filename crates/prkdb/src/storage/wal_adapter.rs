@@ -627,7 +627,7 @@ impl WalStorageAdapter {
             wal,
             index: Arc::new(LockFreeHashMap::new()), // Phase 5: Lock-free HashMap
             cache: Arc::new(super::cache::ShardedLruCache::with_metrics(
-                100_000, // Match default config cache capacity
+                config.cache_capacity,
                 metrics.clone(),
             )),
             outbox: Arc::new(LockFreeHashMap::new()),
@@ -2738,6 +2738,18 @@ mod tests {
     use std::env;
     use std::fs;
     use std::time::Instant;
+
+    /// STO-09: `builder(..).with_cache_capacity(n)` reaches `new_with_config`, which used
+    /// to hard-code 100,000 entries and ignore the knob.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn new_with_config_honors_cache_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = WalStorageAdapter::builder(dir.path().to_path_buf())
+            .with_cache_capacity(1_600)
+            .build()
+            .unwrap();
+        assert_eq!(adapter.inner.cache.capacity(), 1_600);
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn replication_constructor_uses_the_supplied_wal_config() {
