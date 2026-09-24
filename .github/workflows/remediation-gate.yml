@@ -210,6 +210,7 @@ jobs:
         env:
           BASE_REF: ${{ inputs.base_ref }}
         run: |
+          set -o pipefail
           {
             echo "**PROBE — not gate evidence**"
             echo "## Host"; echo; nproc; lscpu | grep 'Model name'; df -hT . | tail -1
