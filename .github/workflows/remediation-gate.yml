@@ -8,13 +8,37 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: Git ref to verify (phase PR head)
+        description: Git ref to verify (phase PR head), or to probe
         required: true
       phase:
         description: Phase number (0-5)
         required: true
         type: choice
         options: ['0', '1', '2', '3', '4', '5']
+      # Linux probe path (Task 2.2, spec §7 Phase 2, D10): lets a phase branch pushed
+      # without a PR (maintainer-approved probe push) run a benchmark or a Valgrind
+      # bench on a Linux runner, e.g. to satisfy the Task 2.1 spike's Risk 1 condition
+      # ("run this bench on Linux ... before merging the writer"). Leaving this at
+      # 'none' runs the normal gate untouched; 'bench'/'valgrind' skip the gate jobs
+      # below and run only the matching probe job.
+      probe:
+        description: Linux probe instead of the gate ('none' for a normal phase gate)
+        required: false
+        type: choice
+        options: ['none', 'bench', 'valgrind']
+        default: 'none'
+      bench_name:
+        description: 'probe != none: cargo bench target under crates/prkdb/benches (default depends on probe kind)'
+        required: false
+        default: ''
+      bench_filter:
+        description: 'probe=bench only: SPIKE_FILTER substring passed to the bench'
+        required: false
+        default: ''
+      bench_reps:
+        description: 'probe=bench only: SPIKE_REPS passed to the bench'
+        required: false
+        default: '1'
 
 permissions:
   contents: read
@@ -53,6 +77,9 @@ jobs:
   ledger-and-tests:
     name: Ledger and Tests
     needs: resolve
+    # Skipped on a probe dispatch (probe != 'none'): a probe push exists only to run a
+    # benchmark or Valgrind bench on Linux, not to gate a phase.
+    if: ${{ inputs.probe == 'none' || inputs.probe == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -79,8 +106,8 @@ jobs:
     needs: resolve
     # Phases 0 and 5 don't touch the storage/WAL path this harness exercises: phase 0
     # only stands the gate workflow up, and phase 5 is close-out. Every other phase
-    # gate runs it.
-    if: ${{ inputs.phase != '0' && inputs.phase != '5' }}
+    # gate runs it. Also skipped on a probe dispatch (see ledger-and-tests above).
+    if: ${{ (inputs.probe == 'none' || inputs.probe == '') && inputs.phase != '0' && inputs.phase != '5' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     # Ten shards, not because ten are needed to fit the time budget, but for headroom
@@ -136,9 +163,14 @@ jobs:
         env:
           RESULT: ${{ needs.harness.result }}
           PHASE: ${{ inputs.phase }}
+          PROBE: ${{ inputs.probe }}
         run: |
           if [ "$RESULT" = "success" ]; then
             echo "Harness result: success" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$RESULT" = "skipped" ] && [ -n "$PROBE" ] && [ "$PROBE" != "none" ]; then
+            echo "Harness result: skipped (probe=$PROBE dispatch, expected)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if [ "$RESULT" = "skipped" ] && { [ "$PHASE" = "0" ] || [ "$PHASE" = "5" ]; }; then
@@ -148,3 +180,92 @@ jobs:
           echo "Harness result: $RESULT (phase $PHASE) — failing" >> "$GITHUB_STEP_SUMMARY"
           echo "::error::Harness did not pass and was not a legitimate phase 0/5 skip: $RESULT"
           exit 1
+
+  probe-bench:
+    name: Linux bench probe
+    needs: resolve
+    if: ${{ inputs.probe == 'bench' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      - name: Run bench probe
+        env:
+          BENCH_NAME: ${{ inputs.bench_name }}
+          SPIKE_FILTER: ${{ inputs.bench_filter }}
+          SPIKE_REPS: ${{ inputs.bench_reps }}
+        run: |
+          set -o pipefail
+          name="${BENCH_NAME:-wal_write_path_spike}"
+          echo "Bench: $name (filter='${SPIKE_FILTER}', reps=${SPIKE_REPS:-1})" >> "$GITHUB_STEP_SUMMARY"
+          cargo bench -p prkdb --bench "$name" | tee probe-bench-output.txt
+      - name: Publish bench probe output
+        if: always()
+        run: |
+          {
+            echo '```'
+            cat probe-bench-output.txt 2>/dev/null || echo "(no output captured)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: probe-bench-output
+          path: probe-bench-output.txt
+          if-no-files-found: warn
+
+  probe-valgrind:
+    name: Linux Valgrind probe
+    needs: resolve
+    if: ${{ inputs.probe == 'valgrind' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      - name: Install Valgrind
+        run: sudo apt-get install -y valgrind
+      - name: Install gungraun-runner
+        run: cargo install gungraun-runner --version "0.19.4" --locked
+      - name: Run Valgrind probe
+        env:
+          BENCH_NAME: ${{ inputs.bench_name }}
+        run: |
+          set -o pipefail
+          name="${BENCH_NAME:-iai_hot_paths}"
+          cargo bench -p prkdb --bench "$name" -- --save-summary=json | tee probe-valgrind-output.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: probe-valgrind-output
+          path: |
+            probe-valgrind-output.txt
+            target/gungraun
+          if-no-files-found: warn
