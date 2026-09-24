@@ -11,6 +11,17 @@ pub enum CompactionPolicy {
     SizeWindow(u64), // bytes
 }
 
+/// When a write is acknowledged (spec §6.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SyncMode {
+    /// Ack after the group-commit batch containing the write is fsynced.
+    #[default]
+    Durable,
+    /// Ack after the write reaches the OS; synced at least every `sync_interval_ms`.
+    /// A power cut can lose up to `sync_interval_ms` of acknowledged writes.
+    Fast,
+}
+
 /// Configuration for Write-Ahead Log
 #[derive(Debug, Clone)]
 pub struct WalConfig {
@@ -53,6 +64,16 @@ pub struct WalConfig {
 
     /// Adaptive batching configuration
     pub adaptive_config: AdaptiveBatchConfig,
+
+    /// Acknowledgement policy. Default `Durable` everywhere, including `test_config()`
+    /// (controller decision: Durable is the default everywhere, spec §6.2).
+    pub sync_mode: SyncMode,
+    /// Fast mode's sync bound (default 10).
+    pub sync_interval_ms: u64,
+    /// Largest group-commit write (default 16 MiB).
+    pub max_batch_bytes: usize,
+    /// Admission bound: bytes queued for the writer before appenders wait (default 64 MiB).
+    pub max_queued_bytes: usize,
 }
 
 impl Default for WalConfig {
@@ -70,6 +91,10 @@ impl Default for WalConfig {
             shard_count: Some(16), // 16 WAL shards for maximum parallelism
             workload_profile: WorkloadProfile::Balanced,
             adaptive_config: AdaptiveBatchConfig::default(),
+            sync_mode: SyncMode::Durable,
+            sync_interval_ms: 10,
+            max_batch_bytes: 16 * 1024 * 1024,
+            max_queued_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -100,6 +125,10 @@ impl WalConfig {
             shard_count: Some(4), // Fewer shards for testing
             workload_profile: WorkloadProfile::Balanced,
             adaptive_config: AdaptiveBatchConfig::default(),
+            sync_mode: SyncMode::Durable,
+            sync_interval_ms: 10,
+            max_batch_bytes: 16 * 1024 * 1024,
+            max_queued_bytes: 64 * 1024 * 1024,
         }
     }
 
@@ -118,6 +147,10 @@ impl WalConfig {
             shard_count: Some(16), // Maximum sharding for benchmarks
             workload_profile: WorkloadProfile::Balanced,
             adaptive_config: AdaptiveBatchConfig::default(),
+            sync_mode: SyncMode::Durable,
+            sync_interval_ms: 10,
+            max_batch_bytes: 16 * 1024 * 1024,
+            max_queued_bytes: 64 * 1024 * 1024,
         }
     }
 
@@ -136,6 +169,10 @@ impl WalConfig {
             shard_count: Some(16), // 16 shards for production
             workload_profile: WorkloadProfile::Balanced,
             adaptive_config: AdaptiveBatchConfig::default(),
+            sync_mode: SyncMode::Durable,
+            sync_interval_ms: 10,
+            max_batch_bytes: 16 * 1024 * 1024,
+            max_queued_bytes: 64 * 1024 * 1024,
         }
     }
 
@@ -154,6 +191,10 @@ impl WalConfig {
             shard_count: Some(16), // 16 shards
             workload_profile: WorkloadProfile::Balanced,
             adaptive_config: AdaptiveBatchConfig::default(),
+            sync_mode: SyncMode::Durable,
+            sync_interval_ms: 10,
+            max_batch_bytes: 16 * 1024 * 1024,
+            max_queued_bytes: 64 * 1024 * 1024,
         }
     }
 }

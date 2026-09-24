@@ -8,6 +8,7 @@ pub mod compaction;
 pub mod compression;
 pub mod config;
 pub mod frame;
+pub mod log;
 pub mod log_record;
 pub mod log_segment;
 pub mod metrics;
@@ -21,9 +22,12 @@ pub mod write_ahead_log;
 pub use compression::{
     compress, decompress, decompress_bounded, CompressionConfig, CompressionError, CompressionType,
 };
-pub use config::{CompactionPolicy, WalConfig};
+pub use config::{CompactionPolicy, SyncMode, WalConfig};
+pub use frame::Lsn;
+pub use log::{CommitHook, PendingAppend, RecoveryReport, Reservation, Wal, WalHealth, WalOptions};
 pub use log_record::{LogOperation, LogRecord};
 pub use log_segment::LogSegment;
+pub use segment::RecordLoc;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WalError {
@@ -60,6 +64,20 @@ pub enum WalError {
         path: std::path::PathBuf,
         offset: u64,
         reason: String,
+    },
+
+    /// A caller's `replay` closure (passed to `Wal::open`) failed to decode a frame whose
+    /// own CRC/LSN checks passed. Distinct from `CorruptSegment` (a fault the WAL's own
+    /// frame/segment scan found) so callers can tell "the WAL bytes are fine, the payload
+    /// inside them is not" apart from "the WAL itself is corrupt" (spec §8: refuse to
+    /// open, name the file).
+    #[error("WAL replay failed for lsn {lsn} in {path} at byte {offset}: {source}")]
+    ReplayFailed {
+        path: std::path::PathBuf,
+        offset: u64,
+        lsn: Lsn,
+        #[source]
+        source: Box<WalError>,
     },
 
     #[error("record of {len} bytes in {path} exceeds the {max}-byte limit")]

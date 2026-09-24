@@ -3238,6 +3238,9 @@ New `WalError` variants in `wal/mod.rs` (no existing code matches on `WalError` 
     Poisoned(String),
     #[error("WAL is closed")]
     Closed,
+    // Added by Task 2.6 review: a `replay` callback error during `Wal::open`, located.
+    #[error("replay of lsn {lsn} at {path} byte {offset} failed: {source}")]
+    ReplayFailed { path: std::path::PathBuf, offset: u64, lsn: u64, source: Box<WalError> },
 ```
 
 `frame.rs`:
@@ -3629,7 +3632,11 @@ impl Wal {
     /// truncated (`set_len` + `sync_data`) and reported. Earlier segment: any fault is
     /// `CorruptSegment` and nothing is modified. A zero-length or header-only last segment
     /// is valid (a crash right after a roll or right after creation); a zero-length one is
-    /// completed by writing its header (+ `sync_data`) before use.
+    /// completed by writing its header (+ `sync_data`) before use. After the scan (and any
+    /// truncation) the last segment is `sync_data`ed once before `durable_lsn` is set to
+    /// cover the replayed range: after a process crash, frames replayed from the page cache
+    /// were never fsynced, and must not be reported durable until they are. A `replay` error
+    /// is returned as `WalError::ReplayFailed { path, offset, lsn, source }`.
     ///
     /// First segment: when the directory holds no segment, `open` creates
     /// `{next_lsn:020}.wal` (next_lsn = 1 for a new log) **before returning**: `create` →
@@ -3665,10 +3672,23 @@ impl Wal {
     /// `sync` for non-async callers; waits with `futures::executor::block_on` (see `append_blocking`).
     pub fn sync_blocking(&self) -> Result<Lsn, WalError>;
     pub fn read(&self, loc: RecordLoc) -> Result<Vec<u8>, WalError>;
-    /// Visits committed frames with lsn >= `from`, in order (reads through Vfs).
+    /// Visits *acked* frames with lsn >= `from`, in order (reads through Vfs): capped at
+    /// `acked_lsn`, not `durable_lsn`, so a Fast-mode write that has been answered `Ok` is
+    /// visible immediately, before the periodic sync catches up — a consumer's cursor
+    /// (Task 2.8a's `get_changes_since`/`read_from`) must never skip an acked change. A
+    /// fault in a sealed segment is `CorruptSegment`, never a silent skip.
     pub fn scan_from(&self, from: Lsn, visit: &mut dyn FnMut(RecordLoc, FrameKind, &[u8]) -> Result<(), WalError>) -> Result<(), WalError>;
+    /// Like `scan_from`, but capped at `durable_lsn` instead: never visits a frame a crash
+    /// right now could still lose. For compaction/checkpoint callers, which must only ever
+    /// persist state built from data that is already durable.
+    pub fn scan_durable_from(&self, from: Lsn, visit: &mut dyn FnMut(RecordLoc, FrameKind, &[u8]) -> Result<(), WalError>) -> Result<(), WalError>;
     pub fn next_lsn(&self) -> Lsn;
     pub fn durable_lsn(&self) -> Lsn;
+    /// Watermark of LSNs answered `Ok` to their caller. `>= durable_lsn` always; equal to
+    /// it in `SyncMode::Durable`. A batch item answered `Poisoned` (including one whose
+    /// commit hook panicked, and everything after it in the same batch) never raises this,
+    /// even if its frame is already physically written.
+    pub fn acked_lsn(&self) -> Lsn;
     pub fn health(&self) -> WalHealth;
     /// First LSNs of the segments, oldest first (tests, compaction).
     pub fn segments(&self) -> Vec<Lsn>;
@@ -3679,10 +3699,10 @@ impl Wal {
 
 **Invariants the implementation must hold (each has a test below):**
 1. LSNs are assigned by the writer, contiguous from 1, one per `append`. Replay visits them in LSN order.
-2. Durable: the frame is `sync_data`ed before its hook runs and before the caller is answered. Fast: the frame is written before; it is synced within `sync_interval` even if no further writes arrive (the writer waits with `recv_timeout(remaining interval)` while it holds unsynced data).
+2. Durable: the frame is `sync_data`ed before its hook runs and before the caller is answered. Fast: the frame is written before; it is synced within `sync_interval` even if no further writes arrive (the writer waits with `recv_timeout(remaining interval)` while it holds unsynced data) **and** even if writes never stop (after every Fast batch write the writer checks the interval and syncs inline when it has elapsed — a saturated writer never reaches the idle `recv_timeout` branch).
 3. Hooks run on the writer thread in LSN order.
-4. Any I/O error, or a panicking hook, **poisons** the log: the failing batch and every later append get `WalError::Poisoned`; a failed `fsync` is never retried (fsyncgate); `health()` reports `Poisoned`. The writer body runs under `catch_unwind` so a panic becomes poisoning, and remaining queued requests are answered, never dropped silently (each request's `oneshot` sender sits in a struct whose `Drop` sends `Err(Closed)`, mirroring today's `PendingWrite`).
-5. A batch never spans segments. Roll when the next batch would push the active segment past `segment_bytes` (a batch larger than `segment_bytes` gets a segment of its own): `sync_data` the old segment, `create` `{next_lsn:020}.wal`, write and `sync_data` its header, `sync_dir(dir)`, switch.
+4. Any I/O error, or a panicking hook, **poisons** the log: the failing batch and every later append get `WalError::Poisoned` (each hook runs under its own `catch_unwind`; on a panic, that item and the rest of its batch are answered `Poisoned`, items answered before it keep `Ok`; a request held over in the writer's `pending` slot, or still unconsumed in a `Close`-triggered chunked drain, is answered `Poisoned`, never left to fall through to a bare `Closed` via `Reply`'s drop guard); a failed `fsync` is never retried (fsyncgate); `health()` reports `Poisoned`. The writer body runs under `catch_unwind` so a panic becomes poisoning, and remaining queued requests are answered, never dropped silently (each request's `oneshot` sender sits in a struct whose `Drop` sends `Err(Closed)`, mirroring today's `PendingWrite`).
+5. A batch never spans segments. Roll when the next batch would push the active segment past `segment_bytes` (a batch larger than `segment_bytes` gets a segment of its own): `sync_data` the old segment, `create` `{next_lsn:020}.wal`, write and `sync_data` its header, `sync_dir(dir)`, switch. The roll's sync of the old segment advances `durable_lsn` (`fetch_max`) to that segment's last LSN immediately, in every `SyncMode` — otherwise a Fast-mode `durable_lsn` reader would lag behind what a crash right now would actually still keep, until the next periodic or explicit sync.
 6. Admission: `reserve` acquires `min(len, max_queued_bytes)` permits from a `tokio::sync::Semaphore` of `max_queued_bytes`; the permit travels inside the request and is released when the writer answers it. A payload over `MAX_PAYLOAD_LEN` is refused with `RecordTooLarge` before any permit is taken. The split lets a caller time "waiting to be admitted" (nothing queued: a definite refusal) separately from "queued, not yet answered" (may still land) — Task 2.8a maps them to `WriteBackpressure` and `WriteNotConfirmed`.
 7. Batching: block for the first request, drain what is already queued up to `max_batch_bytes`, no linger timer (decision record §7).
 8. `read` verifies CRC and LSN (`segment::read_frame`); it never trusts an offset blindly.
@@ -4082,11 +4102,11 @@ async fn corruption_in_a_sealed_segment_refuses_to_open() {
 `rand` and `rand_chacha` are already `prkdb-verify` dependencies. Run: `cargo nextest run -p prkdb-verify --test wal_power_loss` → fail (`todo!()`).
 
 - [ ] **Step 4: Implement `log.rs`.** Structure (port `writer_loop` from the spike and extend):
-  - `Shared` (in an `Arc`, read by `Wal` and the writer): `next_lsn: AtomicU64`, `durable_lsn: AtomicU64`, `health: RwLock<WalHealth>` (read on the probe path only), `segments: RwLock<BTreeMap<Lsn, Arc<dyn VfsFile>>>` (read handles for `read`/`scan_from`), `queued_bytes: AtomicUsize`, `last_progress_ms: AtomicU64`, `oldest_enqueued_ms: AtomicU64`, `admission: Arc<Semaphore>`.
+  - `Shared` (in an `Arc`, read by `Wal` and the writer): `next_lsn: AtomicU64`, `durable_lsn: AtomicU64`, `acked_lsn: AtomicU64` (watermark of LSNs answered `Ok`; `>= durable_lsn`, equal to it in `SyncMode::Durable`, raised via `fetch_max` right before each `Ok` reply so `scan_from` can use it as its default cap — see invariant 4 and `scan_from`'s doc above), `health: RwLock<WalHealth>` (read on the probe path only), `segments: RwLock<BTreeMap<Lsn, Arc<dyn VfsFile>>>` (read handles for `read`/`scan_from`), `queued_bytes: AtomicUsize`, `last_progress_ms: AtomicU64`, `oldest_enqueued_ms: AtomicU64`, `admission: Arc<Semaphore>`.
   - `Request::Append { payload, hook, reply: Reply, _permit: OwnedSemaphorePermit }`, `Request::Sync { reply }`, `Request::Close { reply }`. `Reply` wraps `oneshot::Sender<Result<RecordLoc, WalError>>` with a `Drop` that sends `Err(WalError::Closed)` if never answered.
   - Channel: `std::sync::mpsc::channel` (unbounded, bounded in bytes by the semaphore).
   - Writer thread `prkdb-wal-writer` owns the active segment `(first_lsn, Arc<dyn VfsFile>, write_pos)` and a reusable `Vec<u8>` batch buffer. Loop: `recv()` (or `recv_timeout` while unsynced Fast data is outstanding), drain with `try_recv` up to `max_batch_bytes`, frame, roll if needed (invariant 5), one `write_at`, `sync_data` if Durable (or Fast and the interval elapsed), run hooks in order, update `durable_lsn`/`last_progress_ms`, answer replies. On error: set `Poisoned(cause)`, answer the batch and everything queued with `Poisoned`, then keep answering new requests with `Poisoned` until `Close`.
-  - `health()`: `Stalled` when `queued_bytes > 0` and `now - last_progress_ms > max(1s, 100 × sync_interval)`; computed on demand, so an idle log performs no wakeups (liveness spec acceptance 1).
+  - `health()`: `Stalled` when `queued_bytes > 0` and `now - max(last_progress_ms, oldest_enqueued_ms) > max(1s, 100 × sync_interval)`, where `oldest_enqueued_ms` is the enqueue time of the oldest request still queued (from each request's own `enqueued_at_ms`, cleared only when `queued_bytes == 0`), so the first append after an idle spell is not reported stalled; computed on demand, so an idle log performs no wakeups (liveness spec acceptance 1). `oldest_enqueued_ms` is claimed with `compare_exchange(0, now)` in `reserve`/`append_reserved`, before `queued_bytes` goes above zero, and cleared by the writer with a `compare_exchange` (re-checking `queued_bytes` after) rather than a plain `store(0, …)`, so a concurrent appender's own stamp is never clobbered by a writer that observed an empty queue a moment too early.
   - `Drop for Wal`: send `Close`, join; log (`tracing::warn!`) any error; never panic.
 - [ ] **Step 5: Run** both test files → all pass. Run each five times (`for i in 1 2 3 4 5; do cargo nextest run -p prkdb-verify --test wal_power_loss || break; done`): they are deterministic (explicit syncs only), so one failure is a bug.
 - [ ] **Step 6: Add real-`Wal` cells to the spike bench** (`wal_write_path_spike.rs`): a `Target::Wal(prkdb_core::wal::Wal)` whose `put` encodes a one-op `Batch` on the caller (as the adapter will) and calls `append(payload, None)`; cells `wal_durable` and `wal_fast`, opened with `WalOptions { segment_bytes: 256 MiB, max_batch_bytes: 16 MiB, max_queued_bytes: 64 MiB, sync_interval: 10 ms, .. }`. Keep every existing cell.
