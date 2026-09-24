@@ -16,6 +16,12 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # gungraun-runner reads GUNGRAUN_COLOR before falling back to CARGO_TERM_COLOR (see
+  # gungraun-runner-0.19.4's src/main.rs) — CARGO_TERM_COLOR=always above is for readable
+  # human logs elsewhere in this job, but the bench steps below force gungraun itself
+  # into plain output via GUNGRAUN_COLOR=never so parsing never depends on ANSI codes
+  # (it no longer scrapes terminal text at all; kept as defense in depth).
+  GUNGRAUN_COLOR: never
   # Pin the runner binary to the library version pinned in crates/prkdb/Cargo.toml
   # (Task 1.13: "pin its runner version to the library version"). Bump both together.
   GUNGRAUN_VERSION: "0.19.4"
@@ -25,6 +31,12 @@ jobs:
     name: Instruction-count regression gate
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    defaults:
+      run:
+        # Every piped step (`| tee`, etc.) below needs pipefail or a failing left-hand
+        # command is silently swallowed by tee's own zero exit. `bash -eo pipefail` is
+        # bash's default under `defaults.run.shell: bash` on GitHub-hosted runners.
+        shell: bash
     steps:
       # CI preamble (spec conventions): identical to ci.yml's `test` job setup.
       - name: Free disk space
@@ -57,34 +69,75 @@ jobs:
       # Benchmarked in the same job, on the same runner, so both share whatever noise
       # the runner itself contributes (spec §6.2: "base commit and the PR head are
       # benchmarked in the same job").
-      # gungraun/iai-callgrind compares each benchmark id against the previous run
-      # recorded under target/ for that same id (see scripts/perf_gate_deltas.py's
-      # docstring). Benching base first, then head, in the same job and without
-      # clearing target/ in between, makes the head run's own terminal output already
-      # contain the base-vs-head diff.
+      #
+      # gungraun has its own native baseline comparison (`--save-baseline` /
+      # `--baseline`, verified against gungraun-runner-0.19.4's src/runner/args.rs) —
+      # this no longer relies on scraping `cargo bench`'s terminal output, which is
+      # unreliable both because gungraun-runner forces colored output from
+      # CARGO_TERM_COLOR/GUNGRAUN_COLOR and because the old approach depended on
+      # target/ state left over from a prior step rather than an explicit, named
+      # baseline.
+      #
+      # rust-cache (above) may restore a stale target/gungraun/ from a previous run of
+      # this workflow on the same cache key; clear it so "base" always means the
+      # baseline this job is about to create, not a leftover from an earlier PR push.
+      - name: Clear stale gungraun state
+        run: rm -rf target/gungraun
+
       # The very first phase PR to carry this workflow benches a base SHA that predates
       # `iai_hot_paths` entirely (it lands in the same PR as this workflow). Treat a
-      # missing bench at base as "no prior baseline" rather than failing the job: with no
-      # base run recorded, gungraun's own first-run-vs-baseline comparison reports "N/A"
-      # for the head run too, which scripts/perf_gate_deltas.py already reads as a 0%
-      # delta.
+      # missing bench file at base as "no prior baseline" rather than failing the job:
+      # no `--save-baseline=base` step runs, so the head step's `--baseline=base`
+      # comparison naturally reports "no comparison" for every benchmark (gungraun
+      # creates a new baseline instead of comparing — see --baseline's docs in
+      # args.rs), which scripts/perf_gate_deltas.py reports as "bootstrap: no
+      # comparison" rather than a crash, and the base_benched output below tells the
+      # deltas step not to expect a comparison.
       - name: Bench base SHA
+        id: base_bench
         run: |
           git checkout "${{ steps.shas.outputs.base }}"
           if [ -f crates/prkdb/benches/iai_hot_paths.rs ]; then
-            cargo bench -p prkdb --bench iai_hot_paths 2>&1 | tee base-bench.log
+            cargo bench -p prkdb --bench iai_hot_paths -- --save-baseline=base
+            echo "benched=true" >> "$GITHUB_OUTPUT"
           else
-            echo "iai_hot_paths does not exist at base SHA; no prior baseline to compare against" | tee base-bench.log
+            echo "iai_hot_paths does not exist at base SHA; no prior baseline to compare against"
+            echo "benched=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # `--callgrind-limits='ir=5%'` sets a 5% soft regression limit on the
+      # Instructions (Ir) metric (format verified against args.rs's
+      # `parse_callgrind_limits`/`--callgrind-limits` docs, which give exactly this
+      # `ir=5%` form as an example). `--save-summary=json` writes gungraun's own
+      # machine-readable summary (schema documented in scripts/perf_gate_deltas.py)
+      # instead of us parsing text. Per gungraun's documented exit codes (args.rs's
+      # `after_help`): 0 = success, 1 = any other error (compile failure, panic,
+      # ...), 2 = arg parsing failure, 3 = a performance regression was detected. Only
+      # exit 3 is eligible for the ledger perf_note override below — 1 and 2 fail the
+      # job unconditionally, with no override, since they mean the benchmark itself
+      # didn't run cleanly rather than "it ran and got slower."
       - name: Bench head SHA
+        id: head_bench
         run: |
           git checkout "${{ steps.shas.outputs.head }}"
-          cargo bench -p prkdb --bench iai_hot_paths 2>&1 | tee head-bench.log
+          set +e
+          cargo bench -p prkdb --bench iai_hot_paths -- \
+            --baseline=base --callgrind-limits='ir=5%' --save-summary=json
+          code=$?
+          set -e
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" -ne 0 ] && [ "$code" -ne 3 ]; then
+            echo "gungraun exited $code (not a regression verdict) — failing unconditionally"
+            exit "$code"
+          fi
 
       - name: Compute instruction-count deltas
         run: |
-          python3 scripts/perf_gate_deltas.py base-bench.log head-bench.log \
+          extra_args=()
+          if [ "${{ steps.base_bench.outputs.benched }}" = "true" ]; then
+            extra_args+=(--expect-baseline)
+          fi
+          python3 scripts/perf_gate_deltas.py extract target/gungraun "${extra_args[@]}" \
             > deltas.json
 
       - name: Print deltas to job summary
@@ -94,23 +147,30 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           python3 scripts/perf_gate_deltas.py --summary deltas.json >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Enforce the >5% regression gate
+      - name: Enforce the regression gate
         run: |
-          regressed=$(python3 scripts/perf_gate_deltas.py --regressed deltas.json)
-          if [ -z "$regressed" ]; then
-            echo "no benchmark regressed more than 5%"
+          code="${{ steps.head_bench.outputs.exit_code }}"
+
+          if [ "$code" = "0" ]; then
+            echo "gungraun reported no regression (exit 0)"
             exit 0
           fi
 
-          echo "regressed benchmarks (>5%):"
+          # code == 3 here; any other value already failed the "Bench head SHA" step
+          # unconditionally, above.
+          regressed=$(python3 scripts/perf_gate_deltas.py --regressed deltas.json)
+          echo "regressed benchmarks (gungraun exit 3):"
           echo "$regressed"
 
           # Override (spec §6.2): a regression is allowed when the PR's diff to the
-          # ledger adds or changes a non-empty perf_note.
-          if git diff "${{ steps.shas.outputs.base }}" "${{ steps.shas.outputs.head }}" -- docs/remediation/ledger.toml | grep -qE '^\+perf_note = ".+"'; then
+          # ledger adds or changes a non-empty perf_note. Three-dot diff: compare
+          # against the merge base, so unrelated commits already on main between base
+          # and head (this is fetch-depth: 0, base may not be head's immediate parent)
+          # don't get attributed to this PR's ledger change.
+          if git diff "${{ steps.shas.outputs.base }}...${{ steps.shas.outputs.head }}" -- docs/remediation/ledger.toml | grep -qE '^\+perf_note = ".+"'; then
             echo "regression justified by a ledger perf_note"
             exit 0
           fi
 
-          echo "instruction-count regression > 5% without a ledger perf_note"
+          echo "instruction-count regression without a ledger perf_note"
           exit 1

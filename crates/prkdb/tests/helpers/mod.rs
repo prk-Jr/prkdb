@@ -6,9 +6,13 @@
 // `unused_imports` is allowed alongside `dead_code` because `crates/prkdb/benches/
 // cluster_write_bench.rs` also pulls this whole tree in via `#[path]` (spec §6.1's
 // 3-node cluster write bench, reusing this harness rather than duplicating it). Cargo
-// compiles bench targets with `cfg(test)` even under `harness = false`, so each
-// submodule's own `#[cfg(test)] mod tests` compiles there too — legitimately unused by
-// a benchmark binary that never runs `cargo test`.
+// only passes `--test` (which sets `cfg(test)`) to a target when it uses the built-in
+// libtest harness; every bench in this crate sets `harness = false` in Cargo.toml, so
+// `cfg(test)` is never set here and the re-exports below compile unconditionally. The
+// warnings instead come from each bench pulling in this whole module tree but only
+// using a subset of it: `cluster_write_bench` uses `in_process_cluster` and nothing
+// else here, so `jepsen_checker`'s re-exports and `TestCluster` are legitimately
+// unused from that binary's point of view.
 #![allow(dead_code, unused_imports)]
 
 pub mod in_process_cluster;
