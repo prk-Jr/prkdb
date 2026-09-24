@@ -423,12 +423,13 @@ title = "No restart/crash testing against a reference model"
 area = "tests"
 severity = "medium"
 phase = 1
-status = "fixed"
+status = "verified"
 regression_tests = [
   "test:crates/prkdb-verify/tests/harness.rs::meta_harness_catches_a_lossy_sut",
   "test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_on_current_code",
 ]
 changes = ["61cde01f69ff8ed1a2718a856c55e437fee38b85"]
+ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35961505905"
 
 [[finding]]
 id = "TST-04"
@@ -436,9 +437,10 @@ title = "e2e_throughput_bench not declared harness = false; Criterion main likel
 area = "tests"
 severity = "low"
 phase = 1
-status = "fixed"
+status = "verified"
 regression_tests = ["script:scripts/check_bench_harness.sh"]
 changes = ["67e1308"]
+ci_evidence = "https://github.com/prk-Jr/prkdb/actions/runs/35961505905"
 
 [[finding]]
 id = "TST-05"
@@ -654,7 +656,7 @@ gate_evidence = ["https://github.com/prk-Jr/prkdb/actions/runs/35883454867"]
 [[phase]]
 id = 1
 title = "Harness and baseline"
-status = "not_started"
+status = "gate_passed"
 gate = [
   "blocking profile green",
   "discovery reproduces STO-01",
@@ -663,6 +665,7 @@ gate = [
   "nextest in CI",
   "then phase PR sequence",
 ]
+gate_evidence = ["https://github.com/prk-Jr/prkdb/actions/runs/35961505905", "https://github.com/prk-Jr/prkdb/actions/runs/35963074942"]
 
 [[phase]]
 id = 2

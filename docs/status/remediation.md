@@ -9,7 +9,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | Phase | Title | Status | Findings verified |
 |---|---|---|---|
 | 0 | Honesty and tracking | gate_passed | 6/6 |
-| 1 | Harness and baseline | not_started | 0/2 |
+| 1 | Harness and baseline | gate_passed | 2/2 |
 | 2 | Format v2 and single-node root fixes | not_started | 0/17 |
 | 3 | Semantics | not_started | 0/9 |
 | 4 | Raft | not_started | 0/13 |
@@ -60,18 +60,18 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | STO-04 | medium | 2 | open | scan_mmap skips CRC on open; torn records become invisible; directories never fsynced |
 | STO-05 | medium | 2 | open | WAL routing uses unstable DefaultHasher; replay ordered by segment id, not global order |
 | TST-02 | medium | 4 | open | Linearizability workloads use 1 writer, 1 reader, ~25 ops; failed reads dropped |
-| TST-03 | medium | 1 | fixed | No restart/crash testing against a reference model |
 | TST-05 | medium | 2 | open | No power-loss (unsynced-data) testing; needs the WAL routed through Vfs |
 | TST-06 | medium | 4 | open | No deterministic simulation of the cluster |
 | TTL-01 | medium | 3 | open | Expiry deletes without re-checking the version; value and TTL metadata written non-atomically |
 | TXN-04 | medium | 3 | open | Default isolation is ReadCommitted; D5 makes Serializable the default |
 | DOC-10 | low | 5 | open | ignoreDeadLinks: true hides orphaned methodology/status pages |
 | STO-08 | low | 2 | open | WalConfig::segment_bytes ignored by the mmap WAL (segment size hardcoded to 64 MB) |
-| TST-04 | low | 1 | fixed | e2e_throughput_bench not declared harness = false; Criterion main likely never runs |
 | TST-07 | low | 2 | open | No fuzzing of WAL record, segment, snapshot, and proto decoding |
 | DOC-01 | high | 0 | verified | Cluster docs and compose files misdescribe multi-node setup (env vars, peer auth, metrics auth) |
 | SCH-01 | high | 0 | verified | Schema collection name joined into a path allows writes outside the registry dir |
 | DOC-11 | medium | 0 | verified | Transactions page claims Serializable is the default; code defaults to ReadCommitted |
+| TST-03 | medium | 1 | verified | No restart/crash testing against a reference model |
 | TST-08 | medium | 0 | verified | replication_tests binds fixed port 13197 and fails under parallel nextest runs |
 | DOC-06 | low | 0 | verified | Rust version stated as 1.75+/1.95+ while the actual toolchain is 1.98 |
 | DOC-09 | low | 0 | verified | Unsourced performance claims (10x less resources, ~10 MB binary, <1s startup, 99.4% write success) |
+| TST-04 | low | 1 | verified | e2e_throughput_bench not declared harness = false; Criterion main likely never runs |
