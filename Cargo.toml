@@ -41,7 +41,7 @@ futures = "0.3"
 chrono = { version = "0.4", features = ["serde", "alloc"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
 rstest = "0.26"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 # Hoisted so the workspace resolves one HTTP stack. prkdb was on 0.12 and prkdb-cli on
