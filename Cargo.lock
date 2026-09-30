@@ -2702,6 +2702,7 @@ dependencies = [
  "async-trait",
  "bincode",
  "chrono",
+ "crc32fast",
  "prkdb-proto",
  "prkdb-types",
  "prost",

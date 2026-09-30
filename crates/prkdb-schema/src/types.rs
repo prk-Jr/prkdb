@@ -70,6 +70,11 @@ pub struct Schema {
     pub migration_id: Option<String>,
     /// Unix timestamp when created (ms)
     pub created_at: u64,
+    /// CRC-32 of `descriptor`, recorded by the file storage when the schema is written
+    /// and verified on load. `None` for index entries written before it existed; those
+    /// skip only the checksum, never the check that the descriptor file exists.
+    #[serde(default)]
+    pub descriptor_crc32: Option<u32>,
 }
 
 /// Summary information about a schema (for listing).

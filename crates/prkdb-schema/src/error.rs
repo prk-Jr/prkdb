@@ -39,6 +39,21 @@ pub enum SchemaError {
     #[error("Collection name {name:?} collides with existing collection {existing:?} when case is ignored")]
     CollectionNameConflict { name: String, existing: String },
 
+    /// A `(collection, version)` pair is already stored; versions are never overwritten
+    #[error("Schema version {version} already exists for collection '{collection}'")]
+    VersionConflict { collection: String, version: u32 },
+
+    /// A stored descriptor does not match the checksum recorded in the index
+    #[error(
+        "descriptor {path} does not match its recorded checksum (expected {expected:#010x}, \
+         found {actual:#010x}); restore it from backup"
+    )]
+    DescriptorChecksumMismatch {
+        path: String,
+        expected: u32,
+        actual: u32,
+    },
+
     /// Storage error
     #[error("Storage error: {0}")]
     Storage(String),

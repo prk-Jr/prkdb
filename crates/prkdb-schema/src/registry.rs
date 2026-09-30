@@ -12,12 +12,19 @@ use tracing::{info, warn};
 /// Stores and validates collection schemas for cross-language SDK support.
 pub struct SchemaRegistry<S: SchemaStorage> {
     storage: Arc<S>,
+    /// Held across the whole read-check-allocate-put sequence in `register`, so two
+    /// concurrent registrations cannot read the same latest version and allocate the
+    /// same next one (SCH-02).
+    register_lock: tokio::sync::Mutex<()>,
 }
 
 impl<S: SchemaStorage> SchemaRegistry<S> {
     /// Create a new schema registry with the given storage backend.
     pub fn new(storage: Arc<S>) -> Self {
-        Self { storage }
+        Self {
+            storage,
+            register_lock: tokio::sync::Mutex::new(()),
+        }
     }
 
     /// Register a new schema for a collection.
@@ -42,6 +49,8 @@ impl<S: SchemaStorage> SchemaRegistry<S> {
     ) -> SchemaResult<Schema> {
         crate::names::validate_collection_name(collection)?;
         crate::names::validate_descriptor(&schema_proto)?;
+
+        let _allocation = self.register_lock.lock().await;
 
         // SCH-01 continuation: on case-insensitive filesystems, "users" and
         // "Users" would map to the same `descriptors/` directory, so a new
@@ -111,6 +120,7 @@ impl<S: SchemaStorage> SchemaRegistry<S> {
             is_breaking,
             migration_id,
             created_at: now,
+            descriptor_crc32: None,
         };
 
         // Store it

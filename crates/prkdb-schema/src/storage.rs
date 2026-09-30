@@ -6,7 +6,7 @@ use crate::error::{SchemaError, SchemaResult};
 use crate::types::{Schema, SchemaInfo};
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use tokio::fs;
 use tracing::{debug, info, warn};
@@ -161,11 +161,107 @@ impl SchemaStorage for InMemorySchemaStorage {
 ///     └── {collection}/
 ///         └── v{version}.binpb  # FileDescriptorProto bytes
 /// ```
+///
+/// Every file is written atomically (temp file, fsync, rename, fsync of the
+/// directory), descriptor before index, so a crash leaves at worst a descriptor
+/// the index does not reference. [`FileSchemaStorage::load`] fails closed: an
+/// index entry whose descriptor is missing or does not match its checksum is an
+/// error, never an empty schema (SCH-02).
 pub struct FileSchemaStorage {
     /// Base directory for schema storage
     base_path: PathBuf,
     /// In-memory cache (always kept in sync with disk)
     cache: InMemorySchemaStorage,
+    /// Serializes `put`, so the overwrite check, the cache insert and the index
+    /// snapshot/write happen as one step and index writes cannot reorder.
+    write_lock: tokio::sync::Mutex<()>,
+}
+
+/// Suffix of the temporary file [`write_atomic`] renames into place.
+const TMP_SUFFIX: &str = ".tmp";
+
+fn tmp_path_for(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(TMP_SUFFIX);
+    PathBuf::from(name)
+}
+
+/// Write `bytes` to `path` so that a crash leaves either the old file or the new
+/// one: write `path.tmp`, `sync_all`, rename over `path`, then sync the parent
+/// directory so the rename itself is durable.
+async fn write_atomic(path: &Path, bytes: Vec<u8>) -> SchemaResult<()> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || write_atomic_blocking(&path, &bytes))
+        .await
+        .map_err(|e| SchemaError::Storage(format!("atomic write task failed: {e}")))?
+}
+
+fn write_atomic_blocking(path: &Path, bytes: &[u8]) -> SchemaResult<()> {
+    use std::io::Write;
+
+    let io_err = |what: &str, p: &Path, e: std::io::Error| {
+        SchemaError::Storage(format!("{what} {}: {e}", p.display()))
+    };
+    let parent = path
+        .parent()
+        .ok_or_else(|| SchemaError::Storage(format!("{} has no parent", path.display())))?;
+    std::fs::create_dir_all(parent).map_err(|e| io_err("cannot create directory", parent, e))?;
+
+    let tmp = tmp_path_for(path);
+    {
+        let mut file = std::fs::File::create(&tmp).map_err(|e| io_err("cannot create", &tmp, e))?;
+        file.write_all(bytes)
+            .map_err(|e| io_err("cannot write", &tmp, e))?;
+        file.sync_all()
+            .map_err(|e| io_err("cannot sync", &tmp, e))?;
+    }
+    std::fs::rename(&tmp, path).map_err(|e| io_err("cannot rename into", path, e))?;
+    sync_dir(parent)
+}
+
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> SchemaResult<()> {
+    std::fs::File::open(dir)
+        .and_then(|d| d.sync_all())
+        .map_err(|e| SchemaError::Storage(format!("cannot sync directory {}: {e}", dir.display())))
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) -> SchemaResult<()> {
+    // Directories cannot be opened for syncing on this platform; the rename is
+    // as durable as the filesystem makes it.
+    Ok(())
+}
+
+/// Remove `*.tmp` files left by a write that crashed before its rename. They are
+/// never referenced: the rename is what publishes a file.
+fn remove_stale_tmp_files(base: &Path) {
+    let mut dirs = vec![base.to_path_buf()];
+    if let Ok(entries) = std::fs::read_dir(base.join("descriptors")) {
+        dirs.extend(
+            entries
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.is_dir()),
+        );
+    }
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for path in entries.filter_map(Result::ok).map(|e| e.path()) {
+            let is_tmp = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(TMP_SUFFIX));
+            if is_tmp && path.is_file() {
+                match std::fs::remove_file(&path) {
+                    Ok(()) => info!("Removed stale temporary file {:?}", path),
+                    Err(e) => warn!("Could not remove stale temporary file {:?}: {}", path, e),
+                }
+            }
+        }
+    }
 }
 
 impl FileSchemaStorage {
@@ -175,11 +271,21 @@ impl FileSchemaStorage {
         Self {
             base_path,
             cache: InMemorySchemaStorage::new(),
+            write_lock: tokio::sync::Mutex::new(()),
         }
     }
 
     /// Load schemas from disk into cache.
+    ///
+    /// Fails if an index entry's descriptor is missing, unreadable or does not
+    /// match its recorded checksum: serving such a registry would report fewer
+    /// schemas than were registered and let clients re-register over them.
     pub async fn load(&mut self) -> SchemaResult<()> {
+        let base = self.base_path.clone();
+        tokio::task::spawn_blocking(move || remove_stale_tmp_files(&base))
+            .await
+            .map_err(|e| SchemaError::Storage(format!("temp file cleanup failed: {e}")))?;
+
         let index_path = self.base_path.join("schemas.json");
 
         if !index_path.exists() {
@@ -211,25 +317,12 @@ impl FileSchemaStorage {
                 ))
             })?;
 
-            // Load the descriptor from its file
-            let descriptor_path = self.descriptor_path(&schema.collection, schema.version);
-
-            let mut schema_with_descriptor = schema;
-            if descriptor_path.exists() {
-                match fs::read(&descriptor_path).await {
-                    Ok(bytes) => {
-                        schema_with_descriptor.descriptor = bytes;
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Failed to load descriptor for {}:v{}: {}",
-                            schema_with_descriptor.collection, schema_with_descriptor.version, e
-                        );
-                    }
-                }
-            }
-
-            self.cache.put(&schema_with_descriptor).await?;
+            let descriptor = self.read_descriptor(&schema).await?;
+            let loaded = Schema {
+                descriptor,
+                ..schema
+            };
+            self.cache.put(&loaded).await?;
         }
 
         // Update next_id based on loaded schemas
@@ -251,6 +344,43 @@ impl FileSchemaStorage {
         Ok(())
     }
 
+    /// Read and verify the descriptor an index entry refers to.
+    async fn read_descriptor(&self, schema: &Schema) -> SchemaResult<Vec<u8>> {
+        let path = self.descriptor_path(&schema.collection, schema.version);
+        let bytes = match fs::read(&path).await {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(SchemaError::Storage(format!(
+                    "missing descriptor {} for {} v{}; restore it from backup or remove the \
+                     entry from schemas.json",
+                    path.display(),
+                    schema.collection,
+                    schema.version
+                )));
+            }
+            Err(e) => {
+                return Err(SchemaError::Storage(format!(
+                    "cannot read descriptor {} for {} v{}: {e}",
+                    path.display(),
+                    schema.collection,
+                    schema.version
+                )));
+            }
+        };
+
+        if let Some(expected) = schema.descriptor_crc32 {
+            let actual = crc32fast::hash(&bytes);
+            if actual != expected {
+                return Err(SchemaError::DescriptorChecksumMismatch {
+                    path: path.display().to_string(),
+                    expected,
+                    actual,
+                });
+            }
+        }
+        Ok(bytes)
+    }
+
     /// Get the path to a schema descriptor file.
     fn descriptor_path(&self, collection: &str, version: u32) -> PathBuf {
         self.base_path
@@ -259,10 +389,10 @@ impl FileSchemaStorage {
             .join(format!("v{}.binpb", version))
     }
 
-    /// Save the index file (metadata without descriptors).
+    /// Save the index file (metadata without descriptors). Callers hold `write_lock`.
     async fn save_index(&self) -> SchemaResult<()> {
         // Collect data while holding lock, then release before async I/O
-        let (json, index_path) = {
+        let json = {
             let schemas = self
                 .cache
                 .schemas
@@ -280,25 +410,30 @@ impl FileSchemaStorage {
                 })
                 .collect();
 
-            let json = serde_json::to_string_pretty(&all_schemas)
-                .map_err(|e| SchemaError::Serialization(format!("Failed to serialize: {}", e)))?;
-
-            let index_path = self.base_path.join("schemas.json");
-            (json, index_path)
+            serde_json::to_vec_pretty(&all_schemas)
+                .map_err(|e| SchemaError::Serialization(format!("Failed to serialize: {}", e)))?
         }; // Lock is released here
 
-        // Now do async I/O without holding the lock
-        if let Some(parent) = index_path.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|e| SchemaError::Storage(format!("Failed to create directory: {}", e)))?;
-        }
-
-        fs::write(&index_path, json)
-            .await
-            .map_err(|e| SchemaError::Storage(format!("Failed to write index: {}", e)))?;
+        let index_path = self.base_path.join("schemas.json");
+        write_atomic(&index_path, json).await?;
 
         debug!("Saved schema index to {:?}", index_path);
+        Ok(())
+    }
+
+    /// Drop a cache entry whose index write failed, so memory matches disk.
+    fn forget(&self, collection: &str, version: u32) -> SchemaResult<()> {
+        let mut schemas = self
+            .cache
+            .schemas
+            .write()
+            .map_err(|e| SchemaError::Storage(format!("Lock error: {}", e)))?;
+        if let Some(versions) = schemas.get_mut(collection) {
+            versions.remove(&version);
+            if versions.is_empty() {
+                schemas.remove(collection);
+            }
+        }
         Ok(())
     }
 }
@@ -308,26 +443,38 @@ impl SchemaStorage for FileSchemaStorage {
     async fn put(&self, schema: &Schema) -> SchemaResult<()> {
         crate::names::validate_collection_name(&schema.collection)?;
 
-        // Save descriptor to file
-        let descriptor_path = self.descriptor_path(&schema.collection, schema.version);
+        let _guard = self.write_lock.lock().await;
 
-        if let Some(parent) = descriptor_path.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|e| SchemaError::Storage(format!("Failed to create directory: {}", e)))?;
+        // Versions are immutable once stored: overwriting one would change what
+        // readers of that version decode with.
+        if self
+            .cache
+            .get(&schema.collection, schema.version)
+            .await?
+            .is_some()
+        {
+            return Err(SchemaError::VersionConflict {
+                collection: schema.collection.clone(),
+                version: schema.version,
+            });
         }
 
-        fs::write(&descriptor_path, &schema.descriptor)
-            .await
-            .map_err(|e| SchemaError::Storage(format!("Failed to write descriptor: {}", e)))?;
-
+        // Descriptor first, index second: a crash in between leaves an
+        // unreferenced descriptor, never an index entry without one.
+        let descriptor_path = self.descriptor_path(&schema.collection, schema.version);
+        write_atomic(&descriptor_path, schema.descriptor.clone()).await?;
         debug!("Saved descriptor to {:?}", descriptor_path);
 
-        // Store in cache
-        self.cache.put(schema).await?;
+        let stored = Schema {
+            descriptor_crc32: Some(crc32fast::hash(&schema.descriptor)),
+            ..schema.clone()
+        };
+        self.cache.put(&stored).await?;
 
-        // Update index file
-        self.save_index().await?;
+        if let Err(e) = self.save_index().await {
+            self.forget(&schema.collection, schema.version)?;
+            return Err(e);
+        }
 
         Ok(())
     }
@@ -369,6 +516,7 @@ mod tests {
             is_breaking: false,
             migration_id: None,
             created_at: chrono::Utc::now().timestamp_millis() as u64,
+            descriptor_crc32: None,
         }
     }
 

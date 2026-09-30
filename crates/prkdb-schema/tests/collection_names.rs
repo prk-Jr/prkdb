@@ -169,6 +169,7 @@ async fn sch01_storage_level_put_rejects_unsafe_names_before_any_write() {
         is_breaking: false,
         migration_id: None,
         created_at: 0,
+        descriptor_crc32: None,
     };
 
     let err = storage.put(&schema).await.unwrap_err();

@@ -550,6 +550,26 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         let schema_storage_path =
             crate::database_manager::try_get_database_manager()?.schema_storage_path();
 
+        // Load the schema registry here rather than inside the spawned server task, so a
+        // registry that cannot be loaded fails `serve` before anything listens (SCH-02)
+        // instead of serving an empty registry clients could re-register over.
+        let service = prkdb::raft::grpc_service::PrkDbGrpcService::with_schema_storage_path(
+            std::sync::Arc::new(db.clone()),
+            std::env::var("PRKDB_ADMIN_TOKEN").unwrap_or_default(),
+            schema_storage_path,
+        )
+        .await
+        .context("loading the schema registry")?
+        // The layer requires Admin for these RPCs, so the deprecated admin_token
+        // message field is no longer the only way in.
+        .with_authz_enforced(grpc_authz_store.is_some())
+        // Distinct from `!authz_enforced`: only an explicit --allow-anonymous waives
+        // the admin check, so a missing layer still denies.
+        .with_anonymous_access(args.allow_anonymous)
+        .with_local_node_id(args.id)
+        .with_public_address(advertised_grpc_address)
+        .with_advertised_node_addresses(advertised_node_addresses);
+
         // Start Multi-Raft partitions (background tasks)
         // Skip serving Partition 0's Raft server here, as we'll multiplex it on the main gRPC server below
         // This avoids port collision on 50051
@@ -572,30 +592,10 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         let grpc_tls = tls.clone();
         let grpc_rate_limit = args.rate_limit;
         tokio::spawn(async move {
-            use prkdb::raft::grpc_service::PrkDbGrpcService;
             use prkdb::raft::rpc::prk_db_service_server::PrkDbServiceServer;
             use prkdb::raft::rpc::raft_service_server::RaftServiceServer;
             use prkdb::raft::service::RaftServiceImpl;
-            use std::sync::Arc;
             use tonic::transport::Server;
-
-            use std::env;
-            let admin_token = env::var("PRKDB_ADMIN_TOKEN").unwrap_or_default();
-            let service = PrkDbGrpcService::with_schema_storage_path(
-                Arc::new(db.clone()),
-                admin_token,
-                schema_storage_path,
-            )
-            .await
-            // The layer requires Admin for these RPCs, so the deprecated admin_token
-            // message field is no longer the only way in.
-            .with_authz_enforced(grpc_authz_store.is_some())
-            // Distinct from `!authz_enforced`: only an explicit --allow-anonymous waives
-            // the admin check, so a missing layer still denies.
-            .with_anonymous_access(args.allow_anonymous)
-            .with_local_node_id(args.id)
-            .with_public_address(advertised_grpc_address)
-            .with_advertised_node_addresses(advertised_node_addresses);
 
             // Authorization runs as a tower layer rather than a tonic interceptor: an
             // interceptor sees Request<()> and cannot read the method name, so it could

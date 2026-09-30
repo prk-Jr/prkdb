@@ -32,6 +32,7 @@ anyhow = { workspace = true }
 # Utilities
 tracing = { workspace = true }
 chrono = { workspace = true }
+crc32fast = "1.4"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
