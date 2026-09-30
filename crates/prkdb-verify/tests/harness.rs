@@ -161,3 +161,29 @@ async fn sto01_discovery_profile_finds_checkpoint_loss_tripwire() {
         None => panic!("STO-01 appears fixed: invert this tripwire"),
     }
 }
+
+/// Op coverage is reported: a green run must show which op kinds actually
+/// executed, so a disabled op can't hide behind a passing report.
+#[tokio::test(flavor = "multi_thread")]
+async fn report_counts_ops_per_kind() {
+    let report = run_seeds(WalSut::new, 0, 20, 60, Profile::Blocking)
+        .await
+        .expect("harness error");
+    assert!(report.failure.is_none(), "{:?}", report.failure);
+    assert!(report.op_counts.get("Put").copied().unwrap_or(0) > 0);
+    assert!(report.op_counts.get("Reopen").copied().unwrap_or(0) > 0);
+    assert!(
+        report.missing_op_kinds(Profile::Blocking).is_empty(),
+        "blocking kinds never executed: {:?} (counts {:?})",
+        report.missing_op_kinds(Profile::Blocking),
+        report.op_counts
+    );
+    // Discovery also enables Checkpoint, which a blocking run never executes.
+    assert_eq!(
+        report.missing_op_kinds(Profile::Discovery),
+        vec!["Checkpoint"]
+    );
+    let formatted = report.format_op_counts();
+    assert!(formatted.starts_with("Put:"), "{formatted}");
+    assert!(!formatted.contains("Checkpoint"), "{formatted}");
+}

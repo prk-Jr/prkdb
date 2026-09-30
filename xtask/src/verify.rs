@@ -1,5 +1,12 @@
 //! `cargo xtask verify ...` forwards to the prkdb-verify binary so xtask stays light.
 //!
+//! Usage (see `cargo xtask verify --help` for every flag):
+//!   cargo xtask verify [--profile core|blocking|discovery] [--seed N] [--seed-offset N]
+//!                      [--seeds K] [--ops M] [--mode durable]
+//!
+//! A green run prints `profile=<p> mode=<m> seeds=<n> checks=<c> ops=<Put:…,Delete:…,…>`
+//! and fails as vacuous if no key was compared or any op kind the profile enables never ran.
+//!
 //! Builds and runs in debug mode by default for fast iteration; set
 //! `PRKDB_VERIFY_RELEASE=1` to build/run in release mode (e.g. for large seed
 //! counts, or the pre-push harness gate).

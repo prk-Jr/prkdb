@@ -9,10 +9,10 @@
 //! using small, fast, deterministic wrappers.
 
 use prkdb_verify::checker::Mismatch;
-use prkdb_verify::model::{Key, Value};
+use prkdb_verify::model::{Key, Mode, Value};
 use prkdb_verify::ops::{generate, key, Op, Profile, KEY_SPACE};
-use prkdb_verify::runner::{run_ops, run_seeds, run_seeds_with, Outcome};
-use prkdb_verify::sut::{Sut, WalSut};
+use prkdb_verify::runner::{run, run_ops, run_seeds, run_seeds_with, Outcome, RunConfig};
+use prkdb_verify::sut::{Sut, Unsupported, WalSut};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -168,7 +168,7 @@ async fn detects_and_minimizes_lost_key_on_crash() {
             }
         }
     };
-    let report = run_seeds(make, 0, 30, 20, Profile::Blocking)
+    let report = run_seeds(make, 0, 30, 20, Profile::Core)
         .await
         .expect("harness error");
     let failure = report.failure.expect("expected a finding");
@@ -200,7 +200,7 @@ async fn detects_resurrected_deleted_key() {
             }
         }
     };
-    let report = run_seeds(make, 0, 30, 20, Profile::Blocking)
+    let report = run_seeds(make, 0, 30, 20, Profile::Core)
         .await
         .expect("harness error");
     let failure = report.failure.expect("expected a finding");
@@ -227,7 +227,7 @@ async fn detects_stale_value() {
             }
         }
     };
-    let report = run_seeds(make, 0, 30, 20, Profile::Blocking)
+    let report = run_seeds(make, 0, 30, 20, Profile::Core)
         .await
         .expect("harness error");
     let failure = report.failure.expect("expected a finding");
@@ -362,17 +362,17 @@ async fn minimizer_never_accepts_a_drifted_finding() {
             last_put: None,
         })
     };
-    let report = run_seeds(make, 0, 30, len, Profile::Blocking)
+    let report = run_seeds(make, 0, 30, len, Profile::Core)
         .await
         .expect("harness error");
     let failure = report.failure.expect("expected a finding");
 
-    let original_ops = generate(failure.seed, len, Profile::Blocking);
+    let original_ops = generate(failure.seed, len, Profile::Core);
     let mut original_sut = CorruptsLastPutOnCrash {
         inner: WalSut::new().await.expect("fresh SUT"),
         last_put: None,
     };
-    let original_outcome = run_ops(&mut original_sut, &original_ops)
+    let original_outcome = run_ops(&mut original_sut, &original_ops, Mode::Durable)
         .await
         .expect("harness error");
     let (original_key, original_shape) = match &original_outcome {
@@ -415,6 +415,7 @@ fn same_kind_requires_matching_key_and_shape_or_op_discriminant() {
         mismatch: Mismatch {
             key: key_a.clone(),
             expected: None,
+            acceptable: vec![None],
             actual: Some(b"v".to_vec()),
         },
     };
@@ -424,6 +425,7 @@ fn same_kind_requires_matching_key_and_shape_or_op_discriminant() {
         mismatch: Mismatch {
             key: key_a.clone(),
             expected: Some(b"v".to_vec()),
+            acceptable: vec![Some(b"v".to_vec())],
             actual: None,
         },
     };
@@ -438,6 +440,7 @@ fn same_kind_requires_matching_key_and_shape_or_op_discriminant() {
         mismatch: Mismatch {
             key: key_b,
             expected: None,
+            acceptable: vec![None],
             actual: Some(b"v".to_vec()),
         },
     };
@@ -465,14 +468,48 @@ fn same_kind_requires_matching_key_and_shape_or_op_discriminant() {
         at: 7,
         after: Op::Crash,
         mismatch: Mismatch {
-            key: key_a,
+            key: key_a.clone(),
             expected: None,
+            acceptable: vec![None],
             actual: Some(b"different-value".to_vec()),
         },
     };
     assert!(
         missing_expected_present_actual.same_kind(&same_everything),
         "same key and same shape must be the same kind, regardless of `at`/`after`/value"
+    );
+
+    // The acceptable set's presence shape counts too: "absent was the only
+    // acceptable answer" is a different bug from "absent or present were both
+    // acceptable" — but how many candidates there were is not (a shrink can
+    // change how many prefixes were pending).
+    let wider_acceptable = Outcome::Mismatch {
+        at: 0,
+        after: Op::Reopen,
+        mismatch: Mismatch {
+            key: key_a.clone(),
+            expected: None,
+            acceptable: vec![None, Some(b"old".to_vec())],
+            actual: Some(b"v".to_vec()),
+        },
+    };
+    assert!(
+        !missing_expected_present_actual.same_kind(&wider_acceptable),
+        "a different acceptable-set presence shape must not be the same kind"
+    );
+    let more_candidates_same_shape = Outcome::Mismatch {
+        at: 0,
+        after: Op::Reopen,
+        mismatch: Mismatch {
+            key: key_a,
+            expected: None,
+            acceptable: vec![None, None],
+            actual: Some(b"v".to_vec()),
+        },
+    };
+    assert!(
+        missing_expected_present_actual.same_kind(&more_candidates_same_shape),
+        "the number of acceptable candidates alone must not change the kind"
     );
 }
 
@@ -500,7 +537,7 @@ async fn nondeterministic_failure_with_repro_attempts_does_not_panic() {
             }
         }
     };
-    let report = run_seeds_with(make, 0, 30, 20, Profile::Blocking, 3)
+    let report = run_seeds_with(make, 0, 30, 20, Profile::Core, 3)
         .await
         .expect("harness error should not panic or propagate");
     let failure = report
@@ -529,7 +566,7 @@ async fn detects_and_minimizes_put_sut_error() {
             }
         }
     };
-    let report = run_seeds(make, 0, 30, 20, Profile::Blocking)
+    let report = run_seeds(make, 0, 30, 20, Profile::Core)
         .await
         .expect("harness error");
     let failure = report.failure.expect("expected a finding");
@@ -600,7 +637,9 @@ async fn checks_a_touched_key_outside_key_space() {
     // the one touched out-of-space key — pin the exact count, not just a
     // lower bound, so this can't pass by coincidence.
     let mut sut = WalSut::new().await.expect("fresh SUT");
-    let outcome = run_ops(&mut sut, &ops()).await.expect("harness error");
+    let outcome = run_ops(&mut sut, &ops(), Mode::Durable)
+        .await
+        .expect("harness error");
     match outcome {
         Outcome::Pass { checks } => assert_eq!(
             checks,
@@ -618,7 +657,9 @@ async fn checks_a_touched_key_outside_key_space() {
         inner: WalSut::new().await.expect("fresh SUT"),
         target: outside.clone(),
     };
-    let outcome = run_ops(&mut sut, &ops()).await.expect("harness error");
+    let outcome = run_ops(&mut sut, &ops(), Mode::Durable)
+        .await
+        .expect("harness error");
     match outcome {
         Outcome::Mismatch { mismatch, .. } => assert_eq!(mismatch.key, outside),
         other => panic!("expected a Mismatch on the touched out-of-space key, got {other:?}"),
@@ -634,7 +675,7 @@ async fn detects_reopen_failure() {
     };
     // A `reopen` that always fails must be caught even on an empty sequence,
     // because every run ends with an implicit trailing reopen.
-    let report = run_seeds(make, 0, 1, 1, Profile::Blocking)
+    let report = run_seeds(make, 0, 1, 1, Profile::Core)
         .await
         .expect("harness error");
     let failure = report.failure.expect("expected a finding");
@@ -644,4 +685,60 @@ async fn detects_reopen_failure() {
         }
         other => panic!("expected a SutError on Reopen, got {other:?}"),
     }
+}
+
+/// Wraps a `WalSut` whose `checkpoint` is not implemented — a SUT the
+/// discovery profile (which generates `Checkpoint`) asks too much of.
+struct NoCheckpoint {
+    inner: WalSut,
+}
+
+#[async_trait::async_trait]
+impl Sut for NoCheckpoint {
+    async fn put(&mut self, k: &Key, v: &Value) -> anyhow::Result<()> {
+        self.inner.put(k, v).await
+    }
+    async fn delete(&mut self, k: &Key) -> anyhow::Result<()> {
+        self.inner.delete(k).await
+    }
+    async fn get(&mut self, k: &Key) -> anyhow::Result<Option<Value>> {
+        self.inner.get(k).await
+    }
+    async fn reopen(&mut self) -> anyhow::Result<()> {
+        self.inner.reopen().await
+    }
+    async fn crash(&mut self) -> anyhow::Result<()> {
+        self.inner.crash().await
+    }
+    async fn checkpoint(&mut self) -> anyhow::Result<()> {
+        Err(Unsupported("checkpoint").into())
+    }
+}
+
+/// A profile asking for an op the SUT cannot do is a harness error (the run
+/// is misconfigured), never a finding against the SUT: `run` returns `Err`
+/// instead of a `Report` carrying a `Failure`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unsupported_op_is_a_harness_error_not_a_finding() {
+    let make = || async {
+        Ok(NoCheckpoint {
+            inner: WalSut::new().await?,
+        })
+    };
+    let config = RunConfig {
+        first_seed: 0,
+        seeds: 20,
+        ops: 200,
+        profile: Profile::Discovery,
+        mode: Mode::Durable,
+        repro_attempts: 1,
+    };
+    let err = run(make, &config)
+        .await
+        .expect_err("an Unsupported op must surface as a harness error, not a Report");
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("does not support checkpoint"),
+        "unexpected harness error text: {text}"
+    );
 }

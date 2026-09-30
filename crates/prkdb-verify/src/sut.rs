@@ -6,6 +6,21 @@ use prkdb_core::wal::WalConfig;
 use prkdb_types::storage::StorageAdapter;
 use std::path::PathBuf;
 
+/// Returned by `Sut` methods a SUT does not implement. The runner treats it as
+/// a harness error (the profile asked for an op this SUT cannot do), never as
+/// a finding. New `Sut` methods get default bodies returning this, so adding
+/// an op never breaks existing implementations.
+#[derive(Debug)]
+pub struct Unsupported(pub &'static str);
+
+impl std::fmt::Display for Unsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SUT does not support {}", self.0)
+    }
+}
+
+impl std::error::Error for Unsupported {}
+
 #[async_trait::async_trait]
 pub trait Sut: Send {
     async fn put(&mut self, k: &Key, v: &Value) -> anyhow::Result<()>;
