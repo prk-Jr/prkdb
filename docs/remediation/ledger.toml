@@ -382,9 +382,11 @@ title = "Schema reload accepts missing descriptors; non-atomic writes; concurren
 area = "schema"
 severity = "high"
 phase = 2
-status = "open"
+status = "fixed"
 sources = ["review-2026-09-07#R10"]
 evidence = ["crates/prkdb-schema/src/storage.rs:198-222,283-319"]
+regression_tests = ["test:crates/prkdb-schema/tests/schema_persistence.rs::a_missing_descriptor_fails_the_load", "test:crates/prkdb-schema/tests/schema_persistence.rs::a_corrupt_descriptor_fails_the_load", "test:crates/prkdb-schema/tests/schema_persistence.rs::concurrent_registrations_never_reuse_a_version", "test:crates/prkdb-schema/tests/schema_persistence.rs::a_leftover_temp_index_is_ignored", "test:crates/prkdb/tests/security_tests.rs::a_damaged_schema_registry_fails_service_startup"]
+changes = ["5d4ac7c"]
 
 [[finding]]
 id = "REL-01"
