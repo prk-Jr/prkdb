@@ -32,9 +32,28 @@ pub enum Op {
     Checkpoint,
 }
 
+impl Op {
+    /// The op's kind name, as counted in [`crate::runner::Report::op_counts`].
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Op::Put(..) => Kind::Put.name(),
+            Op::Delete(_) => Kind::Delete.name(),
+            Op::Reopen => Kind::Reopen.name(),
+            Op::Crash => Kind::Crash.name(),
+            Op::Checkpoint => Kind::Checkpoint.name(),
+        }
+    }
+}
+
+/// Every op kind name, in canonical (declaration) order.
+pub const OP_KIND_NAMES: &[&str] = &["Put", "Delete", "Reopen", "Crash", "Checkpoint"];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile {
-    /// Phase 1 blocking profile.
+    /// The Phase 1 blocking table, frozen: the self-tests were tuned on its
+    /// seeds and keep reproducing exactly, whatever `Blocking` later becomes.
+    Core,
+    /// The gating profile. Until Task 2.10b it runs exactly the `Core` table.
     Blocking,
     /// Everything implemented so far; failures are findings, not gates.
     Discovery,
@@ -43,6 +62,7 @@ pub enum Profile {
 impl Profile {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
+            "core" => Some(Self::Core),
             "blocking" => Some(Self::Blocking),
             "discovery" => Some(Self::Discovery),
             _ => None,
@@ -51,9 +71,21 @@ impl Profile {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Core => "core",
             Self::Blocking => "blocking",
             Self::Discovery => "discovery",
         }
+    }
+
+    /// Names of the op kinds this profile can generate, in canonical order.
+    /// A run in which any of these never executed is vacuous for that kind.
+    pub fn op_kinds(self) -> Vec<&'static str> {
+        let table = weights(self);
+        OP_KIND_NAMES
+            .iter()
+            .copied()
+            .filter(|name| table.iter().any(|(k, w)| *w > 0 && k.name() == *name))
+            .collect()
     }
 }
 
@@ -68,16 +100,31 @@ enum Kind {
     Checkpoint,
 }
 
+impl Kind {
+    fn name(self) -> &'static str {
+        match self {
+            Kind::Put => "Put",
+            Kind::Delete => "Delete",
+            Kind::Reopen => "Reopen",
+            Kind::Crash => "Crash",
+            Kind::Checkpoint => "Checkpoint",
+        }
+    }
+}
+
 /// Explicit per-profile weight tables, out of 100. These reproduce exactly the
 /// cumulative ranges the generator used before this table existed
 /// (Put 0..=59, Delete 60..=79, Reopen 80..=89, then Checkpoint/Crash), so
 /// existing seeds still produce the same ops.
-const BLOCKING_WEIGHTS: &[(Kind, u32)] = &[
+const CORE_WEIGHTS: &[(Kind, u32)] = &[
     (Kind::Put, 60),
     (Kind::Delete, 20),
     (Kind::Reopen, 10),
     (Kind::Crash, 10),
 ];
+/// Identical to [`CORE_WEIGHTS`] until Task 2.10b adds `PowerLoss`, so every
+/// existing blocking seed runs exactly as before.
+const BLOCKING_WEIGHTS: &[(Kind, u32)] = CORE_WEIGHTS;
 const DISCOVERY_WEIGHTS: &[(Kind, u32)] = &[
     (Kind::Put, 60),
     (Kind::Delete, 20),
@@ -88,6 +135,7 @@ const DISCOVERY_WEIGHTS: &[(Kind, u32)] = &[
 
 fn weights(profile: Profile) -> &'static [(Kind, u32)] {
     match profile {
+        Profile::Core => CORE_WEIGHTS,
         Profile::Blocking => BLOCKING_WEIGHTS,
         Profile::Discovery => DISCOVERY_WEIGHTS,
     }
@@ -134,14 +182,50 @@ mod tests {
 
     #[test]
     fn blocking_never_checkpoints() {
+        for profile in [Profile::Core, Profile::Blocking] {
+            for seed in 0..50 {
+                assert!(
+                    !generate(seed, 200, profile).contains(&Op::Checkpoint),
+                    "{profile:?} generated a Checkpoint for seed {seed}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn blocking_runs_the_core_table_until_power_loss_lands() {
         for seed in 0..50 {
-            assert!(!generate(seed, 200, Profile::Blocking).contains(&Op::Checkpoint));
+            assert_eq!(
+                generate(seed, 200, Profile::Blocking),
+                generate(seed, 200, Profile::Core)
+            );
         }
     }
 
     #[test]
     fn discovery_does_checkpoint() {
         assert!((0..20).any(|s| generate(s, 200, Profile::Discovery).contains(&Op::Checkpoint)));
+    }
+
+    #[test]
+    fn profiles_round_trip_through_parse() {
+        for p in [Profile::Core, Profile::Blocking, Profile::Discovery] {
+            assert_eq!(Profile::parse(p.as_str()), Some(p));
+        }
+        assert_eq!(Profile::parse("nope"), None);
+    }
+
+    #[test]
+    fn op_kinds_follow_the_weight_tables() {
+        assert_eq!(
+            Profile::Blocking.op_kinds(),
+            vec!["Put", "Delete", "Reopen", "Crash"]
+        );
+        assert_eq!(Profile::Core.op_kinds(), Profile::Blocking.op_kinds());
+        assert_eq!(Profile::Discovery.op_kinds(), OP_KIND_NAMES.to_vec());
+        for op in generate(7, 200, Profile::Discovery) {
+            assert!(OP_KIND_NAMES.contains(&op.kind_name()));
+        }
     }
 
     #[test]
