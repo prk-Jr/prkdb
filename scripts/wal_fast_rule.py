@@ -5,7 +5,8 @@ Rule (spec §7 2a, decision record §6 risk 1): the new write path in Fast mode 
 most 15 % put throughput against the path it replaces, per (writers, value size) cell.
 
 Input is the bench's raw stdout (`print_row` in the bench), never a hand-edited table.
-Head-only mode compares cells inside one run: `wal_fast` vs `current_mmap_wal`.
+Head-only mode compares cells inside one run: `wal_fast` (and any `wal_fast_*` variant)
+vs `current_mmap_wal`.
 Base/head mode compares `current_adapter_put` in the head run (new adapter) against the
 same cell in the base run (old adapter), both benched in the same job on the same runner.
 Exit status 1 if any cell loses more than 15 %. `--self-test` checks the parser and both
@@ -46,9 +47,11 @@ def pairs_for(head: dict, base: dict | None) -> list[tuple[str, float, float]]:
             if cell == "current_adapter_put" and (cell, w, v) in head:
                 pairs.append((f"adapter_put/{w}w/{v}k", head[(cell, w, v)], old))
     else:
+        # `wal_fast`, plus any `wal_fast_*` variant cells (Task 2.7 measures
+        # `wal_fast_inwriter` and `wal_fast_syncer`): each is held to the same rule.
         for (cell, w, v), new in sorted(head.items()):
-            if cell == "wal_fast" and ("current_mmap_wal", w, v) in head:
-                pairs.append((f"wal_fast/{w}w/{v}k", new, head[("current_mmap_wal", w, v)]))
+            if cell.startswith("wal_fast") and ("current_mmap_wal", w, v) in head:
+                pairs.append((f"{cell}/{w}w/{v}k", new, head[("current_mmap_wal", w, v)]))
     return pairs
 
 

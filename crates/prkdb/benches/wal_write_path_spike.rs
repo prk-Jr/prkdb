@@ -20,7 +20,7 @@ use prkdb_core::vfs::{StdVfs, Vfs, VfsFile};
 use prkdb_core::wal::batch::{Batch, BatchOp};
 use prkdb_core::wal::mmap_parallel_wal::MmapParallelWal;
 use prkdb_core::wal::{
-    CompressionConfig, LogOperation, LogRecord, SyncMode, Wal, WalConfig, WalOptions,
+    CompressionConfig, FastSync, LogOperation, LogRecord, SyncMode, Wal, WalConfig, WalOptions,
 };
 use prkdb_types::storage::StorageAdapter;
 use std::io;
@@ -716,7 +716,9 @@ fn main() {
         "model_memcpy_only",
         "two_shard_fast",
         "wal_durable",
-        "wal_fast",
+        // Task 2.7 measurement run: `wal_fast` split by Fast sync placement.
+        "wal_fast_inwriter",
+        "wal_fast_syncer",
     ];
     let mut cell_id = 0;
     for _ in 0..reps {
@@ -776,19 +778,26 @@ fn main() {
                                     segment_bytes: 256 * 1024 * 1024,
                                     max_batch_bytes: 16 * 1024 * 1024,
                                     max_queued_bytes: 64 * 1024 * 1024,
+                                    fast_sync: FastSync::InWriter,
                                 };
                                 let (wal, _) =
                                     Wal::open(Arc::new(StdVfs), &dir, o, 1, &mut |_, _, _| Ok(()))
                                         .expect("wal open");
                                 Target::Wal(wal)
                             }
-                            "wal_fast" => {
+                            // Task 2.7: the two Fast sync placements, measured side by side.
+                            "wal_fast_inwriter" | "wal_fast_syncer" => {
                                 let o = WalOptions {
                                     sync_mode: SyncMode::Fast,
                                     sync_interval: Duration::from_millis(10),
                                     segment_bytes: 256 * 1024 * 1024,
                                     max_batch_bytes: 16 * 1024 * 1024,
                                     max_queued_bytes: 64 * 1024 * 1024,
+                                    fast_sync: if kind == "wal_fast_syncer" {
+                                        FastSync::SyncerThread
+                                    } else {
+                                        FastSync::InWriter
+                                    },
                                 };
                                 let (wal, _) =
                                     Wal::open(Arc::new(StdVfs), &dir, o, 1, &mut |_, _, _| Ok(()))
