@@ -172,12 +172,8 @@ impl Partitioner {
 
     /// Get the partition ID for a given key
     pub fn get_partition(&self, key: &[u8]) -> usize {
-        // Simple hash-based partitioning
-        let hash = ahash::AHasher::default();
-        use std::hash::{Hash, Hasher};
-        let mut hasher = hash;
-        key.hash(&mut hasher);
-        (hasher.finish() as usize) % self.num_partitions
+        // Fixed-seed hash so a key maps to the same partition in every process (KEY-03).
+        (seahash::hash(key) as usize) % self.num_partitions
     }
 
     /// Get the node ID responsible for a given key

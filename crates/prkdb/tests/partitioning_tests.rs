@@ -297,3 +297,32 @@ async fn test_consumer_partition_reassignment() {
     consumer.reassign_partitions(vec![2, 3, 4]).await.unwrap();
     assert_eq!(consumer.assigned_partitions(), &[2, 3, 4]);
 }
+
+/// KEY-03: changing the key → partition mapping moves every existing key. If this fails,
+/// the change needs a registered migration (spec D4), not new vectors.
+#[test]
+fn default_partitioner_golden_vectors() {
+    use prkdb::partitioning::{DefaultPartitioner, Partitioner};
+    // Output of `cargo run -p prkdb --example print_partition_golden`, pasted verbatim.
+    const GOLDEN: [(&str, u32); 10] = [
+        ("user-0", 232),
+        ("user-1", 816),
+        ("user-2", 666),
+        ("user-3", 933),
+        ("user-4", 904),
+        ("user-5", 28),
+        ("user-6", 73),
+        ("user-7", 39),
+        ("user-8", 473),
+        ("user-9", 535),
+    ];
+    const GOLDEN_U64_42: u32 = 865;
+    let p = DefaultPartitioner::<String>::new();
+    for (k, want) in GOLDEN {
+        assert_eq!(p.partition(&k.to_string(), 1024), want, "{k}");
+    }
+    assert_eq!(
+        DefaultPartitioner::<u64>::new().partition(&42u64, 1024),
+        GOLDEN_U64_42
+    );
+}
