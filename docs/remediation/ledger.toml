@@ -656,6 +656,16 @@ evidence = ["crates/prkdb/benches/iai_hot_paths.rs", "https://github.com/prk-Jr/
 regression_tests = ["script:scripts/check_perf_gate_floors.sh", "ci-job:perf-gate.yml/instruction-count-gate"]
 changes = ["ac19322", "b4cc02c", "77b5e3f", "fef4ebc"]
 
+[[finding]]
+id = "TST-10"
+title = "mTLS cluster test intermittently misses its 15 s replication deadline"
+area = "tests"
+severity = "medium"
+phase = 4
+status = "open"
+sources = ["scheduled-ci-2026-09-25"]
+evidence = ["crates/prkdb/tests/peer_mtls.rs:438", "https://github.com/prk-Jr/prkdb/actions/runs/36118013335"]
+
 [[phase]]
 id = 0
 title = "Honesty and tracking"

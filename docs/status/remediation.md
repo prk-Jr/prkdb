@@ -12,7 +12,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | 1 | Harness and baseline | gate_passed | 2/2 |
 | 2 | Format v2 and single-node root fixes | not_started | 0/18 |
 | 3 | Semantics | not_started | 0/9 |
-| 4 | Raft | not_started | 0/13 |
+| 4 | Raft | not_started | 0/14 |
 | 5 | Documentation and release | not_started | 0/9 |
 
 ## Findings
@@ -62,6 +62,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | TST-02 | medium | 4 | open | Linearizability workloads use 1 writer, 1 reader, ~25 ops; failed reads dropped |
 | TST-05 | medium | 2 | open | No power-loss (unsynced-data) testing; needs the WAL routed through Vfs |
 | TST-06 | medium | 4 | open | No deterministic simulation of the cluster |
+| TST-10 | medium | 4 | open | mTLS cluster test intermittently misses its 15 s replication deadline |
 | TTL-01 | medium | 3 | open | Expiry deletes without re-checking the version; value and TTL metadata written non-atomically |
 | TXN-04 | medium | 3 | open | Default isolation is ReadCommitted; D5 makes Serializable the default |
 | DOC-10 | low | 5 | open | ignoreDeadLinks: true hides orphaned methodology/status pages |

@@ -153,6 +153,7 @@ Sources: **A** = 2026-09-23 correctness audit (A#n), **R** = 2026-09-07 senior r
 | TST-06 | MED | No deterministic simulation of the cluster. | 4 |
 | TST-07 | LOW | No fuzzing of WAL record, segment, snapshot, and proto decoding. | 2 |
 | TST-09 | HIGH | The instruction-count perf gate's WAL benches count ~500 instructions for 100 1 KiB puts (`bench_wal_put`), ~500 for a get and for a 100-entry batch: the measured region does not contain the WAL work (likely executed on a runtime thread outside callgrind's toggle-collect), so the gate would not catch WAL regressions. Found on its first real CI run (https://github.com/prk-Jr/prkdb/actions/runs/35961505566). | 2 |
+| TST-10 | MEDIUM | `a_cluster_elects_and_replicates_over_mtls` (`crates/prkdb/tests/peer_mtls.rs`) intermittently times out: a committed write does not reach every node within 15 s. It failed the scheduled CI mutation baseline on main (https://github.com/prk-Jr/prkdb/actions/runs/36118013335, shard 6). Cause not yet established: a slow runner, or a replication stall in the experimental cluster (D8). | 4 |
 
 ### 3.8 Documentation (DOC)
 
@@ -519,6 +520,7 @@ No unrelated refactoring.
 |---|---|---|
 | 1 | 2026-09-23 | Initial spec from the 2026-09-23 audits and the 2026-09-07 review; decisions D1–D9 (D9: publishing policy). |
 | 2 | 2026-09-23 | Spec review pass 1: `Vfs` seam defined in Phase 1, WAL routed through it in 2a; per-area `verified`; tripwires instead of expected-failure lists; single-phase IDs (DOC-11, DOC-12, TST-05..07 split out); harness op profiles per phase (§7.1); Fast mode from 2a; commit-based workflow with phase-PR CI sequence; private backup repo with Actions off; storage-compat timing; single globally ordered WAL; like-for-like Raft gate; madsim budget; DOC-11 interim wording. |
+| 12 | 2026-09-30 | Execution: TST-10 added (mTLS cluster replication test times out intermittently in scheduled CI). |
 | 11 | 2026-09-24 | Phase 2 plan review, recorded deviations ((a) is a maintainer decision; (b) and (c) follow from the review): (a) a collection's persisted name derives from its type name unless `#[collection(name)]` pins it, so renaming an unpinned type changes the name (2c said renaming does not; the catalog cannot know two names are one collection); (b) the storage-compat golden-directory check starts at the end of 2e (plan Task 2.24), not at 2b, because the event and outbox record types land in 2e and the format is frozen only once every record type exists; (c) WAL frames use CRC-32 (`crc32fast`, already a dependency) instead of the spike decision record's CRC-32C; the frame header has no algorithm field, so this is fixed for format 2. |
 | 10 | 2026-09-24 | Decisions D10 (approved probe pushes), D11 (one WAL, including CollectionPartitionedAdapter), D12 (Phase 2 breaking changes accepted). |
 | 9 | 2026-09-24 | Execution: STO-09 added (`cache_capacity` ignored by `new_with_config`), found by the Task 2.1 WAL spike. |
