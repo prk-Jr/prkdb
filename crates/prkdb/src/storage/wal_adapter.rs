@@ -3395,11 +3395,7 @@ mod tests {
             //
             // The supervisor goes first: it watches the flush loop's JoinHandle, and would
             // read the abort as the writer exiting and discharge the queued write itself.
-            {
-                let tasks = adapter.inner.writer.get().expect("the writer was spawned");
-                tasks.supervisor.abort();
-                tasks.flush_loop.abort();
-            }
+            stop_writer_tasks(&adapter).await;
 
             let rx = adapter
                 .enqueue_write(LogRecord::new(LogOperation::Put {
@@ -3432,6 +3428,28 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Stops the writer tasks and waits until both have really finished.
+    ///
+    /// `abort` only takes effect at a task's next await point: on a multi-threaded runtime
+    /// the flush loop can still be mid-poll on another worker, pick up a write the test
+    /// queues next, and be cancelled while holding that write's sender — the caller then
+    /// sees `RecvError` instead of the outcome the test asserts on. The supervisor goes
+    /// first: it watches the flush loop's JoinHandle, and would read the abort as the
+    /// writer exiting and discharge the queued write itself.
+    async fn stop_writer_tasks(adapter: &WalStorageAdapter) {
+        let tasks = adapter.inner.writer.get().expect("the writer was spawned");
+        tasks.supervisor.abort();
+        tasks.flush_loop.abort();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !(tasks.supervisor.is_finished() && tasks.flush_loop.is_finished()) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the aborted writer tasks did not stop within 5 s"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
     }
 
     /// A batch write reports the bytes it wrote, and `flush` publishes what is queued.
@@ -3478,11 +3496,7 @@ mod tests {
         // Now a write the flush has to find. The writer tasks are stopped so nothing else
         // can publish it — supervisor first, or it reads the flush loop's abort as the
         // writer exiting and discharges the write itself.
-        {
-            let tasks = adapter.inner.writer.get().expect("the writer was spawned");
-            tasks.supervisor.abort();
-            tasks.flush_loop.abort();
-        }
+        stop_writer_tasks(&adapter).await;
 
         let rx = adapter
             .enqueue_write(LogRecord::new(LogOperation::Put {
@@ -3546,11 +3560,7 @@ mod tests {
         })
         .expect("adapter opens");
 
-        {
-            let tasks = adapter.inner.writer.get().expect("the writer was spawned");
-            tasks.supervisor.abort();
-            tasks.flush_loop.abort();
-        }
+        stop_writer_tasks(&adapter).await;
 
         let put = |id: &[u8], data: &[u8]| {
             LogRecord::new(LogOperation::Put {
@@ -3616,11 +3626,7 @@ mod tests {
         })
         .expect("adapter opens");
 
-        {
-            let tasks = adapter.inner.writer.get().expect("the writer was spawned");
-            tasks.supervisor.abort();
-            tasks.flush_loop.abort();
-        }
+        stop_writer_tasks(&adapter).await;
 
         let (put, _put_rx) = PendingWrite::new(LogRecord::new(LogOperation::Put {
             collection: "orders".to_string(),
