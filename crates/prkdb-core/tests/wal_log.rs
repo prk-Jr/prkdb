@@ -5,7 +5,7 @@ use prkdb_core::vfs::{OpenMode, StdVfs, Vfs, VfsFile};
 use prkdb_core::wal::batch::{Batch, BatchOp};
 use prkdb_core::wal::frame::FrameKind;
 use prkdb_core::wal::{
-    CompressionConfig, Lsn, RecordLoc, SyncMode, Wal, WalError, WalHealth, WalOptions,
+    CompressionConfig, FastSync, Lsn, RecordLoc, SyncMode, Wal, WalError, WalHealth, WalOptions,
 };
 use std::io;
 use std::path::{Path, PathBuf};
@@ -20,8 +20,12 @@ fn opts(mode: SyncMode, segment_bytes: u64) -> WalOptions {
         segment_bytes,
         max_batch_bytes: 1 << 20,
         max_queued_bytes: 8 << 20,
+        fast_sync: FastSync::InWriter,
     }
 }
+
+/// Task 2.7: both Fast sync placements, for tests parametrized over them.
+const FAST_SYNCS: [FastSync; 2] = [FastSync::InWriter, FastSync::SyncerThread];
 
 fn open(vfs: Arc<dyn Vfs>, dir: &Path, o: WalOptions) -> (Wal, Vec<(Lsn, Vec<u8>)>) {
     let mut seen = Vec::new();
@@ -154,19 +158,75 @@ async fn durable_appends_are_synced_before_the_ack() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn fast_appends_are_synced_within_the_interval_without_more_writes() {
+    for fast_sync in FAST_SYNCS {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = Arc::new(Probe::default());
+        let (wal, _) = open(
+            Arc::new(ProbeVfs(probe.clone())),
+            dir.path(),
+            WalOptions {
+                fast_sync,
+                ..opts(SyncMode::Fast, 1 << 20)
+            },
+        );
+        let loc = wal.append(b"x".to_vec(), None).await.unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while wal.durable_lsn() < loc.lsn {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{fast_sync:?}: never synced"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        wal.close().unwrap();
+    }
+}
+
+/// Task 2.7: a failed fsync on the syncer thread poisons the log exactly like the
+/// writer's own: later appends and explicit syncs get `Poisoned`, and the failed sync is
+/// never retried (no sync is attempted after it, and `durable_lsn` does not move).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_syncer_thread_sync_poisons_the_log() {
     let dir = tempfile::tempdir().unwrap();
     let probe = Arc::new(Probe::default());
     let (wal, _) = open(
         Arc::new(ProbeVfs(probe.clone())),
         dir.path(),
-        opts(SyncMode::Fast, 1 << 20),
+        WalOptions {
+            fast_sync: FastSync::SyncerThread,
+            ..opts(SyncMode::Fast, 1 << 20)
+        },
     );
-    let loc = wal.append(b"x".to_vec(), None).await.unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while wal.durable_lsn() < loc.lsn {
-        assert!(std::time::Instant::now() < deadline, "never synced");
+    probe.fail_syncs.store(true, Ordering::SeqCst);
+    // Fast acks after the write; the syncer's periodic sync then fails.
+    let loc = wal.append(b"acked".to_vec(), None).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !matches!(wal.health(), WalHealth::Poisoned(_)) {
+        assert!(Instant::now() < deadline, "syncer failure never poisoned");
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    probe.fail_syncs.store(false, Ordering::SeqCst);
+    let syncs_after_failure = probe.syncs.load(Ordering::SeqCst);
+    assert!(
+        wal.durable_lsn() < loc.lsn,
+        "a failed sync must not advance durable_lsn"
+    );
+
+    let later = wal.append(b"later".to_vec(), None).await;
+    assert!(matches!(later, Err(WalError::Poisoned(_))), "{later:?}");
+    let sync = wal.sync().await;
+    assert!(matches!(sync, Err(WalError::Poisoned(_))), "{sync:?}");
+    let reason = match wal.health() {
+        WalHealth::Poisoned(r) => r,
+        other => panic!("{other:?}"),
+    };
+    assert!(reason.contains("syncer"), "first cause is kept: {reason}");
+    assert!(matches!(wal.close(), Err(WalError::Poisoned(_))));
+    assert_eq!(
+        probe.syncs.load(Ordering::SeqCst),
+        syncs_after_failure,
+        "fsyncgate: nothing may sync again after a failed fsync"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -369,6 +429,7 @@ async fn fast_mode_keeps_syncing_under_saturation() {
         segment_bytes: 64 << 20,
         max_batch_bytes: 2048,
         max_queued_bytes: 16 << 20,
+        fast_sync: FastSync::InWriter,
     };
     let (wal, _) = open(Arc::new(StdVfs), dir.path(), o);
     let wal = Arc::new(wal);
@@ -630,6 +691,7 @@ async fn scan_from_sees_fast_acked_writes_scan_durable_from_waits_for_sync() {
         segment_bytes: 1 << 20,
         max_batch_bytes: 1 << 20,
         max_queued_bytes: 8 << 20,
+        fast_sync: FastSync::InWriter,
     };
     let (wal, _) = open(Arc::new(StdVfs), dir.path(), o);
 
@@ -696,6 +758,7 @@ async fn a_segment_roll_advances_durable_lsn_for_the_old_segment_in_fast_mode() 
         segment_bytes: 1024,
         max_batch_bytes: 1 << 20,
         max_queued_bytes: 8 << 20,
+        fast_sync: FastSync::InWriter,
     };
     let (wal, _) = open(Arc::new(StdVfs), dir.path(), o);
 
