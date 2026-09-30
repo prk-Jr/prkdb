@@ -9,8 +9,6 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
-use ahash::AHasher;
-
 /// Partition identifier
 pub type PartitionId = u32;
 
@@ -29,7 +27,15 @@ pub trait Partitioner<K: Hash>: Send + Sync {
     fn partition(&self, key: &K, num_partitions: u32) -> u32;
 }
 
-/// A default partitioner that uses ahash for consistent hashing.
+/// A default partitioner that hashes keys with a fixed-seed `SeaHasher`.
+///
+/// The key → partition mapping is the same in every process and across restarts
+/// (the hasher has a fixed seed); golden vectors in `partitioning_tests.rs` fail CI
+/// if it changes. It goes through the key type's `Hash` impl, so it is only as
+/// portable as that output: a key whose `Hash` writes a `usize` (slices and `Vec`s
+/// write their length) hashes differently on 32-bit or big-endian targets, and std
+/// does not promise `Hash` output across Rust releases (the golden vectors catch a
+/// change on the CI toolchain).
 #[derive(Debug, Default, Clone)]
 pub struct DefaultPartitioner<K: Hash + Send + Sync> {
     _marker: PhantomData<K>,
@@ -48,7 +54,7 @@ impl<K: Hash + Send + Sync> Partitioner<K> for DefaultPartitioner<K> {
         if num_partitions == 0 {
             return 0;
         }
-        let mut hasher = AHasher::default();
+        let mut hasher = seahash::SeaHasher::new();
         key.hash(&mut hasher);
         (hasher.finish() % num_partitions as u64) as u32
     }

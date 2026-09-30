@@ -134,27 +134,21 @@ async fn key01_collections_share_primary_keys_tripwire() {
     }
 }
 
-/// KEY-03: the default partitioner is seeded per process.
-///
-/// Blind spot: this also flips (falsely reading as "fixed") if ahash's
-/// runtime random seeding is disabled (e.g. building without the default
-/// `runtime-rng` feature, or pinning a fixed seed), since the partitioner would
-/// then hash deterministically across processes for reasons unrelated to
-/// KEY-03 being fixed in `DefaultPartitioner` itself.
+/// KEY-03 regression (was the tripwire): a key's partition is the same in every process.
 #[test]
-fn key03_partition_differs_across_processes_tripwire() {
+fn key03_partition_is_stable_across_processes() {
     use prkdb::partitioning::{DefaultPartitioner, Partitioner};
-    if is_child("key03_partition_differs_across_processes_tripwire") {
+    if is_child("key03_partition_is_stable_across_processes") {
         let p = DefaultPartitioner::<String>::new().partition(&"user-42".to_string(), 1_000_000);
         println!("CHILD_RESULT={p}");
         return;
     }
     let results: Vec<String> = (0..3)
-        .map(|_| child_result("key03_partition_differs_across_processes_tripwire"))
+        .map(|_| child_result("key03_partition_is_stable_across_processes"))
         .collect();
     assert!(
-        !(results[0] == results[1] && results[1] == results[2]),
-        "KEY-03 appears fixed (stable across processes: {results:?}): invert this tripwire"
+        results.windows(2).all(|w| w[0] == w[1]),
+        "partition changed across processes: {results:?}"
     );
 }
 
