@@ -116,7 +116,8 @@ async fn test_schema_registry_persists_across_restart() {
         ADMIN_TOKEN.to_string(),
         schema_path.clone(),
     )
-    .await;
+    .await
+    .unwrap();
     let (server_url, shutdown) = start_server(first_service).await;
     let mut client = PrkDbServiceClient::connect(server_url).await.unwrap();
 
@@ -140,7 +141,8 @@ async fn test_schema_registry_persists_across_restart() {
         ADMIN_TOKEN.to_string(),
         schema_path,
     )
-    .await;
+    .await
+    .unwrap();
     let (server_url, shutdown) = start_server(second_service).await;
     let mut client = PrkDbServiceClient::connect(server_url).await.unwrap();
 
@@ -158,6 +160,37 @@ async fn test_schema_registry_persists_across_restart() {
     assert_eq!(list_response.schemas[0].latest_version, 1);
 
     shutdown.send(()).ok();
+}
+
+/// SCH-02: a server whose schema registry cannot be loaded must not start with an empty one.
+#[tokio::test]
+async fn a_damaged_schema_registry_fails_service_startup() {
+    let schema_dir = TempDir::new().unwrap();
+    let schema_path = PathBuf::from(schema_dir.path());
+    {
+        let registry = prkdb_schema::SchemaRegistry::new(std::sync::Arc::new(
+            prkdb_schema::FileSchemaStorage::new(schema_path.clone()),
+        ));
+        registry
+            .register(
+                "users",
+                test_schema_bytes(),
+                prkdb_schema::CompatibilityMode::Backward,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    std::fs::remove_file(schema_path.join("descriptors/users/v1.binpb")).unwrap();
+    let err = PrkDbGrpcService::with_schema_storage_path(
+        create_test_db(),
+        ADMIN_TOKEN.to_string(),
+        schema_path,
+    )
+    .await
+    .err()
+    .expect("startup must fail on a missing descriptor");
+    assert!(err.to_string().contains("v1.binpb"), "{err}");
 }
 
 #[tokio::test]

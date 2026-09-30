@@ -41,7 +41,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | RFT-06 | high | 4 | open | ReadIndex heartbeat sends prev_log_index:0 with leader_commit; no no-op on election lets a linearizable read miss an acked write |
 | RFT-07 | high | 4 | open | Failed InstallSnapshot counts toward commit; restore never clears old keys; stale snapshots accepted |
 | RFT-10 | high | 4 | open | CLUSTER_NODES rejects hostnames; 3-node compose cluster cannot start |
-| SCH-02 | high | 2 | open | Schema reload accepts missing descriptors; non-atomic writes; concurrent registrations can reuse a version |
+| SCH-02 | high | 2 | fixed | Schema reload accepts missing descriptors; non-atomic writes; concurrent registrations can reuse a version |
 | STO-06 | high | 2 | open | Four WAL implementations in use; all data writes hash to one shard so fixes do not propagate |
 | STO-07 | high | 2 | open | BatchAccumulator::flush() sleeps and returns Ok while dropping executor errors |
 | TST-01 | high | 4 | open | Chaos monkey tolerates 20% of acknowledged writes missing |

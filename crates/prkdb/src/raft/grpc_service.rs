@@ -27,7 +27,9 @@ use crate::raft::rpc::{
     WatchEvent,
     WatchRequest,
 };
-use prkdb_schema::{CompatibilityMode, FileSchemaStorage, InMemorySchemaStorage, SchemaRegistry};
+use prkdb_schema::{
+    CompatibilityMode, FileSchemaStorage, InMemorySchemaStorage, SchemaError, SchemaRegistry,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -86,23 +88,23 @@ impl PrkDbGrpcService<InMemorySchemaStorage> {
 }
 
 impl PrkDbGrpcService<FileSchemaStorage> {
-    /// Create a new gRPC service with file-backed schema storage
+    /// Create a new gRPC service with file-backed schema storage.
+    ///
+    /// Fails if the schema directory cannot be created or the registry on disk cannot
+    /// be loaded. Starting with an empty registry instead would report no schemas and
+    /// let clients re-register versions over the ones that failed to load (SCH-02).
     pub async fn with_schema_storage_path(
         db: Arc<PrkDb>,
         admin_token: String,
         schema_path: PathBuf,
-    ) -> Self {
-        // Create the directory if it doesn't exist
-        std::fs::create_dir_all(&schema_path).ok();
-
+    ) -> Result<Self, SchemaError> {
         let mut storage = FileSchemaStorage::new(schema_path);
-        if let Err(e) = storage.load().await {
-            tracing::warn!("Failed to load schema storage: {}. Starting fresh.", e);
-        }
+        storage.create_base_dir()?;
+        storage.load().await?;
         let schema_registry = Arc::new(SchemaRegistry::new(Arc::new(storage)));
         let (watch_tx, _) = broadcast::channel(DEFAULT_WATCH_CHANNEL_CAPACITY);
 
-        Self {
+        Ok(Self {
             db,
             admin_token,
             public_address: None,
@@ -113,7 +115,7 @@ impl PrkDbGrpcService<FileSchemaStorage> {
             schema_registry,
             authz_enforced: false,
             allow_anonymous: false,
-        }
+        })
     }
 }
 

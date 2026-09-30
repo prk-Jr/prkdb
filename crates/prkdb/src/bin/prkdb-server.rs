@@ -66,6 +66,16 @@ async fn main() -> Result<()> {
 
     let db_arc = Arc::new(db);
 
+    // Load the schema registry before any listener binds. SCH-02: a registry that
+    // cannot be loaded stops startup here instead of serving an empty one, which would
+    // let clients re-register versions over the schemas that failed to load.
+    let admin_token = env::var("PRKDB_ADMIN_TOKEN").unwrap_or_default();
+    let schema_path = storage_path.join("schemas");
+    let schema_loaded_service =
+        PrkDbGrpcService::with_schema_storage_path(db_arc.clone(), admin_token, schema_path)
+            .await
+            .context("loading the schema registry")?;
+
     // Authorization for the client-facing service. PRKDB_BOOTSTRAP_TOKEN mints the first
     // admin principal, matching `prkdb-cli serve`; PRKDB_ALLOW_ANONYMOUS is the explicit
     // opt-out. Leaving this binary unguarded while `prkdb-cli` enforced would reopen S-01
@@ -217,8 +227,6 @@ async fn main() -> Result<()> {
     }
 
     // Create gRPC service for client data operations
-    let admin_token = env::var("PRKDB_ADMIN_TOKEN").unwrap_or_default();
-    let schema_path = storage_path.join("schemas");
     let explicit_advertised_grpc_address = env::var("PRKDB_ADVERTISED_GRPC_ADDR")
         .ok()
         .filter(|value| !value.trim().is_empty());
@@ -239,19 +247,17 @@ async fn main() -> Result<()> {
 
     info!("Advertised client address: {}", advertised_grpc_address);
 
-    let grpc_service =
-        PrkDbGrpcService::with_schema_storage_path(db_arc.clone(), admin_token, schema_path)
-            .await
-            // The layer requires Admin for these RPCs, so the deprecated admin_token
-            // message field is no longer the only way in.
-            .with_authz_enforced(authz_store.is_some())
-            // Distinct from `!authz_enforced`: only an explicit PRKDB_ALLOW_ANONYMOUS
-            // waives the admin check, so a missing layer still denies.
-            .with_anonymous_access(anonymous_access)
-            .with_local_node_id(node_id)
-            .with_public_address(advertised_grpc_address)
-            .with_advertised_node_addresses(advertised_node_addresses)
-            .into_server();
+    let grpc_service = schema_loaded_service
+        // The layer requires Admin for these RPCs, so the deprecated admin_token
+        // message field is no longer the only way in.
+        .with_authz_enforced(authz_store.is_some())
+        // Distinct from `!authz_enforced`: only an explicit PRKDB_ALLOW_ANONYMOUS
+        // waives the admin check, so a missing layer still denies.
+        .with_anonymous_access(anonymous_access)
+        .with_local_node_id(node_id)
+        .with_public_address(advertised_grpc_address)
+        .with_advertised_node_addresses(advertised_node_addresses)
+        .into_server();
 
     // Create Raft service for multiplexed Raft traffic
     // We must register this service on the SAME server/port as the client API
