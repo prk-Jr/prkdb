@@ -9,8 +9,13 @@ min_ratio = 100.0   # 100 puts must at least encode 100 records
 reference = "bench_log_record_decode"
 # The fixture evicts the key from cache before the measured get (see
 # setup_wal_get_one's doc comment in iai_hot_paths.rs), so this is an index lookup plus
-# a real WAL read and decode, not a cache hit; it must at least decode one record.
-min_ratio = 1.0
+# a real WAL read and decode, not a cache hit. Measured 7351 Ir on Linux
+# (probe https://github.com/prk-Jr/prkdb/actions/runs/36074847032) against a
+# bench_log_record_decode of 1385 Ir: a 5.3x ratio. min_ratio is set to 3.0, not 5.3,
+# to leave headroom for run-to-run jitter while still comfortably rejecting the
+# previous, cache-hit version of this benchmark (1953 Ir measured on Linux before this
+# fix, a 1.4x ratio) if it ever regresses back to a hit.
+min_ratio = 3.0
 
 [floors.bench_wal_batch_of_100]
 reference = "bench_log_record_encode"
