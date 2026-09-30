@@ -24,9 +24,7 @@ pub use compression::{
 };
 pub use config::{CompactionPolicy, SyncMode, WalConfig};
 pub use frame::Lsn;
-pub use log::{
-    CommitHook, FastSync, PendingAppend, RecoveryReport, Reservation, Wal, WalHealth, WalOptions,
-};
+pub use log::{CommitHook, PendingAppend, RecoveryReport, Reservation, Wal, WalHealth, WalOptions};
 pub use log_record::{LogOperation, LogRecord};
 pub use log_segment::LogSegment;
 pub use segment::RecordLoc;

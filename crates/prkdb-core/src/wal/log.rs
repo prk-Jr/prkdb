@@ -24,28 +24,11 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::task::{Context as TaskContext, Poll};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
-
-/// Where `SyncMode::Fast`'s periodic sync runs (Task 2.7, decision record §6 risk 2).
-///
-/// Temporary: Task 2.7 measures both on Linux, keeps the better tail, and deletes this
-/// enum and the option with the losing variant (no dead knobs).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum FastSync {
-    /// The writer thread syncs at batch boundaries once `sync_interval` has elapsed (and
-    /// from its idle `recv_timeout`). One thread owns the file.
-    #[default]
-    InWriter,
-    /// A second thread (`prkdb-wal-syncer`) syncs the active segment within
-    /// `sync_interval` of the first unsynced write, so the writer's `pwrite`s never wait
-    /// behind a sync it issued itself. The writer never runs the periodic Fast sync in
-    /// this mode; it still syncs on roll, on an explicit `sync()` and at close.
-    SyncerThread,
-}
 
 /// Options the writer thread runs under. Constructed from [`WalConfig`] with
 /// [`WalOptions::from_config`].
@@ -56,8 +39,6 @@ pub struct WalOptions {
     pub segment_bytes: u64,
     pub max_batch_bytes: usize,
     pub max_queued_bytes: usize,
-    /// Only read in `SyncMode::Fast`.
-    pub fast_sync: FastSync,
 }
 
 impl WalOptions {
@@ -68,7 +49,6 @@ impl WalOptions {
             segment_bytes: c.segment_bytes,
             max_batch_bytes: c.max_batch_bytes,
             max_queued_bytes: c.max_queued_bytes,
-            fast_sync: FastSync::default(),
         }
     }
 }
@@ -118,16 +98,6 @@ struct Shared {
     /// the same batch) never raises this watermark, even though its frame may already be
     /// physically written — "acked" means the caller was told `Ok`, nothing else.
     acked_lsn: AtomicU64,
-    /// Highest LSN whose `write_at` has returned (the writer stores it right after each
-    /// batch write). Read by the `FastSync::SyncerThread` syncer, always together with
-    /// `active_file` under the same `active_file` read guard (see `syncer_body`).
-    written_lsn: AtomicU64,
-    /// The segment the writer is appending to. Swapped by the writer (under the write
-    /// guard) on roll, after it has synced the outgoing segment and before it writes any
-    /// frame to the new one.
-    active_file: RwLock<Arc<dyn VfsFile>>,
-    /// `Some` only in `SyncMode::Fast` with `FastSync::SyncerThread`.
-    syncer: Option<SyncerCtl>,
     health: RwLock<InternalHealth>,
     /// Read handles for `read`/`scan_from`, keyed by each segment's first LSN.
     segments: RwLock<BTreeMap<Lsn, Arc<dyn VfsFile>>>,
@@ -244,8 +214,6 @@ pub struct Wal {
     shared: Arc<Shared>,
     sender: Option<mpsc::Sender<Request>>,
     writer: Option<JoinHandle<()>>,
-    /// The `FastSync::SyncerThread` syncer, if any.
-    syncer: Option<JoinHandle<()>>,
 }
 
 /// The active segment, owned by the writer thread only.
@@ -412,14 +380,8 @@ impl Wal {
             write_pos,
         };
 
-        let active_handle = active.file.clone();
-        let use_syncer =
-            opts.sync_mode == SyncMode::Fast && opts.fast_sync == FastSync::SyncerThread;
         let shared = Arc::new(Shared {
             next_lsn: AtomicU64::new(next_lsn),
-            written_lsn: AtomicU64::new(next_lsn.saturating_sub(1)),
-            active_file: RwLock::new(active_handle),
-            syncer: use_syncer.then(SyncerCtl::default),
             durable_lsn: AtomicU64::new(next_lsn.saturating_sub(1)),
             // Recovery: everything replayed was just made durable by the sync above, and
             // was reported to `replay` as if committed, so it counts as acked too.
@@ -454,34 +416,11 @@ impl Wal {
             })
             .map_err(WalError::Io)?;
 
-        let syncer = if use_syncer {
-            let syncer_shared = shared.clone();
-            let spawned = std::thread::Builder::new()
-                .name("prkdb-wal-syncer".to_string())
-                .spawn(move || syncer_thread(syncer_shared));
-            match spawned {
-                Ok(handle) => Some(handle),
-                Err(e) => {
-                    // Shut the writer down cleanly before reporting the failure.
-                    drop(Wal {
-                        shared,
-                        sender: Some(tx),
-                        writer: Some(writer),
-                        syncer: None,
-                    });
-                    return Err(WalError::Io(e));
-                }
-            }
-        } else {
-            None
-        };
-
         Ok((
             Wal {
                 shared,
                 sender: Some(tx),
                 writer: Some(writer),
-                syncer,
             },
             report,
         ))
@@ -717,17 +656,6 @@ impl Wal {
     }
 
     fn close_internal(&mut self) -> Result<(), WalError> {
-        // Stop the syncer first: from here on the writer alone owns syncing, and its
-        // `Close` handling performs the final sync. Joining waits for at most one
-        // in-flight `sync_data`; no syncer activity can follow `Closed`.
-        if let Some(handle) = self.syncer.take() {
-            if let Some(ctl) = &self.shared.syncer {
-                ctl.stop();
-            }
-            if handle.join().is_err() {
-                tracing::warn!("WAL syncer thread panicked during shutdown");
-            }
-        }
         let mut result = Ok(());
         if let Some(sender) = self.sender.take() {
             let (tx, rx) = oneshot::channel();
@@ -755,7 +683,7 @@ impl Wal {
 
 impl Drop for Wal {
     fn drop(&mut self) {
-        if self.sender.is_some() || self.syncer.is_some() {
+        if self.sender.is_some() {
             if let Err(e) = self.close_internal() {
                 tracing::warn!(error = %e, "error while closing WAL on drop");
             }
@@ -809,19 +737,13 @@ fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-/// Marks the log poisoned. Keeps the first cause: with a separate syncer thread two
-/// threads can fail, and the first failure is the one that explains the rest.
+/// Marks the log poisoned. Keeps the first cause: a later failure (for example the writer
+/// panicking while it answers requests after an I/O error) must not hide the one that
+/// explains it.
 fn poison(shared: &Arc<Shared>, reason: String) {
     let mut health = shared.health.write().expect("health lock poisoned");
     if *health == InternalHealth::Running {
         *health = InternalHealth::Poisoned(reason);
-    }
-}
-
-fn poisoned_reason(shared: &Shared) -> Option<String> {
-    match &*shared.health.read().expect("health lock poisoned") {
-        InternalHealth::Poisoned(r) => Some(r.clone()),
-        _ => None,
     }
 }
 
@@ -894,7 +816,7 @@ fn writer_body(
                             }
                             shared
                                 .durable_lsn
-                                .fetch_max(last_written_lsn, Ordering::Release);
+                                .store(last_written_lsn, Ordering::Release);
                             unsynced_since = None;
                             continue;
                         }
@@ -992,15 +914,7 @@ fn writer_body(
                     drain_after_poison(shared, rx);
                     return;
                 }
-                // A `FastSync::SyncerThread` syncer may have poisoned the log while the
-                // writer was idle; the final sync must not paper over that.
-                if let Some(reason) = poisoned_reason(shared) {
-                    let _ = reply.send(Err(WalError::Poisoned(reason)));
-                    *shared.health.write().expect("health lock poisoned") = InternalHealth::Closed;
-                    drain_after_poison(shared, rx);
-                    return;
-                }
-                let final_result = if needs_sync(shared, unsynced_since, last_written_lsn) {
+                let final_result = if unsynced_since.is_some() {
                     active.file.sync_data().map_err(WalError::Io)
                 } else {
                     Ok(())
@@ -1008,7 +922,7 @@ fn writer_body(
                 if final_result.is_ok() {
                     shared
                         .durable_lsn
-                        .fetch_max(last_written_lsn, Ordering::Release);
+                        .store(last_written_lsn, Ordering::Release);
                 }
                 *shared.health.write().expect("health lock poisoned") = InternalHealth::Closed;
                 let _ = reply.send(final_result);
@@ -1028,19 +942,12 @@ fn writer_body(
                 return;
             }
             Request::Sync { reply } => {
-                // A `FastSync::SyncerThread` syncer may have poisoned the log while the
-                // writer was idle: never answer `Ok` after a failed fsync.
-                if let Some(reason) = poisoned_reason(shared) {
-                    let _ = reply.send(Err(WalError::Poisoned(reason)));
-                    drain_after_poison(shared, rx);
-                    return;
-                }
-                if needs_sync(shared, unsynced_since, last_written_lsn) {
+                if unsynced_since.is_some() {
                     match active.file.sync_data() {
                         Ok(()) => {
                             shared
                                 .durable_lsn
-                                .fetch_max(last_written_lsn, Ordering::Release);
+                                .store(last_written_lsn, Ordering::Release);
                             unsynced_since = None;
                         }
                         Err(e) => {
@@ -1167,14 +1074,6 @@ fn writer_body(
     }
 }
 
-/// Whether the writer holds written-but-unsynced frames. `unsynced_since` is only
-/// tracked in `FastSync::InWriter` mode; in `SyncerThread` mode the watermark comparison
-/// answers it (a sync the syncer has in flight but not yet recorded costs one redundant,
-/// harmless `sync_data`).
-fn needs_sync(shared: &Shared, unsynced_since: Option<Instant>, last_written_lsn: Lsn) -> bool {
-    unsynced_since.is_some() || last_written_lsn > shared.durable_lsn.load(Ordering::Acquire)
-}
-
 fn request_payload_len(req: &Request) -> usize {
     match req {
         Request::Append { payload, .. } => payload.len(),
@@ -1223,12 +1122,6 @@ fn commit_batch(
     last_written_lsn: &mut Lsn,
     unsynced_since: &mut Option<Instant>,
 ) {
-    // With `FastSync::SyncerThread` the syncer can poison the log while this thread is
-    // busy or idle. Nothing may be written, let alone acked, after a failed fsync.
-    if let Some(reason) = poisoned_reason(shared) {
-        fail_batch(shared, items, reason);
-        return;
-    }
     let total_queued: usize = items.iter().map(|i| i.permit_len).sum();
 
     // Roll first if this batch would push a non-empty active segment past `segment_bytes`.
@@ -1272,9 +1165,6 @@ fn commit_batch(
     active.write_pos += buf.len() as u64;
     shared.next_lsn.store(lsn, Ordering::Release);
     *last_written_lsn = lsn - 1;
-    // SeqCst pairs with the syncer's `armed` clear and `written_lsn` load (see
-    // `SyncerCtl::arm` and `syncer_body`).
-    shared.written_lsn.store(lsn - 1, Ordering::SeqCst);
 
     // H1: under saturation, batches keep draining via `try_recv` inside the Append arm and
     // the writer never reaches the idle `recv_timeout` branch that would otherwise run the
@@ -1289,15 +1179,8 @@ fn commit_batch(
             }
             shared
                 .durable_lsn
-                .fetch_max(*last_written_lsn, Ordering::Release);
+                .store(*last_written_lsn, Ordering::Release);
             *unsynced_since = None;
-        }
-        SyncMode::Fast if opts.fast_sync == FastSync::SyncerThread => {
-            // The syncer owns the periodic sync: the writer neither syncs inline here nor
-            // from its idle `recv_timeout` (it never sets `unsynced_since` in this mode).
-            if let Some(ctl) = &shared.syncer {
-                ctl.arm();
-            }
         }
         SyncMode::Fast => {
             if unsynced_since.is_none() {
@@ -1308,7 +1191,7 @@ fn commit_batch(
                     Ok(()) => {
                         shared
                             .durable_lsn
-                            .fetch_max(*last_written_lsn, Ordering::Release);
+                            .store(*last_written_lsn, Ordering::Release);
                         *unsynced_since = None;
                     }
                     Err(e) => {
@@ -1405,152 +1288,12 @@ fn roll_segment(
         .write()
         .expect("segments lock poisoned")
         .insert(new_first_lsn, file.clone());
-    // Publish the new handle to the syncer before any frame is written to it. Every frame
-    // this thread writes from now on lands in `file`, and `written_lsn` only moves past
-    // `new_first_lsn - 1` after that write; see `syncer_body` for why the syncer can then
-    // never raise `durable_lsn` over frames it did not sync.
-    *shared
-        .active_file
-        .write()
-        .expect("active_file lock poisoned") = file.clone();
     *active = ActiveSegment {
         first_lsn: new_first_lsn,
         file,
         write_pos: SEGMENT_HEADER_LEN,
     };
     Ok(())
-}
-
-// ---------------------------------------------------------------------------------------
-// Syncer thread (`FastSync::SyncerThread`)
-// ---------------------------------------------------------------------------------------
-
-#[derive(Default)]
-struct SyncerState {
-    /// When the oldest write the syncer has not yet covered was made; `None` = clean.
-    dirty_since: Option<Instant>,
-    stop: bool,
-}
-
-/// Wakes the syncer only when there is something to sync, so an idle log performs no
-/// wakeups (liveness spec acceptance 1).
-#[derive(Default)]
-struct SyncerCtl {
-    /// Fast path for the writer: `true` while the syncer already knows it has work.
-    armed: std::sync::atomic::AtomicBool,
-    state: Mutex<SyncerState>,
-    cv: Condvar,
-}
-
-impl SyncerCtl {
-    /// Called by the writer after every Fast batch write (after its `written_lsn` store).
-    ///
-    /// Lost-wakeup argument: the syncer clears `armed` *before* it loads `written_lsn`, and
-    /// the writer stores `written_lsn` *before* it swaps `armed`, all `SeqCst`. If the
-    /// syncer's load misses this write, the writer's swap comes after the syncer's clear
-    /// in the total order, so it reads `false` and re-arms; otherwise the syncer's load
-    /// covers the write.
-    fn arm(&self) {
-        if !self.armed.swap(true, Ordering::SeqCst) {
-            let mut st = self.state.lock().expect("syncer lock poisoned");
-            if st.dirty_since.is_none() {
-                st.dirty_since = Some(Instant::now());
-            }
-            self.cv.notify_one();
-        }
-    }
-
-    fn stop(&self) {
-        self.state.lock().expect("syncer lock poisoned").stop = true;
-        self.cv.notify_one();
-    }
-
-    /// Blocks until the next sync is due; `false` when asked to stop.
-    fn wait_until_due(&self, interval: Duration) -> bool {
-        let mut st = self.state.lock().expect("syncer lock poisoned");
-        let since = loop {
-            if st.stop {
-                return false;
-            }
-            if let Some(since) = st.dirty_since {
-                break since;
-            }
-            st = self.cv.wait(st).expect("syncer lock poisoned");
-        };
-        let deadline = since + interval;
-        loop {
-            if st.stop {
-                return false;
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                break;
-            }
-            st = self
-                .cv
-                .wait_timeout(st, deadline - now)
-                .expect("syncer lock poisoned")
-                .0;
-        }
-        st.dirty_since = None;
-        true
-    }
-}
-
-fn syncer_thread(shared: Arc<Shared>) {
-    if let Err(panic) = catch_unwind(AssertUnwindSafe(|| syncer_body(&shared))) {
-        poison(
-            &shared,
-            format!("WAL syncer panicked: {}", panic_message(&panic)),
-        );
-    }
-}
-
-/// The `FastSync::SyncerThread` loop: within `sync_interval` of the first unsynced write,
-/// sync the active segment and raise `durable_lsn` to the `written_lsn` read before the
-/// sync. `acked_lsn` is the writer's alone.
-///
-/// Roll race. The writer, on roll, syncs the outgoing segment itself, then swaps
-/// `active_file` under its write guard, and only then writes frames to the new segment
-/// and moves `written_lsn` past them. The syncer reads `active_file` and `written_lsn`
-/// under one read guard. While it holds that guard the writer cannot complete a swap, so
-/// if the handle it reads is segment k, every `written_lsn` store it can observe was made
-/// before the swap to k+1, i.e. covers only frames in segment k or earlier (earlier ones
-/// were synced by their own roll). Syncing k then makes everything up to the value read
-/// durable, so the `fetch_max` never covers a frame in a newer segment. The guard is
-/// released before `sync_data`; a roll during the sync syncs k as well, and syncing a
-/// handle that is no longer active is harmless.
-///
-/// Errors poison exactly like the writer's and are never retried (fsyncgate); the syncer
-/// then exits, and the writer answers every later request `Poisoned`.
-fn syncer_body(shared: &Arc<Shared>) {
-    let Some(ctl) = shared.syncer.as_ref() else {
-        return;
-    };
-    while ctl.wait_until_due(shared.sync_interval) {
-        if *shared.health.read().expect("health lock poisoned") != InternalHealth::Running {
-            return;
-        }
-        ctl.armed.store(false, Ordering::SeqCst);
-        let (file, upto) = {
-            let guard = shared
-                .active_file
-                .read()
-                .expect("active_file lock poisoned");
-            (guard.clone(), shared.written_lsn.load(Ordering::SeqCst))
-        };
-        if upto <= shared.durable_lsn.load(Ordering::Acquire) {
-            continue; // a roll or an explicit sync already covered it
-        }
-        if let Err(e) = file.sync_data() {
-            poison(
-                shared,
-                format!("periodic Fast sync failed (syncer thread): {e}"),
-            );
-            return;
-        }
-        shared.durable_lsn.fetch_max(upto, Ordering::Release);
-    }
 }
 
 #[cfg(test)]
@@ -1566,7 +1309,6 @@ mod tests {
             segment_bytes: 1 << 20,
             max_batch_bytes: 1 << 20,
             max_queued_bytes: 4096,
-            fast_sync: FastSync::InWriter,
         }
     }
 
