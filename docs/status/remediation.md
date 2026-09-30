@@ -35,7 +35,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | EVT-06 | high | 3 | open | Auto-commit commits inside poll() before processing; no generation fencing; unassigned consumer falls back to partition 0 |
 | KEY-01 | high | 2 | open | Primary keys not namespaced by collection; different types can overwrite each other |
 | KEY-02 | high | 2 | open | upsert removes the new record's index entries instead of the old; unique index unenforced |
-| KEY-03 | high | 2 | open | AHasher::default() is randomly seeded per process; a key's partition changes after restart |
+| KEY-03 | high | 2 | fixed | AHasher::default() is randomly seeded per process; a key's partition changes after restart |
 | REL-01 | high | 5 | open | prkdb-client path dep has no version; dry-run failures suppressed; validate_all.sh reports success on failure |
 | RFT-05 | high | 4 | open | Commit waiters keyed by index only; not failed on step-down, so a deposed leader's client can see another leader's entry |
 | RFT-06 | high | 4 | open | ReadIndex heartbeat sends prev_log_index:0 with leader_commit; no no-op on election lets a linearizable read miss an acked write |
