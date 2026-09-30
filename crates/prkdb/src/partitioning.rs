@@ -29,9 +29,13 @@ pub trait Partitioner<K: Hash>: Send + Sync {
 
 /// A default partitioner that hashes keys with a fixed-seed `SeaHasher`.
 ///
-/// The key → partition mapping is stable across processes, machines and releases
-/// for the key types' `Hash` output; golden vectors in `partitioning_tests.rs`
-/// fail CI if the mapping changes.
+/// The key → partition mapping is the same in every process and across restarts
+/// (the hasher has a fixed seed); golden vectors in `partitioning_tests.rs` fail CI
+/// if it changes. It goes through the key type's `Hash` impl, so it is only as
+/// portable as that output: a key whose `Hash` writes a `usize` (slices and `Vec`s
+/// write their length) hashes differently on 32-bit or big-endian targets, and std
+/// does not promise `Hash` output across Rust releases (the golden vectors catch a
+/// change on the CI toolchain).
 #[derive(Debug, Default, Clone)]
 pub struct DefaultPartitioner<K: Hash + Send + Sync> {
     _marker: PhantomData<K>,
