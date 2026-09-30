@@ -4129,7 +4129,7 @@ The spike measured Fast p99 of 3–42 ms at 64 KiB because `pwrite` stalls while
 - [ ] **Step 2: Test both.** Parametrize `fast_appends_are_synced_within_the_interval_without_more_writes` and `fast_power_loss_keeps_a_prefix_no_shorter_than_the_last_sync` over both variants (loop over `[FastSync::InWriter, FastSync::SyncerThread]` inside each test). Run → pass.
 - [ ] **Step 3: Bench cells** `wal_fast_inwriter` and `wal_fast_syncer` (replacing `wal_fast` for this run only). Dispatch `probe=wal-bench`. Compare p99 and p99.9 at 8w and 64w, 1 KiB and 64 KiB.
 - [ ] **Step 4: Decide by rule, not by feel:** keep `SyncerThread` if it lowers p99.9 at 64w/64k by ≥ 25 % without losing > 5 % throughput in any cell; otherwise keep `InWriter` (simpler: one thread owns the file). Delete the losing variant, the `FastSync` enum and its option (no dead knobs), rename the bench cell back to `wal_fast`.
-- [ ] **Step 5: Record** the table, run URL and choice in the decision record under "## 9. Fast sync placement (Task 2.7)".
+- [ ] **Step 5: Record** the table, run URL and choice in the decision record under "## 10. Fast sync placement (Task 2.7)" (§9 is the Task 2.6 Linux record).
 - [ ] **Step 6: Commit** — `perf: choose Fast-mode sync placement from Linux measurements` (body: the p99/p99.9 table and the rule outcome).
 
 ---
