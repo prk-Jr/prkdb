@@ -651,9 +651,9 @@ severity = "high"
 phase = 2
 status = "fixed"
 sources = ["pr-80-perf-gate-first-run"]
-evidence = ["crates/prkdb/benches/iai_hot_paths.rs", "https://github.com/prk-Jr/prkdb/actions/runs/35961505566", "https://github.com/prk-Jr/prkdb/actions/runs/36029778339", "https://github.com/prk-Jr/prkdb/actions/runs/36072484141"]
+evidence = ["crates/prkdb/benches/iai_hot_paths.rs", "https://github.com/prk-Jr/prkdb/actions/runs/35961505566", "https://github.com/prk-Jr/prkdb/actions/runs/36029778339", "https://github.com/prk-Jr/prkdb/actions/runs/36072484141", "https://github.com/prk-Jr/prkdb/actions/runs/36074847032"]
 regression_tests = ["script:scripts/check_perf_gate_floors.sh", "ci-job:perf-gate.yml/instruction-count-gate"]
-changes = ["ac19322"]
+changes = ["ac19322", "b4cc02c", "77b5e3f", "fef4ebc"]
 
 [[phase]]
 id = 0
