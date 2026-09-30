@@ -88,10 +88,17 @@ async fn a_leftover_temp_index_is_ignored() {
     let descriptor_tmp = root.path().join("descriptors/users/v1.binpb.tmp");
     std::fs::write(&index_tmp, b"{ half written").unwrap();
     std::fs::write(&descriptor_tmp, b"half").unwrap();
+    // The name the current writer uses: `{name}.{pid}.{n}.tmp`.
+    let unique_tmp = root.path().join("schemas.json.4242.7.tmp");
+    std::fs::write(&unique_tmp, b"[").unwrap();
     let mut reopened = FileSchemaStorage::new(root.path().into());
     reopened.load().await.unwrap();
     assert!(reopened.get("users", 1).await.unwrap().is_some());
     assert!(!index_tmp.exists(), "stale index temp file must be removed");
+    assert!(
+        !unique_tmp.exists(),
+        "stale unique temp file must be removed"
+    );
     assert!(
         !descriptor_tmp.exists(),
         "stale descriptor temp file must be removed"
@@ -177,6 +184,24 @@ async fn put_refuses_to_overwrite_an_existing_version() {
         matches!(err, SchemaError::VersionConflict { ref collection, version: 1 } if collection == "users"),
         "{err:?}"
     );
+}
+
+#[tokio::test]
+async fn a_failed_index_write_leaves_the_version_unallocated() {
+    let root = tempfile::tempdir().unwrap();
+    let storage = FileSchemaStorage::new(root.path().into());
+    storage.put(&schema("users", 1)).await.unwrap();
+
+    // A directory where schemas.json should be: the descriptor write succeeds,
+    // the rename of the new index over it fails.
+    let index = root.path().join("schemas.json");
+    std::fs::remove_file(&index).unwrap();
+    std::fs::create_dir(&index).unwrap();
+
+    storage.put(&schema("users", 2)).await.unwrap_err();
+    assert!(storage.get("users", 2).await.unwrap().is_none());
+    assert_eq!(storage.next_version("users").await.unwrap(), 2);
+    assert_eq!(storage.list().await.unwrap()[0].latest_version, 1);
 }
 
 #[tokio::test]

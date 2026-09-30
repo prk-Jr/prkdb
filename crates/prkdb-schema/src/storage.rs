@@ -78,17 +78,6 @@ impl InMemorySchemaStorage {
             .is_some_and(|versions| versions.contains_key(&version)))
     }
 
-    fn remove(&self, collection: &str, version: u32) -> SchemaResult<()> {
-        let mut schemas = self.schemas.write().map_err(lock_error)?;
-        if let Some(versions) = schemas.get_mut(collection) {
-            versions.remove(&version);
-            if versions.is_empty() {
-                schemas.remove(collection);
-            }
-        }
-        Ok(())
-    }
-
     /// Every stored schema without its descriptor bytes, as written to `schemas.json`.
     fn index_entries(&self) -> SchemaResult<Vec<Schema>> {
         let schemas = self.schemas.read().map_err(lock_error)?;
@@ -397,9 +386,16 @@ impl FileInner {
             descriptor_crc32: Some(crc32fast::hash(&schema.descriptor)),
             ..schema.clone()
         };
-        self.cache.insert(&stored)?;
 
-        let json = self.cache.index_entries().and_then(|entries| {
+        // The index is serialized from the cache plus the new entry, and the cache
+        // only learns the new version once the index lists it: readers never see a
+        // version that a failed index write would then take back (and a later
+        // registration would reuse with a different descriptor).
+        let json = self.cache.index_entries().and_then(|mut entries| {
+            entries.push(Schema {
+                descriptor: Vec::new(),
+                ..stored.clone()
+            });
             serde_json::to_vec_pretty(&entries)
                 .map_err(|e| SchemaError::Serialization(format!("Failed to serialize: {}", e)))
         });
@@ -410,15 +406,13 @@ impl FileInner {
         match written {
             Ok(()) => {
                 debug!("Saved schema index to {:?}", index_path);
-                Ok(())
+                self.cache.insert(&stored)
             }
-            Err(WriteFailure::NotPublished(e)) => {
-                // The index on disk does not list this version: drop it from memory too.
-                self.cache.remove(&schema.collection, schema.version)?;
-                Err(e)
-            }
+            // The index on disk does not list this version, so memory must not either.
+            Err(WriteFailure::NotPublished(e)) => Err(e),
             Err(WriteFailure::PublishedNotDurable(e)) => {
                 // The index on disk does list it, so memory keeps it; stop writing.
+                self.cache.insert(&stored)?;
                 self.poisoned.store(true, Ordering::Release);
                 error!(
                     "Schema index for '{}' v{} is published but not durable; refusing further \
