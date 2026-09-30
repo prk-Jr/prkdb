@@ -225,9 +225,10 @@ const EVICTION_KEYS: u32 = 256;
 /// `std::collections::hash_map::DefaultHasher`'s algorithm here, which the standard
 /// library explicitly does not guarantee stable across Rust versions — a replica could
 /// silently stop matching on a toolchain bump, and this benchmark would quietly go back
-/// to measuring a cache hit with no test failure to say so. There is no public API on
-/// `WalStorageAdapter` to inspect cache occupancy directly to assert the miss instead;
-/// this is the next best thing available without changing that API.
+/// to measuring a cache hit with no test failure to say so. `bench_wal_get_one` also
+/// asserts, outside the counted region, that the measured `get` raised the adapter's
+/// `cache_misses` metric by exactly one, so a slide back to a cache hit fails the gate
+/// outright instead of relying on the instruction floor alone.
 fn setup_wal_get_one() -> (Runtime, TempDir, WalStorageAdapter) {
     let rt = single_worker_runtime();
     let dir = tempfile::tempdir().unwrap();
@@ -264,9 +265,15 @@ async fn get_one(adapter: &WalStorageAdapter) {
 fn bench_wal_get_one(
     (rt, dir, adapter): (Runtime, TempDir, WalStorageAdapter),
 ) -> (Runtime, TempDir, WalStorageAdapter) {
+    let misses_before = adapter.metrics().cache_misses;
     start_instrumentation();
     rt.block_on(get_one(&adapter));
     stop_instrumentation();
+    assert_eq!(
+        adapter.metrics().cache_misses - misses_before,
+        1,
+        "bench_wal_get_one must miss the cache and read the WAL"
+    );
     // See the module doc comment: return the fixture so its teardown happens outside
     // the counted region.
     (rt, dir, adapter)
