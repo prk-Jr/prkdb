@@ -71,7 +71,7 @@ async fn test_leader_with_2_followers_quorum_ack() {
         replica_addresses: vec![follower1_addr.to_string(), follower2_addr.to_string()],
         ack_level: AckLevel::Quorum,
         max_in_flight: 10,
-        replication_timeout: Duration::from_secs(1),
+        replication_timeout: Duration::from_secs(5),
         max_retries: 2,
         health_check_interval: Duration::from_secs(10),
         node_id: "leader".to_string(),
@@ -166,6 +166,9 @@ async fn test_leader_ack_fire_and_forget() {
     let replication_config = ReplicationConfig {
         replica_addresses: vec![follower_addr.to_string()],
         ack_level: AckLevel::Leader,
+        // These tests check that replication happens, not how fast: the 500 ms
+        // test_config timeout lost the race under a loaded parallel test run.
+        replication_timeout: Duration::from_secs(5),
         ..ReplicationConfig::test_config()
     };
 
@@ -235,6 +238,9 @@ async fn test_all_ack_level_waits_for_all_replicas() {
     let replication_config = ReplicationConfig {
         replica_addresses: follower_addrs,
         ack_level: AckLevel::All,
+        // These tests check that replication happens, not how fast: the 500 ms
+        // test_config timeout lost the race under a loaded parallel test run.
+        replication_timeout: Duration::from_secs(5),
         ..ReplicationConfig::test_config()
     };
 
@@ -298,6 +304,9 @@ async fn test_replication_with_batch_writes() {
     let replication_config = ReplicationConfig {
         replica_addresses: vec![follower_addr.to_string()],
         ack_level: AckLevel::Quorum,
+        // These tests check that replication happens, not how fast: the 500 ms
+        // test_config timeout lost the race under a loaded parallel test run.
+        replication_timeout: Duration::from_secs(5),
         ..ReplicationConfig::test_config()
     };
 
