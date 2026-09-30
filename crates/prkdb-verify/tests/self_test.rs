@@ -11,7 +11,9 @@
 use prkdb_verify::checker::Mismatch;
 use prkdb_verify::model::{Key, Mode, Value};
 use prkdb_verify::ops::{generate, key, Op, Profile, KEY_SPACE};
-use prkdb_verify::runner::{run, run_ops, run_seeds, run_seeds_with, Outcome, RunConfig};
+use prkdb_verify::runner::{
+    run, run_ops, run_seeds, run_seeds_with, Outcome, RunConfig, FINAL_REOPEN,
+};
 use prkdb_verify::sut::{Sut, Unsupported, WalSut};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -740,5 +742,70 @@ async fn an_unsupported_op_is_a_harness_error_not_a_finding() {
     assert!(
         text.contains("does not support checkpoint"),
         "unexpected harness error text: {text}"
+    );
+    assert!(
+        text.contains("profile mismatch at op"),
+        "harness error lost its context: {text}"
+    );
+    // The typed cause survives the added context, so callers can match on it.
+    let cause = err
+        .downcast_ref::<Unsupported>()
+        .expect("the harness error must keep Unsupported as its typed cause");
+    assert_eq!(cause.0, "checkpoint");
+}
+
+/// Fast mode needs PowerLoss to mean anything; until Task 2.10b adds it,
+/// `run` must refuse it outright rather than silently running Durable checks.
+#[tokio::test(flavor = "multi_thread")]
+async fn run_rejects_fast_mode_until_power_loss_lands() {
+    let config = RunConfig {
+        first_seed: 0,
+        seeds: 1,
+        ops: 10,
+        profile: Profile::Core,
+        mode: Mode::Fast,
+        repro_attempts: 1,
+    };
+    let err = run(WalSut::new, &config)
+        .await
+        .expect_err("Fast mode must be rejected before any seed runs");
+    assert!(
+        format!("{err:#}").contains("Fast mode arrives with PowerLoss"),
+        "unexpected error: {err:#}"
+    );
+}
+
+/// The implicit trailing reopen every sequence gets is counted separately
+/// from explicit `Reopen` ops, so a generator that stops emitting `Reopen`
+/// is caught as vacuous for it instead of being masked by the final reopen.
+#[tokio::test(flavor = "multi_thread")]
+async fn trailing_reopen_does_not_mask_missing_explicit_reopens() {
+    // A seed whose single generated op is not a Reopen.
+    let seed = (0..100)
+        .find(|&s| generate(s, 1, Profile::Core)[0] != Op::Reopen)
+        .expect("some seed starts with a non-Reopen op");
+    let config = RunConfig {
+        first_seed: seed,
+        seeds: 1,
+        ops: 1,
+        profile: Profile::Core,
+        mode: Mode::Durable,
+        repro_attempts: 1,
+    };
+    let report = run(WalSut::new, &config).await.expect("harness error");
+    assert!(report.failure.is_none(), "{:?}", report.failure);
+    assert_eq!(report.op_counts.get(FINAL_REOPEN).copied(), Some(1));
+    assert_eq!(report.op_counts.get("Reopen"), None);
+    assert!(
+        report.missing_op_kinds(Profile::Core).contains(&"Reopen"),
+        "a run with no explicit Reopen must be vacuous for Reopen: {:?}",
+        report.op_counts
+    );
+    assert!(
+        report
+            .format_op_counts()
+            .ends_with(&format!("{FINAL_REOPEN}:1")),
+        "{}",
+        report.format_op_counts()
     );
 }

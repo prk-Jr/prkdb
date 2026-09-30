@@ -16,8 +16,13 @@ use crate::sut::{Sut, Unsupported};
 use std::collections::BTreeMap;
 use std::future::Future;
 
-/// Executed ops per kind name (see [`Op::kind_name`]).
+/// Executed ops per kind name (see [`Op::kind_name`]), plus [`FINAL_REOPEN`].
 pub type OpCounts = BTreeMap<&'static str, u64>;
+
+/// The [`OpCounts`] key for the implicit trailing reopen every sequence gets.
+/// Deliberately not `"Reopen"`: it must not satisfy the vacuity check for
+/// explicit `Reopen` ops.
+pub const FINAL_REOPEN: &str = "Reopen(final)";
 
 /// What happened when running a sequence of ops against a SUT.
 #[derive(Debug)]
@@ -116,9 +121,10 @@ pub struct Report {
     /// green result.
     pub checks: usize,
     /// Ops executed per kind across every seed run (not counting the
-    /// minimizer's re-runs), including each sequence's implicit trailing
-    /// reopen as `"Reopen"`. A kind the profile enables but that shows 0 here
-    /// was never exercised, so a green run says nothing about it.
+    /// minimizer's re-runs). Each sequence's implicit trailing reopen is
+    /// counted separately as [`FINAL_REOPEN`], so it can never stand in for
+    /// explicit `Reopen` ops. A kind the profile enables but that shows 0
+    /// here was never exercised, so a green run says nothing about it.
     pub op_counts: OpCounts,
     pub failure: Option<Failure>,
 }
@@ -134,10 +140,12 @@ impl Report {
             .collect()
     }
 
-    /// `op_counts` as `Put:12,Delete:4,…`, in canonical kind order.
+    /// `op_counts` as `Put:12,Delete:4,…,Reopen(final):N`, in canonical kind
+    /// order with the implicit trailing reopens last.
     pub fn format_op_counts(&self) -> String {
         OP_KIND_NAMES
             .iter()
+            .chain(std::iter::once(&FINAL_REOPEN))
             .filter_map(|kind| self.op_counts.get(kind).map(|n| format!("{kind}:{n}")))
             .collect::<Vec<_>>()
             .join(",")
@@ -160,12 +168,11 @@ pub struct RunConfig {
 
 /// Turns a SUT error from executing `op` into either a finding or, if the SUT
 /// reported the op [`Unsupported`], a harness error.
+/// The typed `Unsupported` stays the error's cause, so callers can still
+/// `downcast_ref::<Unsupported>()` it.
 fn sut_failure(e: anyhow::Error, idx: usize, op: &Op) -> anyhow::Result<Outcome> {
-    if let Some(unsupported) = e.downcast_ref::<Unsupported>() {
-        anyhow::bail!(
-            "profile mismatch at op {idx} ({}): {unsupported}; choose a profile this SUT implements",
-            op.kind_name()
-        );
+    if e.downcast_ref::<Unsupported>().is_some() {
+        return Err(e.context(format!("profile mismatch at op {idx} ({})", op.kind_name())));
     }
     Ok(Outcome::SutError {
         at: idx,
@@ -260,7 +267,7 @@ async fn run_ops_counted(
         }
     }
 
-    *counts.entry(Op::Reopen.kind_name()).or_default() += 1;
+    *counts.entry(FINAL_REOPEN).or_default() += 1;
     match restart_and_check(sut, &Op::Reopen, &model, ops.len()).await? {
         Ok(n) => Ok(Outcome::Pass { checks: checks + n }),
         Err(outcome) => Ok(*outcome),
