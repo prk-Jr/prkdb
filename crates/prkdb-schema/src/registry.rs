@@ -15,7 +15,7 @@ pub struct SchemaRegistry<S: SchemaStorage> {
     /// Held across the whole read-check-allocate-put sequence in `register`, so two
     /// concurrent registrations cannot read the same latest version and allocate the
     /// same next one (SCH-02).
-    register_lock: tokio::sync::Mutex<()>,
+    register_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl<S: SchemaStorage> SchemaRegistry<S> {
@@ -23,7 +23,7 @@ impl<S: SchemaStorage> SchemaRegistry<S> {
     pub fn new(storage: Arc<S>) -> Self {
         Self {
             storage,
-            register_lock: tokio::sync::Mutex::new(()),
+            register_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -31,6 +31,11 @@ impl<S: SchemaStorage> SchemaRegistry<S> {
     ///
     /// If the collection already has a schema, this will create a new version
     /// after checking compatibility.
+    ///
+    /// The registration runs on a spawned task that owns the registration lock, so
+    /// dropping this future (a cancelled request) does not release the lock while
+    /// the write is still in flight: the next registration waits for it and
+    /// allocates the following version.
     ///
     /// # Arguments
     /// * `collection` - Collection name
@@ -50,13 +55,39 @@ impl<S: SchemaStorage> SchemaRegistry<S> {
         crate::names::validate_collection_name(collection)?;
         crate::names::validate_descriptor(&schema_proto)?;
 
-        let _allocation = self.register_lock.lock().await;
+        let allocation = self.register_lock.clone().lock_owned().await;
+        let storage = self.storage.clone();
+        let collection = collection.to_string();
+        tokio::spawn(async move {
+            let _allocation = allocation;
+            Self::register_locked(
+                &storage,
+                collection,
+                schema_proto,
+                compatibility,
+                migration_id,
+            )
+            .await
+        })
+        .await
+        .map_err(|e| SchemaError::Storage(format!("schema registration task failed: {e}")))?
+    }
+
+    /// The body of [`Self::register`], run while the registration lock is held.
+    async fn register_locked(
+        storage: &S,
+        collection: String,
+        schema_proto: Vec<u8>,
+        compatibility: CompatibilityMode,
+        migration_id: Option<String>,
+    ) -> SchemaResult<Schema> {
+        let collection = collection.as_str();
 
         // SCH-01 continuation: on case-insensitive filesystems, "users" and
         // "Users" would map to the same `descriptors/` directory, so a new
         // (i.e. not exactly-matching) collection whose name case-folds to an
         // existing one is rejected before any write.
-        if let Some(conflict) = self.storage.list().await?.into_iter().find(|info| {
+        if let Some(conflict) = storage.list().await?.into_iter().find(|info| {
             info.collection.eq_ignore_ascii_case(collection) && info.collection != collection
         }) {
             return Err(SchemaError::CollectionNameConflict {
@@ -68,7 +99,7 @@ impl<S: SchemaStorage> SchemaRegistry<S> {
         info!("Registering schema for collection '{}'", collection);
 
         // Check if there's an existing schema
-        let existing = self.storage.get_latest(collection).await?;
+        let existing = storage.get_latest(collection).await?;
 
         let (is_breaking, version) = if let Some(ref existing_schema) = existing {
             // Check compatibility with existing schema
@@ -99,7 +130,7 @@ impl<S: SchemaStorage> SchemaRegistry<S> {
                 warn!("Schema warning for '{}': {}", collection, warning);
             }
 
-            let next_version = self.storage.next_version(collection).await?;
+            let next_version = storage.next_version(collection).await?;
             (compat_result.is_breaking, next_version)
         } else {
             // First schema for this collection
@@ -107,7 +138,7 @@ impl<S: SchemaStorage> SchemaRegistry<S> {
         };
 
         // Get next schema ID
-        let schema_id = self.storage.next_schema_id().await?;
+        let schema_id = storage.next_schema_id().await?;
 
         // Create schema record
         let now = chrono::Utc::now().timestamp_millis() as u64;
@@ -115,16 +146,16 @@ impl<S: SchemaStorage> SchemaRegistry<S> {
             schema_id,
             collection: collection.to_string(),
             version,
+            descriptor_crc32: Some(crc32fast::hash(&schema_proto)),
             descriptor: schema_proto,
             compatibility,
             is_breaking,
             migration_id,
             created_at: now,
-            descriptor_crc32: None,
         };
 
         // Store it
-        self.storage.put(&schema).await?;
+        storage.put(&schema).await?;
 
         info!(
             "Registered schema for '{}' version {} (id={}, breaking={})",

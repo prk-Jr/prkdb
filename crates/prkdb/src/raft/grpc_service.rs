@@ -98,14 +98,8 @@ impl PrkDbGrpcService<FileSchemaStorage> {
         admin_token: String,
         schema_path: PathBuf,
     ) -> Result<Self, SchemaError> {
-        std::fs::create_dir_all(&schema_path).map_err(|e| {
-            SchemaError::Storage(format!(
-                "cannot create schema directory {}: {e}",
-                schema_path.display()
-            ))
-        })?;
-
         let mut storage = FileSchemaStorage::new(schema_path);
+        storage.create_base_dir()?;
         storage.load().await?;
         let schema_registry = Arc::new(SchemaRegistry::new(Arc::new(storage)));
         let (watch_tx, _) = broadcast::channel(DEFAULT_WATCH_CHANNEL_CAPACITY);

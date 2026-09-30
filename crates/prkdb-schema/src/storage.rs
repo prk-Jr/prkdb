@@ -7,13 +7,17 @@ use crate::types::{Schema, SchemaInfo};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use tokio::fs;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Storage interface for schema registry.
+///
+/// `'static` so the registry can finish a registration on a spawned task even when
+/// the caller's future is dropped (see [`crate::SchemaRegistry::register`]).
 #[async_trait]
-pub trait SchemaStorage: Send + Sync {
+pub trait SchemaStorage: Send + Sync + 'static {
     /// Store a schema
     async fn put(&self, schema: &Schema) -> SchemaResult<()>;
 
@@ -41,6 +45,10 @@ pub struct InMemorySchemaStorage {
     next_id: RwLock<u32>,
 }
 
+fn lock_error(e: impl std::fmt::Display) -> SchemaError {
+    SchemaError::Storage(format!("Lock error: {}", e))
+}
+
 impl InMemorySchemaStorage {
     /// Create a new in-memory storage.
     pub fn new() -> Self {
@@ -48,6 +56,50 @@ impl InMemorySchemaStorage {
             schemas: RwLock::new(HashMap::new()),
             next_id: RwLock::new(1),
         }
+    }
+
+    fn insert(&self, schema: &Schema) -> SchemaResult<()> {
+        let mut schemas = self.schemas.write().map_err(lock_error)?;
+        schemas
+            .entry(schema.collection.clone())
+            .or_default()
+            .insert(schema.version, schema.clone());
+        debug!(
+            "Stored schema for '{}' version {}",
+            schema.collection, schema.version
+        );
+        Ok(())
+    }
+
+    fn contains(&self, collection: &str, version: u32) -> SchemaResult<bool> {
+        let schemas = self.schemas.read().map_err(lock_error)?;
+        Ok(schemas
+            .get(collection)
+            .is_some_and(|versions| versions.contains_key(&version)))
+    }
+
+    fn remove(&self, collection: &str, version: u32) -> SchemaResult<()> {
+        let mut schemas = self.schemas.write().map_err(lock_error)?;
+        if let Some(versions) = schemas.get_mut(collection) {
+            versions.remove(&version);
+            if versions.is_empty() {
+                schemas.remove(collection);
+            }
+        }
+        Ok(())
+    }
+
+    /// Every stored schema without its descriptor bytes, as written to `schemas.json`.
+    fn index_entries(&self) -> SchemaResult<Vec<Schema>> {
+        let schemas = self.schemas.read().map_err(lock_error)?;
+        Ok(schemas
+            .values()
+            .flat_map(|versions| versions.values().cloned())
+            .map(|s| Schema {
+                descriptor: Vec::new(),
+                ..s
+            })
+            .collect())
     }
 }
 
@@ -60,26 +112,11 @@ impl Default for InMemorySchemaStorage {
 #[async_trait]
 impl SchemaStorage for InMemorySchemaStorage {
     async fn put(&self, schema: &Schema) -> SchemaResult<()> {
-        let mut schemas = self
-            .schemas
-            .write()
-            .map_err(|e| SchemaError::Storage(format!("Lock error: {}", e)))?;
-
-        let collection_schemas = schemas.entry(schema.collection.clone()).or_default();
-        collection_schemas.insert(schema.version, schema.clone());
-
-        debug!(
-            "Stored schema for '{}' version {}",
-            schema.collection, schema.version
-        );
-        Ok(())
+        self.insert(schema)
     }
 
     async fn get(&self, collection: &str, version: u32) -> SchemaResult<Option<Schema>> {
-        let schemas = self
-            .schemas
-            .read()
-            .map_err(|e| SchemaError::Storage(format!("Lock error: {}", e)))?;
+        let schemas = self.schemas.read().map_err(lock_error)?;
 
         Ok(schemas
             .get(collection)
@@ -87,10 +124,7 @@ impl SchemaStorage for InMemorySchemaStorage {
     }
 
     async fn get_latest(&self, collection: &str) -> SchemaResult<Option<Schema>> {
-        let schemas = self
-            .schemas
-            .read()
-            .map_err(|e| SchemaError::Storage(format!("Lock error: {}", e)))?;
+        let schemas = self.schemas.read().map_err(lock_error)?;
 
         Ok(schemas.get(collection).and_then(|versions| {
             versions
@@ -101,10 +135,7 @@ impl SchemaStorage for InMemorySchemaStorage {
     }
 
     async fn list(&self) -> SchemaResult<Vec<SchemaInfo>> {
-        let schemas = self
-            .schemas
-            .read()
-            .map_err(|e| SchemaError::Storage(format!("Lock error: {}", e)))?;
+        let schemas = self.schemas.read().map_err(lock_error)?;
 
         let mut infos = Vec::new();
         for (collection, versions) in schemas.iter() {
@@ -129,20 +160,14 @@ impl SchemaStorage for InMemorySchemaStorage {
     }
 
     async fn next_schema_id(&self) -> SchemaResult<u32> {
-        let mut next_id = self
-            .next_id
-            .write()
-            .map_err(|e| SchemaError::Storage(format!("Lock error: {}", e)))?;
+        let mut next_id = self.next_id.write().map_err(lock_error)?;
         let id = *next_id;
         *next_id += 1;
         Ok(id)
     }
 
     async fn next_version(&self, collection: &str) -> SchemaResult<u32> {
-        let schemas = self
-            .schemas
-            .read()
-            .map_err(|e| SchemaError::Storage(format!("Lock error: {}", e)))?;
+        let schemas = self.schemas.read().map_err(lock_error)?;
 
         Ok(schemas
             .get(collection)
@@ -162,72 +187,137 @@ impl SchemaStorage for InMemorySchemaStorage {
 ///         └── v{version}.binpb  # FileDescriptorProto bytes
 /// ```
 ///
-/// Every file is written atomically (temp file, fsync, rename, fsync of the
-/// directory), descriptor before index, so a crash leaves at worst a descriptor
-/// the index does not reference. [`FileSchemaStorage::load`] fails closed: an
-/// index entry whose descriptor is missing or does not match its checksum is an
-/// error, never an empty schema (SCH-02).
+/// Every file is written atomically (unique temp file, fsync, rename, fsync of the
+/// directory; newly created directories are fsynced into their parents), descriptor
+/// before index, so a crash leaves at worst a descriptor the index does not
+/// reference. [`FileSchemaStorage::load`] fails closed: an index entry whose
+/// descriptor is missing or does not match its checksum is an error, never an empty
+/// schema (SCH-02).
+///
+/// `put` runs to completion on a blocking thread while holding the write lock, so
+/// dropping a `put` future cannot leave a write running outside the lock.
+///
+/// If the index has been renamed into place but its directory cannot be fsynced,
+/// the new version is on disk but not known to be durable. The storage then keeps
+/// the entry, returns the error, and refuses every later `put` until it is
+/// reopened: continuing would stack further writes on a directory whose last
+/// update may not survive a crash.
 pub struct FileSchemaStorage {
+    inner: Arc<FileInner>,
+    /// Serializes `put`. Held (as an owned guard) by the blocking write itself.
+    write_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+struct FileInner {
     /// Base directory for schema storage
     base_path: PathBuf,
     /// In-memory cache (always kept in sync with disk)
     cache: InMemorySchemaStorage,
-    /// Serializes `put`, so the overwrite check, the cache insert and the index
-    /// snapshot/write happen as one step and index writes cannot reorder.
-    write_lock: tokio::sync::Mutex<()>,
+    /// Set when a published index could not be made durable; see [`FileSchemaStorage`].
+    poisoned: AtomicBool,
 }
 
-/// Suffix of the temporary file [`write_atomic`] renames into place.
+/// Suffix of the temporary files [`write_atomic`] renames into place; `load`
+/// removes any left behind by a crash.
 const TMP_SUFFIX: &str = ".tmp";
 
+/// Distinguishes each temporary file this process creates.
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A unique temporary path next to `path`: `{name}.{pid}.{n}.tmp`. Unique so that
+/// two writes of the same file can never truncate each other's temp file.
 fn tmp_path_for(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
-    name.push(TMP_SUFFIX);
+    name.push(format!(
+        ".{}.{}{TMP_SUFFIX}",
+        std::process::id(),
+        TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
     PathBuf::from(name)
 }
 
-/// Write `bytes` to `path` so that a crash leaves either the old file or the new
-/// one: write `path.tmp`, `sync_all`, rename over `path`, then sync the parent
-/// directory so the rename itself is durable.
-async fn write_atomic(path: &Path, bytes: Vec<u8>) -> SchemaResult<()> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || write_atomic_blocking(&path, &bytes))
-        .await
-        .map_err(|e| SchemaError::Storage(format!("atomic write task failed: {e}")))?
+/// How far an atomic write got before failing.
+enum WriteFailure {
+    /// The target file is unchanged.
+    NotPublished(SchemaError),
+    /// The new file was renamed into place, but the directory fsync failed.
+    PublishedNotDurable(SchemaError),
 }
 
-fn write_atomic_blocking(path: &Path, bytes: &[u8]) -> SchemaResult<()> {
+/// Errors from writes carry paths relative to the storage root: they can reach
+/// clients through `register`, which should not learn server paths.
+fn relative<'a>(base: &Path, path: &'a Path) -> std::path::Display<'a> {
+    path.strip_prefix(base).unwrap_or(path).display()
+}
+
+/// `create_dir_all`, then fsync the parent of every directory it created, so the
+/// new directory entries survive a crash along with the files inside them.
+fn create_dir_all_durable(dir: &Path) -> std::io::Result<()> {
+    let mut missing = Vec::new();
+    let mut current = Some(dir);
+    while let Some(d) = current {
+        if d.as_os_str().is_empty() || d.exists() {
+            break;
+        }
+        missing.push(d);
+        current = d.parent();
+    }
+    std::fs::create_dir_all(dir)?;
+    for created in missing.iter().rev() {
+        if let Some(parent) = created.parent().filter(|p| !p.as_os_str().is_empty()) {
+            sync_dir(parent)?;
+        }
+    }
+    Ok(())
+}
+
+/// Write `bytes` to `path` so that a crash leaves either the old file or the new
+/// one: write a unique temp file, `sync_all`, rename over `path`, then sync the
+/// parent directory so the rename itself is durable.
+fn write_atomic(base: &Path, path: &Path, bytes: &[u8]) -> Result<(), WriteFailure> {
     use std::io::Write;
 
-    let io_err = |what: &str, p: &Path, e: std::io::Error| {
-        SchemaError::Storage(format!("{what} {}: {e}", p.display()))
+    let fail = |what: &str, p: &Path, e: std::io::Error| {
+        WriteFailure::NotPublished(SchemaError::Storage(format!(
+            "{what} {}: {e}",
+            relative(base, p)
+        )))
     };
-    let parent = path
-        .parent()
-        .ok_or_else(|| SchemaError::Storage(format!("{} has no parent", path.display())))?;
-    std::fs::create_dir_all(parent).map_err(|e| io_err("cannot create directory", parent, e))?;
+    let parent = path.parent().ok_or_else(|| {
+        WriteFailure::NotPublished(SchemaError::Storage(format!(
+            "{} has no parent directory",
+            relative(base, path)
+        )))
+    })?;
+    create_dir_all_durable(parent).map_err(|e| fail("cannot create directory", parent, e))?;
 
     let tmp = tmp_path_for(path);
-    {
-        let mut file = std::fs::File::create(&tmp).map_err(|e| io_err("cannot create", &tmp, e))?;
-        file.write_all(bytes)
-            .map_err(|e| io_err("cannot write", &tmp, e))?;
-        file.sync_all()
-            .map_err(|e| io_err("cannot sync", &tmp, e))?;
+    let written = std::fs::File::create(&tmp)
+        .and_then(|mut file| {
+            file.write_all(bytes)?;
+            file.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(fail("cannot write", path, e));
     }
-    std::fs::rename(&tmp, path).map_err(|e| io_err("cannot rename into", path, e))?;
-    sync_dir(parent)
+
+    sync_dir(parent).map_err(|e| {
+        WriteFailure::PublishedNotDurable(SchemaError::Storage(format!(
+            "cannot sync directory {}: {e}",
+            relative(base, parent)
+        )))
+    })
 }
 
 #[cfg(unix)]
-fn sync_dir(dir: &Path) -> SchemaResult<()> {
-    std::fs::File::open(dir)
-        .and_then(|d| d.sync_all())
-        .map_err(|e| SchemaError::Storage(format!("cannot sync directory {}: {e}", dir.display())))
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
 }
 
 #[cfg(not(unix))]
-fn sync_dir(_dir: &Path) -> SchemaResult<()> {
+fn sync_dir(_dir: &Path) -> std::io::Result<()> {
     // Directories cannot be opened for syncing on this platform; the rename is
     // as durable as the filesystem makes it.
     Ok(())
@@ -264,15 +354,105 @@ fn remove_stale_tmp_files(base: &Path) {
     }
 }
 
+impl FileInner {
+    fn descriptor_path(&self, collection: &str, version: u32) -> PathBuf {
+        self.base_path
+            .join("descriptors")
+            .join(collection)
+            .join(format!("v{}.binpb", version))
+    }
+
+    /// The whole of `put`, run on a blocking thread under the write lock.
+    fn put_blocking(&self, schema: &Schema) -> SchemaResult<()> {
+        if self.poisoned.load(Ordering::Acquire) {
+            return Err(SchemaError::Storage(
+                "schema storage refused the write: an earlier index update could not be \
+                 made durable; restart the server"
+                    .to_string(),
+            ));
+        }
+
+        // Versions are immutable once stored: overwriting one would change what
+        // readers of that version decode with.
+        if self.cache.contains(&schema.collection, schema.version)? {
+            return Err(SchemaError::VersionConflict {
+                collection: schema.collection.clone(),
+                version: schema.version,
+            });
+        }
+
+        // Descriptor first, index second: a crash in between leaves an
+        // unreferenced descriptor, never an index entry without one. A descriptor
+        // that is published but not durable is harmless for the same reason.
+        let descriptor_path = self.descriptor_path(&schema.collection, schema.version);
+        match write_atomic(&self.base_path, &descriptor_path, &schema.descriptor) {
+            Ok(()) => {}
+            Err(WriteFailure::NotPublished(e) | WriteFailure::PublishedNotDurable(e)) => {
+                return Err(e)
+            }
+        }
+        debug!("Saved descriptor to {:?}", descriptor_path);
+
+        let stored = Schema {
+            descriptor_crc32: Some(crc32fast::hash(&schema.descriptor)),
+            ..schema.clone()
+        };
+        self.cache.insert(&stored)?;
+
+        let json = self.cache.index_entries().and_then(|entries| {
+            serde_json::to_vec_pretty(&entries)
+                .map_err(|e| SchemaError::Serialization(format!("Failed to serialize: {}", e)))
+        });
+        let index_path = self.base_path.join("schemas.json");
+        let written = json
+            .map_err(WriteFailure::NotPublished)
+            .and_then(|json| write_atomic(&self.base_path, &index_path, &json));
+        match written {
+            Ok(()) => {
+                debug!("Saved schema index to {:?}", index_path);
+                Ok(())
+            }
+            Err(WriteFailure::NotPublished(e)) => {
+                // The index on disk does not list this version: drop it from memory too.
+                self.cache.remove(&schema.collection, schema.version)?;
+                Err(e)
+            }
+            Err(WriteFailure::PublishedNotDurable(e)) => {
+                // The index on disk does list it, so memory keeps it; stop writing.
+                self.poisoned.store(true, Ordering::Release);
+                error!(
+                    "Schema index for '{}' v{} is published but not durable; refusing further \
+                     schema writes until restart: {}",
+                    schema.collection, schema.version, e
+                );
+                Err(e)
+            }
+        }
+    }
+}
+
 impl FileSchemaStorage {
     /// Create a new file-based storage.
     pub fn new(base_path: PathBuf) -> Self {
         info!("Initializing schema storage at {:?}", base_path);
         Self {
-            base_path,
-            cache: InMemorySchemaStorage::new(),
-            write_lock: tokio::sync::Mutex::new(()),
+            inner: Arc::new(FileInner {
+                base_path,
+                cache: InMemorySchemaStorage::new(),
+                poisoned: AtomicBool::new(false),
+            }),
+            write_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// Create the storage root (and any missing ancestors) durably.
+    pub fn create_base_dir(&self) -> SchemaResult<()> {
+        create_dir_all_durable(&self.inner.base_path).map_err(|e| {
+            SchemaError::Storage(format!(
+                "cannot create schema directory {}: {e}",
+                self.inner.base_path.display()
+            ))
+        })
     }
 
     /// Load schemas from disk into cache.
@@ -281,12 +461,12 @@ impl FileSchemaStorage {
     /// match its recorded checksum: serving such a registry would report fewer
     /// schemas than were registered and let clients re-register over them.
     pub async fn load(&mut self) -> SchemaResult<()> {
-        let base = self.base_path.clone();
+        let base = self.inner.base_path.clone();
         tokio::task::spawn_blocking(move || remove_stale_tmp_files(&base))
             .await
             .map_err(|e| SchemaError::Storage(format!("temp file cleanup failed: {e}")))?;
 
-        let index_path = self.base_path.join("schemas.json");
+        let index_path = self.inner.base_path.join("schemas.json");
 
         if !index_path.exists() {
             info!("No existing schema index found, starting fresh");
@@ -318,15 +498,15 @@ impl FileSchemaStorage {
             })?;
 
             let descriptor = self.read_descriptor(&schema).await?;
-            let loaded = Schema {
+            self.inner.cache.insert(&Schema {
                 descriptor,
                 ..schema
-            };
-            self.cache.put(&loaded).await?;
+            })?;
         }
 
         // Update next_id based on loaded schemas
         let max_id = self
+            .inner
             .cache
             .list()
             .await?
@@ -335,18 +515,17 @@ impl FileSchemaStorage {
             .max()
             .unwrap_or(0);
 
-        *self
-            .cache
-            .next_id
-            .write()
-            .map_err(|e| SchemaError::Storage(format!("Lock error: {}", e)))? = max_id + 1;
+        *self.inner.cache.next_id.write().map_err(lock_error)? = max_id + 1;
 
         Ok(())
     }
 
-    /// Read and verify the descriptor an index entry refers to.
+    /// Read and verify the descriptor an index entry refers to. Only reached from
+    /// `load`, whose errors go to the operator, so full paths are kept.
     async fn read_descriptor(&self, schema: &Schema) -> SchemaResult<Vec<u8>> {
-        let path = self.descriptor_path(&schema.collection, schema.version);
+        let path = self
+            .inner
+            .descriptor_path(&schema.collection, schema.version);
         let bytes = match fs::read(&path).await {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -380,62 +559,6 @@ impl FileSchemaStorage {
         }
         Ok(bytes)
     }
-
-    /// Get the path to a schema descriptor file.
-    fn descriptor_path(&self, collection: &str, version: u32) -> PathBuf {
-        self.base_path
-            .join("descriptors")
-            .join(collection)
-            .join(format!("v{}.binpb", version))
-    }
-
-    /// Save the index file (metadata without descriptors). Callers hold `write_lock`.
-    async fn save_index(&self) -> SchemaResult<()> {
-        // Collect data while holding lock, then release before async I/O
-        let json = {
-            let schemas = self
-                .cache
-                .schemas
-                .read()
-                .map_err(|e| SchemaError::Storage(format!("Lock error: {}", e)))?;
-
-            // Flatten all schemas, excluding the descriptor bytes
-            let all_schemas: Vec<Schema> = schemas
-                .values()
-                .flat_map(|versions| versions.values().cloned())
-                .map(|mut s| {
-                    // Don't store descriptor in index (stored separately)
-                    s.descriptor = Vec::new();
-                    s
-                })
-                .collect();
-
-            serde_json::to_vec_pretty(&all_schemas)
-                .map_err(|e| SchemaError::Serialization(format!("Failed to serialize: {}", e)))?
-        }; // Lock is released here
-
-        let index_path = self.base_path.join("schemas.json");
-        write_atomic(&index_path, json).await?;
-
-        debug!("Saved schema index to {:?}", index_path);
-        Ok(())
-    }
-
-    /// Drop a cache entry whose index write failed, so memory matches disk.
-    fn forget(&self, collection: &str, version: u32) -> SchemaResult<()> {
-        let mut schemas = self
-            .cache
-            .schemas
-            .write()
-            .map_err(|e| SchemaError::Storage(format!("Lock error: {}", e)))?;
-        if let Some(versions) = schemas.get_mut(collection) {
-            versions.remove(&version);
-            if versions.is_empty() {
-                schemas.remove(collection);
-            }
-        }
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -443,60 +566,37 @@ impl SchemaStorage for FileSchemaStorage {
     async fn put(&self, schema: &Schema) -> SchemaResult<()> {
         crate::names::validate_collection_name(&schema.collection)?;
 
-        let _guard = self.write_lock.lock().await;
-
-        // Versions are immutable once stored: overwriting one would change what
-        // readers of that version decode with.
-        if self
-            .cache
-            .get(&schema.collection, schema.version)
-            .await?
-            .is_some()
-        {
-            return Err(SchemaError::VersionConflict {
-                collection: schema.collection.clone(),
-                version: schema.version,
-            });
-        }
-
-        // Descriptor first, index second: a crash in between leaves an
-        // unreferenced descriptor, never an index entry without one.
-        let descriptor_path = self.descriptor_path(&schema.collection, schema.version);
-        write_atomic(&descriptor_path, schema.descriptor.clone()).await?;
-        debug!("Saved descriptor to {:?}", descriptor_path);
-
-        let stored = Schema {
-            descriptor_crc32: Some(crc32fast::hash(&schema.descriptor)),
-            ..schema.clone()
-        };
-        self.cache.put(&stored).await?;
-
-        if let Err(e) = self.save_index().await {
-            self.forget(&schema.collection, schema.version)?;
-            return Err(e);
-        }
-
-        Ok(())
+        // The owned guard moves into the blocking task: if this future is dropped,
+        // the write still finishes before the next `put` can start.
+        let guard = self.write_lock.clone().lock_owned().await;
+        let inner = self.inner.clone();
+        let schema = schema.clone();
+        tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            inner.put_blocking(&schema)
+        })
+        .await
+        .map_err(|e| SchemaError::Storage(format!("schema write task failed: {e}")))?
     }
 
     async fn get(&self, collection: &str, version: u32) -> SchemaResult<Option<Schema>> {
-        self.cache.get(collection, version).await
+        self.inner.cache.get(collection, version).await
     }
 
     async fn get_latest(&self, collection: &str) -> SchemaResult<Option<Schema>> {
-        self.cache.get_latest(collection).await
+        self.inner.cache.get_latest(collection).await
     }
 
     async fn list(&self) -> SchemaResult<Vec<SchemaInfo>> {
-        self.cache.list().await
+        self.inner.cache.list().await
     }
 
     async fn next_schema_id(&self) -> SchemaResult<u32> {
-        self.cache.next_schema_id().await
+        self.inner.cache.next_schema_id().await
     }
 
     async fn next_version(&self, collection: &str) -> SchemaResult<u32> {
-        self.cache.next_version(collection).await
+        self.inner.cache.next_version(collection).await
     }
 }
 
