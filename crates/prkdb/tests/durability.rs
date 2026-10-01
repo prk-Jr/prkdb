@@ -471,8 +471,8 @@ async fn segment_bytes_is_honored() {
     );
 }
 
-/// Until the FORMAT marker (Task 2.11), a format-1 directory is refused by name, never
-/// opened as an empty database next to the old log.
+/// A format-1 directory (old files, no `FORMAT` marker) is refused by name, never opened
+/// as an empty database next to the old log (Task 2.11's open rules).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_format_1_directory_is_refused() {
     let dir = tempfile::tempdir().unwrap();

@@ -2,6 +2,8 @@ pub mod cache;
 pub mod checkpoint; // Empty until Task 2.14 writes an index snapshot
 pub mod collection_partitioned_adapter; // Kafka-style collection partitioning for 4-7x performance!
 pub mod config;
+pub mod format; // FORMAT marker and open rules (D3)
+pub mod migrations; // Migration registry (D4)
 pub mod partitioned_streaming_adapter; // Phase 24C: Multi-partition for 1+ GB/s
 pub mod recovery;
 pub mod sharded_wal_adapter; // Phase 2: Multi-WAL sharding for 5-10x performance

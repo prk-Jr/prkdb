@@ -7,6 +7,7 @@ pub mod consumer;
 pub mod data;
 pub mod database;
 pub mod metrics;
+pub mod migrate;
 pub mod partition;
 pub mod replication;
 pub mod schema;

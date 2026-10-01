@@ -174,6 +174,9 @@ pub enum Commands {
 
     /// Schema registry management
     Schema(schema::SchemaArgs),
+
+    /// Upgrade a data directory to this version's format (offline)
+    Migrate(migrate::MigrateArgs),
 }
 
 #[derive(clap::ValueEnum, Clone)]
@@ -304,6 +307,9 @@ async fn main() -> anyhow::Result<()> {
 
         // Schema command (pure remote)
         Commands::Schema(args) => schema::handle_schema(args.clone()).await,
+
+        // Offline: reads the directory itself, never opens a database.
+        Commands::Migrate(args) => migrate::handle_migrate(args.clone()),
     }
 }
 

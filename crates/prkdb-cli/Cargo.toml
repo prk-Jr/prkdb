@@ -60,6 +60,7 @@ reqwest = { workspace = true }
 prkdb-proto = { path = "../prkdb-proto" }
 rand = "0.8"
 tempfile = "3.8"
+tokio = { workspace = true }
 # Test certificates for the HTTPS listener test.
 #
 # default-features = false is load-bearing: rcgen's default backend is `ring`, and the

@@ -1,0 +1,147 @@
+//! `prkdb-cli migrate --data-dir <dir>`: upgrade a data directory to this build's format,
+//! offline (spec D4). The registry is empty in format 2, so today this reports what the
+//! directory is and what, if anything, can be done.
+//!
+//! # Containers
+//!
+//! Some layouts put several data directories under one root that has no `FORMAT` of its
+//! own: the multi-raft `STORAGE_PATH` (`meta/`, `partition_<n>/`, plus `schemas/`, which is
+//! not a data directory), and, until Task 2.9b, the optimized-storage root
+//! (`collections/<name>/`). Such a root is not format 1. `migrate` reports it as a
+//! container and migrates **every** data directory in it, in name order, reporting each;
+//! it succeeds only if all of them end at the current format. A data directory that
+//! cannot be migrated does not stop the others from being reported (each migration is
+//! all-or-nothing on its own directory, per `Migration::run`).
+
+use clap::Args;
+use prkdb::storage::format::{detect_format, read_format, unsupported_format, FORMAT_VERSION};
+use prkdb::storage::migrations::plan;
+use prkdb_core::vfs::StdVfs;
+use std::path::{Path, PathBuf};
+
+#[derive(Args, Clone, Debug)]
+pub struct MigrateArgs {
+    /// Data directory to migrate. Must not be open in a running process.
+    #[arg(long)]
+    pub data_dir: PathBuf,
+    /// List the migrations that would run, without running them.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+pub fn handle_migrate(args: MigrateArgs) -> anyhow::Result<()> {
+    let root = &args.data_dir;
+    if !root.is_dir() {
+        anyhow::bail!("data directory {} does not exist", root.display());
+    }
+
+    let members = container_members(root)?;
+    if members.is_empty() {
+        return migrate_one(root, args.dry_run);
+    }
+
+    println!(
+        "{} is a container, not a data directory: it holds {} data directories; \
+         migrating each",
+        root.display(),
+        members.len()
+    );
+    let failures: Vec<String> = members
+        .iter()
+        .filter_map(|dir| migrate_one(dir, args.dry_run).err())
+        .map(|e| e.to_string())
+        .collect();
+    if failures.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{} of {} data directories under {} could not be migrated:\n{}",
+        failures.len(),
+        members.len(),
+        root.display(),
+        failures.join("\n")
+    )
+}
+
+/// The data directories under `root` if it is a container (see the module docs), sorted;
+/// empty if `root` is a data directory itself (it has `FORMAT`, or no known members).
+fn container_members(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    if read_format(root)?.is_some() {
+        return Ok(Vec::new());
+    }
+    let mut members = Vec::new();
+    for path in subdirs(root)? {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name == "collections" {
+            members.extend(subdirs(&path)?);
+        } else if name == "meta" || name.starts_with("partition_") || read_format(&path)?.is_some()
+        {
+            members.push(path);
+        }
+    }
+    members.sort();
+    Ok(members)
+}
+
+fn subdirs(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            out.push(path);
+        }
+    }
+    Ok(out)
+}
+
+/// Migrates one data directory.
+fn migrate_one(dir: &Path, dry_run: bool) -> anyhow::Result<()> {
+    // `None`: empty (ignoring `lost+found` and dotfiles). Format 1 had no marker, so a
+    // non-empty directory without one is `Some(1)`.
+    let Some(found) = detect_format(&StdVfs, dir)? else {
+        println!(
+            "data directory {} is empty; it is created at format {FORMAT_VERSION} when \
+             first opened. Nothing to migrate.",
+            dir.display()
+        );
+        return Ok(());
+    };
+
+    if found == FORMAT_VERSION {
+        println!(
+            "data directory {} is at format {FORMAT_VERSION}; no migrations available for \
+             format {FORMAT_VERSION}",
+            dir.display()
+        );
+        return Ok(());
+    }
+    if found > FORMAT_VERSION {
+        return Err(unsupported_format(dir, found).into());
+    }
+
+    // Never empty here: `plan` returns an empty chain only for the current format, and
+    // names the gap otherwise. Format 1's error is "no migrations available for format 1".
+    let chain =
+        plan(found).map_err(|e| anyhow::anyhow!("data directory {}: {e}", dir.display()))?;
+    for step in &chain {
+        println!(
+            "{}: format {} → {}: {}",
+            dir.display(),
+            step.from(),
+            step.to(),
+            step.description()
+        );
+        if !dry_run {
+            step.run(dir)?;
+        }
+    }
+    if dry_run {
+        println!("dry run: {} was not changed", dir.display());
+    } else {
+        println!(
+            "data directory {} is now at format {FORMAT_VERSION}",
+            dir.display()
+        );
+    }
+    Ok(())
+}

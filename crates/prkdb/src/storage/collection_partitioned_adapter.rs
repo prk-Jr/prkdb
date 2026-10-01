@@ -170,6 +170,25 @@ impl CollectionPartitionedAdapter {
 
         // Create collections directory
         let collections_dir = base_dir.join("collections");
+
+        // Every collection directory is its own data directory until Task 2.9b moves them
+        // onto one WAL. Refuse an old one here, up front: the lazy per-collection open
+        // would otherwise only find it on first access, where it panics.
+        if collections_dir.is_dir() {
+            let entries = std::fs::read_dir(&collections_dir).map_err(|e| {
+                StorageError::Internal(format!("{}: {e}", collections_dir.display()))
+            })?;
+            for entry in entries {
+                let path = entry
+                    .map_err(|e| {
+                        StorageError::Internal(format!("{}: {e}", collections_dir.display()))
+                    })?
+                    .path();
+                if path.is_dir() {
+                    super::format::check_format(&prkdb_core::vfs::StdVfs, &path)?;
+                }
+            }
+        }
         std::fs::create_dir_all(&collections_dir).map_err(|e| {
             StorageError::Internal(format!("Failed to create collections dir: {}", e))
         })?;
