@@ -19,7 +19,7 @@ evidence = [
   "crates/prkdb/src/storage/wal_adapter.rs:1077-1085",
   "crates/prkdb/src/storage/checkpoint.rs:1-6",
 ]
-regression_tests = ["test:crates/prkdb/tests/tripwires.rs::sto01_checkpoint_keeps_pre_checkpoint_keys", "test:crates/prkdb-verify/tests/harness.rs::discovery_profile_checkpoint_keeps_every_key"]
+regression_tests = ["test:crates/prkdb/tests/tripwires.rs::sto01_checkpoint_keeps_pre_checkpoint_keys", "test:crates/prkdb-verify/tests/harness.rs::discovery_profile_checkpoint_keeps_every_key", "test:crates/prkdb-verify/tests/checkpoint.rs::recovery_from_a_checkpoint_equals_full_replay"]
 changes = ["b7a45cb", "28896a3"]
 
 [[finding]]
