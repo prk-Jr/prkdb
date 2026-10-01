@@ -63,6 +63,38 @@ impl<C: Collection> CollectionHandle<C> {
     }
 }
 
+/// The storage error inside `err`, or `Internal` with its text for the other kinds.
+fn into_storage_error(err: DbError) -> StorageError {
+    match err {
+        DbError::Storage(e) => e,
+        other => StorageError::Internal(other.to_string()),
+    }
+}
+
+/// `err` with `prefix` put in front of its message, keeping its variant (a caller matching
+/// on `BackendError` still sees `BackendError`). Variants without a message are returned
+/// unchanged.
+fn with_context(err: StorageError, prefix: &str) -> StorageError {
+    use StorageError as E;
+    let p = |m: String| format!("{prefix}{m}");
+    match err {
+        E::BackendError(m) => E::BackendError(p(m)),
+        E::Serialization(m) => E::Serialization(p(m)),
+        E::Deserialization(m) => E::Deserialization(p(m)),
+        E::TransactionFailed(m) => E::TransactionFailed(p(m)),
+        E::Replication(m) => E::Replication(p(m)),
+        E::Internal(m) => E::Internal(p(m)),
+        E::WriteNotConfirmed(m) => E::WriteNotConfirmed(p(m)),
+        E::WriteBackpressure(m) => E::WriteBackpressure(p(m)),
+        E::WriteAbandoned(m) => E::WriteAbandoned(p(m)),
+        E::Corruption(m) => E::Corruption(p(m)),
+        E::Recovery(m) => E::Recovery(p(m)),
+        E::Validation(m) => E::Validation(p(m)),
+        E::UnsupportedFormat(m) => E::UnsupportedFormat(p(m)),
+        other => other,
+    }
+}
+
 #[derive(Clone)]
 pub struct CollectionHandle<C: Collection> {
     db: PrkDb,
@@ -138,10 +170,7 @@ where
             async move {
                 // Get collection handle and call put_batch
                 let handle = db_clone.collection::<C>();
-                let results = handle
-                    .put_batch(items)
-                    .await
-                    .map_err(|e| StorageError::Internal(e.to_string()))?;
+                let results = handle.put_batch(items).await.map_err(into_storage_error)?;
 
                 // Per-item failures reach the accumulator, which returns them from `flush`.
                 let n = results.len();
@@ -150,9 +179,10 @@ where
                     None => Ok(()),
                     Some(first) => {
                         let failed = 1 + failures.count();
-                        Err(StorageError::Internal(format!(
-                            "{failed} of {n} batched writes failed; first: {first}"
-                        )))
+                        Err(with_context(
+                            into_storage_error(first),
+                            &format!("{failed} of {n} batched writes failed; first: "),
+                        ))
                     }
                 }
             }

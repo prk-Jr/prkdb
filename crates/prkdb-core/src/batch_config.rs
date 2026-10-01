@@ -39,10 +39,13 @@ pub struct BatchConfig {
     /// Default: 1000 items
     pub max_batch_size: usize,
 
-    /// Maximum memory (in bytes) for pending batches.
+    /// Maximum bytes of items waiting to be batched.
     ///
-    /// When exceeded, backpressure is applied by blocking new operations
-    /// until space is available.
+    /// Counts each queued item at its bincode-encoded size, from when it is accepted until
+    /// the batching worker takes it into the batch it is building. The batch being built or
+    /// executed does not count; it is bounded by `max_batch_size` items instead. When the
+    /// waiting items reach this many bytes, new operations wait until the worker takes some.
+    /// An item larger than the whole budget is charged the whole budget.
     ///
     /// Default: 1MB
     pub max_buffer_bytes: usize,
