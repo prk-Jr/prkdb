@@ -317,7 +317,9 @@ fn fault_config(mode: SyncMode) -> StorageConfig {
             log_dir: dir.clone(),
             sync_mode: mode,
             sync_interval_ms: 3_600_000, // Fast syncs only when asked
-            segment_bytes: 2 * 1024,
+            // Never rolls in these tests: a roll syncs the old segment, which would make
+            // the frames durable whether or not `save_checkpoint` synced.
+            segment_bytes: 1 << 20,
             ..WalConfig::test_config()
         },
         ..StorageConfig::new(dir)
@@ -333,7 +335,9 @@ async fn fault_contents(fs: &FaultFs, mode: SyncMode) -> BTreeMap<Vec<u8>, Vec<u
     contents(&db).await
 }
 
-/// In Fast mode a checkpoint never references a frame a power cut can take: writes
+/// In Fast mode a checkpoint never references a frame a power cut can take (the log is
+/// one segment and nothing else syncs, so only `save_checkpoint`'s own sync can make the
+/// referenced frames durable): writes
 /// acknowledged after it are lost to the power cut, everything before it survives, the
 /// checkpoint itself survives (written atomically, directory synced), and recovery from
 /// it equals a full replay of what the disk kept.
@@ -357,7 +361,24 @@ async fn a_fast_mode_checkpoint_survives_power_loss_and_recovers_exactly() {
                 db.delete(format!("k{}", i % 13).as_bytes()).await.unwrap();
             }
         }
+        assert!(
+            db.durable_lsn() < db.max_offset(),
+            "{tear:?}: something synced before the checkpoint; the test proves nothing"
+        );
         db.save_checkpoint().unwrap();
+        assert!(
+            db.durable_lsn() >= db.max_offset(),
+            "{tear:?}: save_checkpoint returned before the frames it references were durable"
+        );
+        assert_eq!(
+            fs.read_dir(Path::new("/db/wal"))
+                .unwrap()
+                .iter()
+                .filter(|p| { p.extension().is_some_and(|e| e == "wal") })
+                .count(),
+            1,
+            "{tear:?}: the log rolled, and a roll syncs"
+        );
         let at_checkpoint = contents(&db).await;
         for i in 0..30u32 {
             db.put(format!("late{i}").as_bytes(), b"unsynced")
