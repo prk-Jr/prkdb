@@ -807,6 +807,64 @@ impl PrkDbClient {
     }
 
     /// Internal put implementation with health tracking
+    /// Put one record of the collection persisted as `collection`, with a string id: the
+    /// server builds the storage key from its collection catalog, so the record is the
+    /// one its typed APIs and HTTP API read. Routed like `put` of `collection:id`, which
+    /// is the key a multi-raft server stores it under.
+    pub async fn put_record(&self, collection: &str, id: &str, value: &[u8]) -> anyhow::Result<()> {
+        let total_attempts = self.total_attempts();
+        for attempt in 0..total_attempts {
+            match self.put_record_internal(collection, id, value).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    tracing::debug!("PutRecord failed (attempt {}): {}", attempt + 1, e);
+                    if attempt + 1 < total_attempts {
+                        let _ = self.refresh_metadata().await;
+                        tokio::time::sleep(self.retry_delay_for_attempt(attempt)).await;
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        anyhow::bail!("PutRecord failed after {} attempts", total_attempts)
+    }
+
+    async fn put_record_internal(
+        &self,
+        collection: &str,
+        id: &str,
+        value: &[u8],
+    ) -> anyhow::Result<()> {
+        let routing_key = format!("{collection}:{id}");
+        let client = {
+            let metadata = self.metadata.read().await;
+            let partition_id = self.hash_key(routing_key.as_bytes(), metadata.num_partitions);
+            let leader_id = *metadata
+                .partition_leaders
+                .get(&partition_id)
+                .ok_or_else(|| anyhow::anyhow!("No leader for partition {}", partition_id))?;
+            metadata
+                .clients
+                .get(&leader_id)
+                .ok_or_else(|| anyhow::anyhow!("No client for node {}", leader_id))?
+                .clone()
+                .get_client()
+        };
+        let request = self.authed(prkdb_proto::raft::PutRecordRequest {
+            collection: collection.to_string(),
+            id: id.to_string(),
+            value: value.to_vec(),
+        });
+        let response = self
+            .execute_rpc("put_record", client.clone().put_record(request))
+            .await?;
+        if !response.into_inner().success {
+            anyhow::bail!("PutRecord request returned success=false");
+        }
+        Ok(())
+    }
+
     async fn put_internal(&self, key: &[u8], value: &[u8]) -> anyhow::Result<()> {
         let (partition_id, leader_id, client) = {
             let metadata = self.metadata.read().await;

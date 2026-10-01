@@ -35,6 +35,8 @@ pub struct SledAdapter {
     kv_ops_since_flush: AtomicU64,
     outbox_ops_since_flush: AtomicU64,
     flush_every: u64,
+    /// Collection-id allocation lock (`StorageAdapter::allocation_lock`), created at open.
+    allocation: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Clone for SledAdapter {
@@ -49,6 +51,7 @@ impl Clone for SledAdapter {
                 self.outbox_ops_since_flush.load(Ordering::Relaxed),
             ),
             flush_every: self.flush_every,
+            allocation: self.allocation.clone(),
         }
     }
 }
@@ -71,6 +74,7 @@ impl SledAdapter {
             kv_ops_since_flush: AtomicU64::new(0),
             outbox_ops_since_flush: AtomicU64::new(0),
             flush_every: 100,
+            allocation: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -151,6 +155,10 @@ impl SledAdapter {
 
 #[async_trait]
 impl StorageAdapter for SledAdapter {
+    fn allocation_lock(&self) -> Option<std::sync::Arc<tokio::sync::Mutex<()>>> {
+        Some(self.allocation.clone())
+    }
+
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         let res = self
             .kv
@@ -301,6 +309,15 @@ impl StorageAdapter for SledAdapter {
             res.push((k.to_vec(), v.to_vec()));
         }
         Ok(res)
+    }
+
+    async fn count_prefix(&self, prefix: &[u8]) -> Result<usize, StorageError> {
+        let mut n = 0;
+        for key in self.kv.scan_prefix(prefix).keys() {
+            key.map_err(|e| StorageError::BackendError(e.to_string()))?;
+            n += 1;
+        }
+        Ok(n)
     }
 
     async fn scan_range(

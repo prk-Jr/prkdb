@@ -7,9 +7,10 @@
 //! # These tests found two real bugs on their first run
 //!
 //! The round-trip failed immediately with "take_snapshot not supported" (**S-04**):
-//! `PrkDb::builder().with_data_dir()` produces a `CollectionPartitionedAdapter`, which
-//! holds one `WalStorageAdapter` per collection and never implemented `take_snapshot`, so
-//! the call reached the trait default that refuses.
+//! `PrkDb::builder().with_data_dir()` produces a `CollectionPartitionedAdapter`, which then
+//! held one `WalStorageAdapter` per collection and never implemented `take_snapshot`, so
+//! the call reached the trait default that refuses. (Since D11, Task 2.9b, it holds one
+//! WAL for the whole data directory and forwards `take_snapshot` to it.)
 //!
 //! Implementing it made backup *succeed* while archiving **zero entries**, which is how
 //! **S-05** surfaced: reopening a data directory destroyed it. Both are fixed and all

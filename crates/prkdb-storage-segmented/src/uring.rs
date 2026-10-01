@@ -34,6 +34,10 @@ impl UringSegmentedAdapter {
 
 #[async_trait]
 impl StorageAdapter for UringSegmentedAdapter {
+    fn allocation_lock(&self) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        self.inner.allocation_lock()
+    }
+
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         self.inner.get(key).await
     }
@@ -83,6 +87,10 @@ impl StorageAdapter for UringSegmentedAdapter {
 
     async fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
         self.inner.scan_prefix(prefix).await
+    }
+
+    async fn count_prefix(&self, prefix: &[u8]) -> Result<usize, StorageError> {
+        self.inner.count_prefix(prefix).await
     }
 
     async fn scan_range(

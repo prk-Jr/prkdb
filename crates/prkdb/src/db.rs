@@ -70,12 +70,27 @@ pub struct ReplicationTarget {
 pub type ReplicationRegistry =
     std::sync::RwLock<std::collections::HashMap<String, ReplicationTarget>>;
 
+/// One record of a collection addressed by name ([`PrkDb::scan_collection_records`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedRecord {
+    /// The stored key.
+    pub key: Vec<u8>,
+    /// The record's id as stored in the key (encoded, or raw on multi-raft).
+    pub id: Vec<u8>,
+    /// A printable id when it can be decoded (a string or 8-byte integer id).
+    pub id_hint: Option<String>,
+    /// The stored value.
+    pub value: Vec<u8>,
+}
+
 #[derive(Clone)]
 pub struct PrkDb {
     pub(crate) storage: Arc<dyn StorageAdapter>,
     pub(crate) event_bus: Arc<EventBusMap>,
     pub(crate) compute_handlers: Arc<ComputeHandlerMap>,
     pub(crate) namespace: Option<Vec<u8>>,
+    /// Collection ids for the key codec (KEY-01), in this database's namespace.
+    pub(crate) catalog: Arc<crate::catalog::Catalog>,
     pub(crate) metrics: crate::metrics::DbMetrics,
     pub(crate) consumer_coordinator: Arc<ConsumerGroupCoordinator>,
     pub(crate) partitioning_registry: Arc<PartitioningRegistry>,
@@ -88,6 +103,12 @@ pub struct PrkDb {
 impl PrkDb {
     pub fn builder() -> crate::builder::Builder {
         crate::builder::Builder::new()
+    }
+
+    /// The collection catalog (persisted name to collection id) for this database's
+    /// namespace.
+    pub(crate) fn catalog(&self) -> &crate::catalog::Catalog {
+        &self.catalog
     }
 
     /// Access the underlying storage adapter (Read-Only access recommended)
@@ -158,6 +179,7 @@ impl PrkDb {
         ));
 
         Ok(Self {
+            catalog: Arc::new(crate::catalog::Catalog::new(storage.clone(), Vec::new())),
             storage,
             event_bus: Arc::new(DashMap::new()),
             compute_handlers: Arc::new(DashMap::new()),
@@ -534,12 +556,264 @@ impl PrkDb {
         }
     }
 
-    pub async fn get_collection_stats(&self, collection_name: &str) -> Result<(u64, u64), Error> {
-        // Scan storage for all keys belonging to this collection
+    /// Every stored record of the collection persisted as `collection_name`: a scan of its
+    /// key-codec prefix (KEY-01). An unknown name is an empty collection; nothing is
+    /// allocated.
+    async fn collection_records(
+        &self,
+        collection_name: &str,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Error> {
+        // One scan for every caller, multi-raft included (raw `name:` keys there).
+        Ok(self
+            .scan_collection_records(collection_name)
+            .await?
+            .into_iter()
+            .map(|record| (record.key, record.value))
+            .collect())
+    }
+
+    /// The collection's event stream, `(partition, seq, bytes)` per event, from the outbox
+    /// ids `{name}:{partition}:{seq}` its writes record. Record keys no longer carry the
+    /// partition (D12), so per-partition figures come from here (Task 2.20 makes the event
+    /// stream durable; until then this is the events not yet drained).
+    async fn collection_events(
+        &self,
+        collection_name: &str,
+    ) -> Result<Vec<(u32, u64, u64)>, Error> {
         let prefix = format!("{}:", collection_name);
-        let entries = self
-            .scan_prefix_across_data_stores(prefix.as_bytes())
-            .await?;
+        let mut events = Vec::new();
+        for (id, payload) in self.storage.outbox_list().await? {
+            let Some(rest) = id.strip_prefix(&prefix) else {
+                continue;
+            };
+            let mut parts = rest.split(':');
+            let (Some(partition), Some(seq), None) = (parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            if let (Ok(partition), Ok(seq)) = (partition.parse::<u32>(), seq.parse::<u64>()) {
+                events.push((partition, seq, (id.len() + payload.len()) as u64));
+            }
+        }
+        Ok(events)
+    }
+
+    /// The changes after `offset` (a position in the storage's change log) whose keys
+    /// belong to the collection persisted as `collection` **in this database's
+    /// namespace**: those under its key-codec prefix. An unknown collection has none; an
+    /// empty name is the bare cursor (every change). This is what `FetchSegment` serves;
+    /// `StorageAdapter::changes_in_collection` knows no namespace, so a
+    /// `with_namespace` database would get an empty stream from it.
+    pub async fn changes_in_collection(
+        &self,
+        collection: &str,
+        offset: u64,
+    ) -> Result<Vec<prkdb_types::replication::Change>, Error> {
+        use prkdb_types::replication::Change;
+
+        let changes = self
+            .storage
+            .get_changes_since(offset)
+            .await
+            .map_err(Error::Storage)?;
+        if collection.is_empty() {
+            return Ok(changes);
+        }
+        let Some(coll) = self
+            .catalog
+            .lookup(collection)
+            .await
+            .map_err(Error::Storage)?
+        else {
+            return Ok(Vec::new());
+        };
+        let prefix =
+            crate::keys::collection_prefix(self.namespace.as_deref().unwrap_or_default(), coll);
+        Ok(changes
+            .into_iter()
+            .filter(|change| match change {
+                Change::Put { key, .. } | Change::Delete { key, .. } => key.starts_with(&prefix),
+            })
+            .collect())
+    }
+
+    // ── Collections by name (the CLI and HTTP server; review H2) ─────────────────────
+
+    /// The stored key of record `id` in the collection persisted as `name`, for callers
+    /// that address collections by name and ids as strings (the CLI and HTTP server).
+    ///
+    /// Single-node: the key codec in this database's namespace with the catalog's id for
+    /// `name` and the id encoded as a `String` id, the same key a typed API whose `Id` is
+    /// `String` writes, so both see the same records. `allocate` allocates the
+    /// collection's id on first use (writes); otherwise an unknown collection is `None`.
+    ///
+    /// Multi-raft: the raw `name:id`, because the catalog is per node and not replicated
+    /// (Phase 4), so a codec key's collection id would differ between nodes.
+    pub async fn collection_record_key(
+        &self,
+        name: &str,
+        id: &str,
+        allocate: bool,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        if self.partition_manager.is_some() {
+            // A persisted name has no ':', so `name:id` splits one way only: without the
+            // check, `a:b` + `c` and `a` + `b:c` would be one key.
+            if let Err(e) = crate::catalog::Catalog::validate_name(name) {
+                return if allocate {
+                    Err(Error::Storage(e))
+                } else {
+                    Ok(None)
+                };
+            }
+            return Ok(Some(format!("{name}:{id}").into_bytes()));
+        }
+        let coll = if allocate {
+            self.catalog
+                .id_for_name_with(name, crate::catalog::ValueEncoding::Json)
+                .await
+                .map_err(Error::Storage)?
+        } else {
+            match self.catalog.lookup(name).await.map_err(Error::Storage)? {
+                Some(coll) => coll,
+                None => return Ok(None),
+            }
+        };
+        let ns = self.namespace.as_deref().unwrap_or_default();
+        crate::keys::encode_record_key(ns, coll, &id)
+            .map(Some)
+            .map_err(Error::Storage)
+    }
+
+    /// Writes record `id` of collection `name` (see [`Self::collection_record_key`]).
+    pub async fn put_collection_record(
+        &self,
+        name: &str,
+        id: &str,
+        value: &[u8],
+    ) -> Result<(), Error> {
+        let key = self
+            .collection_record_key(name, id, true)
+            .await?
+            .ok_or_else(|| Error::Internal("an allocating key lookup found no key".into()))?;
+        // The name API writes JSON; a collection a `CollectionHandle` type owns stores
+        // bincode, which that type could not read back. Refuse rather than corrupt it.
+        if self.partition_manager.is_none() {
+            if let Some(record) = self.catalog.recorded(name).await.map_err(Error::Storage)? {
+                if record.encoding == crate::catalog::ValueEncoding::Bincode {
+                    return Err(Error::Storage(StorageError::Validation(format!(
+                        "collection {name} belongs to type {} through CollectionHandle, which                          stores bincode values; the name-based API (HTTP, CLI) writes JSON.                          Write it through CollectionHandle, or keep collections shared with                          HTTP/CLI on IndexedStorage (JSON)",
+                        record.type_name
+                    ))));
+                }
+            }
+        }
+        self.put(&key, value).await
+    }
+
+    /// Deletes record `id` of collection `name`; a collection never written has nothing to
+    /// delete.
+    pub async fn delete_collection_record(&self, name: &str, id: &str) -> Result<(), Error> {
+        match self.collection_record_key(name, id, false).await? {
+            Some(key) => self.delete(&key).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Reads record `id` of collection `name` from this node's storage.
+    pub async fn get_collection_record(
+        &self,
+        name: &str,
+        id: &str,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        match self.collection_record_key(name, id, false).await? {
+            Some(key) => self.get_local(&key).await,
+            None => Ok(None),
+        }
+    }
+
+    /// Every record of collection `name`, sorted by stored key: by a key-codec prefix
+    /// scan on a single node, by the raw `name:` prefix across partitions on multi-raft.
+    pub async fn scan_collection_records(&self, name: &str) -> Result<Vec<NamedRecord>, Error> {
+        let (prefix, raw) = if self.partition_manager.is_some() {
+            (format!("{name}:").into_bytes(), true)
+        } else {
+            let Some(coll) = self.catalog.lookup(name).await.map_err(Error::Storage)? else {
+                return Ok(Vec::new());
+            };
+            let ns = self.namespace.as_deref().unwrap_or_default();
+            (crate::keys::collection_prefix(ns, coll), false)
+        };
+        let mut rows = self.scan_prefix_across_data_stores(&prefix).await?;
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(rows
+            .into_iter()
+            .map(|(key, value)| {
+                let id = key[prefix.len()..].to_vec();
+                let id_hint = if raw {
+                    String::from_utf8(id.clone()).ok()
+                } else {
+                    crate::keys::decode_id_hint(&id)
+                };
+                NamedRecord {
+                    key,
+                    id,
+                    id_hint,
+                    value,
+                }
+            })
+            .collect())
+    }
+
+    /// Names of every collection with records or metadata: the catalog's allocated
+    /// names (single node) and the `meta:col:` entries [`Self::create_collection`]
+    /// writes, sorted and deduplicated.
+    pub async fn collection_names(&self) -> Result<Vec<String>, Error> {
+        let mut names: std::collections::BTreeSet<String> =
+            self.list_collections().await?.into_iter().collect();
+        if self.partition_manager.is_none() {
+            for (name, _) in self.catalog.list().await.map_err(Error::Storage)? {
+                names.insert(name);
+            }
+        } else {
+            // Multi-raft records are raw `name:id` keys (the catalog is node-local). The
+            // name API only writes persisted names, which contain no ':', so the text
+            // before the first ':' of a key is its collection when that text is a valid
+            // persisted name. System keyspaces never are (`__…`), except `meta:col:`,
+            // the collection metadata `list_collections` already reports, which is
+            // skipped.
+            for (key, _) in self.scan_prefix_across_data_stores(b"").await? {
+                let Some(split) = key.iter().position(|b| *b == b':') else {
+                    continue;
+                };
+                let Ok(name) = std::str::from_utf8(&key[..split]) else {
+                    continue;
+                };
+                if name != "meta" && crate::catalog::Catalog::validate_name(name).is_ok() {
+                    names.insert(name.to_string());
+                }
+            }
+        }
+        Ok(names.into_iter().collect())
+    }
+
+    /// `(partition, events, bytes)` per partition, sorted by partition.
+    async fn partition_totals(&self, collection_name: &str) -> Result<Vec<(u32, u64, u64)>, Error> {
+        let mut by_partition: std::collections::BTreeMap<u32, (u64, u64)> =
+            std::collections::BTreeMap::new();
+        for (partition, _seq, bytes) in self.collection_events(collection_name).await? {
+            let entry = by_partition.entry(partition).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += bytes;
+        }
+        Ok(by_partition
+            .into_iter()
+            .map(|(partition, (items, bytes))| (partition, items, bytes))
+            .collect())
+    }
+
+    pub async fn get_collection_stats(&self, collection_name: &str) -> Result<(u64, u64), Error> {
+        // Every record of this collection, by its key-codec prefix
+        let entries = self.collection_records(collection_name).await?;
 
         let item_count = entries.len() as u64;
         let total_size: u64 = entries
@@ -592,12 +866,16 @@ impl PrkDb {
         collection: &str,
         partition: u32,
     ) -> Result<u64, Error> {
-        // Scan storage for keys matching this collection and partition
-        let prefix = format!("{}:{}:", collection, partition);
-        let entries = self
-            .scan_prefix_across_data_stores(prefix.as_bytes())
-            .await?;
-        Ok(entries.len() as u64)
+        // The next offset after the partition's newest event, as a consumer counts offsets
+        // (`PrkConsumer::get_latest_offset`); 0 for a partition with no events.
+        Ok(self
+            .collection_events(collection)
+            .await?
+            .into_iter()
+            .filter(|(p, _, _)| *p == partition)
+            .map(|(_, seq, _)| seq.saturating_add(1))
+            .max()
+            .unwrap_or(0))
     }
 
     /// Get all lag information for a consumer group
@@ -643,14 +921,15 @@ impl PrkDb {
         collection_name: &str,
         limit: usize,
     ) -> Result<Vec<serde_json::Value>, Error> {
-        // Scan storage for all keys belonging to this collection
-        let prefix = format!("{}:", collection_name);
-        let entries = self
-            .scan_prefix_across_data_stores(prefix.as_bytes())
-            .await?;
+        // Every record of this collection, by its key-codec prefix
+        let entries = self.collection_records(collection_name).await?;
 
         let mut samples = Vec::new();
         for (key, value) in entries.into_iter().take(limit) {
+            // Show the record's encoded id, not the codec's binary prefix.
+            let key = crate::keys::decode_key(&key)
+                .map(|(_, _, id)| id.to_vec())
+                .unwrap_or(key);
             // Try to deserialize the value as JSON
             match serde_json::from_slice::<serde_json::Value>(&value) {
                 Ok(json_value) => {
@@ -768,44 +1047,21 @@ impl PrkDb {
         &self,
         collection_name: &str,
     ) -> Result<Vec<(u32, u64, u64, u64, u64, u64)>, Error> {
-        // Scan for all partitions of this collection
-        let prefix = format!("{}:", collection_name);
-        let entries = self
-            .scan_prefix_across_data_stores(prefix.as_bytes())
-            .await?;
-
-        // Group by partition
-        let mut partition_data: std::collections::HashMap<u32, (u64, u64)> =
-            std::collections::HashMap::new();
-
-        for (key, value) in entries {
-            let key_str = String::from_utf8_lossy(&key);
-            let parts: Vec<&str> = key_str.split(':').collect();
-
-            if parts.len() >= 2 {
-                if let Ok(partition) = parts[1].parse::<u32>() {
-                    let entry = partition_data.entry(partition).or_insert((0, 0));
-                    entry.0 += 1; // item count
-                    entry.1 += (key.len() + value.len()) as u64; // byte size
-                }
-            }
-        }
-
-        let mut result = Vec::new();
-        for (partition, (items, bytes)) in partition_data {
-            // Using items as proxy for events and bytes as proxy for bytes
-            result.push((
-                partition,
-                items,        // events_produced
-                items,        // events_consumed (simplified)
-                bytes as u64, // bytes_produced
-                bytes as u64, // bytes_consumed (simplified)
-                0,            // consumer_lag (would need offset comparison)
-            ));
-        }
-
-        result.sort_by_key(|&(partition, _, _, _, _, _)| partition);
-        Ok(result)
+        // Per partition, from the collection's event stream (record keys carry no partition)
+        Ok(self
+            .partition_totals(collection_name)
+            .await?
+            .into_iter()
+            .map(|(partition, items, bytes)| {
+                (
+                    partition, items, // events_produced
+                    items, // events_consumed (simplified)
+                    bytes, // bytes_produced
+                    bytes, // bytes_consumed (simplified)
+                    0,     // consumer_lag (would need offset comparison)
+                )
+            })
+            .collect())
     }
 
     /// Get consumer-specific metrics for a group
@@ -838,36 +1094,8 @@ impl PrkDb {
         &self,
         collection_name: &str,
     ) -> Result<Vec<(u32, u64, u64)>, Error> {
-        // Scan storage for all keys belonging to this collection
-        let prefix = format!("{}:", collection_name);
-        let entries = self
-            .scan_prefix_across_data_stores(prefix.as_bytes())
-            .await?;
-
-        // Group by partition to get partition info
-        let mut partition_data: std::collections::HashMap<u32, (u64, u64)> =
-            std::collections::HashMap::new();
-
-        for (key, value) in entries {
-            let key_str = String::from_utf8_lossy(&key);
-            let parts: Vec<&str> = key_str.split(':').collect();
-
-            if parts.len() >= 2 {
-                if let Ok(partition) = parts[1].parse::<u32>() {
-                    let entry = partition_data.entry(partition).or_insert((0, 0));
-                    entry.0 += 1; // item count
-                    entry.1 += (key.len() + value.len()) as u64; // byte size
-                }
-            }
-        }
-
-        let mut result = Vec::new();
-        for (partition, (items, bytes)) in partition_data {
-            result.push((partition, items, bytes));
-        }
-
-        result.sort_by_key(|&(partition, _, _)| partition);
-        Ok(result)
+        // Per partition, from the collection's event stream (record keys carry no partition)
+        self.partition_totals(collection_name).await
     }
 
     /// Get detailed partition information
@@ -876,25 +1104,23 @@ impl PrkDb {
         collection_name: &str,
         partition: u32,
     ) -> Result<Option<(u64, u64, u64, u64)>, Error> {
-        // Scan storage for keys in this specific partition
-        let prefix = format!("{}:{}:", collection_name, partition);
-        let entries = self
-            .scan_prefix_across_data_stores(prefix.as_bytes())
-            .await?;
+        // This partition's events (record keys carry no partition)
+        let events: Vec<(u64, u64)> = self
+            .collection_events(collection_name)
+            .await?
+            .into_iter()
+            .filter(|(p, _, _)| *p == partition)
+            .map(|(_, seq, bytes)| (seq, bytes))
+            .collect();
 
-        if entries.is_empty() {
+        let (Some(first_offset), Some(last_offset)) = (
+            events.iter().map(|(seq, _)| *seq).min(),
+            events.iter().map(|(seq, _)| *seq).max(),
+        ) else {
             return Ok(None);
-        }
-
-        let items = entries.len() as u64;
-        let bytes: u64 = entries
-            .iter()
-            .map(|(key, value)| (key.len() + value.len()) as u64)
-            .sum();
-
-        // For offsets, we use item indices as a simplified approach
-        let first_offset = 0;
-        let last_offset = items.saturating_sub(1);
+        };
+        let items = events.len() as u64;
+        let bytes: u64 = events.iter().map(|(_, bytes)| bytes).sum();
 
         Ok(Some((items, bytes, first_offset, last_offset)))
     }

@@ -1,23 +1,11 @@
 pub mod adaptive;
-pub mod async_fsync;
-pub mod async_log_segment;
-pub mod async_parallel_wal;
 pub mod batch;
-pub mod buffer_pool;
-pub mod compaction;
 pub mod compression;
 pub mod config;
 pub mod frame;
 pub mod log;
 pub mod log_record;
-pub mod log_segment;
-pub mod metrics;
-pub mod mmap_log_segment;
-pub mod mmap_parallel_wal;
-pub mod offset_index;
-pub mod parallel_wal;
 pub mod segment;
-pub mod write_ahead_log;
 
 pub use compression::{
     compress, decompress, decompress_bounded, CompressionConfig, CompressionError, CompressionType,
@@ -26,7 +14,6 @@ pub use config::{CompactionPolicy, SyncMode, WalConfig};
 pub use frame::Lsn;
 pub use log::{CommitHook, PendingAppend, RecoveryReport, Reservation, Wal, WalHealth, WalOptions};
 pub use log_record::{LogOperation, LogRecord};
-pub use log_segment::LogSegment;
 pub use segment::RecordLoc;
 
 #[derive(Debug, thiserror::Error)]
@@ -93,6 +80,3 @@ pub enum WalError {
     #[error("WAL is closed")]
     Closed,
 }
-pub use offset_index::OffsetIndex;
-pub use parallel_wal::ParallelWal;
-pub use write_ahead_log::WriteAheadLog;

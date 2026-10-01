@@ -1,4 +1,4 @@
-# wal_fast_rule.py self-test fixture: raw wal_write_path_spike rows. Expected verdicts are asserted by --self-test.
+# wal_fast_rule.py self-test fixture: raw wal_write_path (formerly wal_write_path_spike) rows. Expected verdicts are asserted by --self-test.
 - warm-up 1000 ms, measure 3000 ms, reps 2, tokio worker threads = 8
 - load average at start: 2.85 2.10 1.90
 - disk ceiling, pwrite 1 MiB, no sync: 1555 MB/s (1483 writes/s)
@@ -14,3 +14,5 @@
 | wal_fast/1w/1k | 1 | 1 KiB | 76000 | 77.8 | 10.6 | 18.0 | 900.0 | 1.0 | 1 | 50 | 40 | 0 | 40 | 3.10 3.00 2.90 |
 | current_mmap_wal/1w/1k | 1 | 1 KiB | 90000 | 92.2 | 11.2 | 5000.0 | 7700.0 |  |  |  |  |  |  | 3.10 3.00 2.90 |
 | current_adapter_put/1w/1k | 1 | 1 KiB | 1062 | 1.1 | 16.0 | 5400.0 | 12000.0 |  |  |  |  |  |  | 3.00 3.00 2.90 |
+| adapter_put/1w/1k | 1 | 1 KiB | 27200 | 27.9 | 33.1 | 61.0 | 410.2 | 2.10 2.00 1.90 |
+| adapter_put/1w/1k | 1 | 1 KiB | 27000 | 27.6 | 33.4 | 62.3 | 415.0 | 2.00 2.00 1.90 |

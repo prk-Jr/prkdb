@@ -164,7 +164,7 @@ where
         partitions: Vec<PartitionId>,
     ) -> Result<Self, Error> {
         let offset_store = Arc::new(StorageOffsetStore::new(db.storage.clone()));
-        let collection_name = std::any::type_name::<C>();
+        let collection_name: &str = &C::persisted_name();
 
         // Load offsets for all assigned partitions
         let mut partition_offsets = HashMap::new();
@@ -214,7 +214,7 @@ where
         &mut self,
         new_partitions: Vec<PartitionId>,
     ) -> Result<(), Error> {
-        let collection_name = std::any::type_name::<C>();
+        let collection_name: &str = &C::persisted_name();
 
         // Load offsets for newly assigned partitions
         for partition in &new_partitions {
@@ -287,7 +287,7 @@ where
     C::Id: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     async fn poll(&mut self) -> Result<Vec<ConsumerRecord<C>>, Error> {
-        let collection_name = std::any::type_name::<C>();
+        let collection_name: &str = &C::persisted_name();
         let entries = self.db.storage.outbox_list().await?;
 
         let mut all_records = Vec::new();
@@ -440,7 +440,7 @@ where
     }
 
     async fn commit(&mut self) -> Result<CommitResult, Error> {
-        let collection_name = std::any::type_name::<C>();
+        let collection_name: &str = &C::persisted_name();
 
         // Commit offsets for all assigned partitions
         let mut all_success = true;
@@ -504,7 +504,7 @@ where
     }
 
     async fn commit_offset(&mut self, offset: Offset) -> Result<CommitResult, Error> {
-        let collection_name = std::any::type_name::<C>();
+        let collection_name: &str = &C::persisted_name();
 
         // Commit the specified offset for all assigned partitions
         let mut all_success = true;
@@ -569,7 +569,7 @@ where
 
     async fn committed(&self) -> Result<Option<Offset>, Error> {
         // Return the minimum committed offset across all partitions
-        let collection_name = std::any::type_name::<C>();
+        let collection_name: &str = &C::persisted_name();
         let mut min_offset: Option<Offset> = None;
 
         for partition in &self.assigned_partitions {
@@ -674,7 +674,7 @@ impl ConsumerExt for PrkDb {
         info!(
             group_id = %config.group_id,
             consumer_id = ?config.consumer_id,
-            collection = std::any::type_name::<C>(),
+            collection = %C::persisted_name(),
             partitions = ?partitions,
             "Consumer created with dynamic partition assignment"
         );

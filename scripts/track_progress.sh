@@ -89,8 +89,8 @@ run_benchmarks() {
     cargo bench --bench batch_bench -- --quick 2>&1 | grep -E "time:|thrpt:" || true
     
     echo ""
-    echo "2. MmapParallelWal..."
-    cargo bench --bench mmap_parallel_wal_bench -- --quick 2>&1 | grep -E "time:|thrpt:" || true
+    echo "2. WAL write path..."
+    SPIKE_MEASURE_MS=500 cargo bench -p prkdb --bench wal_write_path 2>&1 | grep -E "^\| " || true
     
     echo ""
     echo -e "${GREEN}✅ Benchmarks complete${NC}"

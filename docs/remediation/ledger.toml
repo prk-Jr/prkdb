@@ -79,11 +79,13 @@ title = "Four WAL implementations in use; all data writes hash to one shard so f
 area = "storage"
 severity = "high"
 phase = 2
-status = "open"
+status = "fixed"
 evidence = [
   "crates/prkdb/src/storage/wal_adapter.rs:470",
   "crates/prkdb/src/storage/wal_adapter.rs:540",
 ]
+regression_tests = ["script:scripts/check_single_wal.sh", "test:crates/prkdb-core/tests/wal_log.rs::replay_order_equals_append_order_across_segment_roll", "test:crates/prkdb/src/storage/collection_partitioned_adapter.rs::a_partitioned_directory_has_one_wal"]
+changes = ["01caedd", "6fa063a"]
 
 [[finding]]
 id = "STO-07"
@@ -108,10 +110,11 @@ title = "Primary keys not namespaced by collection; different types can overwrit
 area = "keys"
 severity = "high"
 phase = 2
-status = "open"
+status = "fixed"
 sources = ["audit-2026-09-23#13", "review-2026-09-07#R01"]
 evidence = ["crates/prkdb/src/indexed_storage.rs:4280-4287,5273-5276"]
-tripwire = "test:crates/prkdb/tests/tripwires.rs::key01_collections_share_primary_keys_tripwire"
+regression_tests = ["test:crates/prkdb/tests/tripwires.rs::key01_collections_with_same_id_are_independent", "test:crates/prkdb/tests/key_codec.rs::catalog_ids_survive_restart", "test:crates/prkdb/tests/key_codec.rs::concurrent_first_use_from_two_catalogs_allocates_each_name_once", "test:crates/prkdb/tests/key_codec.rs::a_second_type_for_a_pinned_name_is_refused", "test:crates/prkdb/tests/key_codec.rs::generic_instantiations_sharing_a_default_name_are_refused", "test:crates/prkdb/tests/key_codec.rs::a_record_written_by_name_is_read_by_type_and_vice_versa", "test:crates/prkdb/tests/key_codec.rs::a_range_scan_returns_exactly_the_id_range_in_order"]
+changes = ["3c47a77", "35c9c39", "608e9bf", "d362199"]
 
 [[finding]]
 id = "KEY-02"
@@ -134,6 +137,19 @@ sources = ["audit-2026-09-23#12"]
 evidence = ["crates/prkdb/src/partitioning.rs:51"]
 regression_tests = ["test:crates/prkdb/tests/tripwires.rs::key03_partition_is_stable_across_processes", "test:crates/prkdb/tests/partitioning_tests.rs::default_partitioner_golden_vectors"]
 changes = ["8da967f"]
+
+[[finding]]
+id = "KEY-05"
+title = "Multi-raft collection catalog is node-local; name-addressed records on multi-raft use raw name:id keys"
+area = "keys"
+severity = "medium"
+phase = 4
+status = "open"
+sources = ["task-2.12-review-2026-10-01"]
+evidence = [
+  "crates/prkdb/src/db.rs:652-668",
+  "crates/prkdb/src/raft/grpc_service.rs:310",
+]
 
 # ---------------------------------------------------------------------------
 # 3.3 Events, outbox, consumers (EVT)

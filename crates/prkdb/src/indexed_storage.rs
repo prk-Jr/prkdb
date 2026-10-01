@@ -75,6 +75,8 @@
 //! own figures on your machine, which is the only hardware whose numbers describe your
 //! deployment.
 
+use crate::catalog::Catalog;
+use crate::keys::{collection_prefix, encode_id, encode_key, encode_record_key};
 use crate::storage::WalStorageAdapter;
 use dashmap::DashMap;
 use prkdb_types::collection::Collection;
@@ -333,13 +335,14 @@ impl MemoryIndex {
 /// Change event types for watch/subscribe
 #[derive(Debug, Clone)]
 pub enum ChangeEvent {
-    /// Record inserted
+    /// Record inserted. `collection` is the persisted name, `id` the record's id as
+    /// [`encode_id`](crate::keys::encode_id) writes it.
     Inserted {
         collection: String,
         id: Vec<u8>,
         data: Vec<u8>,
     },
-    /// Record deleted
+    /// Record deleted (fields as for `Inserted`).
     Deleted { collection: String, id: Vec<u8> },
 }
 
@@ -837,7 +840,7 @@ where
     /// # }
     /// ```
     pub fn explain(&self) -> QueryPlan {
-        let collection = std::any::type_name::<T>().to_string();
+        let collection = T::persisted_name().into_owned();
         let uses_preload = self.preloaded.is_some();
 
         let description = if uses_preload {
@@ -3106,15 +3109,19 @@ where
 /// Buffered operation for transaction
 #[derive(Debug, Clone)]
 enum TxOperation {
+    /// `collection` is the persisted name and `id` the encoded id; the stored key is built
+    /// at commit, where the catalog can be asked for the collection's id.
     Insert {
         collection: String,
-        key: Vec<u8>,
+        ty: crate::catalog::CollectionType,
+        id: Vec<u8>,
         data: Vec<u8>,
         index_values: Vec<(String, Vec<u8>)>,
     },
     Delete {
         collection: String,
-        key: Vec<u8>,
+        ty: crate::catalog::CollectionType,
+        id: Vec<u8>,
         index_values: Vec<(String, Vec<u8>)>,
     },
 }
@@ -3219,9 +3226,8 @@ impl<'a, S: StorageAdapter + 'static> Transaction<'a, S> {
 
     /// Buffer an insert operation
     pub fn insert<T: Indexed + Collection>(&mut self, record: &T) -> Result<(), StorageError> {
-        let collection_name = std::any::type_name::<T>();
-        let primary_key = serde_json::to_vec(record.id())
-            .map_err(|e| StorageError::Serialization(format!("Failed to serialize id: {}", e)))?;
+        let collection_name = T::persisted_name();
+        let id = encode_id(record.id())?;
         let data = serde_json::to_vec(record).map_err(|e| {
             StorageError::Serialization(format!("Failed to serialize record: {}", e))
         })?;
@@ -3233,8 +3239,10 @@ impl<'a, S: StorageAdapter + 'static> Transaction<'a, S> {
             .collect();
 
         self.operations.push(TxOperation::Insert {
-            collection: collection_name.to_string(),
-            key: primary_key,
+            collection: collection_name.into_owned(),
+            ty: crate::catalog::CollectionType::of::<T>()
+                .with_encoding(crate::catalog::ValueEncoding::Json),
+            id,
             data,
             index_values,
         });
@@ -3244,9 +3252,8 @@ impl<'a, S: StorageAdapter + 'static> Transaction<'a, S> {
 
     /// Buffer a delete operation
     pub fn delete<T: Indexed + Collection>(&mut self, record: &T) -> Result<(), StorageError> {
-        let collection_name = std::any::type_name::<T>();
-        let primary_key = serde_json::to_vec(record.id())
-            .map_err(|e| StorageError::Serialization(format!("Failed to serialize id: {}", e)))?;
+        let collection_name = T::persisted_name();
+        let id = encode_id(record.id())?;
 
         let index_values: Vec<(String, Vec<u8>)> = record
             .index_values()
@@ -3255,8 +3262,10 @@ impl<'a, S: StorageAdapter + 'static> Transaction<'a, S> {
             .collect();
 
         self.operations.push(TxOperation::Delete {
-            collection: collection_name.to_string(),
-            key: primary_key,
+            collection: collection_name.into_owned(),
+            ty: crate::catalog::CollectionType::of::<T>()
+                .with_encoding(crate::catalog::ValueEncoding::Json),
+            id,
             index_values,
         });
 
@@ -3314,10 +3323,13 @@ impl<'a, S: StorageAdapter + 'static> Transaction<'a, S> {
             match op {
                 TxOperation::Insert {
                     collection,
-                    key,
+                    ty,
+                    id,
                     data,
                     index_values,
                 } => {
+                    let coll = self.storage.catalog.id_for_type(ty, &collection).await?;
+                    let key = encode_key(&[], coll, &id)?;
                     // Store record
                     self.storage.storage.put(&key, &data).await?;
 
@@ -3345,9 +3357,17 @@ impl<'a, S: StorageAdapter + 'static> Transaction<'a, S> {
                 }
                 TxOperation::Delete {
                     collection,
-                    key,
+                    ty,
+                    id,
                     index_values,
                 } => {
+                    // Like a non-transactional delete, never allocates: a collection that
+                    // was never written has nothing to delete.
+                    let Some(coll) = self.storage.catalog.lookup_type(ty, &collection).await?
+                    else {
+                        continue;
+                    };
+                    let key = encode_key(&[], coll, &id)?;
                     // Delete record
                     self.storage.storage.delete(&key).await?;
 
@@ -3399,11 +3419,21 @@ impl<'a, S: StorageAdapter> Drop for Transaction<'a, S> {
     }
 }
 
+/// The encoded id inside a stored key built by this module (empty namespace), without
+/// encoding it a second time.
+fn id_of(primary_key: &[u8]) -> Vec<u8> {
+    crate::keys::decode_key(primary_key)
+        .map(|(_, _, id)| id.to_vec())
+        .unwrap_or_default()
+}
+
 /// Generic storage adapter with secondary index support
 /// Works with any StorageAdapter implementation (WAL, SQL, memory, etc.)
 pub struct IndexedStorage<S: StorageAdapter> {
     /// Underlying storage
     storage: Arc<S>,
+    /// Collection ids for the key codec (KEY-01), in the empty namespace.
+    catalog: Arc<Catalog>,
     /// In-memory indexes by collection (legacy - uses RwLock)
     indexes: Arc<RwLock<BTreeMap<String, MemoryIndex>>>,
     /// Lock-free indexes using DashMap for concurrent access
@@ -3425,6 +3455,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     pub fn new(storage: Arc<S>) -> Self {
         let (change_tx, _) = tokio::sync::broadcast::channel(1024);
         Self {
+            catalog: Arc::new(Catalog::new(storage.clone(), Vec::new())),
             storage,
             indexes: Arc::new(RwLock::new(BTreeMap::new())),
             lock_free_indexes: Arc::new(DashMap::new()),
@@ -3433,6 +3464,52 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
             sync_path: None,
             shutdown_tx: None,
         }
+    }
+
+    /// The stored key of `id` in `T`'s collection: the key codec over the catalog id of
+    /// `T::persisted_name()` (KEY-01). Allocates the collection's id on first use, so it
+    /// is for writes; reads use [`Self::existing_key`].
+    async fn primary_key<T: Collection>(&self, id: &T::Id) -> Result<Vec<u8>, StorageError> {
+        let coll = self
+            .catalog
+            .id_for_encoded::<T>(crate::catalog::ValueEncoding::Json)
+            .await?;
+        encode_record_key(&[], coll, id)
+    }
+
+    /// As [`Self::primary_key`] without allocating: `None` if `T` was never written.
+    async fn existing_key<T: Collection>(
+        &self,
+        id: &T::Id,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        match self.catalog.lookup_for::<T>().await? {
+            Some(coll) => Ok(Some(encode_record_key(&[], coll, id)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Every stored record of `T`, read by a prefix scan of its collection (not from the
+    /// in-memory indexes, which miss records written by another process or before a
+    /// restart), sorted by stored key, i.e. by encoded id.
+    async fn scan_collection<T: Collection + DeserializeOwned>(
+        &self,
+    ) -> Result<Vec<(Vec<u8>, T)>, StorageError> {
+        let Some(coll) = self.catalog.lookup_for::<T>().await? else {
+            return Ok(Vec::new());
+        };
+        let mut rows = self
+            .storage
+            .scan_prefix(&collection_prefix(&[], coll))
+            .await?;
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows.into_iter()
+            .map(|(key, data)| {
+                let record = serde_json::from_slice(&data).map_err(|e| {
+                    StorageError::Deserialization(format!("Failed to deserialize: {}", e))
+                })?;
+                Ok((key, record))
+            })
+            .collect()
     }
 
     /// Query the lock-free index for primary keys matching a field value
@@ -3688,6 +3765,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         };
 
         Ok(Self {
+            catalog: Arc::new(Catalog::new(storage.clone(), Vec::new())),
             storage,
             indexes: Arc::new(RwLock::new(indexes)),
             lock_free_indexes: Arc::new(DashMap::new()),
@@ -4125,21 +4203,18 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         T: Indexed + Collection + DeserializeOwned,
         F: Fn(&T) -> &str,
     {
-        let collection_name = std::any::type_name::<T>();
-        let all_records: Vec<T> = self.all().await?;
+        let collection_name = T::persisted_name();
+        let all_records = self.scan_collection::<T>().await?;
 
         let mut indexes = self.indexes.write().await;
         let collection_index = indexes
-            .entry(collection_name.to_string())
+            .entry(collection_name.into_owned())
             .or_insert_with(MemoryIndex::new);
 
         let mut count = 0;
-        for record in &all_records {
+        for (primary_key, record) in &all_records {
             let text = text_fn(record);
-            let primary_key = serde_json::to_vec(record.id()).map_err(|e| {
-                StorageError::Serialization(format!("Failed to serialize id: {}", e))
-            })?;
-            collection_index.add_text(field, text, &primary_key);
+            collection_index.add_text(field, text, primary_key);
             count += 1;
         }
 
@@ -4230,7 +4305,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         field: &str,
         query: &str,
     ) -> Result<Vec<T>, StorageError> {
-        let collection_name = std::any::type_name::<T>();
+        let collection_name = T::persisted_name();
 
         // Tokenize query (simple whitespace split + lowercase)
         let tokens: Vec<String> = query.split_whitespace().map(|s| s.to_lowercase()).collect();
@@ -4243,7 +4318,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         let mut scores: std::collections::HashMap<Vec<u8>, usize> =
             std::collections::HashMap::new();
 
-        if let Some(col_idx) = self.lock_free_text_indexes.get(collection_name) {
+        if let Some(col_idx) = self.lock_free_text_indexes.get(collection_name.as_ref()) {
             if let Some(field_idx) = col_idx.get(field) {
                 for token in &tokens {
                     if let Some(keys) = field_idx.get(token) {
@@ -4276,9 +4351,8 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     ///
     /// Uses lock-free DashMap for concurrent index updates.
     pub async fn insert<T: Indexed + Collection>(&self, record: &T) -> Result<(), StorageError> {
-        let collection_name = std::any::type_name::<T>().to_string();
-        let primary_key = serde_json::to_vec(record.id())
-            .map_err(|e| StorageError::Serialization(format!("Failed to serialize id: {}", e)))?;
+        let collection_name = T::persisted_name().into_owned();
+        let primary_key = self.primary_key::<T>(record.id()).await?;
         let data = serde_json::to_vec(record).map_err(|e| {
             StorageError::Serialization(format!("Failed to serialize record: {}", e))
         })?;
@@ -4303,7 +4377,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         // Emit change event (ignore if no subscribers)
         let _ = self.change_tx.send(ChangeEvent::Inserted {
             collection: collection_name,
-            id: primary_key,
+            id: id_of(&primary_key),
             data,
         });
 
@@ -4628,10 +4702,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     where
         T: Indexed + Collection + prkdb_types::Timestamped,
     {
-        let primary_key = serde_json::to_vec(record.id())
-            .map_err(|e| StorageError::Serialization(format!("Failed to serialize id: {}", e)))?;
-
-        let exists = self.storage.get(&primary_key).await?.is_some();
+        let exists = self.exists::<T>(record.id()).await?;
 
         if exists {
             record.touch(); // Just update updated_at
@@ -4722,11 +4793,8 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// # }
     /// ```
     pub async fn upsert<T: Indexed + Collection>(&self, record: &T) -> Result<bool, StorageError> {
-        let primary_key = serde_json::to_vec(record.id())
-            .map_err(|e| StorageError::Serialization(format!("Failed to serialize id: {}", e)))?;
-
         // Check if exists
-        let exists = self.storage.get(&primary_key).await?.is_some();
+        let exists = self.exists::<T>(record.id()).await?;
 
         if exists {
             // Delete old record first (to update indexes correctly)
@@ -4817,10 +4885,10 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// # }
     /// ```
     pub async fn exists<T: Collection>(&self, id: &T::Id) -> Result<bool, StorageError> {
-        let primary_key = serde_json::to_vec(id)
-            .map_err(|e| StorageError::Serialization(format!("Failed to serialize id: {}", e)))?;
-
-        Ok(self.storage.get(&primary_key).await?.is_some())
+        match self.existing_key::<T>(id).await? {
+            Some(primary_key) => Ok(self.storage.get(&primary_key).await?.is_some()),
+            None => Ok(false),
+        }
     }
 
     /// Update a record using a closure
@@ -5198,13 +5266,13 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         field: &str,
         value: &impl Serialize,
     ) -> Result<Vec<T>, StorageError> {
-        let collection_name = std::any::type_name::<T>();
+        let collection_name = T::persisted_name();
         let search_value = serde_json::to_vec(value).map_err(|e| {
             StorageError::Serialization(format!("Failed to serialize query value: {}", e))
         })?;
 
         // Lock-free DashMap lookup
-        let primary_keys = self.query_lockfree_index(collection_name, field, &search_value);
+        let primary_keys = self.query_lockfree_index(&collection_name, field, &search_value);
 
         // Fetch records
         let mut results = Vec::new();
@@ -5234,9 +5302,11 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     ///
     /// Uses lock-free DashMap for concurrent index updates.
     pub async fn delete<T: Indexed + Collection>(&self, record: &T) -> Result<(), StorageError> {
-        let collection_name = std::any::type_name::<T>().to_string();
-        let primary_key = serde_json::to_vec(record.id())
-            .map_err(|e| StorageError::Serialization(format!("Failed to serialize id: {}", e)))?;
+        let collection_name = T::persisted_name().into_owned();
+        let Some(primary_key) = self.existing_key::<T>(record.id()).await? else {
+            // The collection was never written, so neither was this record.
+            return Ok(());
+        };
 
         // Remove from lock-free DashMap indexes
         if let Some(col_idx) = self.lock_free_indexes.get(&collection_name) {
@@ -5256,7 +5326,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         // Emit change event (ignore if no subscribers)
         let _ = self.change_tx.send(ChangeEvent::Deleted {
             collection: collection_name,
-            id: primary_key,
+            id: id_of(&primary_key),
         });
 
         Ok(())
@@ -5270,8 +5340,9 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     where
         T::Id: Serialize,
     {
-        let primary_key = serde_json::to_vec(id)
-            .map_err(|e| StorageError::Serialization(format!("Failed to serialize id: {}", e)))?;
+        let Some(primary_key) = self.existing_key::<T>(id).await? else {
+            return Ok(None);
+        };
 
         match self.storage.get(&primary_key).await? {
             Some(data) => {
@@ -5292,7 +5363,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         start: &impl Serialize,
         end: &impl Serialize,
     ) -> Result<Vec<T>, StorageError> {
-        let collection_name = std::any::type_name::<T>();
+        let collection_name = T::persisted_name();
         let start_bytes = serde_json::to_vec(start).map_err(|e| {
             StorageError::Serialization(format!("Failed to serialize start: {}", e))
         })?;
@@ -5303,7 +5374,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         let primary_keys = {
             let indexes = self.indexes.read().await;
             indexes
-                .get(collection_name)
+                .get(collection_name.as_ref())
                 .map(|idx| idx.query_range(field, &start_bytes, &end_bytes))
                 .unwrap_or_default()
         };
@@ -5397,7 +5468,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         start: &impl Serialize,
         end: &impl Serialize,
     ) -> Result<Vec<T>, StorageError> {
-        let collection_name = std::any::type_name::<T>();
+        let collection_name = T::persisted_name();
         let start_bytes = serde_json::to_vec(start).map_err(|e| {
             StorageError::Serialization(format!("Failed to serialize start: {}", e))
         })?;
@@ -5407,7 +5478,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         // Collect matching primary keys from lock-free DashMap
         let mut primary_keys = Vec::new();
 
-        if let Some(col_idx) = self.lock_free_indexes.get(collection_name) {
+        if let Some(col_idx) = self.lock_free_indexes.get(collection_name.as_ref()) {
             if let Some(field_idx) = col_idx.get(field) {
                 for entry in field_idx.iter() {
                     let value = entry.key();
@@ -5517,13 +5588,13 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         cursor: Option<&[u8]>,
         limit: usize,
     ) -> Result<(Vec<T>, Option<Vec<u8>>), StorageError> {
-        let collection_name = std::any::type_name::<T>();
+        let collection_name = T::persisted_name();
         let search_value = serde_json::to_vec(value).map_err(|e| {
             StorageError::Serialization(format!("Failed to serialize query value: {}", e))
         })?;
 
         // Get matching primary keys from lock-free DashMap
-        let mut primary_keys = self.query_lockfree_index(collection_name, field, &search_value);
+        let mut primary_keys = self.query_lockfree_index(&collection_name, field, &search_value);
 
         // Sort for consistent cursor behavior
         primary_keys.sort();
@@ -5565,7 +5636,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         field: &str,
         prefix: &str,
     ) -> Result<Vec<T>, StorageError> {
-        let collection_name = std::any::type_name::<T>();
+        let collection_name = T::persisted_name();
         let prefix_bytes = serde_json::to_vec(prefix).map_err(|e| {
             StorageError::Serialization(format!("Failed to serialize prefix: {}", e))
         })?;
@@ -5574,7 +5645,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         let primary_keys = {
             let indexes = self.indexes.read().await;
             indexes
-                .get(collection_name)
+                .get(collection_name.as_ref())
                 .map(|idx| idx.query_prefix(field, &prefix_bytes))
                 .unwrap_or_default()
         };
@@ -5592,32 +5663,13 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         T: Indexed + Collection + DeserializeOwned,
         F: Fn(&T) -> bool,
     {
-        let collection_name = std::any::type_name::<T>();
-
-        // Get all unique primary keys from DashMap (lock-free)
-        let mut primary_keys = std::collections::HashSet::new();
-        if let Some(col_idx) = self.lock_free_indexes.get(collection_name) {
-            for field_entry in col_idx.iter() {
-                for value_entry in field_entry.value().iter() {
-                    primary_keys.extend(value_entry.value().iter().cloned());
-                }
-            }
-        }
-
-        // Fetch and filter records
-        let mut results = Vec::new();
-        for pk in primary_keys {
-            if let Some(data) = self.storage.get(&pk).await? {
-                let record: T = serde_json::from_slice(&data).map_err(|e| {
-                    StorageError::Deserialization(format!("Failed to deserialize: {}", e))
-                })?;
-                if predicate(&record) {
-                    results.push(record);
-                }
-            }
-        }
-
-        Ok(results)
+        Ok(self
+            .scan_collection::<T>()
+            .await?
+            .into_iter()
+            .map(|(_, record)| record)
+            .filter(|record| predicate(record))
+            .collect())
     }
 
     /// Helper to fetch records by primary keys
@@ -5727,19 +5779,17 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         T: Indexed + Collection + DeserializeOwned,
         F: Fn(&T) -> Vec<String>,
     {
-        let collection_name = std::any::type_name::<T>();
-        let records: Vec<T> = self.all().await?;
+        let collection_name = T::persisted_name();
+        let records = self.scan_collection::<T>().await?;
         let count = records.len();
 
         let mut indexes = self.indexes.write().await;
         let collection_index = indexes
-            .entry(collection_name.to_string())
+            .entry(collection_name.into_owned())
             .or_insert_with(MemoryIndex::new);
 
-        for record in &records {
-            let primary_key = serde_json::to_vec(record.id()).map_err(|e| {
-                StorageError::Serialization(format!("Failed to serialize id: {}", e))
-            })?;
+        for (primary_key, record) in records {
+            let record = &record;
 
             // Create composite key from multiple field values
             let fields = key_fn(record);
@@ -5833,7 +5883,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         index_name: &str,
         values: Vec<String>,
     ) -> Result<Vec<T>, StorageError> {
-        let collection_name = std::any::type_name::<T>();
+        let collection_name = T::persisted_name();
         let composite_key = serde_json::to_vec(&values).map_err(|e| {
             StorageError::Serialization(format!("Failed to serialize compound key: {}", e))
         })?;
@@ -5841,7 +5891,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         let primary_keys = {
             let indexes = self.indexes.read().await;
             indexes
-                .get(collection_name)
+                .get(collection_name.as_ref())
                 .map(|idx| idx.query_compound(index_name, &composite_key))
                 .unwrap_or_default()
         };
@@ -5949,15 +5999,17 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
             return Ok(0);
         }
 
-        let collection_name = std::any::type_name::<T>().to_string();
+        let collection_name = T::persisted_name().into_owned();
+        let coll = self
+            .catalog
+            .id_for_encoded::<T>(crate::catalog::ValueEncoding::Json)
+            .await?;
 
         // Step 1: Serialize all records
         let serialized: Vec<_> = records
             .iter()
             .map(|record| {
-                let primary_key = serde_json::to_vec(record.id()).map_err(|e| {
-                    StorageError::Serialization(format!("Failed to serialize id: {}", e))
-                })?;
+                let primary_key = encode_record_key(&[], coll, record.id())?;
                 let data = serde_json::to_vec(record).map_err(|e| {
                     StorageError::Serialization(format!("Failed to serialize record: {}", e))
                 })?;
@@ -6004,16 +6056,21 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
             return Ok(0);
         }
 
-        let collection_name = std::any::type_name::<T>().to_string();
+        let collection_name = T::persisted_name().into_owned();
+        let Some(coll) = self.catalog.lookup_for::<T>().await? else {
+            // Never written, so there is nothing to delete.
+            return Ok(records.len());
+        };
 
         // Step 1: Collect all primary keys and prepare for deletion
         let mut keys_to_delete = Vec::with_capacity(records.len());
         let mut index_removals = Vec::with_capacity(records.len());
+        let mut deleted_ids = Vec::with_capacity(records.len());
 
         for record in records {
-            let primary_key = serde_json::to_vec(record.id()).map_err(|e| {
-                StorageError::Serialization(format!("Failed to serialize id: {}", e))
-            })?;
+            let id = encode_id(record.id())?;
+            let primary_key = encode_key(&[], coll, &id)?;
+            deleted_ids.push(id);
             let index_values: Vec<_> = record
                 .index_values()
                 .into_iter()
@@ -6043,10 +6100,10 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         }
 
         // Step 4: Emit delete events
-        for key in keys_to_delete {
+        for id in deleted_ids {
             let _ = self.change_tx.send(ChangeEvent::Deleted {
                 collection: collection_name.clone(),
-                id: key,
+                id,
             });
         }
 
@@ -6069,19 +6126,22 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
             return Ok(0);
         }
 
-        let collection_name = std::any::type_name::<T>();
+        let collection_name = T::persisted_name();
+        let coll = self
+            .catalog
+            .id_for_encoded::<T>(crate::catalog::ValueEncoding::Json)
+            .await?;
 
         // Step 1: Check which records exist using lock-free index
         let mut new_records = Vec::with_capacity(records.len());
         let mut existing_records = Vec::with_capacity(records.len() / 4); // Usually fewer updates
 
         for record in records {
-            let pk = serde_json::to_vec(record.id()).map_err(|e| {
-                StorageError::Serialization(format!("Failed to serialize id: {}", e))
-            })?;
+            let pk = encode_record_key(&[], coll, record.id())?;
 
             // Check if exists in lock-free index
-            let exists = if let Some(col_idx) = self.lock_free_indexes.get(collection_name) {
+            let exists = if let Some(col_idx) = self.lock_free_indexes.get(collection_name.as_ref())
+            {
                 col_idx.iter().any(|field_entry| {
                     field_entry
                         .value()
@@ -6310,18 +6370,15 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     ///
     /// Uses lock-free DashMap for concurrent access.
     pub async fn count<T: Indexed + Collection>(&self) -> Result<usize, StorageError> {
-        let collection_name = std::any::type_name::<T>();
-
-        // Count unique primary keys from DashMap indexes
-        let mut unique_keys = std::collections::HashSet::new();
-        if let Some(col_idx) = self.lock_free_indexes.get(collection_name) {
-            for field_entry in col_idx.iter() {
-                for value_entry in field_entry.value().iter() {
-                    unique_keys.extend(value_entry.value().iter().cloned());
-                }
-            }
-        }
-        Ok(unique_keys.len())
+        // A key-only count of the collection's prefix: the in-memory indexes miss records
+        // that have no indexed field, and everything written before a restart; reading
+        // every value just to count them would make `count` a full scan.
+        let Some(coll) = self.catalog.lookup_for::<T>().await? else {
+            return Ok(0);
+        };
+        self.storage
+            .count_prefix(&collection_prefix(&[], coll))
+            .await
     }
 
     /// Get detailed index statistics for a collection
@@ -6401,11 +6458,11 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// # }
     /// ```
     pub async fn collection_stats<T: Collection>(&self) -> IndexStats {
-        let collection_name = std::any::type_name::<T>();
+        let collection_name = T::persisted_name();
         let indexes = self.indexes.read().await;
 
         indexes
-            .get(collection_name)
+            .get(collection_name.as_ref())
             .map(|idx| idx.stats())
             .unwrap_or_default()
     }
@@ -6768,19 +6825,12 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     pub async fn all<T: Indexed + Collection + DeserializeOwned>(
         &self,
     ) -> Result<Vec<T>, StorageError> {
-        let collection_name = std::any::type_name::<T>();
-
-        // Get all unique primary keys from DashMap (lock-free)
-        let mut primary_keys = std::collections::HashSet::new();
-        if let Some(col_idx) = self.lock_free_indexes.get(collection_name) {
-            for field_entry in col_idx.iter() {
-                for value_entry in field_entry.value().iter() {
-                    primary_keys.extend(value_entry.value().iter().cloned());
-                }
-            }
-        }
-
-        self.fetch_records(primary_keys.into_iter().collect()).await
+        Ok(self
+            .scan_collection::<T>()
+            .await?
+            .into_iter()
+            .map(|(_, record)| record)
+            .collect())
     }
 
     /// Sum a numeric field across all records
@@ -6852,25 +6902,15 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<T>, StorageError> {
-        let collection_name = std::any::type_name::<T>();
-
-        // Get all unique primary keys from DashMap (lock-free)
-        let mut all_keys = Vec::new();
-        if let Some(col_idx) = self.lock_free_indexes.get(collection_name) {
-            let mut seen = std::collections::HashSet::new();
-            for field_entry in col_idx.iter() {
-                for value_entry in field_entry.value().iter() {
-                    for key in value_entry.value().iter() {
-                        if seen.insert(key.clone()) {
-                            all_keys.push(key.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        let primary_keys: Vec<_> = all_keys.into_iter().skip(offset).take(limit).collect();
-        self.fetch_records(primary_keys).await
+        // Pages in stored-key order (by encoded id), so they are stable between calls.
+        Ok(self
+            .scan_collection::<T>()
+            .await?
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|(_, record)| record)
+            .collect())
     }
 
     /// Filter with pagination
@@ -6884,45 +6924,15 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         T: Indexed + Collection + DeserializeOwned,
         F: Fn(&T) -> bool,
     {
-        let collection_name = std::any::type_name::<T>();
-
-        // Get all unique primary keys from DashMap (lock-free)
-        let mut primary_keys = Vec::new();
-        if let Some(col_idx) = self.lock_free_indexes.get(collection_name) {
-            let mut seen = std::collections::HashSet::new();
-            for field_entry in col_idx.iter() {
-                for value_entry in field_entry.value().iter() {
-                    for key in value_entry.value().iter() {
-                        if seen.insert(key.clone()) {
-                            primary_keys.push(key.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut results = Vec::new();
-        let mut skipped = 0;
-
-        for pk in primary_keys {
-            if results.len() >= limit {
-                break;
-            }
-            if let Some(data) = self.storage.get(&pk).await? {
-                let record: T = serde_json::from_slice(&data).map_err(|e| {
-                    StorageError::Deserialization(format!("Failed to deserialize: {}", e))
-                })?;
-                if predicate(&record) {
-                    if skipped >= offset {
-                        results.push(record);
-                    } else {
-                        skipped += 1;
-                    }
-                }
-            }
-        }
-
-        Ok(results)
+        Ok(self
+            .scan_collection::<T>()
+            .await?
+            .into_iter()
+            .map(|(_, record)| record)
+            .filter(|record| predicate(record))
+            .skip(offset)
+            .take(limit)
+            .collect())
     }
 
     /// Query by field with pagination
@@ -6933,7 +6943,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<T>, StorageError> {
-        let collection_name = std::any::type_name::<T>();
+        let collection_name = T::persisted_name();
         let search_value = serde_json::to_vec(value).map_err(|e| {
             StorageError::Serialization(format!("Failed to serialize query value: {}", e))
         })?;
@@ -6941,7 +6951,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         let primary_keys: Vec<Vec<u8>> = {
             let indexes = self.indexes.read().await;
             indexes
-                .get(collection_name)
+                .get(collection_name.as_ref())
                 .map(|idx| {
                     idx.query(field, &search_value)
                         .into_iter()
@@ -7597,5 +7607,48 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    /// An adapter that can count keys but refuses to read values by prefix.
+    struct CountOnly(crate::storage::InMemoryAdapter);
+
+    #[async_trait::async_trait]
+    impl StorageAdapter for CountOnly {
+        async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+            self.0.get(key).await
+        }
+        async fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+            self.0.put(key, value).await
+        }
+        async fn delete(&self, key: &[u8]) -> Result<(), StorageError> {
+            self.0.delete(key).await
+        }
+        async fn scan_prefix(&self, _: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+            Err(StorageError::Internal("count must not read values".into()))
+        }
+        async fn count_prefix(&self, prefix: &[u8]) -> Result<usize, StorageError> {
+            self.0.count_prefix(prefix).await
+        }
+    }
+
+    /// Review M2: `count` counts keys (`count_prefix`) and never reads the collection's
+    /// values, and counts records with no indexed field too.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn count_is_key_only() {
+        let indexed =
+            IndexedStorage::new(Arc::new(CountOnly(crate::storage::InMemoryAdapter::new())));
+        assert_eq!(indexed.count::<Person>().await.unwrap(), 0);
+        for i in 0..5 {
+            indexed
+                .insert(&Person {
+                    id: i.to_string(),
+                    age: i,
+                    name: format!("p{i}"),
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(indexed.count::<Person>().await.unwrap(), 5);
+        assert_eq!(indexed.count::<TestUser>().await.unwrap(), 0);
     }
 }

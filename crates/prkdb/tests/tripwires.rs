@@ -8,7 +8,7 @@
 //! PRKDB_TRIPWIRE_CHILD set; the child prints `CHILD_RESULT=<value>`.
 
 use prkdb::indexed_storage::IndexedStorage;
-use prkdb::storage::{InMemoryAdapter, WalStorageAdapter};
+use prkdb::storage::WalStorageAdapter;
 use prkdb_core::wal::WalConfig;
 use prkdb_macros::Collection;
 use prkdb_types::storage::StorageAdapter;
@@ -108,30 +108,58 @@ struct TwProject {
     name: String,
 }
 
-/// KEY-01: two collections with the same id overwrite each other.
-#[tokio::test]
-async fn key01_collections_share_primary_keys_tripwire() {
-    let db = IndexedStorage::new(Arc::new(InMemoryAdapter::new()));
-    db.insert(&TwUser {
-        id: 1,
-        name: "Alice".into(),
-    })
-    .await
-    .unwrap();
-    db.insert(&TwProject {
-        id: 1,
-        name: "Project".into(),
-    })
-    .await
-    .unwrap();
-    // Match rather than unwrap the result chain: a fix that makes `get` return an
-    // error or `None` for the colliding id (instead of quietly returning the
-    // wrong record) should also read as "fixed" here, not panic with an
-    // unrelated unwrap failure.
-    match db.get::<TwUser>(&1).await {
-        Ok(Some(user)) if user.name == "Project" => {}
-        other => panic!("KEY-01 appears fixed: invert this tripwire (got {other:?})"),
+/// KEY-01 regression (was the tripwire): same id in two collections, through get,
+/// query, delete and a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn key01_collections_with_same_id_are_independent() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = IndexedStorage::new(Arc::new(
+            WalStorageAdapter::new(wal_config(dir.path())).unwrap(),
+        ));
+        db.insert(&TwUser {
+            id: 1,
+            name: "Alice".into(),
+        })
+        .await
+        .unwrap();
+        db.insert(&TwProject {
+            id: 1,
+            name: "Project".into(),
+        })
+        .await
+        .unwrap();
+        assert_eq!(db.get::<TwUser>(&1).await.unwrap().unwrap().name, "Alice");
+        assert_eq!(
+            db.get::<TwProject>(&1).await.unwrap().unwrap().name,
+            "Project"
+        );
+        assert_eq!(
+            db.query_by::<TwUser>("name", &"Alice").await.unwrap().len(),
+            1
+        );
+        assert!(db
+            .query_by::<TwUser>("name", &"Project")
+            .await
+            .unwrap()
+            .is_empty());
+        db.delete(&TwProject {
+            id: 1,
+            name: "Project".into(),
+        })
+        .await
+        .unwrap();
+        assert!(db.get::<TwProject>(&1).await.unwrap().is_none());
+        assert_eq!(db.get::<TwUser>(&1).await.unwrap().unwrap().name, "Alice");
+        db.inner().flush().await.unwrap();
     }
+    let db = IndexedStorage::new(Arc::new(
+        WalStorageAdapter::open_async(wal_config(dir.path()))
+            .await
+            .unwrap(),
+    ));
+    assert_eq!(db.get::<TwUser>(&1).await.unwrap().unwrap().name, "Alice");
+    assert!(db.get::<TwProject>(&1).await.unwrap().is_none());
 }
 
 /// KEY-03 regression (was the tripwire): a key's partition is the same in every process.

@@ -1,61 +1,53 @@
 use super::wal_adapter::WalStorageAdapter;
+use crate::catalog::Catalog;
+use crate::keys::{collection_prefix, decode_key, encode_key};
 use dashmap::DashMap;
 use prkdb_core::wal::WalConfig;
 use prkdb_metrics::storage::StorageMetrics;
 use prkdb_types::error::StorageError;
-use prkdb_types::snapshot::{CompressionType, SnapshotHeader};
-use prkdb_types::storage::StorageAdapter;
+use prkdb_types::replication::Change;
+use prkdb_types::snapshot::CompressionType;
+use prkdb_types::storage::{StorageAdapter, WritePathHealth};
 
-use super::snapshot::SnapshotWriter;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{info, instrument};
 
-/// Collection-Level Partitioned Storage Adapter
+/// The storage adapter `PrkDb::builder().with_data_dir(..)` builds: one globally ordered
+/// WAL for the whole data directory, with a per-collection routing API on top.
 ///
-/// This adapter creates independent WAL instances for each collection,
-/// enabling true parallel writes across collections. This is the proven
-/// approach used by Kafka (topics), Cassandra (column families), etc.
+/// # One WAL per data directory (D11)
 ///
-/// # Architecture
-/// ```text
-/// ┌──────────────────────────────────────────┐
-/// │  CollectionPartitionedAdapter            │
-/// │  ┌────────────┐  ┌────────────┐         │
-/// │  │ Users WAL  │  │ Orders WAL │  ...    │
-/// │  │ + Cache    │  │ + Cache    │         │
-/// │  │ + Index    │  │ + Index    │         │
-/// │  └────────────┘  └────────────┘         │
-/// │       ↓                ↓                 │
-/// │  Parallel!        Parallel!             │
-/// └──────────────────────────────────────────┘
-/// ```
+/// Every collection is stored in the one `WalStorageAdapter` opened at the data
+/// directory root. There are no per-collection logs: one log gives one global commit
+/// order, atomic writes across collections, and one recovery path (spec 2a). A collection
+/// is part of a record's key, built by one private helper (`collection_key`) with the key
+/// codec (`crate::keys`, KEY-01) and this adapter's collection catalog; it is never
+/// recovered by splitting a key at a delimiter.
+///
+/// # API
+///
+/// The [`StorageAdapter`] methods forward to the inner adapter unchanged, so keys written
+/// through the trait are stored exactly as given. The routing methods
+/// (`get_from_collection`, `put_to_collection`, …) take the collection explicitly (a
+/// persisted name, `^[a-z][a-z0-9_]{0,63}$`) and build the stored key from it in the
+/// empty namespace, the same key an `IndexedStorage` over this adapter writes for that
+/// collection. They exist so callers can name a collection and get per-collection
+/// metrics.
 ///
 /// # Performance
 ///
-/// Writes to different collections do not contend, so throughput is expected to scale
-/// with collection count. **That expectation is unmeasured** — the per-collection figures
-/// previously given here were unverified, from no benchmark in this repository. See
+/// One writer with group commit. The throughput figures previously given here were
+/// unverified, from no benchmark in this repository. See
 /// `docs/benchmarks/methodology.md`.
-///
-/// # Key Benefits
-/// - ✅ Zero cross-collection coordination overhead
-/// - ✅ Linear scaling with collection count
-/// - ✅ Parallel cross-collection reads
-/// - ✅ Natural isolation and organization
-/// - ✅ Works seamlessly with Raft transactions
 pub struct CollectionPartitionedAdapter {
-    /// Map: collection_name -> WalStorageAdapter
-    /// Uses DashMap for lock-free concurrent access
-    collections: Arc<DashMap<String, Arc<WalStorageAdapter>>>,
+    /// The one WAL of this data directory, at its root.
+    inner: Arc<WalStorageAdapter>,
 
-    /// Base directory for all collections
-    /// Structure: base_dir/collections/{collection_name}/wal
-    base_dir: PathBuf,
-
-    /// Template config for creating new collections
-    base_config: WalConfig,
+    /// Collection ids (empty namespace) over `inner`, allocating under `inner`'s lock, so
+    /// it agrees with every other catalog over this storage.
+    catalog: Catalog,
 
     /// Aggregated metrics across all collections
     metrics: Arc<AggregatedMetrics>,
@@ -103,250 +95,117 @@ impl AggregatedMetrics {
     }
 }
 
-/// Restore the `collection:` prefix a per-collection adapter strips.
-///
-/// Without this a follower would receive `alice` where the leader wrote `users:alice`, and
-/// replay it into whatever collection the bare key happened to parse as.
-fn prefix_change(
-    collection: &str,
-    change: prkdb_types::replication::Change,
-) -> prkdb_types::replication::Change {
-    use prkdb_types::replication::Change;
-
-    let prefixed = |key: Vec<u8>| {
-        let mut full = Vec::with_capacity(collection.len() + 1 + key.len());
-        full.extend_from_slice(collection.as_bytes());
-        full.push(b':');
-        full.extend_from_slice(&key);
-        full
-    };
-
-    match change {
-        Change::Put {
-            key,
-            value,
-            version,
-        } => Change::Put {
-            key: prefixed(key),
-            value,
-            version,
-        },
-        Change::Delete { key, version } => Change::Delete {
-            key: prefixed(key),
-            version,
-        },
-    }
-}
-
-/// The collection both bounds name, when they name the same one.
-///
-/// # Why this is a free function with its own tests
-///
-/// Inside `scan_range` this is a pure optimisation: every candidate row is filtered
-/// against the original bounds afterwards, so a detector that wrongly returns `None` only
-/// costs work — the rows come out the same. That makes it invisible from the outside, and
-/// mutants on either `position` call survived the entire suite (run 31362753534, shard 8)
-/// for exactly that reason. Testing `scan_range` cannot distinguish a broken detector
-/// from a working one; testing the detector can.
-///
-/// The one direction that *is* observable is a wrong `Some`, which skips collections
-/// holding matching rows — covered both here and by
-/// `a_range_spanning_collections_returns_rows_from_each`.
-fn single_collection_bound(start: &[u8], end: &[u8]) -> Option<Vec<u8>> {
-    match (
-        start.iter().position(|b| *b == b':'),
-        end.iter().position(|b| *b == b':'),
-    ) {
-        (Some(a), Some(b)) if start[..a] == end[..b] => Some(start[..a].to_vec()),
-        _ => None,
-    }
-}
-
 impl CollectionPartitionedAdapter {
-    /// Create a new collection-partitioned adapter
+    /// Open (or create) the data directory at `config.log_dir`.
+    ///
+    /// The directory's format is checked by the inner adapter's open rules: a pre-D11
+    /// layout (a `collections/` directory and no `FORMAT`) is refused as format 1, never
+    /// opened as an empty database. Every open error is returned, none panics.
     #[instrument(skip(config), fields(base_dir = %config.log_dir.display()))]
     pub fn new(config: WalConfig) -> Result<Self, StorageError> {
-        let base_dir = config.log_dir.clone();
-
-        // Create collections directory
-        let collections_dir = base_dir.join("collections");
-
-        // Every collection directory is its own data directory until Task 2.9b moves them
-        // onto one WAL. Refuse an old one here, up front: the lazy per-collection open
-        // would otherwise only find it on first access, where it panics.
-        if collections_dir.is_dir() {
-            let entries = std::fs::read_dir(&collections_dir).map_err(|e| {
-                StorageError::Internal(format!("{}: {e}", collections_dir.display()))
-            })?;
-            for entry in entries {
-                let path = entry
-                    .map_err(|e| {
-                        StorageError::Internal(format!("{}: {e}", collections_dir.display()))
-                    })?
-                    .path();
-                if path.is_dir() {
-                    super::format::check_format(&prkdb_core::vfs::StdVfs, &path)?;
-                }
-            }
-        }
-        std::fs::create_dir_all(&collections_dir).map_err(|e| {
-            StorageError::Internal(format!("Failed to create collections dir: {}", e))
-        })?;
-
-        info!("Initialized CollectionPartitionedAdapter at {:?}", base_dir);
+        let inner = Arc::new(WalStorageAdapter::new(config.clone())?);
+        info!(
+            "Initialized CollectionPartitionedAdapter at {:?}",
+            config.log_dir
+        );
 
         Ok(Self {
-            collections: Arc::new(DashMap::new()),
-            base_dir,
-            base_config: config,
+            catalog: Catalog::new(inner.clone(), Vec::new()),
+            inner,
             metrics: Arc::new(AggregatedMetrics::new()),
             collection_sizes: Arc::new(DashMap::new()),
         })
     }
 
-    /// Get or create a collection's WAL adapter
-    ///
-    /// This is lazy - collections are only created when first accessed.
-    /// Uses DashMap for lock-free concurrent access.
-    ///
-    /// Opens a new collection on the blocking pool: the open replays its log.
-    #[instrument(skip(self), fields(collection = %collection_name))]
-    async fn get_or_create_collection_async(
+    /// The stored key of `key` in `collection`: the key codec over the empty namespace and
+    /// the collection's catalog id, allocated on first use (so this is for writes).
+    async fn collection_key(&self, collection: &str, key: &[u8]) -> Result<Vec<u8>, StorageError> {
+        encode_key(&[], self.catalog.id_for_name(collection).await?, key)
+    }
+
+    /// As `collection_key` for reads: `None` if `collection` was never written.
+    async fn existing_key(
         &self,
-        collection_name: &str,
-    ) -> Arc<WalStorageAdapter> {
-        // Fast path: check if collection already exists
-        if let Some(adapter) = self.collections.get(collection_name) {
-            return adapter.clone();
+        collection: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        match self.catalog.lookup(collection).await? {
+            Some(coll) => Ok(Some(encode_key(&[], coll, key)?)),
+            None => Ok(None),
         }
+    }
 
-        // Slow path: need to create collection
-        info!("Creating new collection WAL: {}", collection_name);
+    /// The collection a trait-path key belongs to, for metrics only: the catalog's name for
+    /// the collection id the key codec decodes, when the key is a codec key in this
+    /// adapter's (empty) namespace. Anything else counts toward the totals only.
+    async fn collection_of(&self, key: &[u8]) -> Option<String> {
+        let (ns, coll, _) = decode_key(key).ok()?;
+        if !ns.is_empty() || coll == crate::keys::SYSTEM_COLLECTION {
+            return None;
+        }
+        self.catalog.name_for(coll).await.ok().flatten()
+    }
 
-        // Each collection gets its own directory
-        let collection_dir = self.base_dir.join("collections").join(collection_name);
-        let collection_config = WalConfig {
-            log_dir: collection_dir,
-            ..self.base_config.clone()
-        };
-
-        // On the blocking pool because opening replays the collection's whole log, which can
-        // be long; `WalStorageAdapter::new` itself no longer needs a runtime (Task 2.8a).
-        let adapter = tokio::task::spawn_blocking(move || {
-            Arc::new(
-                WalStorageAdapter::new(collection_config).expect("Failed to create collection WAL"),
-            )
-        })
-        .await
-        .expect("spawn_blocking failed");
-
-        // Insert into collections map (may race with another insert, which is fine)
-        let adapter = self
-            .collections
-            .entry(collection_name.to_string())
-            .or_insert(adapter)
-            .clone();
-
-        // Track metrics
-        self.metrics
-            .total_collections
-            .fetch_add(1, Ordering::Relaxed);
-
-        // Update active collections gauge for Grafana
-        let active_count = self.collections.len() as f64;
+    /// Record that `collection` has been seen, for `collection_names` and the metrics.
+    fn note_collection(&self, collection: &str) {
+        if self.metrics.per_collection_metrics.contains_key(collection) {
+            return;
+        }
+        let inserted = self
+            .metrics
+            .per_collection_metrics
+            .entry(collection.to_string())
+            .or_insert_with(|| {
+                self.metrics
+                    .total_collections
+                    .fetch_add(1, Ordering::Relaxed);
+                Arc::new(StorageMetrics::new())
+            });
+        drop(inserted);
         crate::prometheus_metrics::COLLECTIONS_ACTIVE
             .with_label_values(&["local"])
-            .set(active_count);
-
-        self.metrics
-            .per_collection_metrics
-            .insert(collection_name.to_string(), Arc::new(StorageMetrics::new()));
-
-        adapter
+            .set(self.metrics.per_collection_metrics.len() as f64);
     }
 
-    /// Names of every collection that exists on disk, whether or not it has been opened
-    /// in this process.
-    ///
-    /// Collections are created lazily on first access, so after a restart the in-memory
-    /// map is empty even though `collections/` is full. Anything that operates on the
-    /// whole database — a backup, most obviously — has to consult the directory rather
-    /// than the map, or it silently sees nothing.
-    fn collection_names_on_disk(&self) -> Vec<String> {
-        let dir = self.base_dir.join("collections");
-        let mut names: Vec<String> = std::fs::read_dir(&dir)
+    /// Add `bytes` to `collection`'s approximate size.
+    fn track_size(&self, collection: &str, bytes: u64) {
+        let size_counter = self
+            .collection_sizes
+            .entry(collection.to_string())
+            .or_insert_with(|| AtomicU64::new(0));
+        let total = size_counter.fetch_add(bytes, Ordering::Relaxed) + bytes;
+        crate::prometheus_metrics::COLLECTION_SIZE_BYTES
+            .with_label_values(&["local", collection])
+            .set(total as f64);
+    }
+
+    /// Names of every collection the catalog has allocated in this data directory (empty
+    /// namespace), sorted, including those written before this process started.
+    pub async fn collection_names(&self) -> Result<Vec<String>, StorageError> {
+        Ok(self
+            .catalog
+            .list()
+            .await?
             .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|e| e.path().is_dir())
-            .filter_map(|e| e.file_name().into_string().ok())
-            .collect();
-
-        // A collection created in this process may not have been flushed to a directory
-        // yet, so union rather than replace.
-        for entry in self.collections.iter() {
-            if !names.contains(entry.key()) {
-                names.push(entry.key().clone());
-            }
-        }
-        names.sort();
-        names.dedup();
-        names
+            .map(|(name, _)| name)
+            .collect())
     }
 
-    /// Materialise an adapter for every collection on disk.
-    ///
-    /// Returns the full set, so callers that need to touch all data can work from it.
-    pub async fn load_all_collections(&self) -> Vec<(String, Arc<WalStorageAdapter>)> {
-        let mut loaded = Vec::new();
-        for name in self.collection_names_on_disk() {
-            let adapter = self.get_or_create_collection_async(&name).await;
-            loaded.push((name, adapter));
-        }
-        loaded
-    }
-
-    /// Parse a key into (collection_name, actual_key)
-    ///
-    /// Key format: "{collection_name}:{actual_key}" (binary safe)
-    /// Example: b"users:johndoe" -> ("users", b"johndoe")
-    ///
-    /// Note: Uses ':' (0x3A) as delimiter. First occurrence splits collection from key.
-    fn parse_collection_key(&self, key: &[u8]) -> Result<(String, Vec<u8>), StorageError> {
-        // Find first ':' byte
-        let delimiter_pos = key.iter().position(|&b| b == b':').ok_or_else(|| {
-            StorageError::Internal(format!(
-                "Key must contain ':' delimiter, got {} bytes",
-                key.len()
-            ))
-        })?;
-
-        // Split at delimiter
-        let collection_bytes = &key[..delimiter_pos];
-        let actual_key = &key[delimiter_pos + 1..];
-
-        // Collection name must be valid UTF-8, but actual key can be binary
-        let collection = std::str::from_utf8(collection_bytes)
-            .map_err(|e| {
-                StorageError::Internal(format!("Collection name must be valid UTF-8: {}", e))
-            })?
-            .to_string();
-
-        Ok((collection, actual_key.to_vec()))
-    }
-
-    /// Get from a specific collection (direct API, no key parsing)
+    /// Get from a specific collection.
     pub async fn get_from_collection(
         &self,
         collection: &str,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, StorageError> {
         self.metrics.total_reads.fetch_add(1, Ordering::Relaxed);
-        let adapter = self.get_or_create_collection_async(collection).await;
-        adapter.get(key).await
+        self.note_collection(collection);
+        match self.existing_key(collection, key).await? {
+            Some(full) => self.inner.get(&full).await,
+            None => Ok(None),
+        }
     }
 
-    /// Put to a specific collection (direct API, no key parsing)
+    /// Put to a specific collection.
     pub async fn put_to_collection(
         &self,
         collection: &str,
@@ -354,21 +213,27 @@ impl CollectionPartitionedAdapter {
         value: &[u8],
     ) -> Result<(), StorageError> {
         self.metrics.total_writes.fetch_add(1, Ordering::Relaxed);
-        let adapter = self.get_or_create_collection_async(collection).await;
-        adapter.put(key, value).await
+        self.note_collection(collection);
+        let full = self.collection_key(collection, key).await?;
+        self.inner.put(&full, value).await?;
+        self.track_size(collection, value.len() as u64);
+        Ok(())
     }
 
-    /// Delete from a specific collection (direct API, no key parsing)
+    /// Delete from a specific collection.
     pub async fn delete_from_collection(
         &self,
         collection: &str,
         key: &[u8],
     ) -> Result<(), StorageError> {
-        let adapter = self.get_or_create_collection_async(collection).await;
-        adapter.delete(key).await
+        self.note_collection(collection);
+        match self.existing_key(collection, key).await? {
+            Some(full) => self.inner.delete(&full).await,
+            None => Ok(()),
+        }
     }
 
-    /// Batch put to a specific collection (direct API)
+    /// Batch put to a specific collection: one inner `put_batch`, so one frame.
     pub async fn put_batch_to_collection(
         &self,
         collection: &str,
@@ -377,13 +242,19 @@ impl CollectionPartitionedAdapter {
         self.metrics
             .total_writes
             .fetch_add(entries.len() as u64, Ordering::Relaxed);
-        let adapter = self.get_or_create_collection_async(collection).await;
-        adapter.put_batch(entries).await
+        self.note_collection(collection);
+        let bytes: u64 = entries.iter().map(|(_, v)| v.len() as u64).sum();
+        let coll = self.catalog.id_for_name(collection).await?;
+        let entries = entries
+            .into_iter()
+            .map(|(key, value)| Ok((encode_key(&[], coll, &key)?, value)))
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        self.inner.put_batch(entries).await?;
+        self.track_size(collection, bytes);
+        Ok(())
     }
 
-    /// Multi-collection parallel get
-    ///
-    /// Reads from multiple collections in parallel for maximum throughput.
+    /// Read one key from each of several collections.
     ///
     /// # Example
     /// ```no_run
@@ -396,7 +267,6 @@ impl CollectionPartitionedAdapter {
     ///     ("products".to_string(), b"prod_456".to_vec()),
     /// ];
     ///
-    /// // All 3 reads happen in PARALLEL!
     /// let results = adapter.multi_collection_get(queries).await?;
     /// # Ok(())
     /// # }
@@ -405,41 +275,42 @@ impl CollectionPartitionedAdapter {
         &self,
         queries: Vec<(String, Vec<u8>)>,
     ) -> Result<Vec<Option<Vec<u8>>>, StorageError> {
-        let futures: Vec<_> = queries
-            .into_iter()
-            .map(|(collection, key)| async move {
-                let adapter = self.get_or_create_collection_async(&collection).await;
-                adapter.get(&key).await
-            })
-            .collect();
-
-        futures::future::try_join_all(futures).await
+        let mut results = Vec::with_capacity(queries.len());
+        for (collection, key) in queries {
+            results.push(self.get_from_collection(&collection, &key).await?);
+        }
+        Ok(results)
     }
 
     /// Get metrics for all collections
     pub fn get_metrics(&self) -> &AggregatedMetrics {
         &self.metrics
     }
+
+    /// Attribute a trait-path write to its collection, when it is known.
+    async fn track_trait_write(&self, key: &[u8], bytes: u64) {
+        if let Some(collection) = self.collection_of(key).await {
+            self.note_collection(&collection);
+            self.track_size(&collection, bytes);
+        }
+    }
 }
 
-/// Implement StorageAdapter trait for backwards compatibility
+/// Every method forwards to the one inner WAL adapter, with no key parsing.
 ///
-/// This allows CollectionPartitionedAdapter to be used anywhere
-/// WalStorageAdapter is used, with keys in "collection:key" format.
+/// `scripts/check_wrapper_completeness.sh` checks that every method the inner adapter
+/// implements is forwarded here: an inherited default would refuse at runtime (S-04,
+/// S-05, S-07, S-08).
 #[async_trait::async_trait]
 impl StorageAdapter for CollectionPartitionedAdapter {
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         let start = std::time::Instant::now();
-        let (collection, actual_key) = self.parse_collection_key(key)?;
-        let result = self.get_from_collection(&collection, &actual_key).await;
+        self.metrics.total_reads.fetch_add(1, Ordering::Relaxed);
+        let result = self.inner.get(key).await;
 
-        // Track metrics
-        let duration = start.elapsed().as_secs_f64();
         crate::prometheus_metrics::OPERATION_DURATION
             .with_label_values(&["local", "read"])
-            .observe(duration);
-
-        // Track cache hit/miss (heuristic: Some = hit, None = miss)
+            .observe(start.elapsed().as_secs_f64());
         if let Ok(entry) = &result {
             if entry.is_some() {
                 crate::prometheus_metrics::CACHE_HITS_TOTAL
@@ -451,479 +322,308 @@ impl StorageAdapter for CollectionPartitionedAdapter {
                     .inc();
             }
         }
-
         result
     }
 
     async fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
         let start = std::time::Instant::now();
-        let (collection, actual_key) = self.parse_collection_key(key)?;
-        let result = self
-            .put_to_collection(&collection, &actual_key, value)
-            .await;
+        self.metrics.total_writes.fetch_add(1, Ordering::Relaxed);
+        let result = self.inner.put(key, value).await;
 
-        // Track metrics
-        let duration = start.elapsed().as_secs_f64();
         crate::prometheus_metrics::OPERATION_DURATION
             .with_label_values(&["local", "write"])
-            .observe(duration);
-
-        // Track collection size (approximate - adds value size)
+            .observe(start.elapsed().as_secs_f64());
         if result.is_ok() {
-            let size_bytes = value.len() as u64;
-            let size_counter = self
-                .collection_sizes
-                .entry(collection.clone())
-                .or_insert_with(|| AtomicU64::new(0));
-            size_counter.fetch_add(size_bytes, Ordering::Relaxed);
-
-            // Update Prometheus metric
-            let total_size = size_counter.load(Ordering::Relaxed) as f64;
-            crate::prometheus_metrics::COLLECTION_SIZE_BYTES
-                .with_label_values(&["local", &collection])
-                .set(total_size);
+            self.track_trait_write(key, value.len() as u64).await;
         }
-
         result
+    }
+
+    async fn put_batch(&self, entries: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), StorageError> {
+        self.metrics
+            .total_writes
+            .fetch_add(entries.len() as u64, Ordering::Relaxed);
+        let sizes: Vec<(Vec<u8>, u64)> = entries
+            .iter()
+            .map(|(k, v)| (k.clone(), v.len() as u64))
+            .collect();
+        self.inner.put_batch(entries).await?;
+        for (key, bytes) in sizes {
+            self.track_trait_write(&key, bytes).await;
+        }
+        Ok(())
+    }
+
+    async fn put_many(&self, items: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), StorageError> {
+        self.metrics
+            .total_writes
+            .fetch_add(items.len() as u64, Ordering::Relaxed);
+        self.inner.put_many(items).await
+    }
+
+    async fn get_many(&self, keys: Vec<Vec<u8>>) -> Result<Vec<Option<Vec<u8>>>, StorageError> {
+        self.metrics
+            .total_reads
+            .fetch_add(keys.len() as u64, Ordering::Relaxed);
+        self.inner.get_many(keys).await
     }
 
     async fn delete(&self, key: &[u8]) -> Result<(), StorageError> {
         let start = std::time::Instant::now();
-        let (collection, actual_key) = self.parse_collection_key(key)?;
-        let result = self.delete_from_collection(&collection, &actual_key).await;
-
-        // Track metrics
-        let duration = start.elapsed().as_secs_f64();
+        let result = self.inner.delete(key).await;
         crate::prometheus_metrics::OPERATION_DURATION
             .with_label_values(&["local", "delete"])
-            .observe(duration);
-
+            .observe(start.elapsed().as_secs_f64());
         result
     }
 
+    async fn delete_many(&self, keys: Vec<Vec<u8>>) -> Result<(), StorageError> {
+        self.inner.delete_many(keys).await
+    }
+
     async fn flush(&self) -> Result<(), StorageError> {
-        let adapters: Vec<_> = self
-            .collections
-            .iter()
-            .map(|entry| entry.value().clone())
-            .collect();
-
-        for adapter in adapters {
-            adapter.flush().await?;
-        }
-
-        Ok(())
+        StorageAdapter::flush(self.inner.as_ref()).await
     }
 
-    async fn put_batch(&self, entries: Vec<(Vec<u8>, Vec<u8>)>) -> Result<(), StorageError> {
-        // Group entries by collection for maximum parallelism
-        let mut collection_batches: std::collections::HashMap<String, Vec<(Vec<u8>, Vec<u8>)>> =
-            std::collections::HashMap::new();
-
-        for (key, value) in entries {
-            let (collection, actual_key) = self.parse_collection_key(&key)?;
-            collection_batches
-                .entry(collection)
-                .or_default()
-                .push((actual_key, value));
-        }
-
-        // Write to all collections in PARALLEL! (This is the magic!)
-        let futures: Vec<_> = collection_batches
-            .into_iter()
-            .map(|(collection, batch)| async move {
-                let adapter = self.get_or_create_collection_async(&collection).await;
-                adapter.put_batch(batch).await
-            })
-            .collect();
-
-        futures::future::try_join_all(futures).await?;
-        Ok(())
-    }
-
-    // Outbox methods - provide default implementations
-    async fn outbox_save(&self, _id: &str, _payload: &[u8]) -> Result<(), StorageError> {
-        // Not heavily used in examples -  return OK for compatibility
-        Ok(())
+    /// Until Task 2.19 the outbox is the inner adapter's memory-only map, as for
+    /// `WalStorageAdapter`; it is no longer dropped.
+    async fn outbox_save(&self, id: &str, payload: &[u8]) -> Result<(), StorageError> {
+        self.inner.outbox_save(id, payload).await
     }
 
     async fn outbox_list(&self) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
-        // Return empty list
-        Ok(Vec::new())
+        self.inner.outbox_list().await
     }
 
-    async fn outbox_remove(&self, _id: &str) -> Result<(), StorageError> {
-        // Not heavily used - return OK
-        Ok(())
+    async fn outbox_remove(&self, id: &str) -> Result<(), StorageError> {
+        self.inner.outbox_remove(id).await
     }
 
+    /// One frame for the record and its outbox entry, so atomic.
     async fn put_with_outbox(
         &self,
         key: &[u8],
         value: &[u8],
-        _outbox_id: &str,
-        _outbox_payload: &[u8],
+        outbox_id: &str,
+        outbox_payload: &[u8],
     ) -> Result<(), StorageError> {
-        // Just do the put, ignore outbox for now
-        let (collection, actual_key) = self.parse_collection_key(key)?;
-        self.put_to_collection(&collection, &actual_key, value)
-            .await
+        self.metrics.total_writes.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .put_with_outbox(key, value, outbox_id, outbox_payload)
+            .await?;
+        self.track_trait_write(key, value.len() as u64).await;
+        Ok(())
     }
 
     async fn delete_with_outbox(
         &self,
         key: &[u8],
-        _outbox_id: &str,
-        _outbox_payload: &[u8],
+        outbox_id: &str,
+        outbox_payload: &[u8],
     ) -> Result<(), StorageError> {
-        // Just do the delete, ignore outbox for now
-        let (collection, actual_key) = self.parse_collection_key(key)?;
-        self.delete_from_collection(&collection, &actual_key).await
+        self.inner
+            .delete_with_outbox(key, outbox_id, outbox_payload)
+            .await
     }
 
-    /// Scan every key beginning with `prefix`, across collections.
-    ///
-    /// # Why this needs its own implementation
-    ///
-    /// Without it the trait default refuses with "scan_prefix not supported", and this is
-    /// the adapter `PrkDb::builder().with_data_dir()` constructs. That silently broke
-    /// anything built on prefix scans — `list_collections` returned an error, and
-    /// persisted principals could not be loaded — in exactly the way the missing
-    /// `take_snapshot` broke `prkdb backup` (S-04).
-    ///
-    /// # Routing
-    ///
-    /// Keys are `collection:id`. A prefix containing the delimiter therefore names one
-    /// collection and only that collection is scanned; a prefix without it may match any
-    /// collection name, so every collection is scanned and filtered. Results carry the
-    /// full `collection:id` key, matching what `get` and `put` accept.
     async fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
-        let collections = self.load_all_collections().await;
-        let split = prefix.iter().position(|b| *b == b':');
-
-        let mut out = Vec::new();
-        for (name, adapter) in collections {
-            let inner_prefix: Vec<u8> = match split {
-                Some(at) => {
-                    // The prefix names a collection; skip the others entirely.
-                    if prefix[..at] != *name.as_bytes() {
-                        continue;
-                    }
-                    prefix[at + 1..].to_vec()
-                }
-                // A partial collection name matches any collection it prefixes.
-                None => {
-                    if !name.as_bytes().starts_with(prefix) {
-                        continue;
-                    }
-                    Vec::new()
-                }
-            };
-
-            for (key, value) in adapter.scan_prefix(&inner_prefix).await? {
-                let mut full = Vec::with_capacity(name.len() + 1 + key.len());
-                full.extend_from_slice(name.as_bytes());
-                full.push(b':');
-                full.extend_from_slice(&key);
-                out.push((full, value));
-            }
-        }
-
-        // Callers that page or diff results need a stable order; per-collection iteration
-        // order is not one.
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(out)
+        self.inner.scan_prefix(prefix).await
     }
 
-    /// Scan the half-open key range `[start, end)`, across collections.
-    ///
-    /// The fourth method this wrapper was missing, after `take_snapshot` (S-04),
-    /// collection discovery (S-05) and `scan_prefix` (S-07). `WalStorageAdapter` implements
-    /// it; the wrapper fell through to the trait default that refuses, so
-    /// `CollectionHandle::scan_range_by_id_bytes` — public API — failed on every database
-    /// opened with `--database`.
-    ///
-    /// # Routing
-    ///
-    /// Bounds are full `collection:id` keys. Rather than reason about which collections a
-    /// range spans — `orders:z` to `users:a` covers every collection in between, and
-    /// collection names are arbitrary — each collection is scanned for its own slice of
-    /// the range and the results are filtered against the original bounds. Correct by
-    /// construction, at the cost of touching every collection; ranges that name one
-    /// collection on both sides are the common case and are narrowed first.
+    async fn count_prefix(&self, prefix: &[u8]) -> Result<usize, StorageError> {
+        self.inner.count_prefix(prefix).await
+    }
+
     async fn scan_range(
         &self,
         start: &[u8],
         end: &[u8],
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
-        let collections = self.load_all_collections().await;
-        let single_collection = single_collection_bound(start, end);
-
-        let mut out = Vec::new();
-        for (name, adapter) in collections {
-            if let Some(only) = &single_collection {
-                if name.as_bytes() != only.as_slice() {
-                    continue;
-                }
-            }
-
-            // Scan the whole collection and filter: the inner adapter's range is over
-            // *its* keys, which have the collection prefix stripped, so translating the
-            // bounds per collection would need a case for every way a bound can fall
-            // inside, outside, or across the prefix.
-            for (key, value) in adapter.scan_prefix(b"").await? {
-                let mut full = Vec::with_capacity(name.len() + 1 + key.len());
-                full.extend_from_slice(name.as_bytes());
-                full.push(b':');
-                full.extend_from_slice(&key);
-
-                if full.as_slice() >= start && full.as_slice() < end {
-                    out.push((full, value));
-                }
-            }
-        }
-
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(out)
+        self.inner.scan_range(start, end).await
     }
 
-    /// Changes after `offset`, for replication.
-    ///
-    /// # Why this is not simply a merge (S-09)
-    ///
-    /// The cursor is a `u64` WAL offset, and this adapter holds one independent WAL per
-    /// collection. Two collections both number their first record 1, so an offset does not
-    /// identify a position across them — and no ordering recovers one:
-    ///
-    /// - **By offset**: collides. Collection `a` offset 5 and collection `b` offset 5 are
-    ///   unrelated events.
-    /// - **By (collection, offset), cursor as an index**: a collection created later
-    ///   receives low offsets and inserts into the middle of the sequence, shifting every
-    ///   position after it. An outstanding cursor then skips or repeats changes — silent
-    ///   data loss during replication, which is the class of bug this work exists to
-    ///   remove.
-    /// - **By `LogRecord::timestamp`**: wall clock, not monotonic, and collides at
-    ///   millisecond granularity.
-    ///
-    /// A general solution needs a monotonic sequence assigned by *this* adapter at write
-    /// time and persisted with each record. That is a WAL format change and would not
-    /// recover history written before it, so it is not attempted here.
-    ///
-    /// # What is implemented
-    ///
-    /// A single-collection database has exactly one WAL, so the cursor is unambiguous and
-    /// the call delegates. That is the common shape for a replicated collection, and it is
-    /// the case `fetch_segment` is usually asked about.
-    ///
-    /// More than one collection is refused, naming the collections and the reason. It used
-    /// to return "not supported" via the trait default, and `fetch_segment` swallowed that
-    /// and streamed an empty successful response — so a follower concluded there was
-    /// nothing to replicate.
-    async fn get_changes_since(
-        &self,
-        offset: u64,
-    ) -> Result<Vec<prkdb_types::replication::Change>, StorageError> {
-        let collections = self.load_all_collections().await;
-
-        match collections.len() {
-            0 => Ok(Vec::new()),
-            1 => collections[0].1.get_changes_since(offset).await,
-            n => {
-                let mut names: Vec<&str> = collections.iter().map(|(k, _)| k.as_str()).collect();
-                names.sort();
-                Err(StorageError::BackendError(format!(
-                    "get_changes_since is not defined across {n} collections ({}): each has \
-                     an independent WAL whose offsets start at 1, so a single u64 cursor \
-                     cannot address a position across them. Replicate a single-collection \
-                     database, or see spec S-09 for what a general cursor would require.",
-                    names.join(", ")
-                )))
-            }
-        }
+    /// Every change after `offset`, across collections, in commit order: one log has one
+    /// order, so the cursor is unambiguous (the old refusal, spec S-09, is gone).
+    async fn get_changes_since(&self, offset: u64) -> Result<Vec<Change>, StorageError> {
+        self.inner.get_changes_since(offset).await
     }
 
-    /// Changes after `offset` within one collection.
-    ///
-    /// This is the call that makes replication of a multi-collection database possible.
-    /// `get_changes_since` cannot be: it takes a bare offset, and each collection here has
-    /// its own log numbering from 1, so the cursor is ambiguous. Naming the collection
-    /// resolves it, and `fetch_segment` carries the name for exactly that reason.
-    ///
-    /// An unknown collection returns no changes rather than an error: a follower asking
-    /// about a collection that has not been created yet is early, not wrong.
+    /// The changes after `offset` (the global log cursor) whose keys belong to
+    /// `collection`: those under the collection's key-codec prefix, which every
+    /// routing-API key (and every `IndexedStorage` key) for it starts with. Selected by
+    /// that prefix, never by parsing a key. An unknown collection has no changes; an empty
+    /// name means every collection (the bare cursor, as the trait default and
+    /// `FetchSegment` define it).
     async fn changes_in_collection(
         &self,
         collection: &str,
         offset: u64,
-    ) -> Result<Vec<prkdb_types::replication::Change>, StorageError> {
-        let Some(adapter) = self
-            .load_all_collections()
-            .await
-            .into_iter()
-            .find(|(name, _)| name == collection)
-            .map(|(_, adapter)| adapter)
-        else {
+    ) -> Result<Vec<Change>, StorageError> {
+        if collection.is_empty() {
+            return self.inner.get_changes_since(offset).await;
+        }
+        let Some(coll) = self.catalog.lookup(collection).await? else {
             return Ok(Vec::new());
         };
-
-        // The inner adapter stores keys without the collection prefix, but a replication
-        // consumer must be able to apply what it receives — and `put` at this layer takes
-        // the full `collection:id` form. Re-prefix so a change can be replayed as-is.
-        let changes = adapter.get_changes_since(offset).await?;
-        Ok(changes
+        let prefix = collection_prefix(&[], coll);
+        Ok(self
+            .inner
+            .get_changes_since(offset)
+            .await?
             .into_iter()
-            .map(|change| prefix_change(collection, change))
+            .filter(|change| match change {
+                Change::Put { key, .. } | Change::Delete { key, .. } => key.starts_with(&prefix),
+            })
             .collect())
     }
 
-    /// Snapshot every collection into a single archive.
-    ///
-    /// Without this the trait default refuses with "take_snapshot not supported", which is
-    /// what `prkdb backup` did for every database opened with `--database` — this adapter
-    /// is what `PrkDb::builder().with_data_dir()` constructs. See S-04.
-    ///
-    /// # One archive, not one per collection
-    ///
-    /// Data is spread across one `WalStorageAdapter` per collection, so a snapshot has to
-    /// merge N sources. Entries are written under their **full `collection:key` form**,
-    /// which is what `get`/`put` take at this layer. Restore therefore needs no knowledge
-    /// of collections at all: it replays each entry through the public `put`, and the
-    /// normal routing in `parse_collection_key` puts it back where it came from.
-    ///
-    /// The alternative — an archive per collection — was rejected because it makes a
-    /// partial restore silently possible.
-    ///
-    /// # Consistency
-    ///
-    /// The read is not atomic across collections: a write landing mid-snapshot may or may
-    /// not be captured, and `max_offset` is the maximum over adapters rather than a single
-    /// consistent cut. The single-adapter implementation has the same property. It is
-    /// sound for `prkdb backup`, which opens the data directory offline with no other
-    /// writer. Do not treat the result as a consistent cut of a live cluster.
     async fn take_snapshot(
         &self,
         path: PathBuf,
         compression: CompressionType,
     ) -> Result<u64, StorageError> {
-        // Read from disk, not from the in-memory map: collections open lazily, so on a
-        // freshly opened database the map is empty and a snapshot built from it would
-        // succeed while containing nothing.
-        let collections = self.load_all_collections().await;
-
-        let mut max_offset = 0u64;
-        let mut planned: Vec<(String, Arc<WalStorageAdapter>, Vec<Vec<u8>>)> =
-            Vec::with_capacity(collections.len());
-        let mut count = 0u64;
-        for (name, adapter) in collections {
-            max_offset = max_offset.max(adapter.max_offset());
-            let keys = adapter.get_all_keys();
-            count += keys.len() as u64;
-            planned.push((name, adapter, keys));
-        }
-
-        info!(
-            "Starting merged snapshot: {} collections, {} keys, max_offset={}",
-            planned.len(),
-            count,
-            max_offset
-        );
-
-        // Same producer/consumer split as the single-adapter path: file I/O runs on a
-        // blocking thread so compression does not stall the runtime.
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<(Vec<u8>, Vec<u8>)>(1024);
-        let write_task = tokio::task::spawn_blocking(move || -> Result<(), StorageError> {
-            let header = SnapshotHeader::new(max_offset, count, compression);
-            let mut writer = SnapshotWriter::new(&path, header)?;
-            while let Some((key, val)) = rx.blocking_recv() {
-                writer.write_entry(&key, &val)?;
-            }
-            writer.finish()?;
-            Ok(())
-        });
-
-        for (name, adapter, keys) in planned {
-            for key in keys {
-                // A key deleted between planning and reading simply drops out; the header
-                // count is then an upper bound, which the reader tolerates.
-                if let Some(val) = adapter.get(&key).await? {
-                    let mut full_key = Vec::with_capacity(name.len() + 1 + key.len());
-                    full_key.extend_from_slice(name.as_bytes());
-                    full_key.push(b':');
-                    full_key.extend_from_slice(&key);
-
-                    if tx.send((full_key, val)).await.is_err() {
-                        return Err(StorageError::Internal(
-                            "Snapshot writer task failed".to_string(),
-                        ));
-                    }
-                }
-            }
-        }
-        drop(tx);
-
-        write_task
-            .await
-            .map_err(|e| StorageError::Internal(format!("Snapshot writer panicked: {}", e)))??;
-
-        Ok(max_offset)
+        StorageAdapter::take_snapshot(self.inner.as_ref(), path, compression).await
     }
 
-    /// Worst write-path health across every open collection.
-    ///
-    /// # Why the wrapper cannot inherit the default here
-    ///
-    /// The trait's default answers "not applicable", which is right for an adapter with no
-    /// background writer and wrong for this one — it owns one `WalStorageAdapter`, and
-    /// therefore one writer, per collection. Inheriting it would have a database with a
-    /// stalled writer report itself perfectly healthy, which is the same silently-inherited
-    /// default that produced S-04, S-05, S-07 and S-08 (see
-    /// `scripts/check_wrapper_completeness.sh`).
-    ///
-    /// Worst-across-all, not an average: one stalled collection means writes to it are not
-    /// being confirmed, and a probe that dilutes that against nine healthy collections is
-    /// reporting a number nobody can act on. Depths sum, because the memory they represent
-    /// does.
-    ///
-    /// Reads only collections already open in the map, deliberately: a probe must not open
-    /// files, and a collection that has never been touched has no writer to be stalled.
-    fn write_path_health(&self) -> prkdb_types::storage::WritePathHealth {
-        let mut worst = prkdb_types::storage::WritePathHealth::not_applicable();
-        let mut unhealthy: Vec<String> = Vec::new();
+    /// The inner adapter's lock, so this adapter's catalog, `PrkDb`'s and any
+    /// `IndexedStorage` over it all allocate under one lock.
+    fn allocation_lock(&self) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        self.inner.allocation_lock()
+    }
 
-        for entry in self.collections.iter() {
-            let health = entry.value().write_path_health();
-
-            worst.queue_depth += health.queue_depth;
-            worst.publishes_total += health.publishes_total;
-            worst.direct_appends_total += health.direct_appends_total;
-            worst.oldest_unpublished_age_ms = worst
-                .oldest_unpublished_age_ms
-                .max(health.oldest_unpublished_age_ms);
-            // The oldest last-publish wins: the collection that has gone longest without
-            // writing anything is the one worth reporting.
-            worst.last_publish_age_ms =
-                match (worst.last_publish_age_ms, health.last_publish_age_ms) {
-                    (Some(a), Some(b)) => Some(a.max(b)),
-                    (a, b) => a.or(b),
-                };
-
-            if let Some(reason) = health.reason {
-                unhealthy.push(format!("{}: {}", entry.key(), reason));
-            }
-        }
-
-        if !unhealthy.is_empty() {
-            worst.healthy = false;
-            worst.reason = Some(unhealthy.join("; "));
-        }
-
-        worst
+    /// The one writer's health.
+    fn write_path_health(&self) -> WritePathHealth {
+        self.inner.write_path_health()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keys::SYSTEM_COLLECTION;
+    use prkdb_types::replication::Change;
+
+    fn change_keys(changes: Vec<Change>) -> Vec<Vec<u8>> {
+        changes
+            .into_iter()
+            .map(|c| match c {
+                Change::Put { key, .. } | Change::Delete { key, .. } => key,
+            })
+            .collect()
+    }
+
+    /// Change keys without the catalog's own entries (collection ids are allocated in the
+    /// same log, on first use).
+    fn data_keys(changes: Vec<Change>) -> Vec<Vec<u8>> {
+        change_keys(changes)
+            .into_iter()
+            .filter(|k| !matches!(decode_key(k), Ok((ns, c, _)) if ns.is_empty() && c == SYSTEM_COLLECTION))
+            .collect()
+    }
+
+    /// The routing API's stored key for an existing collection.
+    async fn routed(db: &CollectionPartitionedAdapter, collection: &str, key: &[u8]) -> Vec<u8> {
+        db.existing_key(collection, key).await.unwrap().unwrap()
+    }
+
+    /// D11: every collection lands in the one WAL at the directory root, in one order.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_partitioned_directory_has_one_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = CollectionPartitionedAdapter::new(WalConfig {
+            log_dir: dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        })
+        .unwrap();
+        db.put_to_collection("users", b"1", b"alice").await.unwrap();
+        db.put(b"orders:1", b"book").await.unwrap();
+        db.put_to_collection("invoices", b"1", b"paid")
+            .await
+            .unwrap();
+        db.put_with_outbox(b"users:2", b"bob", "users:0:1", b"event")
+            .await
+            .unwrap();
+        db.flush().await.unwrap();
+
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert!(
+            entries.iter().all(|p| !p.is_dir()),
+            "no per-collection directories: {entries:?}"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|p| p.extension().is_some_and(|e| e == "wal")),
+            "{entries:?}"
+        );
+
+        let keys = data_keys(db.get_changes_since(0).await.unwrap());
+        assert_eq!(
+            keys,
+            vec![
+                routed(&db, "users", b"1").await,
+                b"orders:1".to_vec(),
+                routed(&db, "invoices", b"1").await,
+                b"users:2".to_vec()
+            ],
+            "one global commit order across collections"
+        );
+        assert_eq!(
+            db.outbox_list().await.unwrap(),
+            vec![("users:0:1".to_string(), b"event".to_vec())]
+        );
+    }
+
+    /// The pre-D11 layout is refused, not opened as an empty database.
+    #[test]
+    fn a_per_collection_layout_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("collections/users")).unwrap();
+        let err = CollectionPartitionedAdapter::new(WalConfig {
+            log_dir: dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        })
+        .err()
+        .expect("must refuse");
+        assert!(err.to_string().contains("format 1"), "{err}");
+    }
+
+    /// `changes_in_collection` selects a collection's changes by its key-codec prefix, from
+    /// the one log: not a collection whose name merely starts the same, and every
+    /// collection for the empty name.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn changes_in_collection_selects_by_the_collection_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = CollectionPartitionedAdapter::new(WalConfig {
+            log_dir: dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        })
+        .unwrap();
+        db.put_to_collection("users", b"1", b"a").await.unwrap();
+        db.put_to_collection("users_archive", b"1", b"b")
+            .await
+            .unwrap();
+        db.delete_from_collection("users", b"1").await.unwrap();
+
+        let users_1 = routed(&db, "users", b"1").await;
+        assert_eq!(
+            change_keys(db.changes_in_collection("users", 0).await.unwrap()),
+            vec![users_1.clone(), users_1]
+        );
+        assert_eq!(
+            data_keys(db.changes_in_collection("", 0).await.unwrap()).len(),
+            3,
+            "the empty name is the bare cursor"
+        );
+        assert!(db
+            .changes_in_collection("nonexistent", 0)
+            .await
+            .unwrap()
+            .is_empty());
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_collection_partitioned_basic() {
@@ -1090,50 +790,96 @@ mod tests {
         );
     }
 
-    /// A collection that exists only in memory must still be listed.
-    ///
-    /// `collection_names_on_disk` unions the in-memory map over the directory listing
-    /// precisely because a freshly created collection may not have been flushed yet —
-    /// that omission is spec S-05. Removing the `!` from `if !names.contains(..)` inverts
-    /// the union into a no-op and drops those collections, and no test noticed (mutation
-    /// run 31358158012, shard 5).
+    /// `collection_names` lists every collection the catalog allocated, sorted and without
+    /// duplicates, including after a reopen (Task 2.12: from the catalog, not from what
+    /// this process happened to touch).
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_collection_not_yet_on_disk_is_still_listed() {
+    async fn collection_names_lists_what_was_written() {
         let temp_dir = tempfile::tempdir().unwrap();
         let config = WalConfig {
             log_dir: temp_dir.path().to_path_buf(),
             ..WalConfig::test_config()
         };
-        let adapter = CollectionPartitionedAdapter::new(config).unwrap();
+        {
+            let adapter = CollectionPartitionedAdapter::new(config.clone()).unwrap();
+            assert!(adapter.collection_names().await.unwrap().is_empty());
 
-        adapter
-            .put_to_collection("just_created", b"k", b"v")
-            .await
-            .unwrap();
+            adapter
+                .put_to_collection("users", b"a", b"1")
+                .await
+                .unwrap();
+            adapter
+                .put_to_collection("orders", b"b", b"2")
+                .await
+                .unwrap();
+            adapter
+                .put_to_collection("users", b"c", b"3")
+                .await
+                .unwrap();
+            // A read of an unknown collection allocates nothing.
+            assert_eq!(
+                adapter.get_from_collection("ghosts", b"a").await.unwrap(),
+                None
+            );
 
-        // Removing the directory while the adapter keeps its in-memory entry reproduces
-        // the state the union exists for: known to this process, not visible on disk.
-        // Writing the collection and listing it immediately does not — `put_to_collection`
-        // creates the directory, so the disk listing already contains it and the union is
-        // redundant. A test that skips this step passes with the `!` removed.
-        std::fs::remove_dir_all(temp_dir.path().join("collections").join("just_created"))
-            .expect("the collection directory exists to be removed");
-
-        let names = adapter.collection_names_on_disk();
-        assert!(
-            names.contains(&"just_created".to_string()),
-            "a collection held in memory must appear in the listing, found {names:?}"
-        );
-
-        // No duplicates, whether the collection reached disk or not.
-        let mut sorted = names.clone();
-        sorted.sort();
-        sorted.dedup();
+            assert_eq!(
+                adapter.collection_names().await.unwrap(),
+                vec!["orders".to_string(), "users".to_string()]
+            );
+        }
+        let reopened = CollectionPartitionedAdapter::new(config).unwrap();
         assert_eq!(
-            sorted.len(),
-            names.len(),
-            "listing repeats a collection: {names:?}"
+            reopened.collection_names().await.unwrap(),
+            vec!["orders".to_string(), "users".to_string()]
         );
+        assert_eq!(
+            reopened.get_from_collection("users", b"c").await.unwrap(),
+            Some(b"3".to_vec())
+        );
+    }
+
+    /// A trait-path write is attributed to its collection by decoding the key codec and
+    /// asking the catalog, never by parsing the key; a key that is not a codec key counts
+    /// toward the totals only.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn trait_path_writes_are_attributed_through_the_catalog() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let adapter = CollectionPartitionedAdapter::new(WalConfig {
+            log_dir: temp_dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        })
+        .unwrap();
+        // Another catalog over the same storage (as `PrkDb`'s or `IndexedStorage`'s is)
+        // allocates the id; this adapter has never seen the name.
+        let other = Catalog::new(adapter.inner.clone(), Vec::new());
+        let coll = other.id_for_name("events").await.unwrap();
+        let key = encode_key(&[], coll, b"1").unwrap();
+
+        assert_eq!(
+            adapter.collection_of(&key).await,
+            Some("events".to_string())
+        );
+        assert_eq!(adapter.collection_of(b"events:1").await, None);
+        adapter.put(&key, b"v").await.unwrap();
+        assert_eq!(
+            adapter.metrics.get_collection_names(),
+            vec!["events".to_string()]
+        );
+    }
+
+    /// Every catalog over this adapter allocates under its inner adapter's one lock.
+    #[test]
+    fn the_allocation_lock_is_the_inner_adapters() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let adapter = CollectionPartitionedAdapter::new(WalConfig {
+            log_dir: temp_dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        })
+        .unwrap();
+        assert!(Arc::ptr_eq(
+            &adapter.allocation_lock().unwrap(),
+            &adapter.inner.allocation_lock().unwrap()
+        ));
     }
 
     /// The metrics accessors report what was recorded.
@@ -1236,15 +982,10 @@ mod tests {
         );
     }
 
-    /// The outbox on this adapter is a stub, and this pins that it is an *empty* stub.
-    ///
-    /// `outbox_list` returns `Ok(Vec::new())` — the outbox pattern is not implemented
-    /// here. Mutants replacing it with a populated vector survived, which matters more
-    /// than it looks: a caller draining the outbox would act on invented entries. The
-    /// contract this asserts is "empty", so if the stub is ever replaced by a real
-    /// implementation this test is where that shows up.
+    /// The outbox is the inner adapter's: a saved entry is listed, and removing it removes
+    /// it. (Before D11 this adapter's outbox was a stub that dropped every entry.)
     #[tokio::test(flavor = "multi_thread")]
-    async fn the_outbox_stub_reports_nothing_rather_than_something() {
+    async fn the_outbox_is_the_inner_adapters() {
         let temp_dir = tempfile::tempdir().unwrap();
         let config = WalConfig {
             log_dir: temp_dir.path().to_path_buf(),
@@ -1253,10 +994,12 @@ mod tests {
         let adapter = CollectionPartitionedAdapter::new(config).unwrap();
 
         adapter.outbox_save("id-1", b"payload").await.unwrap();
-        assert!(
-            adapter.outbox_list().await.unwrap().is_empty(),
-            "the outbox is a stub; it must report nothing, not invented entries"
+        assert_eq!(
+            adapter.outbox_list().await.unwrap(),
+            vec![("id-1".to_string(), b"payload".to_vec())]
         );
+        adapter.outbox_remove("id-1").await.unwrap();
+        assert!(adapter.outbox_list().await.unwrap().is_empty());
     }
 
     /// Flushing must reach disk: a value written and flushed survives a reopen.
@@ -1282,20 +1025,12 @@ mod tests {
         );
     }
 
-    /// A prefix with no colon names a *partial collection name* and must select the
-    /// collections it prefixes — not the ones it does not.
+    /// A prefix is a byte prefix over whole keys: a partial collection name selects the
+    /// keys it prefixes and no others.
     ///
-    /// # What this catches
-    ///
-    /// That branch guards with `if !name.as_bytes().starts_with(prefix) { continue; }`.
-    /// Removing the `!` inverts the selection exactly: `scan_prefix(b"use")` then skips
-    /// `users` and scans every other collection, so the caller gets a confident answer
-    /// made entirely of the wrong rows.
-    ///
-    /// The existing coverage all used `b"users:"`, which takes the *other* branch — the
-    /// one where the prefix contains a colon and names a collection outright — so the
-    /// partial-name path had no test at all and the mutant survived (run 31362753534,
-    /// shard 8).
+    /// Before D11 this adapter routed a colon-less prefix by matching collection names, and
+    /// an inverted guard there survived the suite (run 31362753534, shard 8). The routing
+    /// is gone; the behaviour it had to reproduce is still what callers rely on.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_partial_collection_name_selects_only_matching_collections() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1334,19 +1069,12 @@ mod tests {
         );
     }
 
-    /// A range spanning two collections must return rows from both.
+    /// A range spanning two collections must return rows from both, sorted and half-open.
     ///
-    /// # What this catches
-    ///
-    /// `scan_range` narrows to a single collection only when both bounds name the *same*
-    /// one, which the guard `start[..a] == end[..b]` decides. Forcing that guard to `true`
-    /// makes any pair of colon-bearing bounds look single-collection, so a range from
-    /// `orders:` to `users:` is answered from `orders` alone and every `users` row is
-    /// silently dropped.
-    ///
-    /// Every existing test ranged within one collection (`users:b` to `users:d`), where
-    /// the narrowing is correct either way, so the mutant survived (run 31362753534,
-    /// shard 8). Spanning two collections is the only shape that exercises the guard.
+    /// Before D11 this adapter narrowed a range to one collection when both bounds named
+    /// the same one, and a guard forced to `true` dropped every row of the second
+    /// collection (run 31362753534, shard 8). The narrowing is gone with the per-collection
+    /// logs; this keeps the cross-collection shape covered.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_range_spanning_collections_returns_rows_from_each() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1392,58 +1120,15 @@ mod tests {
         );
     }
 
-    /// The single-collection detector, tested directly.
+    /// `flush` must forward to the one WAL, and report a failure rather than swallow it.
     ///
-    /// Both `position` calls and the guard are only reachable in a way that changes
-    /// results when the answer is a wrong `Some`; a wrong `None` merely costs a full
-    /// scan. Asserting the exact answer here makes all four mutations on this expression
-    /// observable — before it was extracted, three of them survived the whole suite.
-    #[test]
-    fn the_single_collection_detector_answers_exactly() {
-        // Both bounds name the same collection.
-        assert_eq!(
-            single_collection_bound(b"users:a", b"users:z"),
-            Some(b"users".to_vec()),
-            "both bounds name `users`, so only `users` need be scanned"
-        );
-
-        // Different collections: no narrowing is permissible, or the other collection's
-        // rows are dropped.
-        assert_eq!(single_collection_bound(b"orders:1", b"users:9"), None);
-        assert_eq!(single_collection_bound(b"users:1", b"user:9"), None);
-        assert_eq!(single_collection_bound(b"a:1", b"ab:9"), None);
-
-        // A bound with no colon does not name a collection.
-        assert_eq!(single_collection_bound(b"users", b"users:z"), None);
-        assert_eq!(single_collection_bound(b"users:a", b"users"), None);
-        assert_eq!(single_collection_bound(b"", b""), None);
-
-        // A leading colon means an empty collection name on that side.
-        assert_eq!(single_collection_bound(b":a", b":z"), Some(Vec::new()));
-        assert_eq!(single_collection_bound(b":a", b"users:z"), None);
-    }
-
-    /// `flush` must forward to every collection, and report a failure rather than
-    /// swallow it.
-    ///
-    /// # What this catches, and why it needed a new seam
-    ///
-    /// Replacing this method's whole body with `Ok(())` — a flush that flushes nothing
-    /// and reports success — survived the entire suite (run 31358158012, shard 7), and
-    /// stayed unkillable long enough to be recorded as an accepted exclusion in
-    /// `.cargo/mutants.toml`.
-    ///
-    /// It was unkillable through the public surface for a specific reason: this adapter's
-    /// `put` path writes through rather than accumulating, so a value survives a reopen
-    /// whether or not `flush` ran. `a_flushed_write_survives_reopening` passes with the
-    /// body replaced. The only observable difference is whether the wrapper *forwards* —
-    /// which needs an inner adapter that can fail, and none existed.
-    ///
-    /// `wal_adapter::fault_injection` is that missing capability. With one collection's
-    /// flush failing, a wrapper that forwards returns `Err` and a wrapper that returns
-    /// `Ok(())` does not. The exclusion is deleted in the same change.
+    /// Replacing this method's whole body with `Ok(())` survived the entire suite once (run
+    /// 31358158012, shard 7): a value survives a reopen whether or not `flush` ran, so
+    /// only an inner flush that fails can tell a wrapper that forwards from one that does
+    /// not. `wal_adapter::fault_injection` provides that failure, keyed by the WAL
+    /// directory, which since D11 is the data directory root.
     #[tokio::test(flavor = "multi_thread")]
-    async fn flush_reports_a_collection_failure_rather_than_swallowing_it() {
+    async fn flush_reports_a_wal_failure_rather_than_swallowing_it() {
         use crate::storage::wal_adapter::fault_injection;
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1461,11 +1146,9 @@ mod tests {
         adapter
             .flush()
             .await
-            .expect("flush succeeds while every collection is healthy");
+            .expect("flush succeeds while the WAL is healthy");
 
-        // `orders` is deliberately not the first collection created: a wrapper that
-        // stopped after the first would otherwise pass.
-        let failing = temp_dir.path().join("collections").join("orders");
+        let failing = temp_dir.path().to_path_buf();
         fault_injection::fail_flush_at(&failing);
 
         let outcome = adapter.flush().await;
@@ -1474,65 +1157,16 @@ mod tests {
         // path — the adapter flushes as its last handle goes away.
         fault_injection::clear_flush_failure(&failing);
 
-        let err = outcome
-            .expect_err("flush must report a collection whose own flush failed, not return Ok");
+        let err = outcome.expect_err("flush must report the WAL's own flush failure, not Ok");
         assert!(
             err.to_string().contains("injected flush failure"),
             "the error must be the inner failure, not something invented: {err}"
         );
 
-        // And it recovers: the fault was the only reason it failed.
         adapter
             .flush()
             .await
             .expect("flush succeeds again once the injected fault is cleared");
-    }
-
-    /// The aggregate publish total is the sum across collections, not their product.
-    ///
-    /// `write_path_health` folds every open collection into one report so a probe can ask
-    /// a single question. `publishes_total` is a counter, so the fold is `+=`; the nightly
-    /// sweep replaced it with `*=` and nothing noticed, because no test read the aggregate
-    /// count at all.
-    ///
-    /// The counts are deliberately unequal (2 and 3 frames): with one each, `*=` would
-    /// pass, since 1 * 1 == 1. Since Task 2.8a every write is a frame whose commit hook
-    /// counts it before the caller is answered, so no waiting is needed. The old second
-    /// half, on `direct_appends_total`, is gone: that field is always 0 now (one write
-    /// path).
-    #[tokio::test(flavor = "multi_thread")]
-    async fn the_aggregate_publish_total_sums_across_collections() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let config = WalConfig {
-            log_dir: temp_dir.path().to_path_buf(),
-            ..WalConfig::test_config()
-        };
-        let adapter = CollectionPartitionedAdapter::new(config).unwrap();
-
-        for (name, writes) in [("users", 2), ("orders", 3)] {
-            for w in 0..writes {
-                adapter
-                    .put_to_collection(name, format!("{name}-{w}").as_bytes(), b"v")
-                    .await
-                    .unwrap();
-            }
-        }
-
-        let per_collection: Vec<u64> = adapter
-            .collections
-            .iter()
-            .map(|entry| entry.value().write_path_health().publishes_total)
-            .collect();
-        let mut sorted = per_collection.clone();
-        sorted.sort();
-        assert_eq!(sorted, vec![2, 3], "one publish per frame per collection");
-
-        assert_eq!(
-            adapter.write_path_health().publishes_total,
-            5,
-            "the aggregate must sum each collection's publish count; the parts were \
-             {per_collection:?}"
-        );
     }
 
     use std::time::Duration;
@@ -1549,17 +1183,16 @@ mod tests {
         panic!("timed out waiting for {what}");
     }
 
-    /// Queue depths **sum** across collections, because the memory they represent does.
+    /// One writer, one health: a stalled WAL makes the adapter unhealthy, with the queued
+    /// write counted and a reason given.
     ///
-    /// Mutation run 31539366718 missed `+=` -> `-=` and `+=` -> `*=` here: nothing asserted
-    /// the arithmetic, only that a number came back. `*=` reports 0 for any number of
-    /// stalled collections — a probe that says "nothing queued" while two writers are stuck
-    /// is worse than no probe, because it actively argues against the operator's suspicion.
-    ///
-    /// Each collection's `queue_depth` is the number of appends its WAL writer holds and
-    /// has not yet answered (Task 2.9b rewrites this for one WAL).
+    /// Before D11 the adapter folded one health report per collection into one; mutation
+    /// run 31539366718 found that fold's arithmetic and its `unhealthy.is_empty()` guard
+    /// untested. The fold is gone, and this pins the forwarding that replaced it: an
+    /// adapter that reported healthy while its writer is stuck keeps `/readyz` routing
+    /// traffic to a node whose writes are not being confirmed.
     #[tokio::test(flavor = "multi_thread")]
-    async fn queue_depths_sum_across_collections() {
+    async fn a_stalled_wal_makes_the_partitioned_adapter_unhealthy() {
         use crate::storage::wal_adapter::fault_injection::StallGuard;
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1569,77 +1202,25 @@ mod tests {
         };
         let adapter = Arc::new(CollectionPartitionedAdapter::new(config).unwrap());
 
-        // Open both collections with a write that succeeds, so the stall below acts on a
-        // live writer rather than on collection creation.
-        for name in ["users", "orders"] {
-            adapter
-                .put_to_collection(name, b"seed", b"v")
-                .await
-                .unwrap();
-        }
-
-        let collections = temp_dir.path().join("collections");
-        let _users_stall = StallGuard::new(collections.join("users"));
-        let _orders_stall = StallGuard::new(collections.join("orders"));
-
-        let mut queued = Vec::new();
-        for name in ["users", "orders"] {
-            let adapter = adapter.clone();
-            queued.push(tokio::spawn(async move {
-                adapter.put_to_collection(name, b"queued", b"v").await
-            }));
-        }
-
-        wait_until(
-            "both stalled collections to report their queued write",
-            Duration::from_secs(10),
-            || adapter.write_path_health().queue_depth == 2,
-        )
-        .await;
-
-        // One write per collection, so the total is the sum and not either operand: 2 is
-        // unreachable by `-=` (which underflows from 0) and by `*=` (which stays 0).
-        assert_eq!(
-            adapter.write_path_health().queue_depth,
-            2,
-            "two stalled collections holding one write each must report two"
-        );
-    }
-
-    /// Mutation run 31539366718 missed `delete !` on the `unhealthy.is_empty()` guard.
-    /// Without the negation the adapter reports healthy precisely when a collection has
-    /// reported a reason, so `/readyz` keeps routing traffic to the node whose writes are
-    /// not being confirmed. That is the exact failure the liveness work exists to end.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn one_stalled_collection_makes_the_adapter_unhealthy() {
-        use crate::storage::wal_adapter::fault_injection::StallGuard;
-
-        let temp_dir = tempfile::tempdir().unwrap();
-        let config = WalConfig {
-            log_dir: temp_dir.path().to_path_buf(),
-            ..WalConfig::test_config()
-        };
-        let adapter = Arc::new(CollectionPartitionedAdapter::new(config).unwrap());
-
-        for name in ["users", "orders"] {
-            adapter
-                .put_to_collection(name, b"seed", b"v")
-                .await
-                .unwrap();
-        }
+        adapter
+            .put_to_collection("users", b"seed", b"v")
+            .await
+            .unwrap();
+        let healthy = adapter.write_path_health();
         assert!(
-            adapter.write_path_health().healthy,
-            "a freshly opened adapter must be healthy, or the assertion below proves nothing"
+            healthy.healthy && healthy.queue_depth == 0,
+            "a freshly opened adapter must be healthy, or the assertions below prove \
+             nothing: {healthy:?}"
         );
 
-        let _orders_stall = StallGuard::new(temp_dir.path().join("collections").join("orders"));
+        let _stall = StallGuard::new(temp_dir.path());
         let _stalled = {
             let adapter = adapter.clone();
             tokio::spawn(async move { adapter.put_to_collection("orders", b"queued", b"v").await })
         };
 
         wait_until(
-            "the stalled collection to be declared unhealthy",
+            "the stalled WAL to be declared unhealthy",
             Duration::from_secs(15),
             || !adapter.write_path_health().healthy,
         )
@@ -1648,18 +1229,12 @@ mod tests {
         let health = adapter.write_path_health();
         assert!(
             !health.healthy,
-            "one stalled collection means the node is not ready"
+            "a stalled writer means the node is not ready"
         );
-        let reason = health
-            .reason
-            .expect("an unhealthy adapter must name the cause");
+        assert_eq!(health.queue_depth, 1, "the one queued write: {health:?}");
         assert!(
-            reason.contains("orders"),
-            "the reason must name the collection an operator has to look at, got: {reason}"
-        );
-        assert!(
-            !reason.contains("users"),
-            "a healthy collection must not be blamed, got: {reason}"
+            health.reason.is_some(),
+            "an unhealthy adapter must name the cause: {health:?}"
         );
     }
 }

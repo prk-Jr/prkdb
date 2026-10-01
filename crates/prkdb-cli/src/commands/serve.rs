@@ -26,9 +26,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use crate::commands::collection::{self};
 use crate::commands::CollectionCommands;
 use crate::database_manager;
-use crate::storage_keys::{
-    is_internal_metadata_key, logical_collection_name, parse_storage_key, ParsedStorageKey,
-};
+use crate::storage_keys::{is_internal_metadata_key, logical_collection_name};
 
 const HTTP_BROADCAST_CHANNEL_CAPACITY: usize = 100;
 const WEBSOCKET_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
@@ -152,8 +150,7 @@ struct WsParams {
 
 struct CollectionRecord {
     key: Vec<u8>,
-    raw_collection: String,
-    logical_collection: String,
+    collection: String,
     id_hint: Option<String>,
     value: Vec<u8>,
 }
@@ -941,11 +938,15 @@ async fn get_collection_item_handler(
     };
 
     if db.partition_manager.is_none() {
-        let direct_key = format!("{}:{}", name, id);
-        match db.get_local(direct_key.as_bytes()).await {
+        // The record's key from the collection catalog (KEY-01), for a string id.
+        match db.get_collection_record(&name, &id).await {
             Ok(Some(bytes)) => {
                 return match decode_stored_value(&bytes) {
-                    Ok(value) => Json(ApiResponse::success(value)).into_response(),
+                    Ok(value) => Json(ApiResponse::success(enrich_collection_value(
+                        value,
+                        Some(&id),
+                    )))
+                    .into_response(),
                     Err(e) => (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(ApiResponse::<Value>::error(e.to_string())),
@@ -1066,7 +1067,6 @@ async fn put_collection_data_handler(
         }
     };
 
-    let key = format!("{}:{}", name, id);
     let value = match serde_json::to_vec(&data) {
         Ok(v) => v,
         Err(e) => {
@@ -1078,7 +1078,9 @@ async fn put_collection_data_handler(
         }
     };
 
-    match db.put(key.as_bytes(), &value).await {
+    // The storage key comes from the collection catalog (KEY-01): the record is the one
+    // typed APIs, stats and `FetchSegment` see.
+    match db.put_collection_record(&name, &id, &value).await {
         Ok(_) => Json(json!({"success": true, "id": id})).into_response(),
         Err(e) => {
             let err_str = e.to_string();
@@ -1146,9 +1148,7 @@ async fn delete_collection_data_handler(
         }
     };
 
-    let key = format!("{}:{}", name, id);
-
-    match db.delete(key.as_bytes()).await {
+    match db.delete_collection_record(&name, &id).await {
         Ok(_) => Json(json!({"success": true, "id": id})).into_response(),
         Err(e) => {
             let err_str = e.to_string();
@@ -1609,16 +1609,21 @@ async fn execute_collection_command(cmd: CollectionCommands) -> Result<Value> {
 // Helper functions to get data directly from storage
 async fn get_collections_list() -> Result<Value> {
     let db = crate::database_manager::get_db_instance().await?;
+    // The catalog's collections and `meta:col:` entries (KEY-01).
     let mut collections: std::collections::BTreeSet<String> =
-        db.list_collections().await?.into_iter().collect();
+        db.collection_names().await?.into_iter().collect();
 
-    for (key, _) in database_manager::scan_storage().await? {
-        if is_internal_metadata_key(&key) {
-            continue;
-        }
+    // Multi-raft nodes still store `name:id` keys (the catalog is not replicated yet), so
+    // their collections are found by parsing keys.
+    if db.partition_manager.is_some() {
+        for (key, _) in database_manager::scan_storage().await? {
+            if is_internal_metadata_key(&key) {
+                continue;
+            }
 
-        if let Some(name) = logical_collection_name(&key) {
-            collections.insert(name);
+            if let Some(name) = logical_collection_name(&key) {
+                collections.insert(name);
+            }
         }
     }
 
@@ -1699,7 +1704,7 @@ async fn get_collection_data(
                 );
                 obj.insert(
                     "_collection".to_string(),
-                    serde_json::Value::String(record.logical_collection.clone()),
+                    serde_json::Value::String(record.collection.clone()),
                 );
             }
             collection_entries.push((full_key, json_entry));
@@ -1755,44 +1760,26 @@ async fn get_collection_data(
 }
 
 async fn scan_collection_records(name: &str) -> Result<Vec<CollectionRecord>> {
-    let data = database_manager::scan_storage().await?;
-    let mut records = Vec::new();
-
-    for (key, value) in data {
-        let ParsedStorageKey::Data {
-            raw_collection,
-            logical_collection,
-            id_hint,
-            ..
-        } = parse_storage_key(&key)
-        else {
-            continue;
-        };
-
-        if collection_matches_name(name, &raw_collection, &logical_collection) {
-            records.push(CollectionRecord {
-                key,
-                raw_collection,
-                logical_collection,
-                id_hint,
-                value,
-            });
-        }
-    }
-
-    records.sort_by_key(storage_key_display);
-
-    Ok(records)
-}
-
-fn collection_matches_name(name: &str, raw_collection: &str, logical_collection: &str) -> bool {
-    name == logical_collection || name == raw_collection
+    // Through the database's name-based API: a key-codec prefix scan of the collection
+    // (KEY-01), never a parse of every stored key.
+    let db = crate::database_manager::get_db_instance().await?;
+    Ok(db
+        .scan_collection_records(name)
+        .await?
+        .into_iter()
+        .map(|record| CollectionRecord {
+            key: record.key,
+            collection: name.to_string(),
+            id_hint: record.id_hint,
+            value: record.value,
+        })
+        .collect())
 }
 
 fn storage_key_display(record: &CollectionRecord) -> String {
     match &record.id_hint {
-        Some(id_hint) => format!("{}:{}", record.raw_collection, id_hint),
-        None => record.raw_collection.clone(),
+        Some(id_hint) => format!("{}:{}", record.collection, id_hint),
+        None => record.collection.clone(),
     }
 }
 

@@ -20,6 +20,9 @@ use tokio::sync::RwLock;
 pub struct InMemoryAdapter {
     inner: Arc<RwLock<DashMap<Vec<u8>, Vec<u8>>>>,
     outbox: Arc<RwLock<DashMap<String, Vec<u8>>>>,
+    /// Collection-id allocation lock, shared by every catalog over this map (clones
+    /// included: they share the map).
+    allocation: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl InMemoryAdapter {
@@ -27,6 +30,7 @@ impl InMemoryAdapter {
         Self {
             inner: Arc::new(RwLock::new(DashMap::new())),
             outbox: Arc::new(RwLock::new(DashMap::new())),
+            allocation: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 }
@@ -39,6 +43,10 @@ impl Default for InMemoryAdapter {
 
 #[async_trait::async_trait]
 impl StorageAdapter for InMemoryAdapter {
+    fn allocation_lock(&self) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        Some(self.allocation.clone())
+    }
+
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         let m = self.inner.read().await;
         Ok(m.get(key).map(|v| v.value().clone()))
@@ -113,6 +121,13 @@ impl StorageAdapter for InMemoryAdapter {
         }
         res.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(res)
+    }
+
+    async fn count_prefix(&self, prefix: &[u8]) -> Result<usize, StorageError> {
+        let m = self.inner.read().await;
+        Ok(m.iter()
+            .filter(|entry| entry.key().starts_with(prefix))
+            .count())
     }
 
     async fn scan_range(

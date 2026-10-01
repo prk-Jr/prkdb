@@ -1,5 +1,5 @@
 use crate::commands::MetricsCommands;
-use crate::database_manager::{scan_storage, with_database_read};
+use crate::database_manager::with_database_read;
 use crate::output::{display_single, info, success, OutputDisplay};
 use crate::uptime_tracker::{get_uptime_seconds, record_startup_time};
 use crate::Cli;
@@ -62,30 +62,23 @@ pub async fn execute(cmd: MetricsCommands, cli: &Cli) -> Result<()> {
 async fn show_system_metrics(cli: &Cli) -> Result<()> {
     info("Fetching system metrics...");
 
-    // Use storage scan with proper error handling
-    let result = scan_storage().await;
+    // Per collection, through the database's name-based API (the collection catalog,
+    // KEY-01), not by splitting every stored key at a ':'.
+    let result = with_database_read(|db| async move {
+        let names = db.collection_names().await?;
+        let mut item_count = 0u64;
+        let mut total_bytes = 0u64;
+        for name in &names {
+            let (items, bytes) = db.get_collection_stats(name).await?;
+            item_count += items;
+            total_bytes += bytes;
+        }
+        Ok((item_count, total_bytes, names.len() as u32))
+    })
+    .await;
 
     let (events_count, total_bytes, collections_count) = match result {
-        Ok(all_entries) => {
-            // Calculate real metrics from storage data
-            let mut collection_types = std::collections::HashSet::new();
-            let mut total_bytes = 0u64;
-            let mut item_count = 0u64;
-
-            for (key, value) in &all_entries {
-                let key_str = String::from_utf8_lossy(key);
-                // Skip metadata keys when counting
-                if !key_str.starts_with("__prkdb_metadata:") {
-                    if let Some(collection_type) = key_str.split(':').next() {
-                        collection_types.insert(collection_type.to_string());
-                    }
-                    item_count += 1;
-                    total_bytes += (key.len() + value.len()) as u64;
-                }
-            }
-
-            (item_count, total_bytes, collection_types.len() as u32)
-        }
+        Ok(totals) => totals,
         Err(e) => {
             info(&format!("Unable to scan storage: {}", e));
             info("This may happen when the database is busy. Showing partial metrics.");

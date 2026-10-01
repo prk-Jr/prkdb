@@ -186,6 +186,15 @@ pub trait StorageAdapter: Send + Sync + 'static {
         ))
     }
 
+    /// How many live keys start with `prefix`, without reading their values.
+    ///
+    /// The default counts a [`scan_prefix`](Self::scan_prefix), which reads every value;
+    /// an adapter that can count from its keys alone (an in-memory index, `COUNT(*)`)
+    /// overrides it, because counting a collection must not cost a full read of it.
+    async fn count_prefix(&self, prefix: &[u8]) -> Result<usize, StorageError> {
+        Ok(self.scan_prefix(prefix).await?.len())
+    }
+
     /// Optional: scan a half-open key range [start, end) (lexicographic).
     async fn scan_range(
         &self,
@@ -274,6 +283,19 @@ pub trait StorageAdapter: Send + Sync + 'static {
         Err(StorageError::BackendError(
             "take_snapshot not supported".into(),
         ))
+    }
+
+    /// The lock that serializes collection-id allocation on this storage (spec §7 2c).
+    ///
+    /// Several collection catalogs can sit over one storage (`PrkDb`'s, an
+    /// `IndexedStorage` wrapping `db.storage()`, `CollectionPartitionedAdapter`'s), and
+    /// allocation is read-counter, write-counter, write-entry: two catalogs with their own
+    /// locks could both read the same counter and hand one id to two names. The lock
+    /// therefore belongs to the storage, and every catalog over it allocates under this
+    /// one. An adapter that returns `None` (the default) gets a lock per catalog, so it
+    /// must be used through a single catalog. A wrapper returns its inner adapter's lock.
+    fn allocation_lock(&self) -> Option<std::sync::Arc<tokio::sync::Mutex<()>>> {
+        None
     }
 
     /// State of the adapter's asynchronous write path, for health and readiness probes.

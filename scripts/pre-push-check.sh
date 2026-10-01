@@ -23,6 +23,7 @@ if [ -d crates/prkdb-verify ]; then
   step harness-fast; cargo xtask verify --profile blocking --seeds 200 --mode fast
 fi
 step wal-fast-rule; python3 scripts/wal_fast_rule.py --self-test
+step single-wal;    bash scripts/check_single_wal.sh
 step ledger;        cargo xtask remediation check
 step ledger-render; cargo xtask remediation render --check
 step repo-status;   cargo xtask repo-status snapshot --fail-on-objective-drift > /dev/null

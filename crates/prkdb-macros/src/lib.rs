@@ -8,6 +8,14 @@ use syn::{parse_macro_input, Data, DeriveInput, Fields, Ident, Type};
 /// - `#[id]` or `#[key]` - marks the primary key field
 /// - `#[index]` - creates a secondary index on the field
 /// - `#[index(unique)]` - creates a unique secondary index
+/// - `#[collection(name = "...")]` (on the struct) - the name the collection is stored
+///   under. Without it the name is the struct name in snake_case (`UserProfile` →
+///   `user_profile`). The name is recorded in the collection catalog at first write and
+///   keys every record, so **renaming a type whose name is not pinned orphans its data**:
+///   pin the name before the first write if the type may ever be renamed. Pinning also
+///   separates two same-named types in different modules: without it, the second type
+///   to use a name over one storage is refused at runtime. Must match
+///   `^[a-z][a-z0-9_]{0,63}$` (checked at compile time).
 ///
 /// # Generated Code
 ///
@@ -37,6 +45,13 @@ use syn::{parse_macro_input, Data, DeriveInput, Fields, Ident, Type};
 pub fn collection_derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let struct_name = &input.ident;
+
+    // The persisted name: `#[collection(name = "...")]`, or the struct name in snake_case.
+    let persisted_name = match pinned_collection_name(&input.attrs) {
+        Ok(Some(name)) => name,
+        Ok(None) => snake_case(&struct_name.to_string()),
+        Err(e) => return e.to_compile_error().into(),
+    };
 
     // Find ID/Key field
     let (id_field_name, id_field_type) = find_id_field(&input.data)
@@ -311,6 +326,9 @@ pub fn collection_derive(input: TokenStream) -> TokenStream {
             fn id(&self) -> &Self::Id {
                 &self.#id_field_name
             }
+            fn persisted_name() -> ::std::borrow::Cow<'static, str> {
+                ::std::borrow::Cow::Borrowed(#persisted_name)
+            }
         }
 
         // Indexed trait implementation
@@ -420,6 +438,64 @@ pub fn collection_derive(input: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+/// The name pinned by `#[collection(name = "...")]`, checked against the catalog's rule
+/// (`^[a-z][a-z0-9_]{0,63}$`) so a bad pin fails to compile rather than at first write.
+/// Other `#[collection(...)]` keys (e.g. `proto = true`) are accepted and ignored.
+fn pinned_collection_name(attrs: &[syn::Attribute]) -> syn::Result<Option<String>> {
+    let mut pinned = None;
+    for attr in attrs.iter().filter(|a| a.path().is_ident("collection")) {
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("name") {
+                let lit: syn::LitStr = meta.value()?.parse()?;
+                let name = lit.value();
+                if !is_valid_persisted_name(&name) {
+                    return Err(syn::Error::new(
+                        lit.span(),
+                        "a collection name must match ^[a-z][a-z0-9_]{0,63}$",
+                    ));
+                }
+                pinned = Some(name);
+            } else if meta.input.peek(syn::Token![=]) {
+                meta.value()?.parse::<syn::Expr>()?;
+            }
+            Ok(())
+        })?;
+    }
+    Ok(pinned)
+}
+
+fn is_valid_persisted_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    name.len() <= 64
+        && bytes.next().is_some_and(|b| b.is_ascii_lowercase())
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// CamelCase → snake_case, exactly as `prkdb_types::collection::default_persisted_name`
+/// converts the last segment of a type name (`key_codec.rs` checks they agree).
+fn snake_case(ident: &str) -> String {
+    let chars: Vec<char> = ident.chars().collect();
+    let mut out = String::with_capacity(ident.len() + 4);
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_uppercase() {
+            let prev = i.checked_sub(1).map(|p| chars[p]);
+            let next = chars.get(i + 1).copied();
+            let boundary = match prev {
+                Some(p) if p.is_lowercase() || p.is_ascii_digit() => true,
+                Some(p) if p.is_uppercase() => next.is_some_and(|n| n.is_lowercase()),
+                _ => false,
+            };
+            if boundary {
+                out.push('_');
+            }
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Find the ID/Key field (supports both #[id] and #[key])

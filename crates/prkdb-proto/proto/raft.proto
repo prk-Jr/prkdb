@@ -29,6 +29,11 @@ service PrkDbService {
     
     // Delete key
     rpc Delete (DeleteRequest) returns (DeleteResponse);
+
+    // Put one record of a collection addressed by name (the CLI): the server builds the
+    // storage key from its collection catalog (KEY-01), so the record is the one typed
+    // APIs and the HTTP server read.
+    rpc PutRecord (PutRecordRequest) returns (PutResponse);
     
     // Health check
     rpc Health (HealthRequest) returns (HealthResponse);
@@ -182,6 +187,12 @@ message LogEntry {
 message PutRequest {
     bytes key = 1;
     bytes value = 2;
+}
+
+message PutRecordRequest {
+    string collection = 1;  // the collection's persisted name
+    string id = 2;          // the record id, as a string id
+    bytes value = 3;
 }
 
 message PutResponse {

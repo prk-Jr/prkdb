@@ -5,9 +5,24 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 use sqlx::{Row, SqlitePool};
 use std::str::FromStr;
 
+/// The smallest key greater than every key starting with `prefix`, or `None` if there is
+/// none (an empty prefix, or one made only of `0xFF`).
+fn prefix_successor(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut end = prefix.to_vec();
+    while let Some(last) = end.pop() {
+        if last < u8::MAX {
+            end.push(last + 1);
+            return Some(end);
+        }
+    }
+    None
+}
+
 #[derive(Clone)]
 pub struct SqliteAdapter {
     pool: SqlitePool,
+    /// Collection-id allocation lock (`StorageAdapter::allocation_lock`), created at open.
+    allocation: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl SqliteAdapter {
@@ -43,12 +58,19 @@ impl SqliteAdapter {
             .execute(&pool)
             .await
             .ok();
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            allocation: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        })
     }
 }
 
 #[async_trait]
 impl StorageAdapter for SqliteAdapter {
+    fn allocation_lock(&self) -> Option<std::sync::Arc<tokio::sync::Mutex<()>>> {
+        Some(self.allocation.clone())
+    }
+
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         let row = sqlx::query("SELECT v FROM kv WHERE k = ?")
             .bind(key)
@@ -175,6 +197,28 @@ impl StorageAdapter for SqliteAdapter {
         Ok(())
     }
 
+    /// `COUNT(*)` over the prefix's key range: no value leaves the database.
+    async fn count_prefix(&self, prefix: &[u8]) -> Result<usize, StorageError> {
+        let row = match prefix_successor(prefix) {
+            Some(end) => {
+                sqlx::query("SELECT COUNT(*) FROM kv WHERE k >= ? AND k < ?")
+                    .bind(prefix)
+                    .bind(end)
+                    .fetch_one(&self.pool)
+                    .await
+            }
+            None => {
+                sqlx::query("SELECT COUNT(*) FROM kv WHERE k >= ?")
+                    .bind(prefix)
+                    .fetch_one(&self.pool)
+                    .await
+            }
+        }
+        .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        let n: i64 = row.get(0);
+        Ok(n as usize)
+    }
+
     async fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
         let rows = sqlx::query("SELECT k, v FROM kv ORDER BY k")
             .fetch_all(&self.pool)
@@ -236,6 +280,22 @@ mod tests {
         assert_eq!(items.len(), 1);
         adapter.outbox_remove("e1").await.unwrap();
         assert!(adapter.outbox_list().await.unwrap().is_empty());
+    }
+
+    /// Review M2: a key-only `COUNT(*)` over the prefix's range, including a prefix whose
+    /// last byte is 0xFF (the range's end carries into the byte before it).
+    #[tokio::test]
+    async fn sqlite_count_prefix_counts_keys_in_the_prefix_range() {
+        let adapter = SqliteAdapter::connect("sqlite::memory:").await.unwrap();
+        for key in [&b"a\x01"[..], b"a\xff\x00", b"a\xff\xff", b"b", b"a"] {
+            adapter.put(key, b"v").await.unwrap();
+        }
+        assert_eq!(adapter.count_prefix(b"a").await.unwrap(), 4);
+        assert_eq!(adapter.count_prefix(b"a\xff").await.unwrap(), 2);
+        assert_eq!(adapter.count_prefix(b"").await.unwrap(), 5);
+        assert_eq!(adapter.count_prefix(b"c").await.unwrap(), 0);
+        assert_eq!(super::prefix_successor(b"a\xff"), Some(b"b".to_vec()));
+        assert_eq!(super::prefix_successor(b"\xff\xff"), None);
     }
 
     #[tokio::test]
