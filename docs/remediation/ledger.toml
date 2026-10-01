@@ -79,12 +79,13 @@ title = "Four WAL implementations in use; all data writes hash to one shard so f
 area = "storage"
 severity = "high"
 phase = 2
-status = "open"
+status = "fixed"
 evidence = [
   "crates/prkdb/src/storage/wal_adapter.rs:470",
   "crates/prkdb/src/storage/wal_adapter.rs:540",
 ]
-regression_tests = ["test:crates/prkdb/src/storage/collection_partitioned_adapter.rs::a_partitioned_directory_has_one_wal"]
+regression_tests = ["script:scripts/check_single_wal.sh", "test:crates/prkdb-core/tests/wal_log.rs::replay_order_equals_append_order_across_segment_roll", "test:crates/prkdb/src/storage/collection_partitioned_adapter.rs::a_partitioned_directory_has_one_wal"]
+changes = ["01caedd", "6fa063a"]
 
 [[finding]]
 id = "STO-07"
