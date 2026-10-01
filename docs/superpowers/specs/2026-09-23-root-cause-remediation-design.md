@@ -135,6 +135,7 @@ Sources: **A** = 2026-09-23 correctness audit (A#n), **R** = 2026-09-07 senior r
 | RFT-08 | MED | RPC client never sends `x-prkdb-cluster-secret`; mTLS mode configures no server TLS → cluster cannot elect (outage, fails closed). | `raft/rpc_client.rs`, `bin/prkdb-server.rs` (A#20) | Reported | 4 |
 | RFT-09 | MED | `a_committed_write_replicates_to_every_node` failed unmutated baseline in CI run 34021601202. | `tests/in_process_cluster.rs:87` (R11) | Reported | 4 |
 | RFT-10 | HIGH | `CLUSTER_NODES` is parsed with `parse::<SocketAddr>()`, so hostnames (`node1:50051`) are rejected and the 3-node `docker-compose.yml` cannot start any node; the listen address doubles as the bind address. | `bin/prkdb-server.rs:366` (Batch E quality review, 2026-09-23) | Verified | 4 |
+| RFT-11 | HIGH (sec) | bincode decodes used `config::standard()`, which has no size limit, so a length prefix in the input sized an unchecked allocation. A ten-byte Raft entry panicked or aborted `Command::deserialize` on every node applying it, and again on replay; the same pattern was in stored-record, snapshot and index decodes. | `raft/command.rs:51-55`, `raft/state_machine.rs:65`, `raft/node.rs:252`, `storage/snapshot.rs:96-137`, `wal/log_record.rs:312` (Task 2.23 fuzz entry points, 2026-10-01) | Reproduced | 2 |
 
 ### 3.6 Schema, release, security (SCH, REL)
 
@@ -523,6 +524,7 @@ No unrelated refactoring.
 |---|---|---|
 | 1 | 2026-09-23 | Initial spec from the 2026-09-23 audits and the 2026-09-07 review; decisions D1–D9 (D9: publishing policy). |
 | 2 | 2026-09-23 | Spec review pass 1: `Vfs` seam defined in Phase 1, WAL routed through it in 2a; per-area `verified`; tripwires instead of expected-failure lists; single-phase IDs (DOC-11, DOC-12, TST-05..07 split out); harness op profiles per phase (§7.1); Fast mode from 2a; commit-based workflow with phase-PR CI sequence; private backup repo with Actions off; storage-compat timing; single globally ordered WAL; like-for-like Raft gate; madsim budget; DOC-11 interim wording. |
+| 17 | 2026-10-01 | Execution: RFT-11 added (unbounded bincode decodes of Raft entries, stored records and snapshot files), found while writing the Task 2.23 fuzz targets; fixed in Phase 2 because the bounded decode is a codec change, not a Raft change. |
 | 16 | 2026-10-01 | Execution: KEY-05 added (multi-raft collection catalog is node-local; name-addressed records on multi-raft use raw `name:id` keys). Found in the Task 2.12 review. |
 | 15 | 2026-10-01 | D12 wording: ids use the order-preserving `memcomparable` encoding (Task 2.12 review), not bincode. |
 | 14 | 2026-10-01 | Execution: STO-10 added (no data-directory lock). |

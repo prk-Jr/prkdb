@@ -639,6 +639,33 @@ sources = ["batch-e-review-2026-09-23"]
 evidence = ["crates/prkdb/src/bin/prkdb-server.rs:366"]
 
 [[finding]]
+id = "RFT-11"
+title = "Unbounded bincode decodes: a length prefix in a Raft entry or stored record sizes an unchecked allocation"
+area = "raft"
+severity = "high"
+phase = 2
+status = "fixed"
+security = true
+sources = ["task-2.23-fuzz-2026-10-01"]
+evidence = [
+  "crates/prkdb/src/raft/command.rs:51-55",
+  "crates/prkdb/src/raft/state_machine.rs:65",
+  "crates/prkdb/src/raft/node.rs:252-255",
+  "crates/prkdb/src/storage/snapshot.rs:96-106,124-137",
+  "crates/prkdb-core/src/wal/log_record.rs:311-313",
+  "crates/prkdb/src/indexed_storage.rs:3751,4056",
+  "crates/prkdb-storage-segmented/src/lib.rs:143-146",
+  "crates/prkdb/src/collection_handle.rs:502,688,714,737",
+  "crates/prkdb/src/consumer.rs:63,112,332,335",
+  "crates/prkdb/src/outbox.rs:188,192,311,372,452,576",
+  "crates/prkdb/src/retention.rs:88",
+  "crates/prkdb-cli/src/storage_keys.rs:115",
+  "crates/prkdb-cli/src/commands/collection.rs:919",
+]
+regression_tests = ["test:crates/prkdb/tests/bounded_decode.rs::rft11_command_declaring_a_u64_max_length_is_rejected", "test:crates/prkdb/tests/bounded_decode.rs::rft11_command_declaring_a_2_pow_62_length_is_rejected", "test:crates/prkdb/tests/bounded_decode.rs::rft11_snapshot_header_declaring_an_oversized_length_is_refused", "test:crates/prkdb/tests/bounded_decode.rs::rft11_snapshot_entry_declaring_an_oversized_length_is_refused", "test:crates/prkdb-core/src/wal/log_record.rs::rft11_a_payload_declaring_an_oversized_length_is_an_error", "test:crates/prkdb-storage-segmented/src/lib.rs::rft11_an_oversized_index_snapshot_falls_back_to_replay", "test:crates/prkdb-types/src/codec.rs::an_oversized_declared_length_is_an_error_not_an_allocation"]
+changes = ["0ecfe43"]
+
+[[finding]]
 id = "TST-08"
 title = "replication_tests binds fixed port 13197 and fails under parallel nextest runs"
 area = "tests"

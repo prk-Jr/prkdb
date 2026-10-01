@@ -10,7 +10,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 |---|---|---|---|
 | 0 | Honesty and tracking | gate_passed | 6/6 |
 | 1 | Harness and baseline | gate_passed | 2/2 |
-| 2 | Format v2 and single-node root fixes | not_started | 0/19 |
+| 2 | Format v2 and single-node root fixes | not_started | 0/20 |
 | 3 | Semantics | not_started | 0/9 |
 | 4 | Raft | not_started | 0/15 |
 | 5 | Documentation and release | not_started | 0/9 |
@@ -41,6 +41,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | RFT-06 | high | 4 | open | ReadIndex heartbeat sends prev_log_index:0 with leader_commit; no no-op on election lets a linearizable read miss an acked write |
 | RFT-07 | high | 4 | open | Failed InstallSnapshot counts toward commit; restore never clears old keys; stale snapshots accepted |
 | RFT-10 | high | 4 | open | CLUSTER_NODES rejects hostnames; 3-node compose cluster cannot start |
+| RFT-11 | high | 2 | fixed | Unbounded bincode decodes: a length prefix in a Raft entry or stored record sizes an unchecked allocation |
 | SCH-02 | high | 2 | fixed | Schema reload accepts missing descriptors; non-atomic writes; concurrent registrations can reuse a version |
 | STO-06 | high | 2 | fixed | Four WAL implementations in use; all data writes hash to one shard so fixes do not propagate |
 | STO-07 | high | 2 | fixed | BatchAccumulator::flush() sleeps and returns Ok while dropping executor errors |
