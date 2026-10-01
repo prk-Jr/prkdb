@@ -9,12 +9,14 @@
 //! using small, fast, deterministic wrappers.
 
 use prkdb_verify::checker::Mismatch;
+use prkdb_verify::faultfs::Tear;
 use prkdb_verify::model::{Key, Mode, Value};
 use prkdb_verify::ops::{generate, key, Op, Profile, KEY_SPACE};
 use prkdb_verify::runner::{
     run, run_ops, run_seeds, run_seeds_with, Outcome, RunConfig, FINAL_REOPEN,
 };
-use prkdb_verify::sut::{Sut, Unsupported, WalSut};
+use prkdb_verify::sut::{FaultSut, Sut, Unsupported, WalSut};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -689,10 +691,11 @@ async fn detects_reopen_failure() {
     }
 }
 
-/// Wraps a `WalSut` whose `checkpoint` is not implemented — a SUT the
-/// discovery profile (which generates `Checkpoint`) asks too much of.
+/// Wraps a `FaultSut` whose `checkpoint` is not implemented — a SUT the
+/// discovery profile (which generates `Checkpoint`) asks too much of. It
+/// forwards `power_loss`, so `Checkpoint` is the only op it cannot do.
 struct NoCheckpoint {
-    inner: WalSut,
+    inner: FaultSut,
 }
 
 #[async_trait::async_trait]
@@ -715,6 +718,9 @@ impl Sut for NoCheckpoint {
     async fn checkpoint(&mut self) -> anyhow::Result<()> {
         Err(Unsupported("checkpoint").into())
     }
+    async fn power_loss(&mut self, tear: Tear, fault_seed: u64) -> anyhow::Result<()> {
+        self.inner.power_loss(tear, fault_seed).await
+    }
 }
 
 /// A profile asking for an op the SUT cannot do is a harness error (the run
@@ -724,7 +730,7 @@ impl Sut for NoCheckpoint {
 async fn an_unsupported_op_is_a_harness_error_not_a_finding() {
     let make = || async {
         Ok(NoCheckpoint {
-            inner: WalSut::new().await?,
+            inner: FaultSut::new(Mode::Durable).await?,
         })
     };
     let config = RunConfig {
@@ -754,25 +760,259 @@ async fn an_unsupported_op_is_a_harness_error_not_a_finding() {
     assert_eq!(cause.0, "checkpoint");
 }
 
-/// Fast mode needs PowerLoss to mean anything; until Task 2.10b adds it,
-/// `run` must refuse it outright rather than silently running Durable checks.
+/// `WalSut` (on the real filesystem) cannot lose power, and the blocking
+/// profile generates `PowerLoss` from Task 2.10b on: running it there is a
+/// misconfigured run (a harness error), never a finding against the SUT.
 #[tokio::test(flavor = "multi_thread")]
-async fn run_rejects_fast_mode_until_power_loss_lands() {
+async fn a_sut_without_power_loss_is_a_harness_error_under_blocking() {
     let config = RunConfig {
         first_seed: 0,
-        seeds: 1,
-        ops: 10,
-        profile: Profile::Core,
-        mode: Mode::Fast,
+        seeds: 20,
+        ops: 200,
+        profile: Profile::Blocking,
+        mode: Mode::Durable,
         repro_attempts: 1,
     };
     let err = run(WalSut::new, &config)
         .await
-        .expect_err("Fast mode must be rejected before any seed runs");
+        .expect_err("an unsupported power_loss must be a harness error, not a finding");
+    let text = format!("{err:#}");
     assert!(
-        format!("{err:#}").contains("Fast mode arrives with PowerLoss"),
-        "unexpected error: {err:#}"
+        text.contains("does not support power_loss"),
+        "unexpected harness error text: {text}"
     );
+    assert_eq!(
+        err.downcast_ref::<Unsupported>().map(|u| u.0),
+        Some("power_loss")
+    );
+}
+
+/// What a [`MemSut`] keeps of its unsynced mutations when it loses power.
+#[derive(Clone, Copy)]
+enum Loss {
+    /// Keeps exactly the first `n` unsynced mutations (a correct WAL).
+    KeepPrefix(usize),
+    /// Drops the first unsynced mutation and keeps every later one: a hole,
+    /// which no WAL that writes in order can produce.
+    Hole,
+    /// Keeps the first `n` unsynced mutations, then overwrites `key(i)` with
+    /// garbage: a value no prefix ever held.
+    KeepPrefixCorrupting(usize, u8),
+}
+
+/// A tiny in-memory SUT with an explicit unsynced window, so the Fast-mode
+/// power-loss check can be tested against exact, hand-picked survivals.
+/// Restarts (`reopen`, `crash`) and `checkpoint` make everything durable.
+struct MemSut {
+    durable: BTreeMap<Key, Value>,
+    unsynced: Vec<(Key, Option<Value>)>,
+    loss: Loss,
+}
+
+impl MemSut {
+    fn new(loss: Loss) -> Self {
+        Self {
+            durable: BTreeMap::new(),
+            unsynced: Vec::new(),
+            loss,
+        }
+    }
+
+    fn apply(kv: &mut BTreeMap<Key, Value>, muts: &[(Key, Option<Value>)]) {
+        for (k, v) in muts {
+            match v {
+                Some(v) => kv.insert(k.clone(), v.clone()),
+                None => kv.remove(k),
+            };
+        }
+    }
+
+    fn sync(&mut self) {
+        let muts = std::mem::take(&mut self.unsynced);
+        Self::apply(&mut self.durable, &muts);
+    }
+}
+
+#[async_trait::async_trait]
+impl Sut for MemSut {
+    async fn put(&mut self, k: &Key, v: &Value) -> anyhow::Result<()> {
+        self.unsynced.push((k.clone(), Some(v.clone())));
+        Ok(())
+    }
+    async fn delete(&mut self, k: &Key) -> anyhow::Result<()> {
+        self.unsynced.push((k.clone(), None));
+        Ok(())
+    }
+    async fn get(&mut self, k: &Key) -> anyhow::Result<Option<Value>> {
+        let mut kv = self.durable.clone();
+        Self::apply(&mut kv, &self.unsynced);
+        Ok(kv.get(k).cloned())
+    }
+    async fn reopen(&mut self) -> anyhow::Result<()> {
+        self.sync();
+        Ok(())
+    }
+    async fn crash(&mut self) -> anyhow::Result<()> {
+        self.sync();
+        Ok(())
+    }
+    async fn checkpoint(&mut self) -> anyhow::Result<()> {
+        self.sync();
+        Ok(())
+    }
+    async fn power_loss(&mut self, _tear: Tear, _fault_seed: u64) -> anyhow::Result<()> {
+        let muts = std::mem::take(&mut self.unsynced);
+        let kept: Vec<_> = match self.loss {
+            Loss::KeepPrefix(n) => muts.into_iter().take(n).collect(),
+            Loss::Hole => muts.into_iter().skip(1).collect(),
+            Loss::KeepPrefixCorrupting(n, i) => muts
+                .into_iter()
+                .take(n)
+                .chain(std::iter::once((key(i), Some(b"garbage".to_vec()))))
+                .collect(),
+        };
+        Self::apply(&mut self.durable, &kept);
+        Ok(())
+    }
+    fn unsynced_acked(&self) -> Option<u64> {
+        Some(self.unsynced.len() as u64)
+    }
+}
+
+fn power_loss_op() -> Op {
+    Op::PowerLoss {
+        tear: Tear::None,
+        fault_seed: 0,
+    }
+}
+
+/// Task 2.10a review (a): the Fast check is ONE prefix over the whole
+/// snapshot. Here key B's earlier write is lost while key A's later write
+/// survives. Each key on its own matches *some* prefix (A from the full one,
+/// B from the empty one), so a per-key check would accept it; no single
+/// prefix gives both, so it must be a mismatch.
+#[tokio::test(flavor = "multi_thread")]
+async fn fast_check_needs_one_global_prefix_not_one_per_key() {
+    let (a, b) = (key(1), key(2));
+    let ops = vec![
+        Op::Put(b.clone(), b"b1".to_vec()),
+        Op::Put(a.clone(), b"a1".to_vec()),
+        power_loss_op(),
+    ];
+    let mut sut = MemSut::new(Loss::Hole);
+    let outcome = run_ops(&mut sut, &ops, Mode::Fast)
+        .await
+        .expect("harness error");
+    match &outcome {
+        Outcome::Mismatch {
+            at: 2,
+            after: Op::PowerLoss { .. },
+            mismatch,
+        } => {
+            assert_eq!(
+                mismatch.key, b,
+                "B is the key that diverges from the full state"
+            );
+            assert_eq!(mismatch.actual, None);
+            assert!(
+                mismatch.acceptable.contains(&None),
+                "B alone is acceptable in some prefix: {mismatch:?}"
+            );
+            assert!(mismatch.no_prefix_fits(), "{mismatch:?}");
+        }
+        other => panic!("a hole must be a mismatch at the power loss, got {other:?}"),
+    }
+
+    // The same SUT keeping a true prefix (B only) passes, and the model settles
+    // on that prefix: the trailing reopen expects exactly B.
+    for n in 0..=2 {
+        let mut sut = MemSut::new(Loss::KeepPrefix(n));
+        let outcome = run_ops(&mut sut, &ops, Mode::Fast)
+            .await
+            .expect("harness error");
+        assert!(outcome.is_pass(), "prefix {n}: {outcome:?}");
+    }
+}
+
+/// In Durable mode every ack is durable, so a power loss that keeps only a
+/// prefix of the acknowledged writes is a finding, not an acceptable outcome.
+#[tokio::test(flavor = "multi_thread")]
+async fn durable_power_loss_check_requires_every_ack() {
+    let ops = vec![
+        Op::Put(key(1), b"a1".to_vec()),
+        Op::Put(key(2), b"b1".to_vec()),
+        power_loss_op(),
+    ];
+    let mut sut = MemSut::new(Loss::KeepPrefix(1));
+    let outcome = run_ops(&mut sut, &ops, Mode::Durable)
+        .await
+        .expect("harness error");
+    match &outcome {
+        Outcome::Mismatch { mismatch, .. } => {
+            assert_eq!(mismatch.key, key(2));
+            assert_eq!(mismatch.acceptable, vec![Some(b"b1".to_vec())]);
+        }
+        other => panic!("expected a mismatch, got {other:?}"),
+    }
+    let mut sut = MemSut::new(Loss::KeepPrefix(2));
+    assert!(run_ops(&mut sut, &ops, Mode::Durable)
+        .await
+        .expect("harness error")
+        .is_pass());
+}
+
+/// Fast mode: a power loss right after a sync point (`Reopen`) may not take
+/// anything from before it. Losing a write the model knows was synced is a
+/// finding even though "nothing survived since the sync" is otherwise fine.
+#[tokio::test(flavor = "multi_thread")]
+async fn fast_check_never_goes_below_the_last_sync() {
+    /// Forgets everything, synced or not, on power loss.
+    struct ForgetsAll(MemSut);
+    #[async_trait::async_trait]
+    impl Sut for ForgetsAll {
+        async fn put(&mut self, k: &Key, v: &Value) -> anyhow::Result<()> {
+            self.0.put(k, v).await
+        }
+        async fn delete(&mut self, k: &Key) -> anyhow::Result<()> {
+            self.0.delete(k).await
+        }
+        async fn get(&mut self, k: &Key) -> anyhow::Result<Option<Value>> {
+            self.0.get(k).await
+        }
+        async fn reopen(&mut self) -> anyhow::Result<()> {
+            self.0.reopen().await
+        }
+        async fn crash(&mut self) -> anyhow::Result<()> {
+            self.0.crash().await
+        }
+        async fn checkpoint(&mut self) -> anyhow::Result<()> {
+            self.0.checkpoint().await
+        }
+        async fn power_loss(&mut self, _tear: Tear, _fault_seed: u64) -> anyhow::Result<()> {
+            self.0.durable.clear();
+            self.0.unsynced.clear();
+            Ok(())
+        }
+    }
+    let ops = vec![
+        Op::Put(key(1), b"a1".to_vec()),
+        Op::Reopen,
+        Op::Put(key(2), b"b1".to_vec()),
+        power_loss_op(),
+    ];
+    let mut sut = ForgetsAll(MemSut::new(Loss::KeepPrefix(0)));
+    let outcome = run_ops(&mut sut, &ops, Mode::Fast)
+        .await
+        .expect("harness error");
+    match &outcome {
+        Outcome::Mismatch { mismatch, .. } => {
+            assert_eq!(mismatch.key, key(1));
+            assert_eq!(mismatch.actual, None);
+            assert!(!mismatch.acceptable.contains(&None), "{mismatch:?}");
+            assert!(!mismatch.no_prefix_fits());
+        }
+        other => panic!("expected a mismatch on the synced key, got {other:?}"),
+    }
 }
 
 /// The implicit trailing reopen every sequence gets is counted separately
@@ -807,5 +1047,158 @@ async fn trailing_reopen_does_not_mask_missing_explicit_reopens() {
             .ends_with(&format!("{FINAL_REOPEN}:1")),
         "{}",
         report.format_op_counts()
+    );
+}
+
+/// Task 2.10a review (d): a "no prefix fits" finding (every key's value is
+/// acceptable on its own, but no single prefix gives them all) is about the
+/// whole snapshot, so which key it reports depends on which prefix a shrink
+/// leaves. `same_kind` matches such findings with each other regardless of
+/// key, and never with an ordinary single-key mismatch.
+#[test]
+fn same_kind_treats_no_prefix_fits_findings_as_one_kind() {
+    let lost = |k: Key, acceptable: Vec<Option<Value>>| Outcome::Mismatch {
+        at: 0,
+        after: power_loss_op(),
+        mismatch: Mismatch {
+            key: k,
+            expected: Some(b"v".to_vec()),
+            acceptable,
+            actual: None,
+        },
+    };
+    let hole_on_a = lost(key(1), vec![None, Some(b"v".to_vec())]);
+    let hole_on_b = lost(key(2), vec![None, Some(b"v".to_vec())]);
+    let plain_loss_on_a = lost(key(1), vec![Some(b"v".to_vec())]);
+
+    let Outcome::Mismatch { mismatch, .. } = &hole_on_a else {
+        unreachable!()
+    };
+    assert!(mismatch.no_prefix_fits());
+    assert!(
+        hole_on_a.same_kind(&hole_on_b),
+        "two no-prefix-fits findings are the same kind whatever key they report"
+    );
+    assert!(
+        !hole_on_a.same_kind(&plain_loss_on_a) && !plain_loss_on_a.same_kind(&hole_on_a),
+        "a no-prefix-fits finding is not the same kind as a lost key on that key"
+    );
+}
+
+/// Review M2: when a power loss both drops a legitimate unsynced suffix and
+/// corrupts a key, the finding must name the corrupted key (its value is in
+/// no prefix: single-key evidence), not the first legitimately-lost key.
+#[tokio::test(flavor = "multi_thread")]
+async fn fast_check_reports_the_key_no_prefix_explains() {
+    let ops = vec![
+        Op::Put(key(1), b"a1".to_vec()),
+        Op::Put(key(2), b"b1".to_vec()),
+        Op::Put(key(3), b"c1".to_vec()),
+        power_loss_op(),
+    ];
+    // Keeps only k1 (legitimately losing k2 and k3), then corrupts k3.
+    let mut sut = MemSut::new(Loss::KeepPrefixCorrupting(1, 3));
+    let outcome = run_ops(&mut sut, &ops, Mode::Fast)
+        .await
+        .expect("harness error");
+    match &outcome {
+        Outcome::Mismatch { mismatch, .. } => {
+            assert_eq!(mismatch.key, key(3), "{mismatch:?}");
+            assert_eq!(mismatch.actual, Some(b"garbage".to_vec()));
+            assert!(!mismatch.no_prefix_fits(), "{mismatch:?}");
+        }
+        other => panic!("expected a mismatch on the corrupted key, got {other:?}"),
+    }
+}
+
+/// A WAL whose power loss reverts to the last clean reopen, so it loses
+/// what its own close (in `crash`) had made durable, while claiming through
+/// `unsynced_acked` that the close synced everything.
+struct LosesCrashSyncedData {
+    inner: MemSut,
+    /// What really survives a power cut: the state as of the last reopen.
+    really_durable: BTreeMap<Key, Value>,
+    report_watermark: bool,
+}
+
+#[async_trait::async_trait]
+impl Sut for LosesCrashSyncedData {
+    async fn put(&mut self, k: &Key, v: &Value) -> anyhow::Result<()> {
+        self.inner.put(k, v).await
+    }
+    async fn delete(&mut self, k: &Key) -> anyhow::Result<()> {
+        self.inner.delete(k).await
+    }
+    async fn get(&mut self, k: &Key) -> anyhow::Result<Option<Value>> {
+        self.inner.get(k).await
+    }
+    async fn reopen(&mut self) -> anyhow::Result<()> {
+        self.inner.reopen().await?;
+        self.really_durable = self.inner.durable.clone();
+        Ok(())
+    }
+    async fn crash(&mut self) -> anyhow::Result<()> {
+        self.inner.crash().await
+    }
+    async fn checkpoint(&mut self) -> anyhow::Result<()> {
+        self.inner.checkpoint().await?;
+        self.really_durable = self.inner.durable.clone();
+        Ok(())
+    }
+    async fn power_loss(&mut self, _tear: Tear, _fault_seed: u64) -> anyhow::Result<()> {
+        self.inner.durable = self.really_durable.clone();
+        self.inner.unsynced.clear();
+        Ok(())
+    }
+    fn unsynced_acked(&self) -> Option<u64> {
+        if self.report_watermark {
+            self.inner.unsynced_acked()
+        } else {
+            None
+        }
+    }
+}
+
+/// Review M1: the lower bound follows the SUT's own sync points. A `Crash`
+/// closes the log (a sync), so a later power loss may not take what was
+/// written before it. With the SUT reporting `unsynced_acked` this is caught;
+/// without it the model only knows of `Reopen`/`Checkpoint` and must accept
+/// the loss, which is why `FaultSut` reports it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_loss_of_data_synced_by_a_crash_is_caught() {
+    let ops = vec![
+        Op::Put(key(1), b"a1".to_vec()),
+        Op::Crash,
+        Op::Put(key(2), b"b1".to_vec()),
+        power_loss_op(),
+    ];
+    let make = |report_watermark| LosesCrashSyncedData {
+        inner: MemSut::new(Loss::KeepPrefix(0)),
+        really_durable: BTreeMap::new(),
+        report_watermark,
+    };
+
+    let outcome = run_ops(&mut make(true), &ops, Mode::Fast)
+        .await
+        .expect("harness error");
+    match &outcome {
+        Outcome::Mismatch {
+            after: Op::PowerLoss { .. },
+            mismatch,
+            ..
+        } => {
+            assert_eq!(mismatch.key, key(1));
+            assert_eq!(mismatch.actual, None);
+            assert!(!mismatch.acceptable.contains(&None), "{mismatch:?}");
+        }
+        other => panic!("losing crash-synced data must be caught, got {other:?}"),
+    }
+
+    let blind = run_ops(&mut make(false), &ops, Mode::Fast)
+        .await
+        .expect("harness error");
+    assert!(
+        blind.is_pass(),
+        "without the SUT's watermark the model cannot know the crash synced: {blind:?}"
     );
 }

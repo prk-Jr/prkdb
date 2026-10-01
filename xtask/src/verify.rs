@@ -1,8 +1,12 @@
 //! `cargo xtask verify ...` forwards to the prkdb-verify binary so xtask stays light.
 //!
 //! Usage (see `cargo xtask verify --help` for every flag):
-//!   cargo xtask verify [--profile core|blocking|discovery] [--seed N] [--seed-offset N]
-//!                      [--seeds K] [--ops M] [--mode durable]
+//!   cargo xtask verify [--profile core|blocking|discovery] [--mode durable|fast]
+//!                      [--sut fault|std] [--seed N] [--seed-offset N] [--seeds K] [--ops M]
+//!
+//! `--sut` defaults to `fault` (the WAL adapter on the simulated FaultFs, which can lose
+//! power) for blocking/discovery and `std` (the real filesystem) for core; `--mode fast`
+//! needs `--sut fault`.
 //!
 //! A green run prints `profile=<p> mode=<m> seeds=<n> checks=<c> ops=<Put:…,Delete:…,…>`
 //! and fails as vacuous if no key was compared or any op kind the profile enables never ran.

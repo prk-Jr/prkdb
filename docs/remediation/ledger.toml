@@ -34,6 +34,7 @@ evidence = [
   "crates/prkdb-core/src/wal/mmap_log_segment.rs:279-281",
   "crates/prkdb/src/storage/wal_adapter.rs:497",
 ]
+regression_tests = ["test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_on_current_code", "test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_in_fast_mode"]
 
 [[finding]]
 id = "STO-03"
@@ -54,6 +55,7 @@ phase = 2
 status = "open"
 sources = ["audit-2026-09-23#18"]
 evidence = ["crates/prkdb-core/src/wal/mmap_log_segment.rs:676-720"]
+regression_tests = ["test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_on_current_code", "test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_in_fast_mode"]
 
 [[finding]]
 id = "STO-05"
@@ -450,7 +452,9 @@ title = "No power-loss (unsynced-data) testing; needs the WAL routed through Vfs
 area = "tests"
 severity = "medium"
 phase = 2
-status = "open"
+status = "fixed"
+regression_tests = ["test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_on_current_code", "test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_in_fast_mode", "test:crates/prkdb-verify/tests/harness.rs::fast_mode_checker_catches_lost_synced_data", "test:crates/prkdb-verify/tests/harness.rs::a_default_length_seed_rolls_segments"]
+changes = ["1197abe", "977c79b"]
 
 [[finding]]
 id = "TST-06"

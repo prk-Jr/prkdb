@@ -122,6 +122,16 @@ impl Model {
         self.settle(self.pending.len());
     }
 
+    /// The SUT reports that the first `n` pending mutations are durable (its
+    /// own sync points: a segment roll, a close, an open). They move into
+    /// `durable`; the rest stay pending. `n` is clamped to `pending.len()`.
+    pub fn mark_durable_prefix(&mut self, n: usize) {
+        let n = n.min(self.pending.len());
+        for m in self.pending.drain(..n) {
+            m.apply(&mut self.durable);
+        }
+    }
+
     /// Power loss kept exactly the first `n` pending mutations; the rest are
     /// gone and nothing is pending any more.
     ///
@@ -184,6 +194,22 @@ mod tests {
         let s = m.state();
         assert_eq!(s.len(), 1);
         assert_eq!(s.get(b"a".as_slice()), Some(&b"1".to_vec()));
+    }
+
+    #[test]
+    fn mark_durable_prefix_keeps_the_rest_pending() {
+        let mut m = Model::default();
+        m.put(b"a".to_vec(), b"1".to_vec());
+        m.put(b"b".to_vec(), b"2".to_vec());
+        m.put(b"c".to_vec(), b"3".to_vec());
+        let before = m.state();
+        m.mark_durable_prefix(2);
+        assert_eq!(m.pending.len(), 1);
+        assert_eq!(m.state(), before);
+        assert_eq!(m.prefix(0).len(), 2);
+        m.mark_durable_prefix(10);
+        assert!(m.pending.is_empty());
+        assert_eq!(m.durable, before);
     }
 
     #[test]

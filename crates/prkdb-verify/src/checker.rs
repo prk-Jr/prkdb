@@ -1,13 +1,16 @@
-//! Durable-mode check: after a restart, every key's value equals the model's.
+//! Post-restart checks. After a restart (and after any power loss in Durable
+//! mode) every key's value equals the model's full state. After a power loss
+//! in Fast mode the SUT's whole snapshot must equal ONE prefix of the
+//! acknowledged mutations no shorter than the last known sync (spec §7).
 //!
 //! A SUT error while checking (e.g. `get` failing after reopen) is itself a
 //! finding, not a harness error: it means the implementation under test is
 //! broken, not that the harness is.
 
-use crate::model::{Model, Value};
+use crate::model::{Key, Mode, Model, Value};
 use crate::ops::{key, KEY_SPACE};
 use crate::sut::Sut;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mismatch {
@@ -32,18 +35,36 @@ pub enum CheckOutcome {
     SutError { compared: usize, error: String },
 }
 
+impl Mismatch {
+    /// True for a Fast-mode "no prefix fits" finding: this key's value on its
+    /// own is one the checker would accept (some prefix gives it), yet no
+    /// single prefix explains the whole snapshot — the SUT kept a later write
+    /// while losing an earlier one. The reported key is then just the first
+    /// one that differs from the full state, not the whole story.
+    pub fn no_prefix_fits(&self) -> bool {
+        self.acceptable.contains(&self.actual)
+    }
+}
+
+/// The keys every check compares: the generator's full key space
+/// ([`KEY_SPACE`] keys from [`key`]) plus every key the model has ever seen
+/// touched (see [`Model::touched`]).
+fn checked_keys(model: &Model) -> BTreeSet<Key> {
+    let mut keys: BTreeSet<Key> = (0..KEY_SPACE).map(key).collect();
+    keys.extend(model.touched.iter().cloned());
+    keys
+}
+
 /// Compares the SUT against the model's full state (every acknowledged
 /// mutation survived) over the union of the generator's full key space
 /// ([`KEY_SPACE`] keys from [`key`]) and every key the model has ever seen
 /// touched (see [`Model::touched`]), so a wider generator, or a bug that
 /// reaches outside the nominal key space, can't shrink coverage.
 pub async fn check_durable(model: &Model, sut: &mut dyn Sut) -> CheckOutcome {
-    let mut keys: BTreeSet<Vec<u8>> = (0..KEY_SPACE).map(key).collect();
-    keys.extend(model.touched.iter().cloned());
     let state = model.state();
 
     let mut compared = 0;
-    for k in keys {
+    for k in checked_keys(model) {
         compared += 1;
         match sut.get(&k).await {
             Ok(actual) => {
@@ -69,4 +90,94 @@ pub async fn check_durable(model: &Model, sut: &mut dyn Sut) -> CheckOutcome {
         }
     }
     CheckOutcome::Ok { compared }
+}
+
+/// The check after a power loss. On success the model learns what survived.
+///
+/// - Durable: every acknowledged mutation was durable, so this is
+///   [`check_durable`]; afterwards everything is durable.
+/// - Fast: reads every checked key once, then looks for the LONGEST `n` such
+///   that `model.prefix(n)` equals the SUT's whole snapshot. This is one prefix
+///   for the entire snapshot, never a per-key test: a per-key test would accept
+///   key A from a long prefix together with key B from a short one, i.e. a
+///   hole in the log. Prefixes start at `model.durable` (the last sync the
+///   model knows of), so losing synced data never fits. On success
+///   `model.settle(n)`. On failure the mismatch names the first key whose
+///   value is in NO prefix (single-key evidence), with `acceptable` = that
+///   key's value in every prefix. Only if every key's value is individually
+///   acceptable does it name the first key that differs from the full state;
+///   then no single prefix explains the snapshot (see
+///   [`Mismatch::no_prefix_fits`]).
+pub async fn check_after_power_loss(
+    model: &mut Model,
+    sut: &mut dyn Sut,
+    mode: Mode,
+) -> CheckOutcome {
+    if mode == Mode::Durable {
+        let outcome = check_durable(model, sut).await;
+        if matches!(outcome, CheckOutcome::Ok { .. }) {
+            model.mark_durable();
+        }
+        return outcome;
+    }
+
+    let keys = checked_keys(model);
+    let mut snapshot: BTreeMap<Key, Value> = BTreeMap::new();
+    let mut compared = 0;
+    for k in &keys {
+        compared += 1;
+        match sut.get(k).await {
+            Ok(Some(v)) => {
+                snapshot.insert(k.clone(), v);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return CheckOutcome::SutError {
+                    compared,
+                    error: e.to_string(),
+                }
+            }
+        }
+    }
+
+    // Every key a prefix holds was touched, so it is a checked key: comparing
+    // whole maps compares exactly the checked keys.
+    let prefixes: Vec<BTreeMap<Key, Value>> =
+        (0..=model.pending.len()).map(|n| model.prefix(n)).collect();
+    if let Some(n) = (0..prefixes.len()).rev().find(|&n| prefixes[n] == snapshot) {
+        model.settle(n);
+        return CheckOutcome::Ok { compared };
+    }
+
+    // Prefer single-key evidence: a key whose value no prefix gives at all.
+    // Only if every key is individually explainable is this a "no prefix
+    // fits" finding, reported on the first key that differs from the full
+    // state (which is then a legitimately-lost key, not the culprit alone).
+    let state = &prefixes[prefixes.len() - 1];
+    let acceptable_for = |k: &Key| -> Vec<Option<Value>> {
+        let mut acceptable: Vec<Option<Value>> =
+            prefixes.iter().map(|p| p.get(k).cloned()).collect();
+        acceptable.dedup();
+        acceptable
+    };
+    let (k, acceptable) = keys
+        .iter()
+        .map(|k| (k, acceptable_for(k)))
+        .find(|(k, acceptable)| !acceptable.contains(&snapshot.get(*k).cloned()))
+        .or_else(|| {
+            keys.iter()
+                .find(|k| snapshot.get(*k) != state.get(*k))
+                .map(|k| (k, acceptable_for(k)))
+        })
+        .map(|(k, acceptable)| (k.clone(), acceptable))
+        .expect("the snapshot differs from every prefix, so from the full state too");
+    CheckOutcome::Mismatch {
+        compared,
+        mismatch: Mismatch {
+            expected: state.get(&k).cloned(),
+            actual: snapshot.get(&k).cloned(),
+            key: k,
+            acceptable,
+        },
+    }
 }

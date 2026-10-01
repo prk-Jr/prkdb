@@ -137,21 +137,66 @@ jobs:
           cargo xtask verify --profile blocking --seeds 1000 --seed-offset "$seed_offset" --mode durable | tee harness.log
           grep -E '^profile=.*seeds=.*checks=' harness.log | tail -1 >> "$GITHUB_STEP_SUMMARY"
 
+  # `harness` in Fast mode (Task 2.10b): acknowledged-but-unsynced writes may be lost on
+  # power loss, so the checker accepts any one prefix no shorter than the last sync.
+  # Fast mode exists from Phase 2 on, so phases 0, 1 and 5 skip this job.
+  harness-fast:
+    name: Crash/Restart Harness (Fast mode)
+    needs: resolve
+    if: ${{ inputs.probe == 'none' && contains(fromJSON('["2","3","4"]'), inputs.phase) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    # Sharded like `harness`, for the same reason: each shard stops at its first
+    # failing seed, so ten shards surface up to ten distinct failures per run.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      # 10 shards x 1000 seeds = the 10k-seed gate (spec §5 step 3), in Fast mode.
+      - name: Run harness shard (Fast mode)
+        run: |
+          set -o pipefail
+          seed_offset=$(( ${{ matrix.shard }} * 1000 ))
+          {
+            echo "### Harness shard ${{ matrix.shard }} (Fast mode)"
+            echo "seeds: $seed_offset..$(( seed_offset + 999 ))"
+          } >> "$GITHUB_STEP_SUMMARY"
+          cargo xtask verify --profile blocking --seeds 1000 --seed-offset "$seed_offset" --mode fast | tee harness.log
+          grep -E '^profile=.*seeds=.*checks=' harness.log | tail -1 >> "$GITHUB_STEP_SUMMARY"
+
   # Keeps the required status check reporting under a fixed name regardless of whether
-  # `harness` ran at all: on phase 0/5 it is skipped by design (see the `if:` above),
-  # and a skipped job is otherwise indistinguishable from a passed one to anything
-  # reading only `needs.harness.result`. `if: always()` so a failed or cancelled shard
-  # set still produces a red result instead of being skipped itself.
+  # `harness` / `harness-fast` ran at all: `harness` is skipped by design on phase 0/5
+  # and `harness-fast` outside phases 2-4 (see their `if:`s), and a skipped job is
+  # otherwise indistinguishable from a passed one to anything reading only
+  # `needs.<job>.result`. `if: always()` so a failed or cancelled shard set still
+  # produces a red result instead of being skipped itself.
   harness-result:
     name: Harness result
     if: always()
-    needs: harness
+    needs: [harness, harness-fast]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Verify harness passed or was legitimately skipped
         env:
           RESULT: ${{ needs.harness.result }}
+          FAST_RESULT: ${{ needs.harness-fast.result }}
           PHASE: ${{ inputs.phase }}
           PROBE: ${{ inputs.probe }}
         run: |
@@ -159,17 +204,30 @@ jobs:
             echo "probe run: harness not applicable" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          ok=1
           if [ "$RESULT" = "success" ]; then
             echo "Harness result: success" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          if [ "$RESULT" = "skipped" ] && { [ "$PHASE" = "0" ] || [ "$PHASE" = "5" ]; }; then
+          elif [ "$RESULT" = "skipped" ] && { [ "$PHASE" = "0" ] || [ "$PHASE" = "5" ]; }; then
             echo "Harness result: skipped (phase $PHASE, expected)" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
+          else
+            echo "Harness result: $RESULT (phase $PHASE) — failing" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Harness did not pass and was not a legitimate phase 0/5 skip: $RESULT"
+            ok=0
           fi
-          echo "Harness result: $RESULT (phase $PHASE) — failing" >> "$GITHUB_STEP_SUMMARY"
-          echo "::error::Harness did not pass and was not a legitimate phase 0/5 skip: $RESULT"
-          exit 1
+          case "$PHASE" in
+            2|3|4) fast_applies=1 ;;
+            *) fast_applies=0 ;;
+          esac
+          if [ "$FAST_RESULT" = "success" ]; then
+            echo "Harness (Fast mode) result: success" >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$FAST_RESULT" = "skipped" ] && [ "$fast_applies" = "0" ]; then
+            echo "Harness (Fast mode) result: skipped (phase $PHASE, expected)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Harness (Fast mode) result: $FAST_RESULT (phase $PHASE) — failing" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Fast-mode harness did not pass and was not a legitimate skip (phases 0, 1, 5): $FAST_RESULT"
+            ok=0
+          fi
+          [ "$ok" = "1" ]
 
   probe-wal-bench:
     name: Probe — WAL write path bench (Linux)
