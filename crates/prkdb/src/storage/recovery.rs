@@ -118,7 +118,8 @@ impl RecoveryManager {
                 .map_err(|e| StorageError::Internal(format!("Failed to read entry: {}", e)))?;
             let path = entry.path();
 
-            if path.is_file() {
+            // The lock file is not data, and Windows refuses reads of a locked file.
+            if path.is_file() && !path.ends_with(super::lock::LOCK_FILE) {
                 let filename = path
                     .file_name()
                     .ok_or_else(|| StorageError::Internal("Invalid filename".to_string()))?;

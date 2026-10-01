@@ -701,9 +701,11 @@ title = "No data-directory lock: two processes can open and corrupt the same WAL
 area = "storage"
 severity = "high"
 phase = 2
-status = "open"
+status = "fixed"
 sources = ["task-2.12-review-2026-10-01"]
 evidence = ["crates/prkdb/src/storage/wal_adapter.rs"]
+regression_tests = ["test:crates/prkdb-verify/tests/data_dir_lock.rs::a_second_open_in_process_is_locked", "test:crates/prkdb-verify/tests/data_dir_lock.rs::a_second_open_from_a_child_process_is_locked", "test:crates/prkdb-verify/tests/data_dir_lock.rs::the_lock_is_released_on_drop", "test:crates/prkdb-verify/tests/data_dir_lock.rs::the_lock_is_released_when_the_holder_is_sigkilled", "test:crates/prkdb-verify/tests/data_dir_lock.rs::every_multi_raft_data_directory_is_locked_while_open", "test:crates/prkdb-verify/tests/data_dir_lock.rs::faultfs_models_the_lock", "test:crates/prkdb-cli/tests/migrate.rs::migrate_on_a_locked_directory_refuses", "test:crates/prkdb-cli/tests/migrate.rs::migrate_on_a_live_multi_raft_root_refuses_each_member"]
+changes = ["75db3d6"]
 
 [[phase]]
 id = 0

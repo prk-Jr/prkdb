@@ -432,7 +432,9 @@ async fn a_large_cold_batch_read_returns_the_right_values() {
             );
         }
 
-        // The boundary in the other direction: a small cold batch must agree.
+        // The boundary in the other direction: a small cold batch must agree. One open
+        // at a time (the directory is locked, STO-10).
+        drop(a);
         let a2 = adapter(dir.path());
         let small = a2
             .get_many(vec![b"big0000".to_vec(), b"big0149".to_vec()])

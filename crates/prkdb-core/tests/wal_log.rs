@@ -88,6 +88,9 @@ impl Vfs for ProbeVfs {
     fn sync_dir(&self, d: &Path) -> io::Result<()> {
         StdVfs.sync_dir(d)
     }
+    fn lock_exclusive(&self, p: &Path) -> io::Result<Box<dyn prkdb_core::vfs::LockGuard>> {
+        StdVfs.lock_exclusive(p)
+    }
 }
 
 /// STO-05: replay order is append order, by global LSN, across segment rolls.
@@ -551,6 +554,9 @@ async fn health_is_not_stalled_right_after_a_long_idle_period() {
         }
         fn sync_dir(&self, d: &Path) -> io::Result<()> {
             StdVfs.sync_dir(d)
+        }
+        fn lock_exclusive(&self, p: &Path) -> io::Result<Box<dyn prkdb_core::vfs::LockGuard>> {
+            StdVfs.lock_exclusive(p)
         }
     }
 
