@@ -63,6 +63,38 @@ impl<C: Collection> CollectionHandle<C> {
     }
 }
 
+/// The storage error inside `err`, or `Internal` with its text for the other kinds.
+fn into_storage_error(err: DbError) -> StorageError {
+    match err {
+        DbError::Storage(e) => e,
+        other => StorageError::Internal(other.to_string()),
+    }
+}
+
+/// `err` with `prefix` put in front of its message, keeping its variant (a caller matching
+/// on `BackendError` still sees `BackendError`). Variants without a message are returned
+/// unchanged.
+fn with_context(err: StorageError, prefix: &str) -> StorageError {
+    use StorageError as E;
+    let p = |m: String| format!("{prefix}{m}");
+    match err {
+        E::BackendError(m) => E::BackendError(p(m)),
+        E::Serialization(m) => E::Serialization(p(m)),
+        E::Deserialization(m) => E::Deserialization(p(m)),
+        E::TransactionFailed(m) => E::TransactionFailed(p(m)),
+        E::Replication(m) => E::Replication(p(m)),
+        E::Internal(m) => E::Internal(p(m)),
+        E::WriteNotConfirmed(m) => E::WriteNotConfirmed(p(m)),
+        E::WriteBackpressure(m) => E::WriteBackpressure(p(m)),
+        E::WriteAbandoned(m) => E::WriteAbandoned(p(m)),
+        E::Corruption(m) => E::Corruption(p(m)),
+        E::Recovery(m) => E::Recovery(p(m)),
+        E::Validation(m) => E::Validation(p(m)),
+        E::UnsupportedFormat(m) => E::UnsupportedFormat(p(m)),
+        other => other,
+    }
+}
+
 #[derive(Clone)]
 pub struct CollectionHandle<C: Collection> {
     db: PrkDb,
@@ -138,22 +170,21 @@ where
             async move {
                 // Get collection handle and call put_batch
                 let handle = db_clone.collection::<C>();
-                let results = handle
-                    .put_batch(items)
-                    .await
-                    .map_err(|e| StorageError::Internal(e.to_string()))?;
+                let results = handle.put_batch(items).await.map_err(into_storage_error)?;
 
-                // Count failures and report if any occurred
-                let failed_count = results.iter().filter(|r| r.is_err()).count();
-                if failed_count > 0 {
-                    tracing::warn!(
-                        "Batch operation had {} failed items out of {}",
-                        failed_count,
-                        results.len()
-                    );
+                // Per-item failures reach the accumulator, which returns them from `flush`.
+                let n = results.len();
+                let mut failures = results.into_iter().filter_map(Result::err);
+                match failures.next() {
+                    None => Ok(()),
+                    Some(first) => {
+                        let failed = 1 + failures.count();
+                        Err(with_context(
+                            into_storage_error(first),
+                            &format!("{failed} of {n} batched writes failed; first: "),
+                        ))
+                    }
                 }
-
-                Ok(())
             }
         };
 
@@ -311,10 +342,11 @@ where
         Ok(())
     }
 
-    /// Flush any pending batched writes immediately.
+    /// Execute every batched write `put` accepted before this call and wait for it.
     ///
-    /// This is useful in tests or when you need to ensure all buffered data
-    /// is persisted before proceeding. Only has an effect if batching is enabled.
+    /// Returns the first write failure since the previous flush: with batching enabled,
+    /// `put` only queues the item, so this is where a failed write is reported. Without
+    /// batching it returns `Ok` at once.
     pub async fn flush(&self) -> Result<(), DbError> {
         if let Some(accumulator) = &self.accumulator {
             accumulator.flush().await?;
