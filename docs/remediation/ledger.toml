@@ -453,8 +453,8 @@ area = "tests"
 severity = "medium"
 phase = 2
 status = "fixed"
-regression_tests = ["test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_on_current_code", "test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_in_fast_mode", "test:crates/prkdb-verify/tests/harness.rs::fast_mode_checker_catches_lost_synced_data"]
-changes = ["1197abe"]
+regression_tests = ["test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_on_current_code", "test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_in_fast_mode", "test:crates/prkdb-verify/tests/harness.rs::fast_mode_checker_catches_lost_synced_data", "test:crates/prkdb-verify/tests/harness.rs::a_default_length_seed_rolls_segments"]
+changes = ["1197abe", "977c79b"]
 
 [[finding]]
 id = "TST-06"
