@@ -1515,4 +1515,132 @@ mod tests {
              {per_collection:?}"
         );
     }
+
+    use std::time::Duration;
+
+    /// Poll until `check` holds, so a test observes a transient window without racing it.
+    async fn wait_until(what: &str, limit: Duration, mut check: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + limit;
+        while std::time::Instant::now() < deadline {
+            if check() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    /// Queue depths **sum** across collections, because the memory they represent does.
+    ///
+    /// Mutation run 31539366718 missed `+=` -> `-=` and `+=` -> `*=` here: nothing asserted
+    /// the arithmetic, only that a number came back. `*=` reports 0 for any number of
+    /// stalled collections — a probe that says "nothing queued" while two writers are stuck
+    /// is worse than no probe, because it actively argues against the operator's suspicion.
+    ///
+    /// Each collection's `queue_depth` is the number of appends its WAL writer holds and
+    /// has not yet answered (Task 2.9b rewrites this for one WAL).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn queue_depths_sum_across_collections() {
+        use crate::storage::wal_adapter::fault_injection::StallGuard;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            log_dir: temp_dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        };
+        let adapter = Arc::new(CollectionPartitionedAdapter::new(config).unwrap());
+
+        // Open both collections with a write that succeeds, so the stall below acts on a
+        // live writer rather than on collection creation.
+        for name in ["users", "orders"] {
+            adapter
+                .put_to_collection(name, b"seed", b"v")
+                .await
+                .unwrap();
+        }
+
+        let collections = temp_dir.path().join("collections");
+        let _users_stall = StallGuard::new(collections.join("users"));
+        let _orders_stall = StallGuard::new(collections.join("orders"));
+
+        let mut queued = Vec::new();
+        for name in ["users", "orders"] {
+            let adapter = adapter.clone();
+            queued.push(tokio::spawn(async move {
+                adapter.put_to_collection(name, b"queued", b"v").await
+            }));
+        }
+
+        wait_until(
+            "both stalled collections to report their queued write",
+            Duration::from_secs(10),
+            || adapter.write_path_health().queue_depth == 2,
+        )
+        .await;
+
+        // One write per collection, so the total is the sum and not either operand: 2 is
+        // unreachable by `-=` (which underflows from 0) and by `*=` (which stays 0).
+        assert_eq!(
+            adapter.write_path_health().queue_depth,
+            2,
+            "two stalled collections holding one write each must report two"
+        );
+    }
+
+    /// Mutation run 31539366718 missed `delete !` on the `unhealthy.is_empty()` guard.
+    /// Without the negation the adapter reports healthy precisely when a collection has
+    /// reported a reason, so `/readyz` keeps routing traffic to the node whose writes are
+    /// not being confirmed. That is the exact failure the liveness work exists to end.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_stalled_collection_makes_the_adapter_unhealthy() {
+        use crate::storage::wal_adapter::fault_injection::StallGuard;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            log_dir: temp_dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        };
+        let adapter = Arc::new(CollectionPartitionedAdapter::new(config).unwrap());
+
+        for name in ["users", "orders"] {
+            adapter
+                .put_to_collection(name, b"seed", b"v")
+                .await
+                .unwrap();
+        }
+        assert!(
+            adapter.write_path_health().healthy,
+            "a freshly opened adapter must be healthy, or the assertion below proves nothing"
+        );
+
+        let _orders_stall = StallGuard::new(temp_dir.path().join("collections").join("orders"));
+        let _stalled = {
+            let adapter = adapter.clone();
+            tokio::spawn(async move { adapter.put_to_collection("orders", b"queued", b"v").await })
+        };
+
+        wait_until(
+            "the stalled collection to be declared unhealthy",
+            Duration::from_secs(15),
+            || !adapter.write_path_health().healthy,
+        )
+        .await;
+
+        let health = adapter.write_path_health();
+        assert!(
+            !health.healthy,
+            "one stalled collection means the node is not ready"
+        );
+        let reason = health
+            .reason
+            .expect("an unhealthy adapter must name the cause");
+        assert!(
+            reason.contains("orders"),
+            "the reason must name the collection an operator has to look at, got: {reason}"
+        );
+        assert!(
+            !reason.contains("users"),
+            "a healthy collection must not be blamed, got: {reason}"
+        );
+    }
 }

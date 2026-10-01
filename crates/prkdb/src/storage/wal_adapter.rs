@@ -89,16 +89,22 @@ impl WalStorageAdapterBuilder {
 /// Keyed by WAL directory rather than by a flag on the adapter, so no constructor
 /// changes. Tests use a unique `tempdir`, so parallel tests cannot collide.
 ///
-/// # Task 2.8a
+/// # Writer faults go through `Vfs` (Task 2.8b)
 ///
-/// Only `fail_flush_at` is consulted today (at the top of `flush`, before the WAL). The
-/// writer-fault hooks lost their last caller with the flush loop; Task 2.8b re-implements
-/// them as a `Vfs` wrapper.
+/// `fail_flush_at` is checked at the top of `flush`, before the WAL: it tests that
+/// wrappers forward errors and must not poison the log. The writer faults
+/// (`fail_append_at`, `stall_writer_at`, `panic_writer_at`) are injected where a real disk
+/// fault reaches the log: `open_inner` wraps the adapter's `Vfs` in [`FaultInjectingVfs`],
+/// whose files consult this registry on every `write_at`.
+///
+/// [`FaultInjectingVfs`]: fault_injection::FaultInjectingVfs
 #[cfg(test)]
 pub(crate) mod fault_injection {
+    use prkdb_core::vfs::{OpenMode, Vfs, VfsFile};
     use std::collections::HashSet;
+    use std::io;
     use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
     fn registry(kind: Fault) -> &'static Mutex<HashSet<PathBuf>> {
         static FLUSH_FAILURE: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
@@ -115,6 +121,13 @@ pub(crate) mod fault_injection {
             Fault::WriterNeverStarted => &NO_WRITER,
         };
         slot.get_or_init(|| Mutex::new(HashSet::new()))
+    }
+
+    /// Notified whenever a stall is cleared; a stalled `write_at` waits on it with the
+    /// `WriterStall` registry's mutex.
+    fn stall_cleared() -> &'static Condvar {
+        static CLEARED: OnceLock<Condvar> = OnceLock::new();
+        CLEARED.get_or_init(Condvar::new)
     }
 
     #[derive(Clone, Copy)]
@@ -138,6 +151,9 @@ pub(crate) mod fault_injection {
             .lock()
             .expect("fault registry lock")
             .remove(dir);
+        if matches!(kind, Fault::WriterStall) {
+            stall_cleared().notify_all();
+        }
     }
 
     fn armed(kind: Fault, dir: &Path) -> bool {
@@ -162,24 +178,20 @@ pub(crate) mod fault_injection {
         armed(Fault::FlushFailure, dir)
     }
 
-    /// Make the WAL append *inside the writer* fail for the adapter whose WAL lives at
-    /// `dir`.
+    /// Make the WAL writer's `write_at` fail for the adapter whose WAL lives at `dir`, as a
+    /// full disk or an I/O error would: the log is poisoned until reopen.
     ///
     /// Distinct from `fail_flush_at`, which fails the caller-facing `flush` and never
-    /// reaches the writer. Real causes are a full disk or a failing fsync, neither of
-    /// which a test can arrange portably.
-    #[allow(dead_code, reason = "wired to the Vfs wrapper in Task 2.8b")]
+    /// reaches the writer.
     pub fn fail_append_at(dir: impl Into<PathBuf>) {
         arm(Fault::AppendFailure, dir);
     }
 
-    #[allow(dead_code, reason = "wired to the Vfs wrapper in Task 2.8b")]
     pub fn clear_append_failure(dir: &Path) {
         disarm(Fault::AppendFailure, dir);
     }
 
-    #[allow(dead_code, reason = "wired to the Vfs wrapper in Task 2.8b")]
-    pub(super) fn append_should_fail(dir: &Path) -> bool {
+    fn append_should_fail(dir: &Path) -> bool {
         armed(Fault::AppendFailure, dir)
     }
 
@@ -202,39 +214,220 @@ pub(crate) mod fault_injection {
         armed(Fault::WriterNeverStarted, dir)
     }
 
-    /// Make the writer stop completing batches while staying alive.
+    /// Make the writer's `write_at` block until [`clear_writer_stall`], with the writer
+    /// thread alive.
     ///
     /// This is the failure the liveness spec exists for: the writer runs, and the only
-    /// evidence anything is wrong is that the queue stops moving.
-    #[allow(dead_code, reason = "wired to the Vfs wrapper in Task 2.8b")]
+    /// evidence anything is wrong is that the queue stops moving. Tests use [`StallGuard`],
+    /// which clears the stall even when an assertion fails: a stall left armed blocks the
+    /// writer, and with it the adapter's drop (which joins the writer), for good.
     pub fn stall_writer_at(dir: impl Into<PathBuf>) {
         arm(Fault::WriterStall, dir);
     }
 
-    #[allow(dead_code, reason = "wired to the Vfs wrapper in Task 2.8b")]
     pub fn clear_writer_stall(dir: &Path) {
         disarm(Fault::WriterStall, dir);
     }
 
-    #[allow(dead_code, reason = "wired to the Vfs wrapper in Task 2.8b")]
-    pub(super) fn writer_should_stall(dir: &Path) -> bool {
-        armed(Fault::WriterStall, dir)
+    /// Blocks while a stall is armed for `dir`.
+    fn wait_while_stalled(dir: &Path) {
+        let stalled = registry(Fault::WriterStall)
+            .lock()
+            .expect("fault registry lock");
+        let _released = stall_cleared()
+            .wait_while(stalled, |set| set.contains(dir))
+            .expect("fault registry lock");
     }
 
-    /// Make the writer panic on its next write.
-    #[allow(dead_code, reason = "wired to the Vfs wrapper in Task 2.8b")]
+    /// Stalls the writer for `dir` while alive and clears the stall when dropped. Declare
+    /// it after the adapter, so it drops (and releases the writer) first.
+    pub struct StallGuard(PathBuf);
+
+    impl StallGuard {
+        pub fn new(dir: impl Into<PathBuf>) -> Self {
+            let dir = dir.into();
+            stall_writer_at(dir.clone());
+            Self(dir)
+        }
+    }
+
+    impl Drop for StallGuard {
+        fn drop(&mut self) {
+            clear_writer_stall(&self.0);
+        }
+    }
+
+    /// Make the writer's `write_at` panic.
     pub fn panic_writer_at(dir: impl Into<PathBuf>) {
         arm(Fault::WriterPanic, dir);
     }
 
-    #[allow(dead_code, reason = "wired to the Vfs wrapper in Task 2.8b")]
     pub fn clear_writer_panic(dir: &Path) {
         disarm(Fault::WriterPanic, dir);
     }
 
-    #[allow(dead_code, reason = "wired to the Vfs wrapper in Task 2.8b")]
-    pub(super) fn writer_should_panic(dir: &Path) -> bool {
+    fn writer_should_panic(dir: &Path) -> bool {
         armed(Fault::WriterPanic, dir)
+    }
+
+    /// A `Vfs` whose files consult the fault registry for `dir` on every `write_at`;
+    /// everything else is forwarded to `inner` unchanged.
+    pub(crate) struct FaultInjectingVfs {
+        inner: Arc<dyn Vfs>,
+        dir: PathBuf,
+    }
+
+    impl FaultInjectingVfs {
+        pub(crate) fn new(inner: Arc<dyn Vfs>, dir: PathBuf) -> Self {
+            Self { inner, dir }
+        }
+
+        fn wrap(&self, file: Arc<dyn VfsFile>) -> Arc<dyn VfsFile> {
+            Arc::new(FaultInjectingFile {
+                inner: file,
+                dir: self.dir.clone(),
+            })
+        }
+    }
+
+    impl Vfs for FaultInjectingVfs {
+        fn open(&self, path: &Path, mode: OpenMode) -> io::Result<Arc<dyn VfsFile>> {
+            Ok(self.wrap(self.inner.open(path, mode)?))
+        }
+        fn create(&self, path: &Path) -> io::Result<Arc<dyn VfsFile>> {
+            Ok(self.wrap(self.inner.create(path)?))
+        }
+        fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+            self.inner.rename(from, to)
+        }
+        fn remove(&self, path: &Path) -> io::Result<()> {
+            self.inner.remove(path)
+        }
+        fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+            self.inner.create_dir_all(path)
+        }
+        fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+            self.inner.read_dir(path)
+        }
+        fn exists(&self, path: &Path) -> io::Result<bool> {
+            self.inner.exists(path)
+        }
+        fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+            self.inner.sync_dir(dir)
+        }
+    }
+
+    struct FaultInjectingFile {
+        inner: Arc<dyn VfsFile>,
+        dir: PathBuf,
+    }
+
+    impl VfsFile for FaultInjectingFile {
+        fn write_at(&self, offset: u64, buf: &[u8]) -> io::Result<()> {
+            if writer_should_panic(&self.dir) {
+                panic!("injected writer panic at {}", self.dir.display());
+            }
+            if append_should_fail(&self.dir) {
+                return Err(io::Error::other("injected append failure"));
+            }
+            wait_while_stalled(&self.dir);
+            self.inner.write_at(offset, buf)
+        }
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+            self.inner.read_at(offset, buf)
+        }
+        fn set_len(&self, len: u64) -> io::Result<()> {
+            self.inner.set_len(len)
+        }
+        fn len(&self) -> io::Result<u64> {
+            self.inner.len()
+        }
+        fn sync_data(&self) -> io::Result<()> {
+            self.inner.sync_data()
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use prkdb_core::vfs::StdVfs;
+        use std::time::Duration;
+
+        /// A file under `root`, created through a wrapper registered for `dir`.
+        fn file_for(root: &Path, name: &str, dir: &Path) -> Arc<dyn VfsFile> {
+            FaultInjectingVfs::new(Arc::new(StdVfs), dir.to_path_buf())
+                .create(&root.join(name))
+                .expect("create")
+        }
+
+        #[test]
+        fn a_registered_directory_fails_its_writes_and_an_unregistered_one_does_not() {
+            let root = tempfile::tempdir().unwrap();
+            let armed_dir = root.path().join("armed");
+            let armed_file = file_for(root.path(), "a", &armed_dir);
+            let other_file = file_for(root.path(), "b", &root.path().join("other"));
+
+            fail_append_at(&armed_dir);
+            let failed = armed_file.write_at(0, b"x");
+            let unaffected = other_file.write_at(0, b"y");
+            clear_append_failure(&armed_dir);
+
+            let error = failed.expect_err("an armed directory's write must fail");
+            assert!(error.to_string().contains("injected append failure"));
+            unaffected.expect("another directory's writes are untouched");
+            armed_file
+                .write_at(0, b"z")
+                .expect("once cleared, writes pass again");
+        }
+
+        #[test]
+        fn a_registered_directory_stalls_its_writes_until_cleared() {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("stalled");
+            let file = file_for(root.path(), "a", &dir);
+            let other_file = file_for(root.path(), "b", &root.path().join("free"));
+
+            let guard = StallGuard::new(&dir);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let writer = std::thread::spawn(move || {
+                tx.send(file.write_at(0, b"x").is_ok()).unwrap();
+            });
+            assert!(
+                rx.recv_timeout(Duration::from_millis(200)).is_err(),
+                "the write must block while the stall is armed"
+            );
+            other_file
+                .write_at(0, b"y")
+                .expect("an unregistered directory does not stall");
+
+            drop(guard);
+            assert_eq!(
+                rx.recv_timeout(Duration::from_secs(5)),
+                Ok(true),
+                "clearing the stall must release the blocked write"
+            );
+            writer.join().unwrap();
+        }
+
+        #[test]
+        fn a_registered_directory_panics_on_write_and_an_unregistered_one_does_not() {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("panics");
+            let file = file_for(root.path(), "a", &dir);
+            let other_file = file_for(root.path(), "b", &root.path().join("calm"));
+
+            panic_writer_at(&dir);
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = file.write_at(0, b"x");
+            }));
+            let unaffected = other_file.write_at(0, b"y");
+            clear_writer_panic(&dir);
+
+            assert!(outcome.is_err(), "an armed directory's write must panic");
+            unaffected.expect("another directory's writes are untouched");
+            file.write_at(0, b"x")
+                .expect("once cleared, writes pass again");
+        }
     }
 }
 
@@ -328,8 +521,7 @@ struct PublishProgress {
     last_publish_ms: AtomicU64,
 }
 
-/// Counts one append as in flight from before it is queued until the writer is done with
-/// it. Moved into the commit hook, so it is released when the hook runs or, if the
+/// Counts one append as in flight from its admission until the writer is done with it. Moved into the commit hook, so it is released when the hook runs or, if the
 /// writer answers the request with an error instead, when the request is dropped.
 struct InFlight(Arc<PublishProgress>);
 
@@ -523,6 +715,11 @@ impl WalStorageAdapter {
     ) -> Result<Self, StorageError> {
         let log_dir = config.wal.log_dir.clone();
         info!("Opening WalStorageAdapter at {}", log_dir.display());
+        #[cfg(test)]
+        let vfs: Arc<dyn Vfs> = Arc::new(fault_injection::FaultInjectingVfs::new(
+            vfs,
+            log_dir.clone(),
+        ));
 
         // Until the FORMAT marker (Task 2.11): a format-1 directory holds the old mmap
         // WAL, and opening a new log next to it would make the database look wiped.
@@ -638,6 +835,20 @@ impl WalStorageAdapter {
             inner.progress.clone(),
             inner.metrics.clone(),
         );
+        let bound = inner.bounds.client_bound;
+        let reservation = match tokio::time::timeout(bound, inner.wal.reserve(payload.len())).await
+        {
+            Ok(r) => r.map_err(wal_err)?,
+            Err(_) => {
+                return Err(StorageError::WriteBackpressure(format!(
+                    "WAL admission queue full for {}ms; nothing was written",
+                    bound.as_millis()
+                )))
+            }
+        };
+
+        // Counted from here, not before `reserve`: a write still waiting for admission
+        // is not queued, and must not show in `queue_depth`.
         let in_flight = InFlight::new(inner.progress.clone());
         let hook: CommitHook = Box::new(move |loc| {
             let _in_flight = in_flight;
@@ -662,17 +873,6 @@ impl WalStorageAdapter {
             metrics.record_writer_publish(1, now);
         });
 
-        let bound = inner.bounds.client_bound;
-        let reservation = match tokio::time::timeout(bound, inner.wal.reserve(payload.len())).await
-        {
-            Ok(r) => r.map_err(wal_err)?,
-            Err(_) => {
-                return Err(StorageError::WriteBackpressure(format!(
-                    "WAL admission queue full for {}ms; nothing was written",
-                    bound.as_millis()
-                )))
-            }
-        };
         // From here the writer owns the request: a timeout means "not confirmed", not
         // "not written".
         let pending = inner
@@ -1873,8 +2073,8 @@ mod tests {
     //
     // Every test below observes the write path from the *caller's* side, because that is
     // where the defect lived: a queued write is a promise, and the failure mode was that
-    // nothing kept it and nothing said so. The tests that injected writer faults (panic,
-    // stall, failed append) come back in Task 2.8b, injected through a `Vfs` wrapper.
+    // nothing kept it and nothing said so. Writer faults (panic, stall, failed append) are
+    // injected where a real disk fault reaches the log: `fault_injection::FaultInjectingVfs`.
     // ------------------------------------------------------------------------------
 
     /// Dropping the last handle closes the log durably: the `Wal` drains its queue,
@@ -2111,6 +2311,10 @@ mod tests {
     /// `max_flush_ms` is the knob the bounds derive from, so setting it here is the same
     /// lever an operator has — the test is not reaching past the mechanism to a private
     /// constant.
+    ///
+    /// The WAL declares a stall after `max(1s, 100 × sync_interval_ms)` with requests
+    /// queued and no batch completed; `test_config`'s 10 ms interval makes that 1 s. The
+    /// client bound is `128 × max_flush_ms` (`LivenessBounds`).
     fn liveness_config(dir: &Path, max_flush_ms: u64, max_pending: usize) -> StorageConfig {
         StorageConfig {
             wal: WalConfig {
@@ -2229,5 +2433,363 @@ mod tests {
 
         let reopened = WalStorageAdapter::open(config).expect("reopen");
         assert_eq!(reopened.get(b"k").await.unwrap(), Some(b"v".to_vec()));
+    }
+
+    /// Poll until `check` holds, so a test observes a transient window without racing it.
+    async fn wait_until(what: &str, limit: Duration, mut check: impl FnMut() -> bool) {
+        let deadline = Instant::now() + limit;
+        while Instant::now() < deadline {
+            if check() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    /// Acceptance 1: a writer that panics answers every waiter, and no caller blocks.
+    ///
+    /// The panic is injected in `write_at`, on the writer thread. Waiters whose request
+    /// was in the batch being written get `WriteNotConfirmed`: their reply is dropped
+    /// unanswered by the unwinding, and a panic after the bytes reached the file would
+    /// leave the frame on disk. Every request after that, and every later write, gets the
+    /// poisoned error, which names the panic, as does the health reason.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_panicking_write_poisons_and_answers_every_waiter() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = Arc::new(
+            WalStorageAdapter::new_with_config(liveness_config(dir.path(), 25, 65_536))
+                .expect("adapter opens"),
+        );
+        adapter
+            .put(b"before", b"v")
+            .await
+            .expect("healthy before the fault");
+
+        fault_injection::panic_writer_at(dir.path());
+        let waiters: Vec<_> = (0..8u32)
+            .map(|i| {
+                let adapter = adapter.clone();
+                tokio::spawn(async move { adapter.put(format!("k{i}").as_bytes(), b"v").await })
+            })
+            .collect();
+        let mut outcomes = Vec::new();
+        for waiter in waiters {
+            outcomes.push(tokio::time::timeout(Duration::from_secs(10), waiter).await);
+        }
+        let later = adapter.put(b"later", b"v").await;
+        fault_injection::clear_writer_panic(dir.path());
+
+        for outcome in outcomes {
+            let error = outcome
+                .expect("every waiter must be answered, not left waiting")
+                .expect("the waiting task must not panic")
+                .expect_err("a panicking writer cannot confirm a write");
+            assert!(
+                error.is_write_unconfirmed() || error.to_string().contains("injected writer panic"),
+                "a waiter is either not confirmed (in the batch that panicked) or refused \
+                 with the panic named; got: {error}"
+            );
+        }
+        let later = later.expect_err("a poisoned log refuses later writes");
+        assert!(
+            later.to_string().contains("injected writer panic")
+                && later.to_string().contains("reopen the database"),
+            "a later write must name the panic and what clears it; got: {later}"
+        );
+
+        let health = adapter.write_path_health();
+        assert!(!health.healthy);
+        assert!(
+            health
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("panicked")),
+            "the health reason must name the panic: {health:?}"
+        );
+        assert_eq!(health.queue_depth, 0, "no waiter may be left behind");
+        for i in 0..8u32 {
+            assert_eq!(adapter.get(format!("k{i}").as_bytes()).await.unwrap(), None);
+        }
+        assert_eq!(
+            adapter.get(b"before").await.unwrap(),
+            Some(b"v".to_vec()),
+            "what was published before the panic stays readable"
+        );
+    }
+
+    /// Acceptance 2: a writer that is alive but completes nothing is detected and reported
+    /// unhealthy; the waiting caller is answered `WriteNotConfirmed` at its client bound,
+    /// and (acceptance 3) that write may still land: once the stall clears, it does.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stalled_writer_is_reported_unhealthy() {
+        let dir = tempfile::tempdir().unwrap();
+        // max_flush_ms 25 => client bound 3.2s, beyond the WAL's 1s stall bound.
+        let adapter = WalStorageAdapter::new_with_config(liveness_config(dir.path(), 25, 65_536))
+            .expect("adapter opens");
+        let bound = LivenessBounds::from_max_flush_ms(25).client_bound;
+
+        let stall = fault_injection::StallGuard::new(dir.path());
+        let started = Instant::now();
+        let outcome = tokio::time::timeout(Duration::from_secs(20), adapter.put(b"k", b"v")).await;
+        let elapsed = started.elapsed();
+        let health = adapter.write_path_health();
+        drop(stall);
+
+        let error = outcome
+            .expect("the caller must be answered, not left waiting")
+            .expect_err("a stalled writer confirmed nothing");
+        assert!(
+            error.is_write_unconfirmed(),
+            "the request was queued with the writer, so its outcome is unknown; got: {error}"
+        );
+        assert!(
+            elapsed >= bound && elapsed < bound + Duration::from_secs(5),
+            "the caller is answered at its client bound ({bound:?}), took {elapsed:?}"
+        );
+        assert!(!health.healthy, "the health probe must report the stall");
+        assert!(
+            health
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("stalled")),
+            "{health:?}"
+        );
+        assert_eq!(health.queue_depth, 1);
+        assert!(health.oldest_unpublished_age_ms >= 1_000, "{health:?}");
+
+        wait_until("the writer to recover", Duration::from_secs(10), || {
+            let health = adapter.write_path_health();
+            health.healthy && health.queue_depth == 0
+        })
+        .await;
+        assert_eq!(
+            adapter.get(b"k").await.unwrap(),
+            Some(b"v".to_vec()),
+            "a not-confirmed write may still land, and this one did"
+        );
+    }
+
+    /// Acceptance 3, at the boundary that matters: the variant survives the trait object
+    /// every caller in the codebase actually holds. `PrkDb` stores an
+    /// `Arc<dyn StorageAdapter>`, so a variant flattened on the way through it would make
+    /// the distinction unobservable however carefully it is defined.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_not_confirmed_variant_survives_the_storage_adapter_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        // max_flush_ms 5 => client bound 640ms.
+        let storage: Arc<dyn StorageAdapter> = Arc::new(
+            WalStorageAdapter::new_with_config(liveness_config(dir.path(), 5, 65_536))
+                .expect("adapter opens"),
+        );
+
+        let _stall = fault_injection::StallGuard::new(dir.path());
+        let result = tokio::time::timeout(
+            Duration::from_secs(20),
+            storage.put_many(vec![(b"k".to_vec(), b"v".to_vec())]),
+        )
+        .await
+        .expect("the caller must be answered");
+
+        let error = result.expect_err("a stalled writer confirmed nothing");
+        assert!(
+            matches!(error, StorageError::WriteNotConfirmed(_)),
+            "the variant must arrive intact rather than as Internal; got: {error:?}"
+        );
+        wait_until(
+            "the stall to show through the trait object",
+            Duration::from_secs(10),
+            || !storage.write_path_health().healthy,
+        )
+        .await;
+    }
+
+    /// Acceptance 4: with admission exhausted and the writer stalled, a new write waits up
+    /// to its client bound and is then refused with backpressure, never queued; memory
+    /// stays bounded by `max_queued_bytes`. A write still waiting when the writer resumes
+    /// gets in.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_full_queue_makes_writers_wait_then_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let max_flush_ms = 10; // client bound 1.28s
+        let bound = LivenessBounds::from_max_flush_ms(max_flush_ms).client_bound;
+        let mut config = liveness_config(dir.path(), max_flush_ms, 65_536);
+        config.wal.max_queued_bytes = 256;
+        let adapter = Arc::new(WalStorageAdapter::new_with_config(config).expect("adapter opens"));
+
+        let stall = fault_injection::StallGuard::new(dir.path());
+        // A payload at least as large as the admission budget holds all of it until the
+        // writer answers it.
+        let filler = {
+            let adapter = adapter.clone();
+            tokio::spawn(async move { adapter.put(b"filler", &[7u8; 512]).await })
+        };
+        wait_until("the filler to be queued", Duration::from_secs(10), || {
+            adapter.write_path_health().queue_depth == 1
+        })
+        .await;
+
+        for attempt in 0..3 {
+            let key = format!("overflow{attempt}");
+            let started = Instant::now();
+            let error = adapter
+                .put(key.as_bytes(), b"v")
+                .await
+                .expect_err("admission is exhausted");
+            assert!(
+                matches!(error, StorageError::WriteBackpressure(_)),
+                "a refused write must say so definitely, so retrying is safe; got: {error:?}"
+            );
+            assert!(
+                started.elapsed() >= bound,
+                "the writer must wait for admission up to its bound ({bound:?}) before being \
+                 refused; waited {:?}",
+                started.elapsed()
+            );
+            assert_eq!(
+                adapter.write_path_health().queue_depth,
+                1,
+                "a refused write must not be queued"
+            );
+            assert_eq!(adapter.get(key.as_bytes()).await.unwrap(), None);
+        }
+
+        // Backpressure, not a wall: a write waiting for admission gets in once the writer
+        // resumes.
+        let waiting = {
+            let adapter = adapter.clone();
+            tokio::spawn(async move { adapter.put(b"waiting", b"v").await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(stall);
+        tokio::time::timeout(Duration::from_secs(20), waiting)
+            .await
+            .expect("the waiting write must resolve once the writer resumes")
+            .expect("the task must not panic")
+            .expect("the waiting write must be admitted and land");
+        assert_eq!(adapter.get(b"waiting").await.unwrap(), Some(b"v".to_vec()));
+
+        // The filler was queued for longer than its own client bound, so it was answered
+        // not-confirmed; it was with the writer all along, and landed once released.
+        let filled = tokio::time::timeout(Duration::from_secs(20), filler)
+            .await
+            .expect("the filler resolves")
+            .expect("the task must not panic");
+        assert!(
+            filled.as_ref().is_err_and(|e| e.is_write_unconfirmed()),
+            "{filled:?}"
+        );
+        assert_eq!(adapter.get(b"filler").await.unwrap(), Some(vec![7u8; 512]));
+    }
+
+    /// The observability the spec asks for, read where an operator reads it: queue depth,
+    /// the age of the oldest unpublished write, the publish count and the time of the last
+    /// publish, while a stall forms and after it clears.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_write_path_publishes_the_numbers_that_show_a_stall_forming() {
+        let dir = tempfile::tempdir().unwrap();
+        // max_flush_ms 5000 => client bound 640s: the write waits out the stall.
+        let adapter = Arc::new(
+            WalStorageAdapter::new_with_config(liveness_config(dir.path(), 5_000, 65_536))
+                .expect("adapter opens"),
+        );
+        adapter.put(b"seed", b"v").await.expect("seed write");
+        let idle = adapter.write_path_health();
+        assert!(idle.healthy && idle.queue_depth == 0, "{idle:?}");
+        assert_eq!(idle.publishes_total, 1);
+
+        let stall = fault_injection::StallGuard::new(dir.path());
+        let filler = {
+            let adapter = adapter.clone();
+            tokio::spawn(async move { adapter.put(b"k", b"v").await })
+        };
+        wait_until(
+            "the queued write to show in the depth gauge",
+            Duration::from_secs(10),
+            || adapter.write_path_health().queue_depth == 1,
+        )
+        .await;
+        wait_until(
+            "the stall to be reported with the oldest write's age",
+            Duration::from_secs(10),
+            || {
+                let health = adapter.write_path_health();
+                !health.healthy && health.oldest_unpublished_age_ms >= 1_000
+            },
+        )
+        .await;
+        let stalled = adapter.write_path_health();
+        assert_eq!(
+            stalled.publishes_total, 1,
+            "nothing publishes while stalled"
+        );
+        assert!(stalled.last_publish_age_ms.is_some_and(|age| age >= 1_000));
+
+        drop(stall);
+        tokio::time::timeout(Duration::from_secs(20), filler)
+            .await
+            .expect("the write resolves once the writer resumes")
+            .expect("the filler task must not panic")
+            .expect("the write publishes");
+
+        let after = adapter.write_path_health();
+        assert!(after.healthy, "{after:?}");
+        assert_eq!(after.queue_depth, 0);
+        assert_eq!(after.oldest_unpublished_age_ms, 0);
+        assert_eq!(after.publishes_total, 2);
+        assert!(after.last_publish_age_ms.is_some_and(|age| age < 1_000));
+        assert!(adapter.metrics().writer_publishes_total >= 2);
+        assert!(adapter.metrics().writer_last_publish_unix_ms.is_some());
+    }
+
+    /// A write whose append failed is never visible, does not count as a publish, and
+    /// poisons the log until reopen, as a real disk error would (fsyncgate: no retry).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_append_is_never_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            log_dir: dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        };
+        let adapter = WalStorageAdapter::new(config.clone()).expect("adapter opens");
+        assert!(adapter.write_path_health().last_publish_age_ms.is_none());
+
+        fault_injection::fail_append_at(dir.path());
+        let refused = adapter.put(b"k", b"v").await;
+        let later = adapter.put(b"k2", b"v2").await;
+        fault_injection::clear_append_failure(dir.path());
+
+        let error = refused.expect_err("a failed append must be reported to its caller");
+        assert!(
+            error.to_string().contains("injected append failure")
+                && error.to_string().contains("reopen the database"),
+            "the error must carry the cause and what clears it; got: {error}"
+        );
+        assert_eq!(adapter.get(b"k").await.unwrap(), None);
+        let later = later.expect_err("the log stays poisoned after a failed write");
+        assert!(later.to_string().contains("WAL poisoned"), "{later}");
+
+        let health = adapter.write_path_health();
+        assert!(!health.healthy);
+        assert!(
+            health
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("injected append failure")),
+            "{health:?}"
+        );
+        assert_eq!(health.publishes_total, 0, "nothing reached the log");
+        assert!(
+            health.last_publish_age_ms.is_none(),
+            "a failed append must not advance the last-publish clock"
+        );
+        assert_eq!(adapter.metrics().writer_last_publish_unix_ms, None);
+
+        drop(adapter);
+        let reopened = WalStorageAdapter::open(config).expect("reopen clears the poison");
+        assert_eq!(reopened.get(b"k").await.unwrap(), None);
+        assert_eq!(reopened.get(b"k2").await.unwrap(), None);
+        reopened.put(b"k3", b"v3").await.expect("writes again");
+        assert_eq!(reopened.write_path_health().publishes_total, 1);
     }
 }
