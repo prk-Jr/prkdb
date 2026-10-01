@@ -250,9 +250,9 @@ lazy_static! {
         &["node_id"]
     ).unwrap();
 
-    /// Writes accepted into the WAL accumulator but not yet published.
+    /// Writes admitted to the WAL writer and not yet answered.
     pub static ref WRITE_QUEUE_DEPTH: GaugeVec = GaugeVec::new(
-        opts!("prkdb_write_queue_depth", "Writes queued in the WAL accumulator and not yet published"),
+        opts!("prkdb_write_queue_depth", "Writes queued with the WAL writer and not yet answered"),
         &["node_id"]
     ).unwrap();
 
@@ -272,15 +272,11 @@ lazy_static! {
         &["node_id"]
     ).unwrap();
 
-    /// Writes appended straight to the log by `put` and `delete`, monotonic.
-    ///
-    /// Deliberately a second series rather than part of `prkdb_writer_publishes_total`.
-    /// The stall detector decides a writer is stuck by asking whether the publish count
-    /// moved between two observations, so folding direct appends into it would mean a
-    /// stalled writer never looks stalled while any `put` traffic continues. Add the two
-    /// for total durable writes; alert on the publish one for writer liveness.
+    /// Always 0 since Task 2.8a: there is a single write path (every write is a frame the
+    /// WAL writer thread completes, counted in `prkdb_writer_publishes_total`). Kept so
+    /// existing dashboards and the probe schema do not break.
     pub static ref WRITER_DIRECT_APPENDS_TOTAL: GaugeVec = GaugeVec::new(
-        opts!("prkdb_writer_direct_appends_total", "Writes appended synchronously, bypassing the writer queue, since start"),
+        opts!("prkdb_writer_direct_appends_total", "Always 0: a single write path, counted in prkdb_writer_publishes_total"),
         &["node_id"]
     ).unwrap();
 

@@ -19,7 +19,7 @@ use prkdb_metrics::storage::StorageMetrics;
 use prkdb_types::error::StorageError;
 use prkdb_types::storage::{StorageAdapter, WritePathHealth};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{OwnedRwLockWriteGuard, RwLock};
 use tracing::{info, instrument};
@@ -430,10 +430,14 @@ struct PublishProgress {
     frames: AtomicU64,
     /// Wall-clock millis of the last completed frame; 0 = never.
     last_publish_ms: AtomicU64,
+    /// Whether the last health observation saw a stall, so `writer_stalls_total` counts
+    /// each stall once, on the observation that first sees it.
+    stall_observed: AtomicBool,
 }
 
-/// Counts one append as in flight from its admission until the writer is done with it. Moved into the commit hook, so it is released when the hook runs or, if the
-/// writer answers the request with an error instead, when the request is dropped.
+/// Counts one append as in flight from its admission until the writer is done with it.
+/// Moved into the commit hook, so it is released when the hook runs or, if the writer
+/// answers the request with an error instead, when the request is dropped.
 struct InFlight(Arc<PublishProgress>);
 
 impl InFlight {
@@ -935,7 +939,13 @@ impl WalStorageAdapter {
     }
 
     /// Get a snapshot of current metrics
+    ///
+    /// The write-path gauges (`writer_healthy`, `write_queue_depth`,
+    /// `write_queue_oldest_age_ms`, `writer_stalls_total`) are refreshed from
+    /// [`Self::write_path_health`] first: the WAL computes its health on demand, so there
+    /// is no background task to keep them current between reads.
     pub fn metrics(&self) -> prkdb_metrics::storage::MetricsSnapshot {
+        self.write_path_health();
         self.inner.metrics.snapshot()
     }
 
@@ -1147,13 +1157,22 @@ impl WalStorageAdapter {
     /// State of the write path, for health and readiness probes.
     ///
     /// Computed on demand from the WAL's own state and a few atomics: there is no
-    /// watchdog task, so an idle adapter performs no wakeups at all (liveness spec
-    /// acceptance 1 holds by construction). Synchronous and non-blocking apart from the
-    /// WAL's uncontended health read lock: a probe that can block turns a stalled writer
-    /// into a stalled health check.
+    /// watchdog task, so an idle adapter performs no wakeups at all. Synchronous and
+    /// non-blocking apart from the WAL's uncontended health read lock: a probe that can
+    /// block turns a stalled writer into a stalled health check.
+    ///
+    /// Each call also refreshes the `StorageMetrics` write-path gauges, and counts a stall
+    /// in `writer_stalls_total` the first time an observation sees it (a stall nobody
+    /// observes is not counted).
     pub fn write_path_health(&self) -> WritePathHealth {
         let progress = &self.inner.progress;
-        let (healthy, reason, oldest_unpublished_age_ms) = match self.inner.wal.health() {
+        let wal_health = self.inner.wal.health();
+        let stalled = matches!(wal_health, WalHealth::Stalled { .. });
+        let was_stalled = progress.stall_observed.swap(stalled, Ordering::AcqRel);
+        if stalled && !was_stalled {
+            self.inner.metrics.record_writer_stall();
+        }
+        let (healthy, reason, oldest_unpublished_age_ms) = match wal_health {
             WalHealth::Healthy => (true, None, 0),
             WalHealth::Stalled {
                 queued_bytes,
@@ -1170,10 +1189,14 @@ impl WalStorageAdapter {
             WalHealth::Closed => (false, Some("WAL closed".to_string()), 0),
         };
         let last = progress.last_publish_ms.load(Ordering::Acquire);
+        let queue_depth = progress.in_flight.load(Ordering::Acquire);
+        let metrics = &self.inner.metrics;
+        metrics.set_writer_healthy(healthy);
+        metrics.set_write_queue(queue_depth, oldest_unpublished_age_ms);
         WritePathHealth {
             healthy,
             reason,
-            queue_depth: progress.in_flight.load(Ordering::Acquire),
+            queue_depth,
             oldest_unpublished_age_ms,
             last_publish_age_ms: (last != 0).then(|| unix_millis().saturating_sub(last)),
             publishes_total: progress.frames.load(Ordering::Acquire),
@@ -2253,26 +2276,54 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_working_writer_is_never_reported_as_stalled() {
         let dir = tempfile::tempdir().unwrap();
-        let adapter = WalStorageAdapter::new_with_config(liveness_config(dir.path(), 25, 65_536))
-            .expect("adapter opens");
+        let adapter = Arc::new(
+            WalStorageAdapter::new_with_config(liveness_config(dir.path(), 25, 65_536))
+                .expect("adapter opens"),
+        );
 
-        // Several stall bounds' worth of ordinary writes.
-        for round in 0..12 {
-            adapter
-                .put_many(vec![(format!("k{round}").into_bytes(), b"v".to_vec())])
-                .await
-                .expect("an ordinary write must succeed");
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        // Continuous writes for longer than the WAL's 1s stall bound, observed while they
+        // are in flight: the metrics are sampled every 10ms, so a stall reported at any
+        // point would be counted in `writer_stalls_total`.
+        let writer = {
+            let adapter = adapter.clone();
+            tokio::spawn(async move {
+                let started = Instant::now();
+                let mut written = 0u64;
+                while started.elapsed() < Duration::from_millis(1_500) {
+                    adapter
+                        .put(format!("k{written}").as_bytes(), b"v")
+                        .await
+                        .expect("an ordinary write must succeed");
+                    written += 1;
+                }
+                written
+            })
+        };
+        while !writer.is_finished() {
+            let metrics = adapter.metrics();
+            assert!(
+                metrics.writer_healthy,
+                "a busy writer reported as unhealthy"
+            );
+            assert_eq!(
+                metrics.writer_stalls_total, 0,
+                "a busy writer reported as stalled"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        let written = writer.await.expect("the writer task must not panic");
 
         let health = adapter.write_path_health();
         assert!(health.healthy, "healthy writer reported as {health:?}");
         assert_eq!(health.queue_depth, 0);
-        assert!(health.publishes_total >= 12);
+        assert_eq!(health.publishes_total, written);
         assert!(health.last_publish_age_ms.is_some());
-        assert_eq!(adapter.metrics().writer_stalls_total, 0);
-        assert!(adapter.metrics().writer_publishes_total >= 12);
-        assert!(adapter.metrics().writer_last_publish_unix_ms.is_some());
+        let metrics = adapter.metrics();
+        assert_eq!(metrics.writer_stalls_total, 0);
+        assert!(metrics.writer_healthy);
+        assert_eq!(metrics.write_queue_depth, 0);
+        assert_eq!(metrics.writer_publishes_total, written);
+        assert!(metrics.writer_last_publish_unix_ms.is_some());
     }
 
     /// Dropping an adapter joins the WAL's writer thread before the drop returns.
@@ -2506,10 +2557,13 @@ mod tests {
         for attempt in 0..3 {
             let key = format!("overflow{attempt}");
             let started = Instant::now();
-            let error = adapter
-                .put(key.as_bytes(), b"v")
-                .await
-                .expect_err("admission is exhausted");
+            let error = tokio::time::timeout(
+                bound + Duration::from_secs(5),
+                adapter.put(key.as_bytes(), b"v"),
+            )
+            .await
+            .expect("a refused write must be answered at its bound, not left waiting")
+            .expect_err("admission is exhausted");
             assert!(
                 matches!(error, StorageError::WriteBackpressure(_)),
                 "a refused write must say so definitely, so retrying is safe; got: {error:?}"
@@ -2598,6 +2652,13 @@ mod tests {
             "nothing publishes while stalled"
         );
         assert!(stalled.last_publish_age_ms.is_some_and(|age| age >= 1_000));
+        // The same numbers through `StorageMetrics`, and the stall counted once however
+        // often it is observed.
+        let gauges = adapter.metrics();
+        assert!(!gauges.writer_healthy);
+        assert_eq!(gauges.write_queue_depth, 1);
+        assert!(gauges.write_queue_oldest_age_ms >= 1_000, "{gauges:?}");
+        assert_eq!(adapter.metrics().writer_stalls_total, 1);
 
         drop(stall);
         tokio::time::timeout(Duration::from_secs(20), filler)
@@ -2612,8 +2673,16 @@ mod tests {
         assert_eq!(after.oldest_unpublished_age_ms, 0);
         assert_eq!(after.publishes_total, 2);
         assert!(after.last_publish_age_ms.is_some_and(|age| age < 1_000));
-        assert!(adapter.metrics().writer_publishes_total >= 2);
-        assert!(adapter.metrics().writer_last_publish_unix_ms.is_some());
+        let gauges = adapter.metrics();
+        assert!(gauges.writer_healthy);
+        assert_eq!(gauges.write_queue_depth, 0);
+        assert_eq!(gauges.write_queue_oldest_age_ms, 0);
+        assert_eq!(
+            gauges.writer_stalls_total, 1,
+            "a recovered stall stays counted"
+        );
+        assert_eq!(gauges.writer_publishes_total, 2);
+        assert!(gauges.writer_last_publish_unix_ms.is_some());
     }
 
     /// A write whose append failed is never visible, does not count as a publish, and
