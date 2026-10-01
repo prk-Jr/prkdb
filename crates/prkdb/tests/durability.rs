@@ -293,7 +293,7 @@ async fn get_changes_since_works_for_a_single_collection() {
         .storage()
         .get_changes_since(0)
         .await
-        .expect("one collection means one WAL, so the offset is unambiguous");
+        .expect("one WAL, so the offset is unambiguous");
     assert!(
         changes.len() >= 2,
         "expected both writes in the change stream, got {}",
@@ -301,12 +301,10 @@ async fn get_changes_since_works_for_a_single_collection() {
     );
 }
 
-/// A multi-collection database can be replicated, one collection at a time (S-09).
+/// A multi-collection database can be replicated one collection at a time (S-09).
 ///
-/// `get_changes_since` takes a bare offset and cannot address a position across
-/// independent per-collection logs. `changes_in_collection` names the collection, which
-/// makes the pair a real cursor — and `fetch_segment` carries that name for exactly this
-/// reason, having previously ignored the `segment_id` it already had.
+/// `fetch_segment` carries the collection name, and `changes_in_collection` returns that
+/// collection's changes after the (global, since D11) log offset, keys intact.
 #[tokio::test(flavor = "multi_thread")]
 async fn changes_can_be_read_per_collection() {
     use prkdb_types::replication::Change;
@@ -354,39 +352,42 @@ async fn changes_can_be_read_per_collection() {
         .is_empty());
 }
 
-/// `fetch_segment` must not report success while streaming nothing (S-09).
+/// A multi-collection database replicates through one cursor (S-09, inverted by D11).
 ///
-/// `CollectionPartitionedAdapter` does not implement `get_changes_since` — merging N
-/// independent WALs into one ordered change stream is a design decision, not a forwarding
-/// fix, because offsets are not comparable across collections.
+/// Before D11 this adapter held one WAL per collection, each numbering its records from
+/// 1, so a bare offset could not address a position across them and `get_changes_since`
+/// refused. Since Task 2.9b every collection is in the one WAL at the data directory
+/// root: one log has one order, and the change stream spans collections in commit order.
 ///
-/// What *was* fixable, and is fixed, is the failure mode: the RPC logged the error and
-/// ended the stream, so the caller received a successful response carrying no data and
-/// concluded there was nothing to replicate. An empty log and an unreadable one must not
-/// look the same.
-///
-/// This test pins the adapter-level behaviour. When a cross-collection change stream is
-/// designed, invert it.
+/// (The S-09 fix in `FetchSegment` stays: an unreadable log must still not look empty.)
 #[tokio::test(flavor = "multi_thread")]
-async fn get_changes_since_is_unsupported_and_says_so() {
+async fn get_changes_since_spans_collections_in_commit_order() {
+    use prkdb_types::replication::Change;
+
     let dir = tempfile::tempdir().unwrap();
     let db = open(dir.path());
     db.storage().put(b"users:a", b"1").await.unwrap();
+    db.storage().put(b"orders:x", b"2").await.unwrap();
+    db.storage().put(b"users:b", b"3").await.unwrap();
 
-    // A second collection makes the cursor ambiguous.
-    db.storage().put(b"orders:x", b"1").await.unwrap();
-
-    let err = db
+    let keys: Vec<Vec<u8>> = db
         .storage()
         .get_changes_since(0)
         .await
-        .expect_err("the partitioned adapter cannot merge per-collection change streams");
-
-    let text = err.to_string();
-    assert!(
-        text.contains("independent WAL") && text.contains("orders") && text.contains("users"),
-        "the refusal must name the collections and the reason, not just say \"not \
-         supported\": {text}"
+        .expect("one WAL, so the offset is unambiguous across collections")
+        .into_iter()
+        .map(|c| match c {
+            Change::Put { key, .. } | Change::Delete { key, .. } => key,
+        })
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            b"users:a".to_vec(),
+            b"orders:x".to_vec(),
+            b"users:b".to_vec()
+        ],
+        "every collection's changes, in the order they were committed"
     );
 }
 

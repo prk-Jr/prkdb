@@ -66,7 +66,8 @@ impl WalStorageAdapterBuilder {
 ///
 /// # Why this exists
 ///
-/// `CollectionPartitionedAdapter::flush` forwards to each collection's adapter, and
+/// `CollectionPartitionedAdapter::flush` forwards to its inner adapter (one per collection
+/// before D11), and
 /// mutation testing replaced its whole body with `Ok(())` — a flush that flushes nothing
 /// and reports success — without a single test noticing (run 31358158012, shard 7). It
 /// was unkillable through the public surface: this adapter's `put` path writes through

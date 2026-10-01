@@ -84,6 +84,7 @@ evidence = [
   "crates/prkdb/src/storage/wal_adapter.rs:470",
   "crates/prkdb/src/storage/wal_adapter.rs:540",
 ]
+regression_tests = ["test:crates/prkdb/src/storage/collection_partitioned_adapter.rs::a_partitioned_directory_has_one_wal"]
 
 [[finding]]
 id = "STO-07"

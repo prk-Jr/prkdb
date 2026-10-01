@@ -218,9 +218,11 @@ proptest! {
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTING PROPERTIES
 //
-// `CollectionPartitionedAdapter` splits a `collection:id` key across one WAL per
-// collection, then reassembles results. Every routing bug found so far came from a
-// hand-picked example missing a case:
+// `CollectionPartitionedAdapter` used to split a `collection:id` key across one WAL per
+// collection, then reassemble results. Since D11 (Task 2.9b) it forwards every key to the
+// one WAL at the data directory root, unparsed; these properties stay as the proof that
+// what a caller writes through it reads back the same. Every routing bug found before
+// D11 came from a hand-picked example missing a case:
 //
 //   - `scan_prefix` dropped every collection when a prefix named one partially, because
 //     each test used a prefix containing a colon and took the other branch

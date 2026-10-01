@@ -1038,10 +1038,10 @@ impl<S: prkdb_schema::SchemaStorage + 'static> PrkDbServiceTrait for PrkDbGrpcSe
             let mut bytes_sent: u64 = 0;
             let storage = db.storage.clone();
 
-            // Use the (collection, offset) pair as the cursor. `segment_id` was logged
-            // and otherwise ignored, and a bare offset is ambiguous on a database with one
-            // log per collection — see S-09. An empty collection keeps the old behaviour,
-            // which is well defined when there is only one.
+            // Use the (collection, offset) pair as the cursor: the offset is a position in
+            // the data directory's one WAL (D11), and the collection selects its changes.
+            // `segment_id` was logged and otherwise ignored (S-09). An empty collection
+            // means every collection.
             match storage
                 .changes_in_collection(&collection, current_offset)
                 .await
@@ -1117,11 +1117,12 @@ impl<S: prkdb_schema::SchemaStorage + 'static> PrkDbServiceTrait for PrkDbGrpcSe
                 Err(e) => {
                     // Surface it. Logging and ending the stream produced a *successful*
                     // RPC carrying no data, so a caller replicating from this segment
-                    // concluded there was nothing to replicate. On any database opened
-                    // with `--database` that was the guaranteed outcome:
-                    // `CollectionPartitionedAdapter` does not implement
-                    // `get_changes_since`, so the call always failed and the failure was
-                    // always swallowed (spec S-09).
+                    // concluded there was nothing to replicate. Before D11, on any
+                    // database opened with `--database`, that was the guaranteed outcome:
+                    // `CollectionPartitionedAdapter` held one WAL per collection and
+                    // refused `get_changes_since`, and the refusal was swallowed (spec
+                    // S-09). It no longer refuses, but a log that cannot be read still
+                    // must not look empty.
                     //
                     // An empty stream and an unreadable log must not look the same.
                     tracing::error!("FetchSegment scan error: {}", e);
