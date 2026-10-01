@@ -44,7 +44,7 @@ jobs:
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Need both the PR head and its merge base in the same checkout to bench each
           # in turn.
