@@ -5084,6 +5084,16 @@ pub fn plan(found: u32) -> Result<Vec<Box<dyn Migration>>, StorageError>;
 
 ---
 
+### Task 2.11b: Data-directory lock (STO-10)
+
+A second process opening the same data directory today writes into the same WAL segments. Take an exclusive advisory lock before anything else touches the directory.
+
+- **Design:** `LOCK` file in the data directory, opened through the `Vfs` (add `Vfs::lock_exclusive(path) -> io::Result<Box<dyn LockGuard>>`; `StdVfs` uses `flock(LOCK_EX | LOCK_NB)` on Unix and `LockFileEx` on Windows via a vetted crate such as `fs4` — research first; `FaultFs` models it in memory). Taken in `open_inner` before `ensure_format`, held for the adapter's lifetime, released on drop; a held lock → `StorageError::Locked("data directory {dir} is in use by another process (pid {n} if known)")`. `LOCK` is ignored by the format emptiness check and by `migrate`; `prkdb-cli migrate` takes the same lock so it cannot run against a live database. Multi-raft: each partition data directory locks itself.
+- **Tests (failing first):** a second open of the same directory in-process and from a child process (`prkdb-verify`'s crash child) returns `Locked`; the lock is released after drop and after the holder is SIGKILLed (OS releases advisory locks); `migrate` on a locked directory refuses.
+- **Ledger:** STO-10 `fixed` with those tests.
+
+---
+
 ### Task 2.12: Key codec and collection catalog (KEY-01)
 
 Spec 2c: `[namespace_len u8][namespace][collection_id u32 BE][key bytes]`, where `collection_id` comes from a persisted catalog keyed by the collection's persisted name. `IndexedStorage` today stores `serde_json(id)` with no namespace at all (KEY-01); `CollectionHandle` prefixes `std::any::type_name::<C>()`, which changes with module paths and compiler versions. Both move to the codec. Extracting the codec from `indexed_storage.rs` follows spec §9. Two accepted breaking changes land here (D12): `IndexedStorage` primary keys switch from JSON to bincode ids, and `CollectionHandle` keys drop the partition.
