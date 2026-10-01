@@ -34,7 +34,7 @@ ignore = [
     # ---------------------------------------------------------------------------
     # rkyv 0.7.46: insufficient archive validation, out-of-bounds reads in archives
     # containing Rc/Arc. This is a DIRECT dependency of prkdb-core and sits on the
-    # WAL deserialization path (wal/log_record.rs, wal/mmap_log_segment.rs,
+    # WAL deserialization path (wal/log_record.rs, until Task 2.9 wal/mmap_log_segment.rs,
     # wal/compression.rs) with the "validation" feature enabled. A corrupt or
     # hostile segment is exactly the input this code exists to survive.
     # Fix requires the 0.7 -> 0.8 breaking upgrade across those three files, with

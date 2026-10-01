@@ -120,7 +120,7 @@ gungraun = { version = "=0.19.4", features = ["client_requests"] }
 rcgen = { version = "0.13.2", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 
-# fsync(2), getloadavg and CLOCK_THREAD_CPUTIME_ID for the WAL write-path spike bench.
+# fsync(2) and getloadavg for the WAL write-path bench.
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
 
@@ -184,8 +184,8 @@ harness = false
 name = "iai_hot_paths"
 harness = false
 
-# SPIKE (remediation Task 2.1): single-log group-commit WAL vs the current write path.
-# Throwaway measurement instrument; see docs/remediation/decisions/2026-09-24-single-log-spike.md.
+# WAL write-path comparison (was the Task 2.1 spike); read by scripts/wal_fast_rule.py.
+# See docs/remediation/decisions/2026-09-24-single-log-spike.md.
 [[bench]]
-name = "wal_write_path_spike"
+name = "wal_write_path"
 harness = false

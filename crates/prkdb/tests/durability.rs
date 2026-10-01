@@ -8,8 +8,9 @@
 //! holds your data tomorrow — completely unverified, and it was in fact broken by three
 //! independent defects at once:
 //!
-//! 1. **`MmapLogSegment::create` truncates.** Opening a data directory called `create`,
-//!    which passes `truncate(true)`, so the log was zeroed on open. `open` existed and was
+//! 1. **The mmap log segment's `create` truncated** (that WAL is deleted since Task 2.9).
+//!    Opening a data directory called `create`, which passes `truncate(true)`, so the log
+//!    was zeroed on open. `open` existed and was
 //!    correct; the path a user reaches never called it. Fixed by `open_or_create`.
 //! 2. **`WalStorageAdapter::new_with_config` never rebuilt the index.** `open` and
 //!    `open_async` both did, but the constructor `PrkDb::builder().with_data_dir()` reaches

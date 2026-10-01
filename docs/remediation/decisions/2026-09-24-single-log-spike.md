@@ -2,7 +2,7 @@
 
 - **Date:** 2026-09-24
 - **Spec:** `docs/superpowers/specs/2026-09-23-root-cause-remediation-design.md` §7 Phase 2 "2a. One WAL", §6 (performance gate), §1 root cause 4
-- **Bench:** `crates/prkdb/benches/wal_write_path_spike.rs` (`cargo bench -p prkdb --bench wal_write_path_spike`)
+- **Bench:** `crates/prkdb/benches/wal_write_path.rs` (`cargo bench -p prkdb --bench wal_write_path`); `wal_write_path_spike.rs` until Task 2.9, which removed the `SingleLog` prototype, `current_mmap_wal` and `two_shard_fast` cells and renamed `current_adapter_put` to `adapter_put` (D13). The raw rows below were printed by the spike and keep its cell names; `scripts/wal_fast_rule.py` uses §9.3's `wal_fast` rows as its default head-only reference.
 - **Decision:** **PROCEED** with one globally ordered log per data directory, written by a dedicated group-commit writer thread through `Vfs`. One condition carries into Task 2.2: re-run the 1-writer cells on Linux (see Risk 1).
 
 ## 1. Question

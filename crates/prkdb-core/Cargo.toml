@@ -50,32 +50,3 @@ rand = "0.8"
 tempfile = "3"
 tokio = { version = "1.0", features = ["full"] }
 
-[[bench]]
-name = "wal_bench"
-harness = false
-
-[[bench]]
-name = "replication_bench"
-harness = false
-
-[[bench]]
-name = "batching_bench"
-harness = false
-
-[[bench]]
-name = "parallel_wal_bench"
-harness = false
-
-[[bench]]
-name = "async_parallel_wal_bench"
-harness = false
-
-[[bench]]
-name = "mmap_parallel_wal_bench"
-harness = false
-
-[[bench]]
-name = "wal_recovery_bench"
-harness = false
-
-

@@ -2,7 +2,7 @@
 //!
 //! Core implementation crate for PrkDB.
 //!
-//! This crate provides the implementation of storage, WAL, replication, and other
+//! This crate provides the implementation of storage, the WAL and other
 //! core functionality. It builds on top of `prkdb-types` which provides the
 //! foundational domain types and traits.
 //!
@@ -22,7 +22,6 @@ pub mod batching;
 pub mod buffer_pool; // Phase 5.2: Buffer pooling for serialization
 pub mod format; // Phase 2a: the one on-disk format version (spec D3)
 pub mod io; // Phase 24B: Platform I/O abstraction (io_uring, sendfile)
-pub mod replication;
 pub mod serialization;
 pub mod vfs; // Phase 1: synchronous filesystem seam (spec §7)
 pub mod wal;

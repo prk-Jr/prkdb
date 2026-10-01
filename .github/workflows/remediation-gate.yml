@@ -258,12 +258,15 @@ jobs:
         run: |
           set -o pipefail
           git checkout "$BASE_REF"
-          SPIKE_REPS=3 cargo bench -p prkdb --bench wal_write_path_spike | tee base.md
+          # Refs before Task 2.9 name the bench `wal_write_path_spike`.
+          bench=wal_write_path
+          [ -f crates/prkdb/benches/wal_write_path.rs ] || bench=wal_write_path_spike
+          SPIKE_REPS=3 cargo bench -p prkdb --bench "$bench" | tee base.md
           git checkout "${{ needs.resolve.outputs.sha }}"
       - name: Bench ref
         run: |
           set -o pipefail
-          SPIKE_REPS=3 cargo bench -p prkdb --bench wal_write_path_spike | tee head.md
+          SPIKE_REPS=3 cargo bench -p prkdb --bench wal_write_path | tee head.md
       - name: Apply the Fast rule and publish the tables
         env:
           BASE_REF: ${{ inputs.base_ref }}
@@ -280,7 +283,9 @@ jobs:
           if [ -f base.md ]; then
             python3 scripts/wal_fast_rule.py --base base.md --head head.md | tee -a "$GITHUB_STEP_SUMMARY"
           else
-            python3 scripts/wal_fast_rule.py --head head.md | tee -a "$GITHUB_STEP_SUMMARY"
+            python3 scripts/wal_fast_rule.py --head head.md \
+              --reference docs/remediation/decisions/2026-09-24-single-log-spike.md \
+              | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
   probe-iai:

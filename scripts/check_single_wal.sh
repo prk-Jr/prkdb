@@ -5,6 +5,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# STO-06: exactly one WAL implementation. Fails if a deleted type returns.
+if grep -rnwE 'ParallelWal|AsyncParallelWal|MmapParallelWal|WriteAheadLog|MmapLogSegment|AsyncLogSegment' crates --include='*.rs'; then
+  echo "a second WAL implementation is back (STO-06)"; exit 1
+fi
+test "$(grep -rlF 'impl Wal {' crates/prkdb-core/src/wal | wc -l | tr -d ' ')" = "1"
+
 # D11: one WAL per data directory; no per-collection or outbox WALs beside it.
 # (The format-1 guard's check for an old `collections/` directory is allowed; a map of
 # adapters or an `__outbox` directory is not. The behavioural proof is the test

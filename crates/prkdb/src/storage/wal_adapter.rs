@@ -7,16 +7,15 @@ use prkdb_types::snapshot::{CompressionType, SnapshotHeader};
 
 use papaya::HashMap as LockFreeHashMap;
 use prkdb_core::batching::adaptive::AdaptiveBatchConfig;
-use prkdb_core::replication::{Change, ReplicationManager};
 use prkdb_core::vfs::{StdVfs, Vfs};
 use prkdb_core::wal::batch::{Batch, BatchOp};
 use prkdb_core::wal::frame::FrameKind;
 use prkdb_core::wal::{
-    CommitHook, LogOperation, LogRecord, Lsn, RecordLoc, Wal, WalConfig, WalError, WalHealth,
-    WalOptions,
+    CommitHook, Lsn, RecordLoc, Wal, WalConfig, WalError, WalHealth, WalOptions,
 };
 use prkdb_metrics::storage::StorageMetrics;
 use prkdb_types::error::StorageError;
+use prkdb_types::replication::Change;
 use prkdb_types::storage::{StorageAdapter, WritePathHealth};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -471,8 +470,6 @@ struct WalStorageInner {
     /// A validated memo: an entry is used only when its LSN equals the index's.
     cache: Arc<ValueCache>,
     outbox: Arc<LockFreeHashMap<String, Vec<u8>>>, // memory-only until Task 2.19 (EVT-02)
-    /// Kept until Task 2.9 decides the fate of `new_with_replication`.
-    replication: Option<tokio::sync::Mutex<ReplicationManager>>,
     metrics: Arc<StorageMetrics>,
     transaction_barrier: Arc<RwLock<()>>,
     bounds: LivenessBounds,
@@ -531,24 +528,6 @@ fn value_in_batch(ops: Vec<BatchOp>, key: &[u8]) -> Option<Vec<u8>> {
         .flatten()
 }
 
-/// `LogRecord`s for `ReplicationManager::replicate_batch`, which predates the batch
-/// codec. Temporary: goes with `new_with_replication` at Task 2.9's STOP.
-fn to_log_records(ops: &[BatchOp]) -> Vec<LogRecord> {
-    ops.iter()
-        .map(|op| match op {
-            BatchOp::Put { key, value } => LogRecord::new(LogOperation::Put {
-                collection: String::new(),
-                id: key.clone(),
-                data: value.clone(),
-            }),
-            BatchOp::Delete { key } => LogRecord::new(LogOperation::Delete {
-                collection: String::new(),
-                id: key.clone(),
-            }),
-        })
-        .collect()
-}
-
 fn raft_key() -> Vec<u8> {
     let mut key = b"__raft_log/".to_vec();
     key.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
@@ -579,25 +558,7 @@ impl WalStorageAdapter {
     /// if it is missing and recovers whatever log it holds.
     #[instrument(skip(config), fields(log_dir = %config.wal.log_dir.display()))]
     pub fn new_with_config(config: StorageConfig) -> Result<Self, StorageError> {
-        Self::open_inner(config, Arc::new(StdVfs), None)
-    }
-
-    /// Create a new WAL storage adapter that also forwards every committed batch to
-    /// `replication_manager`. Kept until Task 2.9 decides the fate of core replication.
-    #[instrument(skip(config, replication_manager), fields(log_dir = %config.log_dir.display()))]
-    pub async fn new_with_replication(
-        config: WalConfig,
-        replication_manager: ReplicationManager,
-    ) -> Result<Self, StorageError> {
-        let config = StorageConfig {
-            wal: config,
-            ..StorageConfig::default()
-        };
-        tokio::task::spawn_blocking(move || {
-            Self::open_inner(config, Arc::new(StdVfs), Some(replication_manager))
-        })
-        .await
-        .map_err(|e| StorageError::Internal(format!("WAL open task failed: {e}")))?
+        Self::open_inner(config, Arc::new(StdVfs))
     }
 
     /// Open a WAL storage adapter and rebuild its index by replaying the log.
@@ -620,15 +581,11 @@ impl WalStorageAdapter {
 
     /// Opens on any `Vfs`: the harness passes `FaultFs`.
     pub fn open_with_vfs(config: StorageConfig, vfs: Arc<dyn Vfs>) -> Result<Self, StorageError> {
-        Self::open_inner(config, vfs, None)
+        Self::open_inner(config, vfs)
     }
 
     /// The one open path. Synchronous: `Wal::open` needs no runtime.
-    fn open_inner(
-        config: StorageConfig,
-        vfs: Arc<dyn Vfs>,
-        replication: Option<ReplicationManager>,
-    ) -> Result<Self, StorageError> {
+    fn open_inner(config: StorageConfig, vfs: Arc<dyn Vfs>) -> Result<Self, StorageError> {
         let log_dir = config.wal.log_dir.clone();
         info!("Opening WalStorageAdapter at {}", log_dir.display());
         #[cfg(test)]
@@ -690,7 +647,6 @@ impl WalStorageAdapter {
                 metrics.clone(),
             )),
             outbox: Arc::new(LockFreeHashMap::new()),
-            replication: replication.map(tokio::sync::Mutex::new),
             metrics,
             transaction_barrier: Arc::new(RwLock::new(())),
             bounds: LivenessBounds::from_max_flush_ms(config.batching.max_flush_ms),
@@ -728,11 +684,6 @@ impl WalStorageAdapter {
                 BatchOp::Delete { key } => (key.clone(), false),
             })
             .collect();
-        let replicated = inner
-            .replication
-            .as_ref()
-            .map(|_| to_log_records(&batch.ops));
-
         let (index, publish, applied) = (
             inner.index.clone(),
             inner.publish.clone(),
@@ -796,13 +747,6 @@ impl WalStorageAdapter {
                 )))
             }
         };
-
-        if let (Some(records), Some(replication)) = (replicated, &inner.replication) {
-            let mut manager = replication.lock().await;
-            if let Err(e) = manager.replicate_batch(records, loc.lsn).await {
-                tracing::error!("Replication failed: {}", e);
-            }
-        }
         Ok(loc)
     }
 
@@ -1419,7 +1363,6 @@ impl StorageAdapter for WalStorageAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prkdb_types::replication::ReplicationConfig;
     use std::env;
     use std::fs;
     use std::time::{Duration, Instant};
@@ -1451,33 +1394,6 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(adapter.inner.config.compaction, wanted);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn replication_constructor_uses_the_supplied_wal_config() {
-        let dir = tempfile::tempdir().expect("temporary root");
-        let log_dir = dir.path().join("replicated-wal");
-        let config = WalConfig {
-            log_dir: log_dir.clone(),
-            segment_bytes: 64 * 1024,
-            ..WalConfig::test_config()
-        };
-        let replication = ReplicationManager::new(ReplicationConfig::test_config())
-            .await
-            .expect("empty replica list needs no network");
-
-        let adapter = WalStorageAdapter::new_with_replication(config, replication)
-            .await
-            .expect("replicated adapter opens");
-
-        assert_eq!(adapter.inner.config.wal.log_dir, log_dir);
-        assert_eq!(adapter.inner.config.wal.segment_bytes, 64 * 1024);
-        assert!(
-            log_dir
-                .join(prkdb_core::wal::segment::segment_file_name(1))
-                .is_file(),
-            "the log's first segment must exist in the supplied directory"
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

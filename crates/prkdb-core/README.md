@@ -17,29 +17,11 @@
 
 ### Write-Ahead Log (WAL)
 
-High-performance WAL with multiple implementations:
-
-```rust
-use prkdb_core::wal::mmap_parallel_wal::MmapParallelWal;
-use prkdb_core::wal::config::WalConfig;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = WalConfig::default();
-    let wal = MmapParallelWal::open(config, 32).await?;
-    
-    // Write entries
-    let entries = vec![b"data1".to_vec(), b"data2".to_vec()];
-    let offsets = wal.append_batch(entries).await?;
-    
-    Ok(())
-}
-```
-
-**Implementations**:
-- `MmapParallelWal` - Memory-mapped, parallel segments ⭐ (recommended)
-- `AsyncParallelWal` - Async I/O variant
-- `MmapWal` - Simple sequential WAL
+One implementation since Task 2.9 (D13): `wal::Wal`, a single globally ordered log
+written by one group-commit writer thread through the `Vfs` seam, with `Durable`
+(acknowledge after sync) and `Fast` (acknowledge after write, sync every
+`sync_interval`) modes. The memory-mapped, parallel and async WALs it replaced are
+deleted. Most callers use it through `prkdb::storage::WalStorageAdapter`.
 
 ### Batch Configuration
 
@@ -112,8 +94,6 @@ for req in rx.iter() {
 ## Features
 
 ### Current
-- [x] Memory-mapped WAL
-- [x] Parallel segment writes
 - [x] Batch processing
 - [x] Compression support (LZ4, Snappy, Zstd)
 - [x] CRC32 checksums
@@ -130,10 +110,8 @@ for req in rx.iter() {
 
 **Confirmed working** (based on source code inspection):
 
-1. **WAL Implementations** ✅
-   - `MmapParallelWal` - 362 lines, fully implemented
-   - `AsyncParallelWal` - 232 lines, fully implemented  
-   - 17 WAL-related modules in `src/wal/`
+1. **WAL** ✅
+   - `wal::Wal` (`src/wal/log.rs`), the only WAL implementation since Task 2.9
 
 2. **Sync Writer** ✅
    - `write_tx` channel in `wal_adapter.rs`
@@ -151,8 +129,7 @@ for req in rx.iter() {
    - `perf_test_batching_wal.rs` example exists
 
 **Partially Implemented** ⚠️:
-- Compaction - skeleton exists in `compaction.rs` (55 lines)
-- Metrics - basic structure in `metrics.rs` (61 lines)
+- Compaction - planned (remediation Task 2.15)
 
 ## Building
 
@@ -173,10 +150,9 @@ cargo bench
 
 ## Benchmarks
 
-Located in `benches/`:
-- `wal_bench.rs` - WAL write performance
-- `parallel_wal_bench.rs` - Multi-segment throughput
-- `batching_bench.rs` - Batch processing overhead
+The WAL write-path comparison bench is `crates/prkdb/benches/wal_write_path.rs`
+(`cargo bench -p prkdb --bench wal_write_path`); this crate has no benches of its own
+since Task 2.9.
 
 ## Examples
 

@@ -118,9 +118,9 @@ async fn chaos_test_concurrent_mixed_operations() {
 ///
 /// It carried `#[ignore = "Manual investigation: integration harness still diverges from
 /// WAL recovery unit tests"]` — blaming the harness for disagreeing with the unit tests.
-/// The harness was correct. `WalStorageAdapter::new` opened the WAL with
-/// `MmapParallelWal::create`, which truncates, so each cycle's writer destroyed every
-/// earlier cycle. The failure message said exactly that: "Lost data from cycle 0 key 0".
+/// The harness was correct. `WalStorageAdapter::new` opened the WAL with the (since
+/// deleted) mmap parallel WAL's `create`, which truncates, so each cycle's writer destroyed
+/// every earlier cycle. The failure message said exactly that: "Lost data from cycle 0 key 0".
 ///
 /// The unit tests it "diverged" from never reopened a data directory, so they could not
 /// see it. Fixed as spec S-05; verified by reverting `open_or_create`, which reproduces
