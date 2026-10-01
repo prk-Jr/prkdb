@@ -25,3 +25,18 @@ min_ratio = 50.0
 [floors.bench_indexed_insert_one]
 reference = "bench_batch_encode"
 min_ratio = 1.0
+
+# The stored key of one typed record (KEY-01, review M1): a header plus a memcomparable id
+# in one allocation, a few hundred Ir at most against the reference's ~5.9 K. The floor
+# only rejects a benchmark that counted nothing; a regression shows in the delta.
+[floors.bench_encode_record_key_u64]
+reference = "bench_batch_encode"
+min_ratio = 0.005
+
+[floors.bench_encode_record_key_string]
+reference = "bench_batch_encode"
+min_ratio = 0.005
+
+[floors.bench_encode_record_key_uuid]
+reference = "bench_batch_encode"
+min_ratio = 0.005

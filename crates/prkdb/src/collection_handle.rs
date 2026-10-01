@@ -2,7 +2,7 @@ use crate::batch_accumulator::BatchAccumulator;
 use crate::compute::{ComputeHandler, Context};
 use crate::db::PrkDb;
 use crate::error::DbError;
-use crate::keys::{collection_prefix, encode_id, encode_key, CollectionId};
+use crate::keys::{collection_prefix, encode_record_key, CollectionId};
 use crate::outbox::{make_outbox_id_for_type, save_outbox_event, OutboxRecord};
 use crate::partitioning::{DefaultPartitioner, PartitionId, Partitioner};
 use bincode::{
@@ -50,7 +50,7 @@ impl<C: Collection> CollectionHandle<C> {
     /// metrics. Allocates the collection's id on first use, so it is for writes.
     async fn record_key(&self, id: &C::Id) -> Result<Vec<u8>, StorageError> {
         let coll = self.db.catalog().id_for::<C>().await?;
-        encode_key(self.namespace(), coll, &encode_id(id)?)
+        encode_record_key(self.namespace(), coll, id)
     }
 
     /// The collection's id if it was ever written; reads never allocate one.
@@ -335,14 +335,13 @@ where
         // Phase 1: Serialize all items in batch (reduces overhead)
         for item in &items {
             let partition = self.get_partition(item.id());
-            let key =
-                match encode_id(item.id()).and_then(|id| encode_key(self.namespace(), coll, &id)) {
-                    Ok(k) => k,
-                    Err(e) => {
-                        results.push(Err(e.into()));
-                        continue;
-                    }
-                };
+            let key = match encode_record_key(self.namespace(), coll, item.id()) {
+                Ok(k) => k,
+                Err(e) => {
+                    results.push(Err(e.into()));
+                    continue;
+                }
+            };
 
             let item_bytes = match encode_to_vec(item, config::standard()) {
                 Ok(b) => b,
@@ -450,7 +449,7 @@ where
 
         // Phase 1: Build all keys
         for id in &ids {
-            keys.push(encode_key(self.namespace(), coll, &encode_id(id)?)?);
+            keys.push(encode_record_key(self.namespace(), coll, id)?);
         }
 
         // Phase 2: Fetch all values with bulk API
@@ -489,7 +488,7 @@ where
         // Phase 1: Verify items exist and prepare delete operations
         for id in &ids {
             let partition = self.get_partition(id);
-            let key = encode_key(self.namespace(), coll, &encode_id(id)?)?;
+            let key = encode_record_key(self.namespace(), coll, id)?;
 
             let maybe_item_bytes = self.db.storage.get(&key).await?;
             if maybe_item_bytes.is_none() {
@@ -575,7 +574,7 @@ where
         let Some(coll) = self.existing_collection().await? else {
             return Ok(());
         };
-        let key = encode_key(self.namespace(), coll, &encode_id(id)?)?;
+        let key = encode_record_key(self.namespace(), coll, id)?;
 
         let maybe_item_bytes = self.db.storage.get(&key).await?;
         if maybe_item_bytes.is_none() {
@@ -642,7 +641,7 @@ where
         let Some(coll) = self.existing_collection().await? else {
             return Ok(None);
         };
-        let key = encode_key(self.namespace(), coll, &encode_id(id)?)?;
+        let key = encode_record_key(self.namespace(), coll, id)?;
 
         match self.db.storage.get(&key).await? {
             Some(item_bytes) => {
@@ -661,7 +660,7 @@ where
 
     /// Every record of this collection whose stored key continues with `prefix` after the
     /// collection prefix. The stored key's tail is the record's id as
-    /// [`encode_id`](crate::keys::encode_id) writes it (bincode), so `prefix` applies to
+    /// [`encode_id`](crate::keys::encode_id) writes it (memcomparable), so `prefix` applies to
     /// those encoded id bytes; `b""` yields the whole collection.
     pub async fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<C>, DbError> {
         let Some(coll) = self.existing_collection().await? else {
@@ -679,8 +678,9 @@ where
         Ok(out)
     }
 
-    /// Range scan by encoded id bytes `[start, end)`: the bounds are the ids' stored keys,
-    /// so the order is that of their bincode encodings.
+    /// Every record whose id is in `[start_id, end_id)`, in id order. The id encoding is
+    /// order-preserving ([`crate::keys`]), so the stored keys of the two bounds delimit
+    /// exactly that id range.
     pub async fn scan_range_by_id_bytes(
         &self,
         start_id: &C::Id,
@@ -689,8 +689,8 @@ where
         let Some(coll) = self.existing_collection().await? else {
             return Ok(Vec::new());
         };
-        let start_key = encode_key(self.namespace(), coll, &encode_id(start_id)?)?;
-        let end_key = encode_key(self.namespace(), coll, &encode_id(end_id)?)?;
+        let start_key = encode_record_key(self.namespace(), coll, start_id)?;
+        let end_key = encode_record_key(self.namespace(), coll, end_id)?;
         let rows = self.db.storage.scan_range(&start_key, &end_key).await?;
         let mut out = Vec::with_capacity(rows.len());
         for (_k, v) in rows {

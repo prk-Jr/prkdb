@@ -152,3 +152,103 @@ fn the_derive_and_the_manual_default_name_alike() {
         "generics are stripped"
     );
 }
+
+// ── Order-preserving ids (review M1) ─────────────────────────────────────────
+
+mod ordering {
+    use prkdb::keys::{encode_id, encode_record_key, CollectionId};
+    use proptest::prelude::*;
+
+    /// Key byte order equals id order, for every pair, within one collection's keys.
+    fn same_order<T: serde::Serialize + Ord + std::fmt::Debug>(a: &T, b: &T) {
+        let (ka, kb) = (encode_id(a).unwrap(), encode_id(b).unwrap());
+        assert_eq!(ka.cmp(&kb), a.cmp(b), "{a:?} vs {b:?}");
+        let ns = b"tenant";
+        let (ra, rb) = (
+            encode_record_key(ns, CollectionId(3), a).unwrap(),
+            encode_record_key(ns, CollectionId(3), b).unwrap(),
+        );
+        assert_eq!(ra.cmp(&rb), a.cmp(b), "record keys of {a:?} vs {b:?}");
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(512))]
+
+        #[test]
+        fn u64_ids_keep_their_order(a: u64, b: u64) { same_order(&a, &b); }
+
+        #[test]
+        fn i64_ids_keep_their_order(a: i64, b: i64) { same_order(&a, &b); }
+
+        #[test]
+        fn u32_and_i32_ids_keep_their_order(a: u32, b: u32, c: i32, d: i32) {
+            same_order(&a, &b);
+            same_order(&c, &d);
+        }
+
+        #[test]
+        fn string_ids_keep_their_order(a in ".{0,40}", b in ".{0,40}") { same_order(&a, &b); }
+
+        /// Strings sharing a long prefix, around the 8-byte group boundary.
+        #[test]
+        fn strings_with_a_shared_prefix_keep_their_order(
+            p in "[a-z]{0,17}", a in "[\\x00-\\x7f]{0,10}", b in "[\\x00-\\x7f]{0,10}"
+        ) {
+            same_order(&format!("{p}{a}"), &format!("{p}{b}"));
+        }
+
+        #[test]
+        fn byte_ids_keep_their_order(a in proptest::collection::vec(any::<u8>(), 0..24),
+                                     b in proptest::collection::vec(any::<u8>(), 0..24)) {
+            same_order(&a, &b);
+        }
+
+        #[test]
+        fn tuple_ids_keep_their_order(a: (u32, String), b: (u32, String)) { same_order(&a, &b); }
+
+        #[test]
+        fn string_first_tuples_keep_their_order(a: (String, i64), b: (String, i64)) {
+            same_order(&a, &b);
+        }
+    }
+}
+
+#[derive(
+    prkdb_macros::Collection, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+)]
+struct RangeItem {
+    #[id]
+    id: u64,
+}
+
+/// Review M1 regression: with bincode's varint ids, 251 encoded as `[251, 251, 0]` and
+/// sorted after 300 (`[251, 44, 1]`), and 256 (`[251, 0, 1]`) before 251, so a 100..300
+/// range scan dropped 251..=255 and returned the rest out of order. Order-preserving ids
+/// make it exactly 100..=299, in order.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_range_scan_returns_exactly_the_id_range_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = prkdb::PrkDb::builder()
+        .with_storage(
+            WalStorageAdapter::new(WalConfig {
+                log_dir: dir.path().to_path_buf(),
+                ..WalConfig::test_config()
+            })
+            .unwrap(),
+        )
+        .register_collection::<RangeItem>()
+        .build()
+        .unwrap();
+    let items = db.collection::<RangeItem>();
+    for id in (50u64..350).rev() {
+        items.put(RangeItem { id }).await.unwrap();
+    }
+    let got: Vec<u64> = items
+        .scan_range_by_id_bytes(&100, &300)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(got, (100u64..300).collect::<Vec<_>>());
+}

@@ -8,10 +8,17 @@
 //! `IndexedStorage` and `CollectionPartitionedAdapter`'s routing API). `collection_id` comes
 //! from the persisted [`Catalog`](crate::catalog::Catalog), keyed by the collection's
 //! persisted name, so two collections never share a key even when their ids are equal.
-//! `key bytes` is the record's id as [`encode_id`] writes it (bincode, standard config), so
-//! records of one collection sort by encoded id and a collection is one contiguous range,
-//! found by [`collection_prefix`]. The id is big-endian for the same reason: id 7 and id
-//! 70 must not share a prefix.
+//! A collection is one contiguous key range, found by [`collection_prefix`]: the
+//! collection id's **fixed width** makes the prefix unambiguous (no id's bytes are a
+//! prefix of another's, so id 7 and id 70 never share one), and its **big-endian** order
+//! sorts collections by id.
+//!
+//! `key bytes` is the record's id as [`encode_id`] writes it: the memcomparable format
+//! (the `memcomparable` crate, the MyRocks key format), which is **order-preserving**,
+//! so a collection's keys sort exactly as its ids do (`u64` 100 < 250 < 300, `i64` by
+//! sign, strings and byte sequences lexicographically, tuples and structs field by
+//! field) and a key range is an id range. The encoding is self-delimiting, so a composite
+//! id's fields cannot run into each other. Maps are not supported as ids.
 //!
 //! [`SYSTEM_COLLECTION`] (id 0) is reserved for the catalog's own entries.
 //!
@@ -98,11 +105,42 @@ pub fn decode_key(bytes: &[u8]) -> Result<(&[u8], CollectionId, &[u8]), StorageE
     Ok((ns, CollectionId(id), key))
 }
 
-/// Primary-key bytes for an id: bincode, standard config (what `CollectionHandle` has
-/// always used; `IndexedStorage` used JSON before Task 2.12, D12).
+/// Primary-key bytes for an id: the order-preserving memcomparable encoding (module
+/// docs). `IndexedStorage` used JSON and `CollectionHandle` bincode before Task 2.12
+/// (D12); neither sorted by id.
 pub fn encode_id<I: serde::Serialize>(id: &I) -> Result<Vec<u8>, StorageError> {
-    bincode::serde::encode_to_vec(id, bincode::config::standard())
-        .map_err(|e| StorageError::Serialization(format!("Failed to serialize id: {e}")))
+    write_id(Vec::with_capacity(ID_CAPACITY), id)
+}
+
+/// The stored key of record `id` in collection `coll` of namespace `ns`:
+/// `encode_key(ns, coll, &encode_id(id)?)` in one allocation, which is the hot path for
+/// every typed put and get.
+pub fn encode_record_key<I: serde::Serialize>(
+    ns: &[u8],
+    coll: CollectionId,
+    id: &I,
+) -> Result<Vec<u8>, StorageError> {
+    let ns_len = u8::try_from(ns.len()).map_err(|_| {
+        StorageError::Validation(format!(
+            "namespace of {} bytes exceeds the key codec's {MAX_NAMESPACE_LEN}-byte limit",
+            ns.len()
+        ))
+    })?;
+    let mut out = Vec::with_capacity(1 + ns.len() + 4 + ID_CAPACITY);
+    out.push(ns_len);
+    out.extend_from_slice(ns);
+    out.extend_from_slice(&coll.0.to_be_bytes());
+    write_id(out, id)
+}
+
+/// Room for the common ids (integers, short strings, UUIDs) without a reallocation.
+const ID_CAPACITY: usize = 64;
+
+fn write_id<I: serde::Serialize>(out: Vec<u8>, id: &I) -> Result<Vec<u8>, StorageError> {
+    let mut ser = memcomparable::Serializer::new(out);
+    id.serialize(&mut ser)
+        .map_err(|e| StorageError::Serialization(format!("Failed to serialize id: {e}")))?;
+    Ok(ser.into_inner())
 }
 
 #[cfg(test)]
@@ -146,8 +184,35 @@ mod tests {
     }
 
     #[test]
-    fn ids_are_bincode() {
-        assert_eq!(encode_id(&7u64).unwrap(), vec![7]);
-        assert_eq!(encode_id(&"ab").unwrap(), vec![2, b'a', b'b']);
+    fn ids_are_memcomparable() {
+        assert_eq!(encode_id(&7u64).unwrap(), 7u64.to_be_bytes());
+        assert_eq!(
+            encode_id(&-1i64).unwrap(),
+            0x7fff_ffff_ffff_ffffu64.to_be_bytes(),
+            "the sign bit is flipped so negatives sort first"
+        );
+        assert_eq!(
+            encode_id(&"ab").unwrap(),
+            [1, b'a', b'b', 0, 0, 0, 0, 0, 0, 2],
+            "8-byte groups, each followed by its significant length"
+        );
+    }
+
+    #[test]
+    fn a_record_key_is_the_key_of_the_encoded_id() {
+        for ns in [&b""[..], b"tenant"] {
+            assert_eq!(
+                encode_record_key(ns, CollectionId(9), &"user-1").unwrap(),
+                encode_key(ns, CollectionId(9), &encode_id(&"user-1").unwrap()).unwrap()
+            );
+        }
+        assert!(encode_record_key(&[0u8; 256], CollectionId(1), &1u64).is_err());
+    }
+
+    #[test]
+    fn maps_are_refused_as_ids() {
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(1u8, 2u8);
+        assert!(encode_id(&map).is_err());
     }
 }

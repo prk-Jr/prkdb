@@ -19,6 +19,8 @@ http = "1"
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 bincode = { workspace = true }
+# Order-preserving id encoding for storage keys (keys.rs, KEY-01).
+memcomparable = "0.2"
 bytes = "1.5"                                                          # Zero-copy data handling for performance
 crossbeam-channel = "0.5"                                              # Lock-free channels for Phase 2 batching optimization
 futures = { workspace = true }

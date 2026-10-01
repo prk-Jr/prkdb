@@ -80,6 +80,7 @@ use gungraun::client_requests::callgrind::{start_instrumentation, stop_instrumen
 use gungraun::{library_benchmark, library_benchmark_group, main};
 use gungraun::{Callgrind, EntryPoint, LibraryBenchmarkConfig};
 use prkdb::indexed_storage::IndexedStorage;
+use prkdb::keys::{encode_record_key, CollectionId};
 use prkdb::storage::config::StorageConfig;
 use prkdb::storage::{InMemoryAdapter, WalStorageAdapter};
 use prkdb_core::wal::batch::{Batch, BatchOp};
@@ -390,6 +391,41 @@ fn bench_batch_decode(bytes: Vec<u8>) -> Vec<u8> {
     bytes
 }
 
+// The stored key of one typed record (KEY-01): header plus the order-preserving
+// (memcomparable) id, in one allocation — what every typed put and get computes. Three
+// typical ids: an integer, a short string, and a UUID in its 36-character text form.
+// Default entry point: pure single-threaded CPU work, like the codec benchmarks below.
+fn setup_u64_id() -> u64 {
+    1_234_567
+}
+
+fn setup_string_id() -> String {
+    "user-000123".to_string()
+}
+
+fn setup_uuid_string_id() -> String {
+    "550e8400-e29b-41d4-a716-446655440000".to_string()
+}
+
+#[library_benchmark(setup = setup_u64_id)]
+fn bench_encode_record_key_u64(id: u64) -> u64 {
+    black_box(encode_record_key(black_box(b""), CollectionId(7), black_box(&id)).unwrap());
+    id
+}
+
+#[library_benchmark(setup = setup_string_id)]
+fn bench_encode_record_key_string(id: String) -> String {
+    black_box(encode_record_key(black_box(b""), CollectionId(7), black_box(&id)).unwrap());
+    // Return the fixture so its drop happens outside the counted region.
+    id
+}
+
+#[library_benchmark(setup = setup_uuid_string_id)]
+fn bench_encode_record_key_uuid(id: String) -> String {
+    black_box(encode_record_key(black_box(b""), CollectionId(7), black_box(&id)).unwrap());
+    id
+}
+
 library_benchmark_group!(
     name = hot_paths;
     benchmarks =
@@ -399,6 +435,9 @@ library_benchmark_group!(
         bench_indexed_insert_one,
         bench_batch_encode,
         bench_batch_decode,
+        bench_encode_record_key_u64,
+        bench_encode_record_key_string,
+        bench_encode_record_key_uuid,
 );
 
 main!(library_benchmark_groups = hot_paths);

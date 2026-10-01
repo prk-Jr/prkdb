@@ -76,7 +76,7 @@
 //! deployment.
 
 use crate::catalog::Catalog;
-use crate::keys::{collection_prefix, encode_id, encode_key};
+use crate::keys::{collection_prefix, encode_id, encode_key, encode_record_key};
 use crate::storage::WalStorageAdapter;
 use dashmap::DashMap;
 use prkdb_types::collection::Collection;
@@ -3406,6 +3406,14 @@ impl<'a, S: StorageAdapter> Drop for Transaction<'a, S> {
     }
 }
 
+/// The encoded id inside a stored key built by this module (empty namespace), without
+/// encoding it a second time.
+fn id_of(primary_key: &[u8]) -> Vec<u8> {
+    crate::keys::decode_key(primary_key)
+        .map(|(_, _, id)| id.to_vec())
+        .unwrap_or_default()
+}
+
 /// Generic storage adapter with secondary index support
 /// Works with any StorageAdapter implementation (WAL, SQL, memory, etc.)
 pub struct IndexedStorage<S: StorageAdapter> {
@@ -3450,7 +3458,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// is for writes; reads use [`Self::existing_key`].
     async fn primary_key<T: Collection>(&self, id: &T::Id) -> Result<Vec<u8>, StorageError> {
         let coll = self.catalog.id_for::<T>().await?;
-        encode_key(&[], coll, &encode_id(id)?)
+        encode_record_key(&[], coll, id)
     }
 
     /// As [`Self::primary_key`] without allocating: `None` if `T` was never written.
@@ -3459,7 +3467,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         id: &T::Id,
     ) -> Result<Option<Vec<u8>>, StorageError> {
         match self.catalog.lookup(&T::persisted_name()).await? {
-            Some(coll) => Ok(Some(encode_key(&[], coll, &encode_id(id)?)?)),
+            Some(coll) => Ok(Some(encode_record_key(&[], coll, id)?)),
             None => Ok(None),
         }
     }
@@ -4353,7 +4361,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         // Emit change event (ignore if no subscribers)
         let _ = self.change_tx.send(ChangeEvent::Inserted {
             collection: collection_name,
-            id: encode_id(record.id())?,
+            id: id_of(&primary_key),
             data,
         });
 
@@ -5302,7 +5310,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         // Emit change event (ignore if no subscribers)
         let _ = self.change_tx.send(ChangeEvent::Deleted {
             collection: collection_name,
-            id: encode_id(record.id())?,
+            id: id_of(&primary_key),
         });
 
         Ok(())
@@ -5982,7 +5990,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         let serialized: Vec<_> = records
             .iter()
             .map(|record| {
-                let primary_key = encode_key(&[], coll, &encode_id(record.id())?)?;
+                let primary_key = encode_record_key(&[], coll, record.id())?;
                 let data = serde_json::to_vec(record).map_err(|e| {
                     StorageError::Serialization(format!("Failed to serialize record: {}", e))
                 })?;
@@ -6107,7 +6115,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         let mut existing_records = Vec::with_capacity(records.len() / 4); // Usually fewer updates
 
         for record in records {
-            let pk = encode_key(&[], coll, &encode_id(record.id())?)?;
+            let pk = encode_record_key(&[], coll, record.id())?;
 
             // Check if exists in lock-free index
             let exists = if let Some(col_idx) = self.lock_free_indexes.get(collection_name.as_ref())
