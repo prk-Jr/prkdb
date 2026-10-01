@@ -795,6 +795,9 @@ enum Loss {
     /// Drops the first unsynced mutation and keeps every later one: a hole,
     /// which no WAL that writes in order can produce.
     Hole,
+    /// Keeps the first `n` unsynced mutations, then overwrites `key(i)` with
+    /// garbage: a value no prefix ever held.
+    KeepPrefixCorrupting(usize, u8),
 }
 
 /// A tiny in-memory SUT with an explicit unsynced window, so the Fast-mode
@@ -862,9 +865,17 @@ impl Sut for MemSut {
         let kept: Vec<_> = match self.loss {
             Loss::KeepPrefix(n) => muts.into_iter().take(n).collect(),
             Loss::Hole => muts.into_iter().skip(1).collect(),
+            Loss::KeepPrefixCorrupting(n, i) => muts
+                .into_iter()
+                .take(n)
+                .chain(std::iter::once((key(i), Some(b"garbage".to_vec()))))
+                .collect(),
         };
         Self::apply(&mut self.durable, &kept);
         Ok(())
+    }
+    fn unsynced_acked(&self) -> Option<u64> {
+        Some(self.unsynced.len() as u64)
     }
 }
 
@@ -1071,5 +1082,123 @@ fn same_kind_treats_no_prefix_fits_findings_as_one_kind() {
     assert!(
         !hole_on_a.same_kind(&plain_loss_on_a) && !plain_loss_on_a.same_kind(&hole_on_a),
         "a no-prefix-fits finding is not the same kind as a lost key on that key"
+    );
+}
+
+/// Review M2: when a power loss both drops a legitimate unsynced suffix and
+/// corrupts a key, the finding must name the corrupted key (its value is in
+/// no prefix: single-key evidence), not the first legitimately-lost key.
+#[tokio::test(flavor = "multi_thread")]
+async fn fast_check_reports_the_key_no_prefix_explains() {
+    let ops = vec![
+        Op::Put(key(1), b"a1".to_vec()),
+        Op::Put(key(2), b"b1".to_vec()),
+        Op::Put(key(3), b"c1".to_vec()),
+        power_loss_op(),
+    ];
+    // Keeps only k1 (legitimately losing k2 and k3), then corrupts k3.
+    let mut sut = MemSut::new(Loss::KeepPrefixCorrupting(1, 3));
+    let outcome = run_ops(&mut sut, &ops, Mode::Fast)
+        .await
+        .expect("harness error");
+    match &outcome {
+        Outcome::Mismatch { mismatch, .. } => {
+            assert_eq!(mismatch.key, key(3), "{mismatch:?}");
+            assert_eq!(mismatch.actual, Some(b"garbage".to_vec()));
+            assert!(!mismatch.no_prefix_fits(), "{mismatch:?}");
+        }
+        other => panic!("expected a mismatch on the corrupted key, got {other:?}"),
+    }
+}
+
+/// A WAL whose power loss reverts to the last clean reopen, so it loses
+/// what its own close (in `crash`) had made durable, while claiming through
+/// `unsynced_acked` that the close synced everything.
+struct LosesCrashSyncedData {
+    inner: MemSut,
+    /// What really survives a power cut: the state as of the last reopen.
+    really_durable: BTreeMap<Key, Value>,
+    report_watermark: bool,
+}
+
+#[async_trait::async_trait]
+impl Sut for LosesCrashSyncedData {
+    async fn put(&mut self, k: &Key, v: &Value) -> anyhow::Result<()> {
+        self.inner.put(k, v).await
+    }
+    async fn delete(&mut self, k: &Key) -> anyhow::Result<()> {
+        self.inner.delete(k).await
+    }
+    async fn get(&mut self, k: &Key) -> anyhow::Result<Option<Value>> {
+        self.inner.get(k).await
+    }
+    async fn reopen(&mut self) -> anyhow::Result<()> {
+        self.inner.reopen().await?;
+        self.really_durable = self.inner.durable.clone();
+        Ok(())
+    }
+    async fn crash(&mut self) -> anyhow::Result<()> {
+        self.inner.crash().await
+    }
+    async fn checkpoint(&mut self) -> anyhow::Result<()> {
+        self.inner.checkpoint().await?;
+        self.really_durable = self.inner.durable.clone();
+        Ok(())
+    }
+    async fn power_loss(&mut self, _tear: Tear, _fault_seed: u64) -> anyhow::Result<()> {
+        self.inner.durable = self.really_durable.clone();
+        self.inner.unsynced.clear();
+        Ok(())
+    }
+    fn unsynced_acked(&self) -> Option<u64> {
+        if self.report_watermark {
+            self.inner.unsynced_acked()
+        } else {
+            None
+        }
+    }
+}
+
+/// Review M1: the lower bound follows the SUT's own sync points. A `Crash`
+/// closes the log (a sync), so a later power loss may not take what was
+/// written before it. With the SUT reporting `unsynced_acked` this is caught;
+/// without it the model only knows of `Reopen`/`Checkpoint` and must accept
+/// the loss, which is why `FaultSut` reports it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_loss_of_data_synced_by_a_crash_is_caught() {
+    let ops = vec![
+        Op::Put(key(1), b"a1".to_vec()),
+        Op::Crash,
+        Op::Put(key(2), b"b1".to_vec()),
+        power_loss_op(),
+    ];
+    let make = |report_watermark| LosesCrashSyncedData {
+        inner: MemSut::new(Loss::KeepPrefix(0)),
+        really_durable: BTreeMap::new(),
+        report_watermark,
+    };
+
+    let outcome = run_ops(&mut make(true), &ops, Mode::Fast)
+        .await
+        .expect("harness error");
+    match &outcome {
+        Outcome::Mismatch {
+            after: Op::PowerLoss { .. },
+            mismatch,
+            ..
+        } => {
+            assert_eq!(mismatch.key, key(1));
+            assert_eq!(mismatch.actual, None);
+            assert!(!mismatch.acceptable.contains(&None), "{mismatch:?}");
+        }
+        other => panic!("losing crash-synced data must be caught, got {other:?}"),
+    }
+
+    let blind = run_ops(&mut make(false), &ops, Mode::Fast)
+        .await
+        .expect("harness error");
+    assert!(
+        blind.is_pass(),
+        "without the SUT's watermark the model cannot know the crash synced: {blind:?}"
     );
 }

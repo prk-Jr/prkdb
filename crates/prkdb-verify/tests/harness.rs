@@ -284,4 +284,40 @@ async fn blocking_profile_is_green_in_fast_mode() {
         "PowerLoss never ran: {:?}",
         report.op_counts
     );
+    assert!(
+        report.segment_rolls.unwrap_or(0) > 0,
+        "no segment ever rolled: {:?}",
+        report.segment_rolls
+    );
+}
+
+/// Review H1: the gate's default sequence length (80 ops) must cross segment
+/// boundaries, or roll-time syncs and multi-segment recovery go untested (a
+/// WAL that skipped the old segment's sync on roll stayed green when no seed
+/// ever rolled). Every seed here must roll, and several times on average.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_default_length_seed_rolls_segments() {
+    for mode in [Mode::Durable, Mode::Fast] {
+        let mut total = 0;
+        for seed in 0..20 {
+            let cfg = RunConfig {
+                first_seed: seed,
+                seeds: 1,
+                ops: 80,
+                profile: Profile::Blocking,
+                mode,
+                repro_attempts: 1,
+            };
+            let report = run(|| FaultSut::new(mode), &cfg)
+                .await
+                .expect("harness error");
+            assert!(report.failure.is_none(), "{:?}", report.failure);
+            let rolls = report
+                .segment_rolls
+                .expect("FaultSut must report segment counts");
+            assert!(rolls > 0, "{mode:?} seed {seed} never rolled a segment");
+            total += rolls;
+        }
+        assert!(total >= 60, "{mode:?}: only {total} rolls in 20 seeds");
+    }
 }

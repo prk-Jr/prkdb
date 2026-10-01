@@ -103,9 +103,11 @@ pub async fn check_durable(model: &Model, sut: &mut dyn Sut) -> CheckOutcome {
 ///   hole in the log. Prefixes start at `model.durable` (the last sync the
 ///   model knows of), so losing synced data never fits. On success
 ///   `model.settle(n)`. On failure the mismatch names the first key whose
-///   value differs from the full state, with `acceptable` = that key's value
-///   in every prefix; if its actual value is among them, no single prefix
-///   explains the snapshot (see [`Mismatch::no_prefix_fits`]).
+///   value is in NO prefix (single-key evidence), with `acceptable` = that
+///   key's value in every prefix. Only if every key's value is individually
+///   acceptable does it name the first key that differs from the full state;
+///   then no single prefix explains the snapshot (see
+///   [`Mismatch::no_prefix_fits`]).
 pub async fn check_after_power_loss(
     model: &mut Model,
     sut: &mut dyn Sut,
@@ -147,13 +149,28 @@ pub async fn check_after_power_loss(
         return CheckOutcome::Ok { compared };
     }
 
+    // Prefer single-key evidence: a key whose value no prefix gives at all.
+    // Only if every key is individually explainable is this a "no prefix
+    // fits" finding, reported on the first key that differs from the full
+    // state (which is then a legitimately-lost key, not the culprit alone).
     let state = &prefixes[prefixes.len() - 1];
-    let k = keys
-        .into_iter()
-        .find(|k| snapshot.get(k) != state.get(k))
+    let acceptable_for = |k: &Key| -> Vec<Option<Value>> {
+        let mut acceptable: Vec<Option<Value>> =
+            prefixes.iter().map(|p| p.get(k).cloned()).collect();
+        acceptable.dedup();
+        acceptable
+    };
+    let (k, acceptable) = keys
+        .iter()
+        .map(|k| (k, acceptable_for(k)))
+        .find(|(k, acceptable)| !acceptable.contains(&snapshot.get(*k).cloned()))
+        .or_else(|| {
+            keys.iter()
+                .find(|k| snapshot.get(*k) != state.get(*k))
+                .map(|k| (k, acceptable_for(k)))
+        })
+        .map(|(k, acceptable)| (k.clone(), acceptable))
         .expect("the snapshot differs from every prefix, so from the full state too");
-    let mut acceptable: Vec<Option<Value>> = prefixes.iter().map(|p| p.get(&k).cloned()).collect();
-    acceptable.dedup();
     CheckOutcome::Mismatch {
         compared,
         mismatch: Mismatch {

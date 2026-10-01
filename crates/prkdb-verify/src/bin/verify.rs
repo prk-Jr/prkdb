@@ -17,8 +17,9 @@
 //!   --help, -h                      print this message and exit
 //!
 //! A green run prints `profile=<p> mode=<m> seeds=<n> checks=<c> ops=<Put:…,Delete:…,…>`
-//! and still fails as vacuous if no key was compared or if any op kind the
-//! profile enables never executed.
+//! (plus ` rolls=<r>`, the WAL segment rolls, on `--sut fault`) and still fails as
+//! vacuous if no key was compared, if any op kind the profile enables never
+//! executed, or if a `fault` run never rolled a segment.
 
 use anyhow::{bail, Context, Result};
 use prkdb_verify::model::Mode;
@@ -44,7 +45,8 @@ Flags (later flags override earlier ones):
   --help, -h                      print this message and exit
 
 A green run prints `profile=<p> mode=<m> seeds=<n> checks=<c> ops=<Put:..,Delete:..,..>`
-and fails as vacuous if no key was compared or any op kind the profile enables never ran.";
+(plus ` rolls=<r>` on --sut fault) and fails as vacuous if no key was compared, any op
+kind the profile enables never ran, or a fault run never rolled a WAL segment.";
 
 /// Which storage the harness drives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,8 +236,12 @@ fn main() -> Result<()> {
         bail!("harness failure");
     }
 
+    let rolls = report
+        .segment_rolls
+        .map(|n| format!(" rolls={n}"))
+        .unwrap_or_default();
     println!(
-        "profile={} mode={} seeds={} checks={} ops={}",
+        "profile={} mode={} seeds={} checks={} ops={}{rolls}",
         config.profile.as_str(),
         config.mode.as_str(),
         report.seeds,
@@ -244,6 +250,9 @@ fn main() -> Result<()> {
     );
     if report.checks == 0 {
         bail!("vacuous run: no checks compared");
+    }
+    if report.segment_rolls == Some(0) {
+        bail!("vacuous for segment rolls: no sequence ever crossed a segment boundary");
     }
     let missing = report.missing_op_kinds(config.profile);
     if !missing.is_empty() {

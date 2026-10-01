@@ -137,6 +137,11 @@ pub struct Report {
     /// explicit `Reopen` ops. A kind the profile enables but that shows 0
     /// here was never exercised, so a green run says nothing about it.
     pub op_counts: OpCounts,
+    /// Segment rolls across every seed run (each seed's final segment count
+    /// minus its first segment), or `None` if the SUT cannot count segments
+    /// ([`Sut::segment_count`]). `Some(0)` means no run ever crossed a segment
+    /// boundary, so roll and multi-segment recovery paths went untested.
+    pub segment_rolls: Option<u64>,
     pub failure: Option<Failure>,
 }
 
@@ -298,6 +303,14 @@ async fn run_ops_counted(
                 Err(outcome) => return Ok(*outcome),
             },
         }
+        // The SUT's own sync points (a segment roll, the close in a crash, the
+        // sync on open) raise the lower bound a later power loss may not go
+        // below. Without this, a WAL that lost data it had synced on its own
+        // would go unnoticed.
+        if let Some(unsynced) = sut.unsynced_acked() {
+            let unsynced = usize::try_from(unsynced).unwrap_or(usize::MAX);
+            model.mark_durable_prefix(model.pending.len().saturating_sub(unsynced));
+        }
     }
 
     *counts.entry(FINAL_REOPEN).or_default() += 1;
@@ -366,7 +379,12 @@ where
         let ops = generate(seed, config.ops, config.profile);
         let mut sut = make().await?;
         report.seeds += 1;
-        match run_ops_counted(&mut sut, &ops, config.mode, &mut report.op_counts).await? {
+        let outcome = run_ops_counted(&mut sut, &ops, config.mode, &mut report.op_counts).await?;
+        if let Some(segments) = sut.segment_count() {
+            let rolls = segments.saturating_sub(1) as u64;
+            report.segment_rolls = Some(report.segment_rolls.unwrap_or(0) + rolls);
+        }
+        match outcome {
             Outcome::Pass { checks } => report.checks += checks,
             outcome => {
                 let original_len = ops.len();

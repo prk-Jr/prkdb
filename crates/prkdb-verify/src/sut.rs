@@ -4,6 +4,8 @@ use crate::faultfs::{FaultFs, Tear};
 use crate::model::{Key, Mode, Value};
 use prkdb::storage::config::StorageConfig;
 use prkdb::storage::WalStorageAdapter;
+use prkdb_core::vfs::Vfs;
+use prkdb_core::wal::segment::parse_segment_file_name;
 use prkdb_core::wal::{SyncMode, WalConfig};
 use prkdb_types::storage::StorageAdapter;
 use rand::SeedableRng;
@@ -39,6 +41,21 @@ pub trait Sut: Send {
     /// Only SUTs on a simulated filesystem can do this.
     async fn power_loss(&mut self, _tear: Tear, _fault_seed: u64) -> anyhow::Result<()> {
         Err(Unsupported("power_loss").into())
+    }
+    /// How many of the most recently acknowledged mutations the SUT itself
+    /// says are not yet durable (`0` = everything acknowledged is durable).
+    /// The runner moves every older pending mutation into the model's durable
+    /// state after each op, so the Fast check's lower bound follows the SUT's
+    /// own sync points (close, open, segment roll) and not only the ones the
+    /// model can see. `None` (the default): the SUT cannot tell, and only
+    /// `Reopen`/`Checkpoint` (and, in Durable mode, every ack) mark durability.
+    fn unsynced_acked(&self) -> Option<u64> {
+        None
+    }
+    /// The number of WAL segment files, if the SUT can tell. Lets a run prove
+    /// that it crossed segment boundaries (see `Report::segment_rolls`).
+    fn segment_count(&self) -> Option<usize> {
+        None
     }
 }
 
@@ -108,15 +125,22 @@ impl Sut for WalSut {
 /// Where `FaultSut` keeps its log on the simulated filesystem.
 const FAULT_LOG_DIR: &str = "/db/wal";
 
+/// Segment size for `FaultSut`. A harness frame is ~50 bytes (17-byte frame
+/// header plus a one-op batch), so a 512-byte segment holds ~9 frames after
+/// its 24-byte header: a default 80-op sequence rolls several times, and
+/// recovery and power loss keep crossing segment boundaries.
+const FAULT_SEGMENT_BYTES: u64 = 512;
+
 /// The WAL adapter on [`FaultFs`] (Durable or Fast), for power-loss testing.
 ///
-/// In Fast mode the periodic sync timer is pinned off (an hour), so the only
-/// syncs are the ones the model sees (`Reopen`, `Checkpoint`) plus the WAL's
-/// own syncs on open, close and segment roll. Those extra syncs only make more
-/// data durable than the model assumes, so the checker's lower bound stays
-/// conservative: it can miss a lost write the WAL had synced on its own, but
-/// never reports a false finding. And nothing depends on a timer firing, so
-/// every seed is deterministic.
+/// In Fast mode the periodic sync timer is pinned off (an hour), so nothing
+/// depends on a timer firing and every seed is deterministic. The remaining
+/// syncs (explicit flushes, and the WAL's own on open, close and segment roll)
+/// are reported to the runner through [`Sut::unsynced_acked`], from the
+/// adapter's `max_offset()` (last acknowledged LSN) and `durable_lsn()`. That
+/// mapping holds because every `put`/`delete` writes exactly one frame and
+/// nothing else writes frames in these profiles; `put`/`delete` check it and
+/// fail loudly if it ever stops holding.
 pub struct FaultSut {
     fs: FaultFs,
     mode: Mode,
@@ -141,9 +165,7 @@ impl FaultSut {
         StorageConfig {
             wal: WalConfig {
                 log_dir: PathBuf::from(FAULT_LOG_DIR),
-                // Small segments roll often, so recovery crosses segment
-                // boundaries and a power loss can land right after a roll.
-                segment_bytes: 16 * 1024,
+                segment_bytes: FAULT_SEGMENT_BYTES,
                 sync_mode,
                 sync_interval_ms,
                 ..WalConfig::test_config()
@@ -164,15 +186,32 @@ impl FaultSut {
     fn db(&self) -> &WalStorageAdapter {
         self.db.as_ref().expect("open")
     }
+
+    /// Fails unless the mutation just acknowledged wrote exactly one frame:
+    /// [`Sut::unsynced_acked`] counts frames, and the model counts mutations.
+    fn one_frame_since(&self, before: u64) -> anyhow::Result<()> {
+        let after = self.db().max_offset();
+        if after != before + 1 {
+            anyhow::bail!(
+                "FaultSut frame accounting broke: one mutation moved the log from LSN \
+                 {before} to {after}; unsynced_acked would mislead the checker"
+            );
+        }
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
 impl Sut for FaultSut {
     async fn put(&mut self, k: &Key, v: &Value) -> anyhow::Result<()> {
-        Ok(self.db().put(k, v).await?)
+        let before = self.db().max_offset();
+        self.db().put(k, v).await?;
+        self.one_frame_since(before)
     }
     async fn delete(&mut self, k: &Key) -> anyhow::Result<()> {
-        Ok(self.db().delete(k).await?)
+        let before = self.db().max_offset();
+        self.db().delete(k).await?;
+        self.one_frame_since(before)
     }
     async fn get(&mut self, k: &Key) -> anyhow::Result<Option<Value>> {
         Ok(self.db().get(k).await?)
@@ -199,5 +238,22 @@ impl Sut for FaultSut {
             .power_loss(&mut ChaCha8Rng::seed_from_u64(fault_seed), tear);
         self.db = None;
         self.open().await
+    }
+    fn unsynced_acked(&self) -> Option<u64> {
+        // Read durable first: it only grows, so a sync landing between the two
+        // loads can only make the answer larger (conservative), never smaller.
+        let db = self.db.as_ref()?;
+        let durable = db.durable_lsn();
+        Some(db.max_offset().saturating_sub(durable))
+    }
+    fn segment_count(&self) -> Option<usize> {
+        let entries = self.fs.read_dir(Path::new(FAULT_LOG_DIR)).ok()?;
+        Some(
+            entries
+                .iter()
+                .filter_map(|p| p.file_name()?.to_str())
+                .filter(|name| parse_segment_file_name(name).is_some())
+                .count(),
+        )
     }
 }
