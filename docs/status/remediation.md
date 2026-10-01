@@ -43,7 +43,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | RFT-10 | high | 4 | open | CLUSTER_NODES rejects hostnames; 3-node compose cluster cannot start |
 | SCH-02 | high | 2 | fixed | Schema reload accepts missing descriptors; non-atomic writes; concurrent registrations can reuse a version |
 | STO-06 | high | 2 | fixed | Four WAL implementations in use; all data writes hash to one shard so fixes do not propagate |
-| STO-07 | high | 2 | open | BatchAccumulator::flush() sleeps and returns Ok while dropping executor errors |
+| STO-07 | high | 2 | fixed | BatchAccumulator::flush() sleeps and returns Ok while dropping executor errors |
 | STO-10 | high | 2 | fixed | No data-directory lock: two processes can open and corrupt the same WAL |
 | TST-01 | high | 4 | open | Chaos monkey tolerates 20% of acknowledged writes missing |
 | TST-09 | high | 2 | fixed | Perf gate WAL benches count ~500 instructions: the WAL work is outside the measured region |
