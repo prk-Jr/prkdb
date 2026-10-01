@@ -105,3 +105,31 @@ fn migrate_on_a_container_with_an_old_member_fails_and_names_it() {
         "{err}"
     );
 }
+
+/// Review M4: a pre-D11 optimized-storage root (`collections/<name>/`, no root `FORMAT`)
+/// is one format-1 data directory to `migrate`, as it is to the open that refuses it; it
+/// used to be reported as a container of up-to-date collections the database would not
+/// open.
+#[test]
+fn migrate_on_a_pre_d11_collections_root_reports_format_1_like_open() {
+    let root = tempfile::tempdir().unwrap();
+    let users = root.path().join("collections").join("users");
+    std::fs::create_dir_all(&users).unwrap();
+    std::fs::write(users.join("FORMAT"), "format = 2\ncreated_by = \"0.6.0\"\n").unwrap();
+
+    let out = migrate(root.path());
+    assert!(!out.status.success(), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("format 1"), "{err}");
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("is a container"));
+
+    let open = prkdb::storage::CollectionPartitionedAdapter::new(prkdb_core::wal::WalConfig {
+        log_dir: root.path().to_path_buf(),
+        ..prkdb_core::wal::WalConfig::test_config()
+    });
+    assert!(
+        open.err()
+            .is_some_and(|e| e.to_string().contains("format 1")),
+        "open and migrate agree"
+    );
+}

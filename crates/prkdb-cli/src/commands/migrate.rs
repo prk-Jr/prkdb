@@ -6,12 +6,15 @@
 //!
 //! Some layouts put several data directories under one root that has no `FORMAT` of its
 //! own: the multi-raft `STORAGE_PATH` (`meta/`, `partition_<n>/`, plus `schemas/`, which is
-//! not a data directory), and, until Task 2.9b, the optimized-storage root
-//! (`collections/<name>/`). Such a root is not format 1. `migrate` reports it as a
+//! not a data directory). Such a root is not format 1. `migrate` reports it as a
 //! container and migrates **every** data directory in it, in name order, reporting each;
 //! it succeeds only if all of them end at the current format. A data directory that
 //! cannot be migrated does not stop the others from being reported (each migration is
 //! all-or-nothing on its own directory, per `Migration::run`).
+//!
+//! The pre-D11 optimized-storage layout (`collections/<name>/` under a root with no
+//! `FORMAT`) is **not** a container: since Task 2.9b that root is one data directory, and
+//! opening it refuses it as format 1, so `migrate` reports format 1 too.
 
 use clap::Args;
 use prkdb::storage::format::{detect_format, read_format, unsupported_format, FORMAT_VERSION};
@@ -72,10 +75,7 @@ fn container_members(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut members = Vec::new();
     for path in subdirs(root)? {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if name == "collections" {
-            members.extend(subdirs(&path)?);
-        } else if name == "meta" || name.starts_with("partition_") || read_format(&path)?.is_some()
-        {
+        if name == "meta" || name.starts_with("partition_") || read_format(&path)?.is_some() {
             members.push(path);
         }
     }
