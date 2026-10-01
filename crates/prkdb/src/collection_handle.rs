@@ -143,17 +143,18 @@ where
                     .await
                     .map_err(|e| StorageError::Internal(e.to_string()))?;
 
-                // Count failures and report if any occurred
-                let failed_count = results.iter().filter(|r| r.is_err()).count();
-                if failed_count > 0 {
-                    tracing::warn!(
-                        "Batch operation had {} failed items out of {}",
-                        failed_count,
-                        results.len()
-                    );
+                // Per-item failures reach the accumulator, which returns them from `flush`.
+                let n = results.len();
+                let mut failures = results.into_iter().filter_map(Result::err);
+                match failures.next() {
+                    None => Ok(()),
+                    Some(first) => {
+                        let failed = 1 + failures.count();
+                        Err(StorageError::Internal(format!(
+                            "{failed} of {n} batched writes failed; first: {first}"
+                        )))
+                    }
                 }
-
-                Ok(())
             }
         };
 
@@ -311,10 +312,11 @@ where
         Ok(())
     }
 
-    /// Flush any pending batched writes immediately.
+    /// Execute every batched write `put` accepted before this call and wait for it.
     ///
-    /// This is useful in tests or when you need to ensure all buffered data
-    /// is persisted before proceeding. Only has an effect if batching is enabled.
+    /// Returns the first write failure since the previous flush: with batching enabled,
+    /// `put` only queues the item, so this is where a failed write is reported. Without
+    /// batching it returns `Ok` at once.
     pub async fn flush(&self) -> Result<(), DbError> {
         if let Some(accumulator) = &self.accumulator {
             accumulator.flush().await?;
