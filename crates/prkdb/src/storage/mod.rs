@@ -1,5 +1,5 @@
 pub mod cache;
-pub mod checkpoint; // Phase 9: Checkpoint persistence for fast recovery
+pub mod checkpoint; // Empty until Task 2.14 writes an index snapshot
 pub mod collection_partitioned_adapter; // Kafka-style collection partitioning for 4-7x performance!
 pub mod config;
 pub mod partitioned_streaming_adapter; // Phase 24C: Multi-partition for 1+ GB/s
@@ -9,10 +9,12 @@ pub mod snapshot;
 pub mod streaming_adapter; // Phase 24: High-throughput streaming (2x+ Kafka performance)
 pub mod wal_adapter;
 pub mod write_queue; // Phase 2: Dedicated sync writer
-pub mod writer_liveness; // Progress accounting and stall detection for the WAL write path
+pub mod writer_liveness; // Client-side time bounds for the WAL write path
 
 mod in_memory;
 pub use in_memory::InMemoryAdapter;
+
+pub use config::CompactionConfig;
 
 // Export WAL adapters
 pub use collection_partitioned_adapter::CollectionPartitionedAdapter;
