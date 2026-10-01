@@ -1,4 +1,4 @@
-//! Time bounds for the WAL write path.
+//! The caller's time bound on the WAL write path.
 //!
 //! # The property this exists to enforce
 //!
@@ -7,60 +7,63 @@
 //! was returned and nothing outside the process could tell (cargo-mutants found it by
 //! replacing the flush function with `()`; the suite hung, run 31505589348).
 //!
-//! Since Task 2.8a the writer is the single `Wal`'s own thread. A panic in it poisons the
-//! log and answers every queued request; a writer that is alive but completes nothing is
-//! reported by `Wal::health` as stalled. What stays here is the caller's side: how long a
-//! write waits for admission and then for its answer before it is told
-//! `WriteBackpressure` or `WriteNotConfirmed`. Liveness has no non-temporal observation —
-//! a test can only ever see "not yet" — so the bound is necessarily time-based, and it
-//! means *not confirmed* rather than *failed*.
+//! # Two bounds, owned by two layers
+//!
+//! Since Task 2.8a the writer is the single `Wal`'s own thread, and detection and the
+//! caller's answer are separate:
+//!
+//! - **Stall detection is the WAL's.** `Wal::health` reports `Stalled` once requests are
+//!   queued and no batch has completed for `max(1 s, 100 × sync_interval_ms)`. That is what
+//!   `write_path_health` (and the `writer_healthy` / `writer_stalls_total` metrics) report.
+//!   A panic on the writer thread poisons the log instead, and every queued request is
+//!   answered.
+//! - **The caller's bound is here.** [`LivenessBounds::client_bound`] is how long one write
+//!   waits for admission (then `WriteBackpressure`: nothing was queued) and, once queued,
+//!   for its answer (then `WriteNotConfirmed`: the writer holds it and it may still land).
+//!   It derives from `max_flush_ms`, not from the WAL's stall bound, so the two are not
+//!   ordered by construction: with the defaults (`max_flush_ms` 50, `sync_interval_ms` 10)
+//!   the client bound is 6.4 s against a 1 s stall bound, but a small `max_flush_ms` can
+//!   make a caller give up before the WAL would call the writer stalled.
+//!
+//! Liveness has no non-temporal observation — a test can only ever see "not yet" — so the
+//! caller's bound is necessarily time-based, and it means *not confirmed*, not *failed*.
 //!
 //! Spec: `docs/superpowers/specs/2026-08-11-wal-writer-liveness.md`.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// How many flush intervals an unpublished write may sit before the writer is considered
-/// stalled.
+/// How many configured flush intervals a caller waits, at each of its two steps, before it
+/// is answered without the writer's result.
 ///
-/// A multiple of the configured flush interval rather than a wall-clock constant, because a
-/// constant would be correct only for whichever configuration it happened to be tuned
-/// against — the magic number the spec rejects, moved one level out. A deployment that
-/// raises `max_flush_ms` raises its own bounds with it. 16 is a margin, not a measurement:
-/// it keeps a loaded CI box from being reported as a stalled database.
-const STALL_FLUSH_INTERVALS: u32 = 16;
+/// A multiple of `max_flush_ms` rather than a wall-clock constant, so a deployment that
+/// raises its flush interval raises its bound with it. 128 (it was 16 intervals for the
+/// old watchdog's threshold, times 8 of margin above it) is a margin, not a measurement:
+/// a merely slow writer must not be reported to its callers as one that may have lost
+/// their writes.
+const CLIENT_BOUND_FLUSH_INTERVALS: u32 = 128;
 
-/// How much longer than the stall threshold a client waits before giving up on its own.
-///
-/// Deliberately far above the threshold, so a merely slow writer is not reported to its
-/// callers as one that may have lost their writes.
-const CLIENT_BOUND_STALL_MULTIPLE: u32 = 8;
-
-/// A flush interval of zero would make every bound zero. Clamping is a sanity floor on a
+/// A flush interval of zero would make the bound zero. Clamping is a sanity floor on a
 /// misconfiguration, not a tuning choice.
 const MIN_FLUSH_INTERVAL_MS: u64 = 1;
 
-/// The two time bounds the write path runs on, both derived from the configured flush
-/// interval.
+/// The caller's time bound on the write path; see the module doc for how it relates to
+/// the WAL's own stall detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LivenessBounds {
-    /// How long an unpublished write may sit before the writer is considered stalled.
-    pub stall_threshold: Duration,
     /// How long a client waits for admission, and then for its answer, before giving up
     /// with `WriteBackpressure` or `WriteNotConfirmed` respectively.
     pub client_bound: Duration,
 }
 
 impl LivenessBounds {
-    /// Derive both bounds from the accumulator's configured maximum flush interval.
+    /// Derive the bound from the configured maximum flush interval.
     ///
-    /// The *configured maximum*, so the bounds do not tighten under load, which is exactly
+    /// The *configured maximum*, so the bound does not tighten under load, which is exactly
     /// when latency is highest.
     pub fn from_max_flush_ms(max_flush_ms: u64) -> Self {
         let interval = Duration::from_millis(max_flush_ms.max(MIN_FLUSH_INTERVAL_MS));
-        let stall_threshold = interval * STALL_FLUSH_INTERVALS;
         Self {
-            stall_threshold,
-            client_bound: stall_threshold * CLIENT_BOUND_STALL_MULTIPLE,
+            client_bound: interval * CLIENT_BOUND_FLUSH_INTERVALS,
         }
     }
 }
@@ -108,28 +111,20 @@ mod tests {
     }
 
     #[test]
-    fn bounds_derive_from_the_flush_interval_rather_than_a_constant() {
-        let fast = LivenessBounds::from_max_flush_ms(10);
-        let slow = LivenessBounds::from_max_flush_ms(100);
-
-        assert_eq!(fast.stall_threshold, Duration::from_millis(160));
-        assert_eq!(slow.stall_threshold, Duration::from_millis(1600));
-        assert_eq!(fast.client_bound, Duration::from_millis(1280));
-        assert!(
-            slow.stall_threshold > fast.stall_threshold,
-            "a slower configured flush must get a proportionally later bound"
+    fn the_bound_derives_from_the_flush_interval_rather_than_a_constant() {
+        assert_eq!(
+            LivenessBounds::from_max_flush_ms(10).client_bound,
+            Duration::from_millis(1_280)
         );
-
-        // The client's bound sits above the stall threshold, so a merely slow writer is
-        // not reported to its callers as one that may have lost their writes.
-        assert!(fast.client_bound > fast.stall_threshold);
-        assert!(slow.client_bound > slow.stall_threshold);
+        assert_eq!(
+            LivenessBounds::from_max_flush_ms(50).client_bound,
+            Duration::from_millis(6_400),
+            "the default max_flush_ms gives callers 6.4s"
+        );
     }
 
     #[test]
-    fn a_zero_flush_interval_does_not_produce_a_zero_threshold() {
-        let bounds = LivenessBounds::from_max_flush_ms(0);
-        assert!(bounds.stall_threshold > Duration::ZERO);
-        assert!(bounds.client_bound > Duration::ZERO);
+    fn a_zero_flush_interval_does_not_produce_a_zero_bound() {
+        assert!(LivenessBounds::from_max_flush_ms(0).client_bound > Duration::ZERO);
     }
 }

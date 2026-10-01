@@ -137,6 +137,27 @@ successful publish. Exported through `PartitionMetrics` alongside the existing
 Acceptance 5 is the exit condition for the `mutants.toml` exemption this spec blocks. When
 it holds, that entry is deleted.
 
+### As built on the single WAL (Tasks 2.8a–2.8b)
+
+The flush loop and watchdog are gone; the writer is the `Wal`'s own thread, and test faults
+are injected through a `Vfs` wrapper (`wal_adapter::fault_injection`). One acceptance item
+is met in a different form than written:
+
+- **Acceptance 1, the error text.** Waiters whose request was in the batch that panicked
+  get `WriteNotConfirmed`, which does not name the panic. Their reply is dropped by the
+  unwind, and the panic may have come after the bytes reached the file, so the frame may
+  be on disk and replay on reopen: "not confirmed" is the honest answer, and naming the
+  panic would need the poison reason before it is recorded. Every request queued after
+  them, every later write, and the health reason do name the panic
+  (`a_panicking_write_poisons_and_answers_every_waiter`). No caller blocks.
+
+The others: acceptance 2 is `Wal::health`'s stall bound, `max(1 s, 100 × sync_interval_ms)`,
+with waiters answered `WriteNotConfirmed` at the client bound (`128 × max_flush_ms`);
+acceptance 4 is the WAL's byte-bounded admission (`max_queued_bytes`), refused with
+`WriteBackpressure` at the client bound; acceptance 5 holds by construction, because
+`flush_accumulator_inner` no longer exists and every adapter write is time-bounded. The
+`TIMEOUT` exemption is gone. Tests and mapping: the Task 2.8b commit body.
+
 ## Sequencing
 
 Parts 1 and 2 are the permanent fix; 3 and 4 harden the surface around them. Part 3 depends

@@ -34,10 +34,8 @@ pub struct WritePathHealth {
     /// Batches published since start, monotonic. Exported as a counter so the publish rate
     /// is derived by the scraper rather than computed in-process.
     ///
-    /// Counts writes the *background writer* published, and deliberately nothing else.
-    /// The stall detector asks whether this number moved between two observations, so a
-    /// second source incrementing it would mean a stalled writer never looks stalled for
-    /// as long as any other traffic continues. See [`Self::direct_appends_total`].
+    /// Counts frames the WAL writer completed. For `WalStorageAdapter` that is every write
+    /// (one frame per write since Task 2.8a); see [`Self::direct_appends_total`].
     pub publishes_total: u64,
     /// Writes appended straight to the log, bypassing the background writer, monotonic.
     ///
