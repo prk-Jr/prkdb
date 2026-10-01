@@ -270,7 +270,13 @@ impl LogRecord {
         buffer.extend_from_slice(&bytes);
     }
 
-    /// Deserialize from bytes
+    /// Deserialize from bytes.
+    ///
+    /// Legacy record format with no production caller (the WAL stores `Batch` frames).
+    /// Bounded by `prkdb_types::codec::decode`, a native decode whose `PutBatch` items
+    /// claim 48 bytes per pair up front, more than the 8 per input byte the scaled limit
+    /// allows, so a batch of very many near-empty pairs can be refused; move it to the
+    /// serde path before reviving it.
     pub fn deserialize(bytes: &[u8]) -> Result<Self, WalError> {
         use crate::serialization::zerocopy::ZeroCopyLogHeader;
         use zerocopy::FromBytes;

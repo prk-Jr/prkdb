@@ -5,108 +5,140 @@
 //! contents, so a ten-byte input can declare a 2^62-byte string and abort the process
 //! (or a `u64::MAX` one and panic with "capacity overflow"). Every decode of bytes this
 //! program did not just produce itself goes through this module instead, which uses
-//! `standard().with_limit::<N>()`: a declared length that would take the decode past `N`
-//! bytes is a `DecodeError::LimitExceeded`, returned before anything is allocated.
+//! `standard().with_limit::<N>()`: a decode that would claim more than `N` bytes is a
+//! `DecodeError::LimitExceeded`, returned before the claimed allocation is made.
 //!
 //! The limit is a decode-side check only. It does not change the wire format, so bytes
 //! written with `standard()` decode here unchanged, and encoders keep using `standard()`
 //! (`limit_does_not_change_the_wire_format` below).
 //!
+//! # What bincode claims
+//!
+//! The limit is checked against a running count of "claimed" bytes, which is the decoded
+//! value's in-memory size, not its wire size:
+//!
+//! - every primitive claims its `size_of` when decoded, on both the serde and the native
+//!   path: a `u64` or a length prefix claims 8 even when its varint is one byte on the
+//!   wire, so a valid value can claim up to 8 times its encoding (16 for `u128`);
+//! - a `String`, `Vec<u8>` or serde byte buffer claims its declared length before
+//!   allocating it, which is what stops the 2^62-byte string;
+//! - on the native path only, a `Vec<T>` or map of anything else first claims
+//!   `len * size_of::<T>()` and preallocates `len` slots, releasing the claim element by
+//!   element. That transient claim can exceed 8 times the encoding (a
+//!   `Vec<(Vec<u8>, Vec<u8>)>` of empty pairs is 2 bytes per element on the wire and 48
+//!   in memory). The serde path's sequences and maps claim nothing up front and
+//!   preallocate at most serde's cautious size hint.
+//!
 //! # Which limit
 //!
-//! - [`decode`] / [`decode_serde`]: one stored record, Raft log entry or message. Limited
-//!   to [`MAX_RECORD_BYTES`], the WAL's largest frame payload (`prkdb_core`'s
-//!   `MAX_PAYLOAD_LEN`, asserted equal there): no stored value can be larger than the
-//!   frame that carried it.
-//! - [`decode_with_limit`] / [`decode_serde_with_limit`]: a caller-chosen limit, for
-//!   small fixed-shape values such as a file header ([`MAX_HEADER_BYTES`]).
-//! - [`decode_file`] / [`decode_serde_file`]: a whole file that may legitimately be far
-//!   larger than one record (a Raft snapshot, a persisted index). The limit scales with
-//!   the input: the smallest of 1 MiB, 16 MiB, ... that is at least the input's length.
-//!   For the types these hold (byte strings, strings, and maps and sequences of them) a
-//!   valid encoding never declares more bytes than it contains, so a valid file always
-//!   fits, and a hostile one can make the decoder allocate at most 16 times its own size.
+//! - [`decode`] / [`decode_serde`] (records, Raft entries, messages) and [`decode_file`] /
+//!   [`decode_serde_file`] (whole files: a Raft snapshot, a persisted index) all scale the
+//!   limit with the input: the smallest of 1 MiB, 8 MiB, 64 MiB, ... that is at least
+//!   [`CLAIM_PER_INPUT_BYTE`] (8) times the input's length. A valid value always fits
+//!   when it claims at most 8 bytes per wire byte: every serde type without `u128`, and
+//!   every native type whose only containers are `Vec<u8>` and `String`. A hostile input
+//!   can make a decode claim at most `max(1 MiB, 64 x its length)`. The file and record
+//!   names are the same function; they say what the call site reads.
+//!   Every production caller uses the serde path or a native type of that shape
+//!   (`(u64, u64, Vec<u8>)` for the Raft snapshot). The exception is
+//!   `LogRecord::deserialize` (native, `Vec<(Vec<u8>, Vec<u8>)>` batches), which has no
+//!   production caller: the legacy record format is decoded only by its own tests.
+//! - [`decode_with_limit`] / [`decode_serde_with_limit`]: a fixed limit, for small
+//!   fixed-shape values such as a file header ([`MAX_HEADER_BYTES`]).
 
 use bincode::config::{self, Configuration, Limit};
 use bincode::error::DecodeError;
 use serde::de::DeserializeOwned;
 
-/// The largest single record, Raft log entry or message decoded with [`decode`] or
-/// [`decode_serde`]: 64 MiB, the WAL's largest frame payload.
+/// The largest stored key or value: 64 MiB, the WAL's largest frame payload
+/// (`prkdb_core`'s `MAX_PAYLOAD_LEN`, asserted equal there). Readers of length-prefixed
+/// entries refuse a longer declared length before reading it.
 pub const MAX_RECORD_BYTES: usize = 64 * 1024 * 1024;
 
 /// The limit for small fixed-shape values such as a file header: 64 KiB.
 pub const MAX_HEADER_BYTES: usize = 64 * 1024;
+
+/// The most bytes a valid value claims per byte of its encoding (a one-byte varint
+/// decoded into a `u64` or `usize`); see the module docs.
+pub const CLAIM_PER_INPUT_BYTE: usize = 8;
 
 /// `standard()` with a decode limit of `N` bytes. Same wire format as `standard()`.
 pub fn bounded<const N: usize>() -> Configuration<config::LittleEndian, config::Varint, Limit<N>> {
     config::standard().with_limit::<N>()
 }
 
-/// Decodes a `bincode::Decode` value, declaring at most `N` bytes.
+/// Decodes a `bincode::Decode` value, claiming at most `N` bytes.
 pub fn decode_with_limit<T: bincode::Decode<()>, const N: usize>(
     bytes: &[u8],
 ) -> Result<(T, usize), DecodeError> {
     bincode::decode_from_slice(bytes, bounded::<N>())
 }
 
-/// Decodes a serde value, declaring at most `N` bytes.
+/// Decodes a serde value, claiming at most `N` bytes.
 pub fn decode_serde_with_limit<T: DeserializeOwned, const N: usize>(
     bytes: &[u8],
 ) -> Result<(T, usize), DecodeError> {
     bincode::serde::decode_from_slice(bytes, bounded::<N>())
 }
 
-/// Decodes one record's `bincode::Decode` value (limit [`MAX_RECORD_BYTES`]).
-pub fn decode<T: bincode::Decode<()>>(bytes: &[u8]) -> Result<(T, usize), DecodeError> {
-    decode_with_limit::<T, MAX_RECORD_BYTES>(bytes)
-}
-
-/// Decodes one record's serde value (limit [`MAX_RECORD_BYTES`]).
-pub fn decode_serde<T: DeserializeOwned>(bytes: &[u8]) -> Result<(T, usize), DecodeError> {
-    decode_serde_with_limit::<T, MAX_RECORD_BYTES>(bytes)
-}
-
-/// Picks the smallest limit tier at least `bytes.len()` and runs `$decode::<T, TIER>`.
-/// The tiers grow by 16x, so the limit is never more than 16 times the input.
+/// Runs `$decode::<T, TIER>` with the smallest tier (1 MiB x 8^k) that is at least
+/// `CLAIM_PER_INPUT_BYTE * bytes.len()`. Tiers grow by 8x, so the limit is at most
+/// `max(1 MiB, 64 x bytes.len())`.
 macro_rules! scaled {
     ($decode:ident, $t:ty, $bytes:expr) => {{
         let bytes: &[u8] = $bytes;
-        if bytes.len() <= 1 << 20 {
+        let need = bytes.len().saturating_mul(CLAIM_PER_INPUT_BYTE);
+        if need <= 1 << 20 {
             return $decode::<$t, { 1 << 20 }>(bytes);
         }
-        if bytes.len() <= 1 << 24 {
-            return $decode::<$t, { 1 << 24 }>(bytes);
+        if need <= 1 << 23 {
+            return $decode::<$t, { 1 << 23 }>(bytes);
         }
-        if bytes.len() <= 1 << 28 {
-            return $decode::<$t, { 1 << 28 }>(bytes);
+        if need <= 1 << 26 {
+            return $decode::<$t, { 1 << 26 }>(bytes);
+        }
+        if need <= 1 << 29 {
+            return $decode::<$t, { 1 << 29 }>(bytes);
         }
         #[cfg(target_pointer_width = "64")]
         {
-            if bytes.len() <= 1 << 32 {
+            if need <= 1 << 32 {
                 return $decode::<$t, { 1 << 32 }>(bytes);
             }
-            if bytes.len() <= 1 << 36 {
-                return $decode::<$t, { 1 << 36 }>(bytes);
+            if need <= 1 << 35 {
+                return $decode::<$t, { 1 << 35 }>(bytes);
             }
-            if bytes.len() <= 1 << 40 {
-                return $decode::<$t, { 1 << 40 }>(bytes);
+            if need <= 1 << 38 {
+                return $decode::<$t, { 1 << 38 }>(bytes);
+            }
+            if need <= 1 << 41 {
+                return $decode::<$t, { 1 << 41 }>(bytes);
             }
         }
         Err(DecodeError::LimitExceeded)
     }};
 }
 
-/// Decodes a whole file's `bincode::Decode` value; the limit scales with the input (see
-/// the module docs for the types this is sound for).
-pub fn decode_file<T: bincode::Decode<()>>(bytes: &[u8]) -> Result<(T, usize), DecodeError> {
+/// Decodes one record's, Raft entry's or message's `bincode::Decode` value; the limit
+/// scales with the input (module docs).
+pub fn decode<T: bincode::Decode<()>>(bytes: &[u8]) -> Result<(T, usize), DecodeError> {
     scaled!(decode_with_limit, T, bytes)
 }
 
-/// Decodes a whole file's serde value; the limit scales with the input (see the module
-/// docs for the types this is sound for).
-pub fn decode_serde_file<T: DeserializeOwned>(bytes: &[u8]) -> Result<(T, usize), DecodeError> {
+/// Decodes one record's, Raft entry's or message's serde value; the limit scales with
+/// the input (module docs).
+pub fn decode_serde<T: DeserializeOwned>(bytes: &[u8]) -> Result<(T, usize), DecodeError> {
     scaled!(decode_serde_with_limit, T, bytes)
+}
+
+/// Decodes a whole file's `bincode::Decode` value: [`decode`], named for the call site.
+pub fn decode_file<T: bincode::Decode<()>>(bytes: &[u8]) -> Result<(T, usize), DecodeError> {
+    decode(bytes)
+}
+
+/// Decodes a whole file's serde value: [`decode_serde`], named for the call site.
+pub fn decode_serde_file<T: DeserializeOwned>(bytes: &[u8]) -> Result<(T, usize), DecodeError> {
+    decode_serde(bytes)
 }
 
 #[cfg(test)]
@@ -184,6 +216,26 @@ mod tests {
         }
     }
 
+    /// Claims are the in-memory size: a million zero `u64`s are about 1 MB on the wire and
+    /// claim 8 MB. A fixed 1 MiB limit refuses them on both paths; the scaled limit
+    /// (8 x the input) decodes them.
+    #[test]
+    fn claims_are_in_memory_size_and_the_scaled_limit_covers_them() {
+        let zeros = vec![0u64; 1_000_000];
+        let bytes = bincode::encode_to_vec(&zeros, config::standard()).unwrap();
+        assert!(bytes.len() < 2 * 1024 * 1024);
+        assert!(matches!(
+            decode_with_limit::<Vec<u64>, { 1 << 20 }>(&bytes),
+            Err(DecodeError::LimitExceeded)
+        ));
+        assert!(matches!(
+            decode_serde_with_limit::<Vec<u64>, { 1 << 20 }>(&bytes),
+            Err(DecodeError::LimitExceeded)
+        ));
+        assert_eq!(decode::<Vec<u64>>(&bytes).unwrap().0, zeros);
+        assert_eq!(decode_serde::<Vec<u64>>(&bytes).unwrap().0, zeros);
+    }
+
     #[test]
     fn a_header_limit_refuses_what_a_record_limit_allows() {
         let input = declares_string_of(MAX_HEADER_BYTES as u64 + 1);
@@ -191,8 +243,8 @@ mod tests {
             decode_with_limit::<Shape, MAX_HEADER_BYTES>(&input),
             Err(DecodeError::LimitExceeded)
         ));
-        // Under the record limit the same declaration is allowed, and fails only because
-        // the bytes are not there.
+        // Under the scaled limit (1 MiB for a ten-byte input) the same declaration is
+        // allowed, and fails only because the bytes are not there.
         assert!(matches!(
             decode::<Shape>(&input),
             Err(DecodeError::UnexpectedEnd { .. })
