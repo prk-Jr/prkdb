@@ -2,8 +2,11 @@
 //! enabled by the selected profile. Seeds are stable for `rand 0.8` /
 //! `rand_chacha 0.3` (pinned in `Cargo.lock`): the same seed always produces the
 //! same op sequence for a given profile, as long as those crate versions and
-//! the shape of `generate`'s rng calls don't change.
+//! the shape of `generate`'s rng calls don't change. Fault parameters
+//! (`PowerLoss`'s tear and fault seed) come from a second stream, so adding or
+//! retuning faults never changes a seed's workload draws.
 
+use crate::faultfs::Tear;
 use crate::model::{Key, Value};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -30,6 +33,13 @@ pub enum Op {
     /// Drop the adapter without flushing, then reopen.
     Crash,
     Checkpoint,
+    /// Power cut: everything not yet synced may be lost or torn per `tear`
+    /// (see [`crate::faultfs`]), with `fault_seed` driving FaultFs's choices.
+    /// Then the SUT reopens.
+    PowerLoss {
+        tear: Tear,
+        fault_seed: u64,
+    },
 }
 
 impl Op {
@@ -41,19 +51,28 @@ impl Op {
             Op::Reopen => Kind::Reopen.name(),
             Op::Crash => Kind::Crash.name(),
             Op::Checkpoint => Kind::Checkpoint.name(),
+            Op::PowerLoss { .. } => Kind::PowerLoss.name(),
         }
     }
 }
 
 /// Every op kind name, in canonical (declaration) order.
-pub const OP_KIND_NAMES: &[&str] = &["Put", "Delete", "Reopen", "Crash", "Checkpoint"];
+pub const OP_KIND_NAMES: &[&str] = &[
+    "Put",
+    "Delete",
+    "Reopen",
+    "Crash",
+    "Checkpoint",
+    "PowerLoss",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile {
     /// The Phase 1 blocking table, frozen: the self-tests were tuned on its
     /// seeds and keep reproducing exactly, whatever `Blocking` later becomes.
     Core,
-    /// The gating profile. Until Task 2.10b it runs exactly the `Core` table.
+    /// The gating profile: `Core` plus `PowerLoss` (Task 2.10b). Needs a SUT
+    /// that can lose power (`FaultSut`).
     Blocking,
     /// Everything implemented so far; failures are findings, not gates.
     Discovery,
@@ -98,6 +117,7 @@ enum Kind {
     Reopen,
     Crash,
     Checkpoint,
+    PowerLoss,
 }
 
 impl Kind {
@@ -108,30 +128,40 @@ impl Kind {
             Kind::Reopen => "Reopen",
             Kind::Crash => "Crash",
             Kind::Checkpoint => "Checkpoint",
+            Kind::PowerLoss => "PowerLoss",
         }
     }
 }
 
-/// Explicit per-profile weight tables, out of 100. These reproduce exactly the
-/// cumulative ranges the generator used before this table existed
-/// (Put 0..=59, Delete 60..=79, Reopen 80..=89, then Checkpoint/Crash), so
-/// existing seeds still produce the same ops.
+/// Explicit per-profile weight tables, out of 100. `CORE_WEIGHTS` reproduces
+/// exactly the cumulative ranges the generator used before these tables
+/// existed (Put 0..=59, Delete 60..=79, Reopen 80..=89, then Crash), so Phase 1
+/// seeds still produce the same ops under `Core`.
 const CORE_WEIGHTS: &[(Kind, u32)] = &[
     (Kind::Put, 60),
     (Kind::Delete, 20),
     (Kind::Reopen, 10),
     (Kind::Crash, 10),
 ];
-/// Identical to [`CORE_WEIGHTS`] until Task 2.10b adds `PowerLoss`, so every
-/// existing blocking seed runs exactly as before.
-const BLOCKING_WEIGHTS: &[(Kind, u32)] = CORE_WEIGHTS;
-const DISCOVERY_WEIGHTS: &[(Kind, u32)] = &[
-    (Kind::Put, 60),
+const BLOCKING_WEIGHTS: &[(Kind, u32)] = &[
+    (Kind::Put, 55),
     (Kind::Delete, 20),
-    (Kind::Reopen, 10),
+    (Kind::Reopen, 8),
+    (Kind::Crash, 8),
+    (Kind::PowerLoss, 9),
+];
+const DISCOVERY_WEIGHTS: &[(Kind, u32)] = &[
+    (Kind::Put, 55),
+    (Kind::Delete, 20),
+    (Kind::Reopen, 8),
     (Kind::Checkpoint, 5),
     (Kind::Crash, 5),
+    (Kind::PowerLoss, 7),
 ];
+
+/// XORed into the seed for the fault stream: one rng per concern, so fault
+/// draws never shift a seed's workload draws.
+const FAULT_STREAM: u64 = 0xFA17_FA17_FA17_FA17;
 
 fn weights(profile: Profile) -> &'static [(Kind, u32)] {
     match profile {
@@ -143,6 +173,7 @@ fn weights(profile: Profile) -> &'static [(Kind, u32)] {
 
 pub fn generate(seed: u64, len: usize, profile: Profile) -> Vec<Op> {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut fault_rng = ChaCha8Rng::seed_from_u64(seed ^ FAULT_STREAM);
     let table = weights(profile);
     let total: u32 = table.iter().map(|(_, w)| w).sum();
     (0..len)
@@ -163,6 +194,11 @@ pub fn generate(seed: u64, len: usize, profile: Profile) -> Vec<Op> {
                 Kind::Reopen => Op::Reopen,
                 Kind::Crash => Op::Crash,
                 Kind::Checkpoint => Op::Checkpoint,
+                // Drawn only when a PowerLoss is emitted, and from the fault stream.
+                Kind::PowerLoss => Op::PowerLoss {
+                    tear: Tear::random(&mut fault_rng),
+                    fault_seed: fault_rng.gen(),
+                },
             }
         })
         .collect()
@@ -193,13 +229,29 @@ mod tests {
     }
 
     #[test]
-    fn blocking_runs_the_core_table_until_power_loss_lands() {
-        for seed in 0..50 {
-            assert_eq!(
-                generate(seed, 200, Profile::Blocking),
-                generate(seed, 200, Profile::Core)
+    fn power_loss_parameters_vary() {
+        let losses: Vec<Op> = (0..20)
+            .flat_map(|s| generate(s, 200, Profile::Blocking))
+            .filter(|op| matches!(op, Op::PowerLoss { .. }))
+            .collect();
+        for tear in [Tear::None, Tear::Prefix, Tear::ZeroTail, Tear::Garbage] {
+            assert!(
+                losses
+                    .iter()
+                    .any(|op| matches!(op, Op::PowerLoss { tear: t, .. } if *t == tear)),
+                "{tear:?} never drawn"
             );
         }
+        let mut fault_seeds: Vec<u64> = losses
+            .iter()
+            .filter_map(|op| match op {
+                Op::PowerLoss { fault_seed, .. } => Some(*fault_seed),
+                _ => None,
+            })
+            .collect();
+        fault_seeds.sort_unstable();
+        fault_seeds.dedup();
+        assert!(fault_seeds.len() > 1, "fault seeds never vary");
     }
 
     #[test]
@@ -219,9 +271,12 @@ mod tests {
     fn op_kinds_follow_the_weight_tables() {
         assert_eq!(
             Profile::Blocking.op_kinds(),
+            vec!["Put", "Delete", "Reopen", "Crash", "PowerLoss"]
+        );
+        assert_eq!(
+            Profile::Core.op_kinds(),
             vec!["Put", "Delete", "Reopen", "Crash"]
         );
-        assert_eq!(Profile::Core.op_kinds(), Profile::Blocking.op_kinds());
         assert_eq!(Profile::Discovery.op_kinds(), OP_KIND_NAMES.to_vec());
         for op in generate(7, 200, Profile::Discovery) {
             assert!(OP_KIND_NAMES.contains(&op.kind_name()));

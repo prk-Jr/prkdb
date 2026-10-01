@@ -9,7 +9,7 @@
 //! returning [`Unsupported`], which means the profile asked for an op this SUT
 //! cannot do: a misconfigured run, not a bug in the SUT.
 
-use crate::checker::{check_durable, CheckOutcome, Mismatch};
+use crate::checker::{check_after_power_loss, check_durable, CheckOutcome, Mismatch};
 use crate::model::{Mode, Model, Value};
 use crate::ops::{generate, Op, Profile, OP_KIND_NAMES};
 use crate::sut::{Sut, Unsupported};
@@ -33,7 +33,7 @@ pub enum Outcome {
     Pass { checks: usize },
     /// A post-restart check found a value that disagreed with the model.
     Mismatch {
-        /// Index into the op sequence of the restart (`Reopen`/`Crash`) whose
+        /// Index into the op sequence of the restart (`Reopen`/`Crash`/`PowerLoss`) whose
         /// check produced this mismatch, or `ops.len()` for the implicit
         /// trailing reopen every sequence gets.
         at: usize,
@@ -76,8 +76,19 @@ impl Outcome {
     /// failing, even though both are `SutError`s). Used by the minimizer to
     /// confirm a shrunk sequence still reproduces the *same* bug rather than
     /// a different one.
+    ///
+    /// A Fast-mode "no prefix fits" finding ([`Mismatch::no_prefix_fits`]) is
+    /// about the whole snapshot, not one key: which key it names depends on
+    /// which prefix a shrink leaves. Two such findings are the same kind
+    /// whatever their keys; one is never the same kind as an ordinary
+    /// single-key mismatch.
     pub fn same_kind(&self, other: &Outcome) -> bool {
         match (self, other) {
+            (Outcome::Mismatch { mismatch: a, .. }, Outcome::Mismatch { mismatch: b, .. })
+                if a.no_prefix_fits() || b.no_prefix_fits() =>
+            {
+                a.no_prefix_fits() && b.no_prefix_fits()
+            }
             (Outcome::Mismatch { mismatch: a, .. }, Outcome::Mismatch { mismatch: b, .. }) => {
                 a.key == b.key
                     && (a.expected.is_some(), a.actual.is_some())
@@ -252,6 +263,28 @@ async fn run_ops_counted(
                 Ok(()) => model.mark_durable(),
                 Err(e) => return sut_failure(e, idx, op),
             },
+            Op::PowerLoss { tear, fault_seed } => {
+                if let Err(e) = sut.power_loss(*tear, *fault_seed).await {
+                    return sut_failure(e, idx, op);
+                }
+                match check_after_power_loss(&mut model, sut, mode).await {
+                    CheckOutcome::Ok { compared } => checks += compared,
+                    CheckOutcome::Mismatch { mismatch, .. } => {
+                        return Ok(Outcome::Mismatch {
+                            at: idx,
+                            after: op.clone(),
+                            mismatch,
+                        })
+                    }
+                    CheckOutcome::SutError { error, .. } => {
+                        return Ok(Outcome::SutError {
+                            at: idx,
+                            op: op.clone(),
+                            error,
+                        })
+                    }
+                }
+            }
             Op::Reopen | Op::Crash => match restart_and_check(sut, op, &model, idx).await? {
                 Ok(n) => {
                     checks += n;
@@ -327,9 +360,6 @@ where
     Fut: Future<Output = anyhow::Result<S>>,
     S: Sut,
 {
-    if config.mode == Mode::Fast {
-        anyhow::bail!("Fast mode arrives with PowerLoss in Task 2.10b");
-    }
     let mut report = Report::default();
     let end = config.first_seed.saturating_add(config.seeds);
     for seed in config.first_seed..end {
