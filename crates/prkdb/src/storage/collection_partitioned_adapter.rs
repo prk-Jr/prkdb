@@ -1468,4 +1468,51 @@ mod tests {
             .await
             .expect("flush succeeds again once the injected fault is cleared");
     }
+
+    /// The aggregate publish total is the sum across collections, not their product.
+    ///
+    /// `write_path_health` folds every open collection into one report so a probe can ask
+    /// a single question. `publishes_total` is a counter, so the fold is `+=`; the nightly
+    /// sweep replaced it with `*=` and nothing noticed, because no test read the aggregate
+    /// count at all.
+    ///
+    /// The counts are deliberately unequal (2 and 3 frames): with one each, `*=` would
+    /// pass, since 1 * 1 == 1. Since Task 2.8a every write is a frame whose commit hook
+    /// counts it before the caller is answered, so no waiting is needed. The old second
+    /// half, on `direct_appends_total`, is gone: that field is always 0 now (one write
+    /// path).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_aggregate_publish_total_sums_across_collections() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config = WalConfig {
+            log_dir: temp_dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        };
+        let adapter = CollectionPartitionedAdapter::new(config).unwrap();
+
+        for (name, writes) in [("users", 2), ("orders", 3)] {
+            for w in 0..writes {
+                adapter
+                    .put_to_collection(name, format!("{name}-{w}").as_bytes(), b"v")
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let per_collection: Vec<u64> = adapter
+            .collections
+            .iter()
+            .map(|entry| entry.value().write_path_health().publishes_total)
+            .collect();
+        let mut sorted = per_collection.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![2, 3], "one publish per frame per collection");
+
+        assert_eq!(
+            adapter.write_path_health().publishes_total,
+            5,
+            "the aggregate must sum each collection's publish count; the parts were \
+             {per_collection:?}"
+        );
+    }
 }

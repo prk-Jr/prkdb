@@ -375,9 +375,11 @@ struct WalStorageInner {
 /// Maps a WAL error onto the storage error a caller can act on (D12).
 fn wal_err(e: WalError) -> StorageError {
     match e {
-        WalError::Poisoned(reason) => {
-            StorageError::Internal(format!("WAL poisoned: {reason}; reopen the database"))
-        }
+        WalError::Poisoned(reason) => StorageError::Internal(format!(
+            "WAL poisoned: {reason}; reopen the database. The outcome of the write that \
+                 failed is unknown: its frame may have reached the disk and reappear after \
+                 the reopen"
+        )),
         WalError::Closed => {
             StorageError::WriteAbandoned("the WAL is closed and accepts no more writes".to_string())
         }
@@ -388,6 +390,23 @@ fn wal_err(e: WalError) -> StorageError {
         | WalError::Corruption(_)
         | WalError::ChecksumMismatch { .. }) => StorageError::Corruption(e.to_string()),
         e => StorageError::Internal(e.to_string()),
+    }
+}
+
+/// Maps an error from awaiting an append the writer already owns (after
+/// `append_reserved` returned `Ok`).
+///
+/// `Closed` here does not mean "nothing was written": the request's reply is dropped
+/// unanswered when the writer thread dies outside the hook's `catch_unwind`, possibly
+/// after `write_at` succeeded, and that frame replays on reopen. So it is
+/// `WriteNotConfirmed`, never the definite `WriteAbandoned` that `wal_err` gives a
+/// refusal before queueing.
+fn queued_wal_err(e: WalError) -> StorageError {
+    match e {
+        WalError::Closed => StorageError::WriteNotConfirmed(
+            "the WAL writer stopped before answering; the write may have landed".to_string(),
+        ),
+        e => wal_err(e),
     }
 }
 
@@ -661,7 +680,7 @@ impl WalStorageAdapter {
             .append_reserved(reservation, payload, Some(hook))
             .map_err(wal_err)?;
         let loc = match tokio::time::timeout(bound, pending).await {
-            Ok(r) => r.map_err(wal_err)?,
+            Ok(r) => r.map_err(queued_wal_err)?,
             Err(_) => {
                 return Err(StorageError::WriteNotConfirmed(format!(
                     "no result from the WAL writer within {}ms",
@@ -915,12 +934,19 @@ impl WalStorageAdapter {
         Ok(values)
     }
 
-    /// Highest LSN published into the index by this adapter (replayed or written).
+    /// Highest LSN that is both published into the index and visible to
+    /// `get_changes_since` (`min(applied, acked)`).
+    ///
+    /// A hook publishes a frame just before the writer answers its caller, so the index
+    /// can briefly be ahead of what `get_changes_since` (capped at the WAL's acked
+    /// watermark) exposes. Taking the minimum means a consumer that sets its cursor to
+    /// this value never skips a change it has not been shown yet.
     ///
     /// Exposed so a wrapper holding several adapters can record the maximum across all of
     /// them in a merged snapshot header.
     pub fn max_offset(&self) -> u64 {
-        self.inner.applied_lsn.load(Ordering::Acquire)
+        let applied = self.inner.applied_lsn.load(Ordering::Acquire);
+        applied.min(self.inner.wal.acked_lsn())
     }
 
     /// Highest LSN that is durable on disk: everything at or below it survives a power
@@ -1999,6 +2025,19 @@ mod tests {
         assert!(
             error.is_write_abandoned(),
             "a closed log queued nothing, so the refusal must be definite; got: {error}"
+        );
+
+        let queued = queued_wal_err(WalError::Closed);
+        assert!(
+            queued.is_write_unconfirmed(),
+            "a request the writer already owned may have been written before the writer \
+             stopped, so its outcome is unknown, not abandoned; got: {queued}"
+        );
+        assert!(
+            queued_wal_err(WalError::Poisoned("x".to_string()))
+                .to_string()
+                .contains("reopen the database"),
+            "other errors after queueing map as before"
         );
 
         let poisoned = wal_err(WalError::Poisoned("injected".to_string()));
