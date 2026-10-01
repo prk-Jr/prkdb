@@ -4637,7 +4637,7 @@ Every stall test waits with `tokio::time::timeout` (fail, never hang) and clears
 
 **Files:** delete `crates/prkdb-core/src/wal/{mmap_parallel_wal,mmap_log_segment,parallel_wal,async_parallel_wal,async_log_segment,log_segment,write_ahead_log,offset_index,compaction}.rs` and whatever else the compiler then reports unused in `wal/` (candidates: `async_fsync.rs`, `adaptive.rs` if `WalConfig` no longer needs it, `buffer_pool.rs` in `wal/`, `metrics.rs` if only the deleted WALs used it); `crates/prkdb-core/src/replication/{follower_server,manager,replica_client,protocol}.rs` + `crates/prkdb-core/tests/replication_integration_tests.rs` + `crates/prkdb-core/benches/{replication_bench,parallel_wal_bench,async_parallel_wal_bench,mmap_parallel_wal_bench,wal_bench,wal_recovery_bench,wal_random_read_bench,wal_single_write_bench,batching_bench}.rs` (their `[[bench]]` entries too, keeping any that no longer reference deleted types); `crates/prkdb-core/tests/format_version.rs`; `crates/prkdb/src/storage/{sharded_wal_adapter,streaming_adapter,partitioned_streaming_adapter,write_queue}.rs`; `crates/prkdb/examples/{raw_wal_bench,streaming_bench,partitioned_bench}.rs` and the streaming/sharded sections of `comprehensive_bench.rs`/`ultra_performance.rs`; `WalStorageAdapter::new_with_replication`, its `replication` field and the `LogRecord` conversion Task 2.8a kept for it. Create `scripts/check_single_wal.sh`.
 
-- [ ] **Step 1: STOP — confirm the deletion list with the maintainer.** This is the one Phase 2 STOP that D12 does not cover. Public API disappears:
+- [x] **Step 1: STOP — confirm the deletion list with the maintainer.** **Decided 2026-10-01 (D13): delete all of it.** Streaming is rebuilt in Task 2.15b; replication is Raft only. This is the one Phase 2 STOP that D12 does not cover. Public API disappears:
   - `prkdb::storage::{ShardedWalAdapter, StreamingStorageAdapter, StreamingConfig, StreamingRecord, PartitionedStreamingAdapter, PartitionedStreamingConfig, PartitionStrategy}`;
   - `prkdb_core::replication::{FollowerServer, ReplicationManager, ReplicaClient, …}` — the core leader/follower replication, fed only by `WalStorageAdapter::new_with_replication` (`rg -n new_with_replication crates` shows only its own tests), which goes with it, together with the adapter's `replication` field, the 2.8a `LogRecord` conversion and the test `replication_constructor_uses_the_supplied_wal_config`. (`test_wal_adapter_replication` tests `get_changes_since`, not the constructor, and stays. `prkdb::replication` is a separate module and stays.)
 
@@ -5625,6 +5625,22 @@ Add a FaultFs test to `crates/prkdb-verify/tests/power_loss.rs`: `compaction_is_
 - [ ] **Step 2: Implement** per the design.
 - [ ] **Step 3: Run** — `cargo nextest run -p prkdb --test compaction_test`, `-p prkdb-verify --test power_loss --test checkpoint` → pass; workspace → pass; harness both modes → green.
 - [ ] **Step 4: Commit** — `feat: compact sealed WAL segments and drop dead ones` (body: bytes before/after for the test workload; recovery_bench delta).
+
+---
+
+### Task 2.15b: Streaming log API on the single `Wal` (D13)
+
+The streaming adapters deleted in Task 2.9 claimed "2x faster than Kafka" on the pre-remediation mmap WAL, which acknowledged writes it had not synced. This task rebuilds the capability on the single `Wal`, after Task 2.15 so it has retention and offsets with a settled meaning. Design first (a short design note under `docs/superpowers/specs/`, reviewed before code), then TDD.
+
+**Design questions the note must answer:**
+- **Layout:** a stream owns its own data directory (D11: one WAL per data directory); a partitioned stream is N data directories under a container root, each with its own `FORMAT` (Task 2.11's container rules apply).
+- **Records and offsets:** a record batch is one frame (new `FrameKind` or a `Batch` op tag — decide, and register the format change per D3/D4 if it lands after Task 2.24 freezes format 2); a record's offset is `EventSeq = lsn << 16 | idx` (the program's existing convention), so appends return per-record offsets without a per-record frame.
+- **Reads:** `read_from(offset, max)` over `Wal::scan_from` (acked) by default and `scan_durable_from` for consumers that must not see unsynced records; behaviour for an offset below the retention floor (error naming the floor, never silent skip).
+- **Retention:** by age and/or size via whole-segment removal from Task 2.15's machinery; the retention floor is durable and survives restart; offsets never move.
+- **Consumers:** how consumer offsets relate to the existing `consumer.rs` (reuse, don't duplicate).
+- **Durability:** Durable/Fast from `WalConfig`, same acknowledgement contract as the keyed path.
+
+**Exit criteria:** crash/restart harness coverage for streams (PowerLoss in both modes, including across segment rolls and retention), the Linux `probe=wal-bench` gains `stream_append` cells (one and many writers, 1 KiB and 64 KiB) recorded in the decision record, an iai bench with a floor, docs that state measured numbers only.
 
 ---
 
