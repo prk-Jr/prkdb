@@ -799,8 +799,13 @@ fn main() {
                                 Target::Wal(wal)
                             }
                             _ => {
+                                // `current_adapter_put`: Fast, because the Linux adapter
+                                // rule (Task 2.8d) compares against the old adapter,
+                                // which never synced whatever its config said, and
+                                // `test_config()` is Durable.
                                 let cfg = WalConfig {
                                     log_dir: dir.clone(),
+                                    sync_mode: SyncMode::Fast,
                                     ..WalConfig::test_config()
                                 };
                                 Target::Adapter(WalStorageAdapter::new(cfg).expect("adapter"))

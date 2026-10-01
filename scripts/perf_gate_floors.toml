@@ -1,26 +1,27 @@
 # Minimum plausible instruction counts for the perf gate (TST-09). A benchmark whose Ir
 # falls below `min_ratio * Ir(reference)` measured nothing and fails the gate, whatever
-# its delta says. Reference benchmarks are pure single-threaded CPU work.
+# its delta says. Reference benchmarks are pure single-threaded CPU work: since Task 2.8d,
+# `Batch::encode`/`Batch::decode` of one 1 KiB put (the single WAL's frame payload codec),
+# replacing the old `LogRecord` encode/decode.
 [floors.bench_wal_put_100]
-reference = "bench_log_record_encode"
-min_ratio = 100.0   # 100 puts must at least encode 100 records
+reference = "bench_batch_encode"
+min_ratio = 100.0   # 100 puts must at least encode 100 batches
 
 [floors.bench_wal_get_one]
-reference = "bench_log_record_decode"
+reference = "bench_batch_decode"
 # The fixture evicts the key from cache before the measured get (see
 # setup_wal_get_one's doc comment in iai_hot_paths.rs), so this is an index lookup plus
-# a real WAL read and decode, not a cache hit. Measured 7351 Ir on Linux
-# (probe https://github.com/prk-Jr/prkdb/actions/runs/36074847032) against a
-# bench_log_record_decode of 1385 Ir: a 5.3x ratio. min_ratio is set to 3.0, not 5.3,
-# to leave headroom for run-to-run jitter while still comfortably rejecting the
-# previous, cache-hit version of this benchmark (1953 Ir measured on Linux before this
-# fix, a 1.4x ratio) if it ever regresses back to a hit.
+# a real WAL read (frame CRC) and a batch decode, not a cache hit. Set at 3.0 against
+# the old LogRecord decode reference (7351 Ir vs 1385 Ir, a 5.3x ratio, probe
+# https://github.com/prk-Jr/prkdb/actions/runs/36074847032), with headroom for jitter
+# while still rejecting the old cache-hit version of this benchmark (a 1.4x ratio).
+# Re-checked against bench_batch_decode by the Task 2.8d probe=iai run.
 min_ratio = 3.0
 
 [floors.bench_wal_batch_of_100]
-reference = "bench_log_record_encode"
+reference = "bench_batch_encode"
 min_ratio = 50.0
 
 [floors.bench_indexed_insert_one]
-reference = "bench_log_record_encode"
+reference = "bench_batch_encode"
 min_ratio = 1.0

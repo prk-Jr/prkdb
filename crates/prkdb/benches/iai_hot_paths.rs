@@ -40,25 +40,19 @@
 //! once one exists. The measured body also lives in a free function *outside* the
 //! `#[library_benchmark]`-annotated function, so no part of it is a symbol under
 //! `__gungraun_wrapper_mod` that the (now-disabled) default toggle could still affect.
-//! One consequence: any background runtime threads that happen to be running (e.g. idle
-//! tokio workers) are also counted for as long as instrumentation is on, since the
-//! switch is process-wide, not scoped to a particular thread or call stack; Task 2.8d
-//! moves these benchmarks to a current-thread runtime once the adapter no longer needs
-//! `block_in_place`, which removes that source of noise.
+//! One consequence: any other thread that does work while instrumentation is on is
+//! counted too, since the switch is process-wide, not scoped to a particular thread or
+//! call stack. That is what counts the `Wal`'s `prkdb-wal-writer` thread (Task 2.8a: the
+//! adapter writes through the single WAL, whose writer is a dedicated thread). Since Task
+//! 2.8d every benchmark runs on a `current_thread` runtime — the adapter no longer calls
+//! `block_in_place`, which was the only reason for a multi-thread one — so there are no
+//! idle tokio workers to count, only the benchmark's own thread and the WAL writer.
 //!
-//! The two `LogRecord` benchmarks below (`bench_log_record_encode`,
-//! `bench_log_record_decode`) keep the default entry point: they are the pure,
-//! single-threaded reference benchmarks `scripts/perf_gate_floors.toml`'s ratios divide
-//! by, so their measured region is unchanged.
-//!
-//! `WalStorageAdapter::new` internally calls `tokio::task::block_in_place` +
-//! `tokio::runtime::Handle::current()` (see `crates/prkdb/src/storage/wal_adapter.rs`), so
-//! it must be constructed from inside an active runtime task on a multi-thread runtime —
-//! `rt.block_on(async { .. })`, not merely `rt.enter()` (which sets the "current" handle
-//! but does not run on a worker thread, and `block_in_place` panics off one). Every WAL
-//! setup function below builds the adapter that way, on a `Builder::new_multi_thread()`
-//! runtime (single worker thread is enough here; multi-thread is required only because
-//! `block_in_place` panics on a current-thread runtime).
+//! The two `Batch` benchmarks below (`bench_batch_encode`, `bench_batch_decode`: one
+//! 1 KiB put through the WAL's frame payload codec) keep the default entry point: they are
+//! the pure, single-threaded reference benchmarks `scripts/perf_gate_floors.toml`'s ratios
+//! divide by. They replaced the `LogRecord` encode/decode references in Task 2.8d, because
+//! `LogRecord` is no longer what the adapter writes.
 //!
 //! Every benchmark function below also returns its fixture instead of dropping it.
 //! `gungraun-macros` 0.9.1's codegen (`src/lib_bench.rs`, `render_standalone` around
@@ -88,8 +82,8 @@ use gungraun::{Callgrind, EntryPoint, LibraryBenchmarkConfig};
 use prkdb::indexed_storage::IndexedStorage;
 use prkdb::storage::config::StorageConfig;
 use prkdb::storage::{InMemoryAdapter, WalStorageAdapter};
-use prkdb_core::wal::log_record::{LogOperation, LogRecord};
-use prkdb_core::wal::WalConfig;
+use prkdb_core::wal::batch::{Batch, BatchOp};
+use prkdb_core::wal::{CompressionConfig, WalConfig};
 use prkdb_macros::Collection;
 use prkdb_types::storage::StorageAdapter;
 use serde::{Deserialize, Serialize};
@@ -144,9 +138,10 @@ fn one_kib_value() -> Vec<u8> {
     vec![b'x'; 1024]
 }
 
-fn single_worker_runtime() -> Runtime {
-    Builder::new_multi_thread()
-        .worker_threads(1)
+/// A `current_thread` runtime: no worker threads, so nothing idle runs while the
+/// process-wide instrumentation is on (module doc comment).
+fn current_thread_runtime() -> Runtime {
+    Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("runtime builds")
@@ -163,9 +158,9 @@ fn wal_adapter_in(dir: &std::path::Path) -> WalStorageAdapter {
 // Setup for `bench_wal_put_100`: runtime, tempdir, adapter, and the 1 KiB value are all
 // built here, outside the measured region.
 fn setup_wal_put() -> (Runtime, TempDir, WalStorageAdapter, Vec<u8>) {
-    let rt = single_worker_runtime();
+    let rt = current_thread_runtime();
     let dir = tempfile::tempdir().unwrap();
-    let adapter = rt.block_on(async { wal_adapter_in(dir.path()) });
+    let adapter = wal_adapter_in(dir.path()); // `new` needs no runtime (Task 2.8a)
     let value = one_kib_value();
     (rt, dir, adapter, value)
 }
@@ -230,7 +225,7 @@ const EVICTION_KEYS: u32 = 256;
 /// `cache_misses` metric by exactly one, so a slide back to a cache hit fails the gate
 /// outright instead of relying on the instruction floor alone.
 fn setup_wal_get_one() -> (Runtime, TempDir, WalStorageAdapter) {
-    let rt = single_worker_runtime();
+    let rt = current_thread_runtime();
     let dir = tempfile::tempdir().unwrap();
     let adapter = rt.block_on(async {
         let wal = WalConfig {
@@ -288,9 +283,9 @@ type WalPutBatchFixture = (Runtime, TempDir, WalStorageAdapter, WalEntries);
 // Setup for `bench_wal_batch_of_100`: the 100 key/value entries are built here, outside
 // the measured region, so only `put_batch` itself is counted.
 fn setup_wal_put_batch_100() -> WalPutBatchFixture {
-    let rt = single_worker_runtime();
+    let rt = current_thread_runtime();
     let dir = tempfile::tempdir().unwrap();
-    let adapter = rt.block_on(async { wal_adapter_in(dir.path()) });
+    let adapter = wal_adapter_in(dir.path()); // `new` needs no runtime (Task 2.8a)
     let entries: WalEntries = (0..100u32)
         .map(|i| (format!("key-{i}").into_bytes(), one_kib_value()))
         .collect();
@@ -330,7 +325,7 @@ struct IaiIndexedRecord {
 // Setup for `bench_indexed_insert_one`: the runtime, storage, and record are all built
 // here, outside the measured region.
 fn setup_indexed_storage_insert() -> (Runtime, IndexedStorage<InMemoryAdapter>, IaiIndexedRecord) {
-    let rt = single_worker_runtime();
+    let rt = current_thread_runtime();
     let storage = IndexedStorage::new(Arc::new(InMemoryAdapter::new()));
     let record = IaiIndexedRecord {
         id: 1,
@@ -358,39 +353,40 @@ fn bench_indexed_insert_one(
     (rt, storage, record)
 }
 
-fn new_log_record() -> LogRecord {
-    LogRecord::new(LogOperation::Put {
-        collection: String::new(),
-        id: b"bench-key".to_vec(),
-        data: one_kib_value(),
-    })
+/// One 1 KiB put: what a single `WalStorageAdapter::put` writes as its frame payload.
+fn one_put_batch() -> Batch {
+    Batch {
+        ops: vec![BatchOp::Put {
+            key: b"bench-key".to_vec(),
+            value: one_kib_value(),
+        }],
+    }
 }
 
-// `LogRecord` encode (on-disk `serialize`). Kept on the default entry point: this is one
-// of the pure, single-threaded reference benchmarks the floors in
+// `Batch::encode` (uncompressed, as `test_config` writes it). Kept on the default entry
+// point: this is one of the pure, single-threaded reference benchmarks the floors in
 // scripts/perf_gate_floors.toml divide by (module doc comment).
-#[library_benchmark(setup = new_log_record)]
-fn bench_log_record_encode(record: LogRecord) -> LogRecord {
-    black_box(record.serialize());
-    // `serialize` only borrows `record` (`&self`); return the input fixture itself so
-    // its drop (the 1 KiB `data` buffer) happens outside the counted region, per the
-    // module doc comment.
-    record
+#[library_benchmark(setup = one_put_batch)]
+fn bench_batch_encode(batch: Batch) -> Batch {
+    black_box(batch.encode(black_box(&CompressionConfig::none())).unwrap());
+    // `encode` only borrows `batch`; return the input fixture itself so its drop (the
+    // 1 KiB value) happens outside the counted region, per the module doc comment.
+    batch
 }
 
-// Setup for `bench_log_record_decode`: the record is built and serialized here, outside
-// the measured region, so only `deserialize` itself is counted.
-fn setup_log_record_decode() -> Vec<u8> {
-    new_log_record().serialize()
+// Setup for `bench_batch_decode`: the batch is built and encoded here, outside the
+// measured region, so only `decode` itself is counted.
+fn setup_batch_decode() -> Vec<u8> {
+    one_put_batch().encode(&CompressionConfig::none()).unwrap()
 }
 
-// `LogRecord` decode (on-disk `deserialize`), the inverse of the encode benchmark above.
-// Kept on the default entry point, same reasoning as encode above.
-#[library_benchmark(setup = setup_log_record_decode)]
-fn bench_log_record_decode(bytes: Vec<u8>) -> Vec<u8> {
-    black_box(LogRecord::deserialize(black_box(&bytes)).unwrap());
-    // `deserialize` only borrows `bytes` (`&[u8]`); return the input fixture so its
-    // drop happens outside the counted region, same reasoning as encode above.
+// `Batch::decode`, the inverse of the encode benchmark above. Kept on the default entry
+// point, same reasoning as encode above.
+#[library_benchmark(setup = setup_batch_decode)]
+fn bench_batch_decode(bytes: Vec<u8>) -> Vec<u8> {
+    black_box(Batch::decode(black_box(&bytes)).unwrap());
+    // `decode` only borrows `bytes`; return the input fixture so its drop happens
+    // outside the counted region, same reasoning as encode above.
     bytes
 }
 
@@ -401,8 +397,8 @@ library_benchmark_group!(
         bench_wal_get_one,
         bench_wal_batch_of_100,
         bench_indexed_insert_one,
-        bench_log_record_encode,
-        bench_log_record_decode,
+        bench_batch_encode,
+        bench_batch_decode,
 );
 
 main!(library_benchmark_groups = hot_paths);
