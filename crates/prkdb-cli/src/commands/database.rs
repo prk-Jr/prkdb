@@ -5,7 +5,6 @@ use crate::Cli;
 use anyhow::Result;
 use prkdb::prelude::*;
 use prkdb_storage_sled::SledAdapter;
-use prkdb_types::storage::StorageAdapter;
 use serde::Serialize;
 use std::fs;
 
@@ -66,31 +65,21 @@ async fn show_database_info(cli: &Cli) -> Result<()> {
     let uptime_seconds = get_uptime_seconds(&storage).await.unwrap_or(0);
     let uptime_formatted = format_uptime(uptime_seconds);
 
-    // Scan all keys directly from storage to get real collection count and items
-    let all_entries = storage.scan_prefix(b"").await?;
-
-    // Group by collection prefix to count unique collections (exclude metadata)
-    let mut collection_prefixes = std::collections::HashSet::new();
-    for (key, _) in &all_entries {
-        let key_str = String::from_utf8_lossy(key);
-        // Skip metadata keys
-        if !key_str.starts_with("__prkdb_metadata:") {
-            if let Some(prefix) = key_str.split(':').next() {
-                collection_prefixes.insert(prefix.to_string());
-            }
-        }
+    // Collections and their items through the database's name-based API (the collection
+    // catalog, KEY-01), over the storage already open here.
+    let db = prkdb::PrkDb::builder()
+        .with_storage(storage.clone())
+        .build()?;
+    let collection_names = db.collection_names().await?;
+    let mut total_items = 0u64;
+    for name in &collection_names {
+        total_items += db.get_collection_stats(name).await?.0;
     }
-
-    // Count non-metadata items
-    let total_items = all_entries
-        .iter()
-        .filter(|(key, _)| !String::from_utf8_lossy(key).starts_with("__prkdb_metadata:"))
-        .count() as u64;
 
     let info = DatabaseInfo {
         path: cli.database.display().to_string(),
         size_bytes: db_size,
-        collections: collection_prefixes.len() as u32,
+        collections: collection_names.len() as u32,
         total_items,
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime: uptime_formatted,

@@ -45,7 +45,7 @@ pub fn required_permission(method: &str) -> Option<Permission> {
         // credential could exist (spec D4).
         "Health" => None,
 
-        "Put" | "BatchPut" | "Delete" => Some(Permission::Write),
+        "Put" | "PutRecord" | "BatchPut" | "Delete" => Some(Permission::Write),
 
         // Metadata discloses node addresses and partition layout, so it is Read rather
         // than public (D4).
@@ -266,7 +266,7 @@ mod tests {
     /// notices a permission that got stricter until writes start failing in production.
     #[test]
     fn a_write_grant_admits_writes_and_nothing_more() {
-        for method in ["Put", "BatchPut", "Delete"] {
+        for method in ["Put", "PutRecord", "BatchPut", "Delete"] {
             assert_eq!(
                 required_permission(&format!("/prkdb.PrkDbService/{method}")),
                 Some(Permission::Write),
@@ -275,7 +275,7 @@ mod tests {
         }
 
         let writer = ApiAuthzInterceptor::new(Some(store_with(&[("*", Permission::Write)])));
-        for method in ["Put", "BatchPut", "Delete"] {
+        for method in ["Put", "PutRecord", "BatchPut", "Delete"] {
             writer
                 .check(&format!("/prkdb.PrkDbService/{method}"), Some("cred"))
                 .unwrap_or_else(|e| panic!("a Write grant must admit {method}: {e}"));

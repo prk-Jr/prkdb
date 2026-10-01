@@ -18,6 +18,7 @@ use crate::raft::rpc::{
     HealthResponse,
     ListSchemasRequest,
     ListSchemasResponse,
+    PutRecordRequest,
     PutRequest,
     PutResponse,
     RawChunk,
@@ -304,6 +305,32 @@ impl<S: prkdb_schema::SchemaStorage + 'static> PrkDbServiceTrait for PrkDbGrpcSe
             }
             Err(e) => Err(Status::internal(format!("Put failed: {}", e))),
         }
+    }
+
+    async fn put_record(
+        &self,
+        request: Request<PutRecordRequest>,
+    ) -> Result<Response<PutResponse>, Status> {
+        let req = request.into_inner();
+        self.db
+            .put_collection_record(&req.collection, &req.id, &req.value)
+            .await
+            .map_err(|e| Status::internal(format!("PutRecord failed: {}", e)))?;
+        let key = self
+            .db
+            .collection_record_key(&req.collection, &req.id, false)
+            .await
+            .map_err(|e| Status::internal(format!("PutRecord failed: {}", e)))?
+            .unwrap_or_default();
+        let partition = match &self.db.partition_manager {
+            Some(pm) => pm.get_partition_for_key(&key),
+            None => 0,
+        };
+        self.publish_watch_event(WatchEventType::Put, &key, req.value);
+        Ok(Response::new(PutResponse {
+            success: true,
+            partition,
+        }))
     }
 
     async fn get(&self, request: Request<GetRequest>) -> Result<Response<GetResponse>, Status> {

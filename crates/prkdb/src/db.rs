@@ -70,6 +70,19 @@ pub struct ReplicationTarget {
 pub type ReplicationRegistry =
     std::sync::RwLock<std::collections::HashMap<String, ReplicationTarget>>;
 
+/// One record of a collection addressed by name ([`PrkDb::scan_collection_records`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedRecord {
+    /// The stored key.
+    pub key: Vec<u8>,
+    /// The record's id as stored in the key (encoded, or raw on multi-raft).
+    pub id: Vec<u8>,
+    /// A printable id when it can be decoded (a string or 8-byte integer id).
+    pub id_hint: Option<String>,
+    /// The stored value.
+    pub value: Vec<u8>,
+}
+
 #[derive(Clone)]
 pub struct PrkDb {
     pub(crate) storage: Arc<dyn StorageAdapter>,
@@ -626,6 +639,126 @@ impl PrkDb {
                 Change::Put { key, .. } | Change::Delete { key, .. } => key.starts_with(&prefix),
             })
             .collect())
+    }
+
+    // ── Collections by name (the CLI and HTTP server; review H2) ─────────────────────
+
+    /// The stored key of record `id` in the collection persisted as `name`, for callers
+    /// that address collections by name and ids as strings (the CLI and HTTP server).
+    ///
+    /// Single-node: the key codec in this database's namespace with the catalog's id for
+    /// `name` and the id encoded as a `String` id, the same key a typed API whose `Id` is
+    /// `String` writes, so both see the same records. `allocate` allocates the
+    /// collection's id on first use (writes); otherwise an unknown collection is `None`.
+    ///
+    /// Multi-raft: the raw `name:id`, because the catalog is per node and not replicated
+    /// (Phase 4), so a codec key's collection id would differ between nodes.
+    pub async fn collection_record_key(
+        &self,
+        name: &str,
+        id: &str,
+        allocate: bool,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        if self.partition_manager.is_some() {
+            return Ok(Some(format!("{name}:{id}").into_bytes()));
+        }
+        let coll = if allocate {
+            self.catalog
+                .id_for_name(name)
+                .await
+                .map_err(Error::Storage)?
+        } else {
+            match self.catalog.lookup(name).await.map_err(Error::Storage)? {
+                Some(coll) => coll,
+                None => return Ok(None),
+            }
+        };
+        let ns = self.namespace.as_deref().unwrap_or_default();
+        crate::keys::encode_record_key(ns, coll, &id)
+            .map(Some)
+            .map_err(Error::Storage)
+    }
+
+    /// Writes record `id` of collection `name` (see [`Self::collection_record_key`]).
+    pub async fn put_collection_record(
+        &self,
+        name: &str,
+        id: &str,
+        value: &[u8],
+    ) -> Result<(), Error> {
+        let key = self
+            .collection_record_key(name, id, true)
+            .await?
+            .ok_or_else(|| Error::Internal("an allocating key lookup found no key".into()))?;
+        self.put(&key, value).await
+    }
+
+    /// Deletes record `id` of collection `name`; a collection never written has nothing to
+    /// delete.
+    pub async fn delete_collection_record(&self, name: &str, id: &str) -> Result<(), Error> {
+        match self.collection_record_key(name, id, false).await? {
+            Some(key) => self.delete(&key).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Reads record `id` of collection `name` from this node's storage.
+    pub async fn get_collection_record(
+        &self,
+        name: &str,
+        id: &str,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        match self.collection_record_key(name, id, false).await? {
+            Some(key) => self.get_local(&key).await,
+            None => Ok(None),
+        }
+    }
+
+    /// Every record of collection `name`, sorted by stored key: by a key-codec prefix
+    /// scan on a single node, by the raw `name:` prefix across partitions on multi-raft.
+    pub async fn scan_collection_records(&self, name: &str) -> Result<Vec<NamedRecord>, Error> {
+        let (prefix, raw) = if self.partition_manager.is_some() {
+            (format!("{name}:").into_bytes(), true)
+        } else {
+            let Some(coll) = self.catalog.lookup(name).await.map_err(Error::Storage)? else {
+                return Ok(Vec::new());
+            };
+            let ns = self.namespace.as_deref().unwrap_or_default();
+            (crate::keys::collection_prefix(ns, coll), false)
+        };
+        let mut rows = self.scan_prefix_across_data_stores(&prefix).await?;
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(rows
+            .into_iter()
+            .map(|(key, value)| {
+                let id = key[prefix.len()..].to_vec();
+                let id_hint = if raw {
+                    String::from_utf8(id.clone()).ok()
+                } else {
+                    crate::keys::decode_id_hint(&id)
+                };
+                NamedRecord {
+                    key,
+                    id,
+                    id_hint,
+                    value,
+                }
+            })
+            .collect())
+    }
+
+    /// Names of every collection with records or metadata: the catalog's allocated
+    /// names (single node) and the `meta:col:` entries [`Self::create_collection`]
+    /// writes, sorted and deduplicated.
+    pub async fn collection_names(&self) -> Result<Vec<String>, Error> {
+        let mut names: std::collections::BTreeSet<String> =
+            self.list_collections().await?.into_iter().collect();
+        if self.partition_manager.is_none() {
+            for (name, _) in self.catalog.list().await.map_err(Error::Storage)? {
+                names.insert(name);
+            }
+        }
+        Ok(names.into_iter().collect())
     }
 
     /// `(partition, events, bytes)` per partition, sorted by partition.

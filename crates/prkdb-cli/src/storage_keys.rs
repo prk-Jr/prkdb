@@ -1,3 +1,11 @@
+//! Parsing of raw `name:id` storage keys, for multi-raft nodes only.
+//!
+//! A single-node database addresses collections through the collection catalog and the
+//! key codec (KEY-01): the CLI and HTTP server go through `PrkDb`'s name-based API
+//! (`scan_collection_records`, `collection_names`, ...) and never parse a stored key. A
+//! multi-raft node still stores `name:id` keys, because the catalog is per node and not
+//! replicated yet (Phase 4), so its collection listing parses them here.
+
 use bincode::{config, serde::decode_from_slice};
 
 pub const INTERNAL_METADATA_PREFIX: &str = "__prkdb_metadata:";

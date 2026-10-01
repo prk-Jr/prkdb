@@ -508,3 +508,147 @@ mod one_type_per_name {
         );
     }
 }
+
+// ── Name-based (CLI / HTTP) and typed APIs see one collection (review H2) ────
+
+mod by_name_and_by_type {
+    use prkdb::indexed_storage::IndexedStorage;
+    use prkdb::storage::WalStorageAdapter;
+    use prkdb_core::wal::WalConfig;
+    use prkdb_types::error::StorageError;
+    use prkdb_types::replication::Change;
+    use prkdb_types::storage::StorageAdapter;
+    use std::sync::Arc;
+
+    /// One WAL shared by a `PrkDb` (the server's name-based API) and an
+    /// `IndexedStorage` (a typed API), as one data directory is in a deployment.
+    struct Shared(Arc<WalStorageAdapter>);
+
+    #[async_trait::async_trait]
+    impl StorageAdapter for Shared {
+        async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+            self.0.get(key).await
+        }
+        async fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+            self.0.put(key, value).await
+        }
+        async fn delete(&self, key: &[u8]) -> Result<(), StorageError> {
+            self.0.delete(key).await
+        }
+        async fn scan_prefix(&self, p: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+            self.0.scan_prefix(p).await
+        }
+        async fn count_prefix(&self, p: &[u8]) -> Result<usize, StorageError> {
+            self.0.count_prefix(p).await
+        }
+        async fn outbox_list(&self) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+            self.0.outbox_list().await
+        }
+        async fn get_changes_since(&self, offset: u64) -> Result<Vec<Change>, StorageError> {
+            self.0.get_changes_since(offset).await
+        }
+        fn allocation_lock(&self) -> Option<Arc<tokio::sync::Mutex<()>>> {
+            self.0.allocation_lock()
+        }
+    }
+
+    #[derive(prkdb_macros::Collection, serde::Serialize, serde::Deserialize, Clone, Debug)]
+    #[collection(name = "people")]
+    struct Person {
+        #[id]
+        id: String,
+        name: String,
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_record_written_by_name_is_read_by_type_and_vice_versa() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = Arc::new(
+            WalStorageAdapter::new(WalConfig {
+                log_dir: dir.path().to_path_buf(),
+                ..WalConfig::test_config()
+            })
+            .unwrap(),
+        );
+        let db = Arc::new(
+            prkdb::PrkDb::builder()
+                .with_storage(Shared(wal.clone()))
+                .build()
+                .unwrap(),
+        );
+        let typed = IndexedStorage::new(Arc::new(Shared(wal)));
+
+        // By name, as `PUT /collections/people/data` and `prkdb collection put` do.
+        let ada = serde_json::json!({"id": "1", "name": "Ada"});
+        db.put_collection_record("people", "1", &serde_json::to_vec(&ada).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            typed
+                .get::<Person>(&"1".to_string())
+                .await
+                .unwrap()
+                .unwrap()
+                .name,
+            "Ada"
+        );
+
+        // By type, read back by name.
+        typed
+            .insert(&Person {
+                id: "2".into(),
+                name: "Grace".into(),
+            })
+            .await
+            .unwrap();
+        let grace: serde_json::Value = serde_json::from_slice(
+            &db.get_collection_record("people", "2")
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(grace["name"], "Grace");
+        let hints: Vec<_> = db
+            .scan_collection_records("people")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id_hint.unwrap())
+            .collect();
+        assert_eq!(hints, ["1", "2"]);
+
+        // Stats, the listing and the change stream all see both.
+        assert_eq!(db.get_collection_stats("people").await.unwrap().0, 2);
+        assert!(db
+            .collection_names()
+            .await
+            .unwrap()
+            .contains(&"people".to_string()));
+        assert_eq!(typed.count::<Person>().await.unwrap(), 2);
+        assert_eq!(
+            db.changes_in_collection("people", 0).await.unwrap().len(),
+            2
+        );
+        assert!(super::fetch_segment_bytes(db.clone(), "people").await > 0);
+
+        // Deleting by name removes the typed record.
+        db.delete_collection_record("people", "1").await.unwrap();
+        assert!(typed
+            .get::<Person>(&"1".to_string())
+            .await
+            .unwrap()
+            .is_none());
+        // A name never written has nothing, and nothing is allocated for it.
+        assert!(db
+            .scan_collection_records("ghosts")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(!db
+            .collection_names()
+            .await
+            .unwrap()
+            .contains(&"ghosts".to_string()));
+    }
+}

@@ -143,6 +143,21 @@ fn write_id<I: serde::Serialize>(out: Vec<u8>, id: &I) -> Result<Vec<u8>, Storag
     Ok(ser.into_inner())
 }
 
+/// A printable form of an encoded id, for tools that do not know the id's type (the CLI
+/// and HTTP server): a string id as itself, an 8-byte id as an unsigned integer, anything
+/// else `None`.
+pub fn decode_id_hint(id: &[u8]) -> Option<String> {
+    if let Ok(s) = memcomparable::from_slice::<String>(id) {
+        return Some(s);
+    }
+    if id.len() == 8 {
+        return memcomparable::from_slice::<u64>(id)
+            .ok()
+            .map(|n| n.to_string());
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +222,19 @@ mod tests {
             );
         }
         assert!(encode_record_key(&[0u8; 256], CollectionId(1), &1u64).is_err());
+    }
+
+    #[test]
+    fn id_hints_print_strings_and_integers() {
+        assert_eq!(
+            decode_id_hint(&encode_id(&"user-1").unwrap()).as_deref(),
+            Some("user-1")
+        );
+        assert_eq!(
+            decode_id_hint(&encode_id(&42u64).unwrap()).as_deref(),
+            Some("42")
+        );
+        assert_eq!(decode_id_hint(&[1, 2, 3]), None);
     }
 
     #[test]

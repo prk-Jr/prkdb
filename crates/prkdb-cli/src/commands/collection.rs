@@ -1,6 +1,5 @@
 use crate::collection_metadata::get_or_create_collection_metadata;
 use crate::commands::CollectionCommands;
-use crate::database_manager::scan_storage;
 use crate::output::{display_single, info, success, OutputDisplay};
 use crate::Cli;
 use anyhow::Result;
@@ -117,13 +116,6 @@ async fn put_collection_data(name: &str, data: &str, cli: &Cli) -> Result<()> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("Data must have an 'id' field (string)"))?;
 
-    // Construct Key: "collection:id"
-    // Note: If using Type, it would be "collection::Type:id".
-    // For now, assume simple collection.
-    // Ideally we should check schema to key format?
-    // But standardized key format is "collection:id".
-    let key = format!("{}:{}", name, id);
-
     // Connect client
     let client = crate::remote_client::connect(
         vec![cli.server.clone()],
@@ -142,8 +134,9 @@ async fn put_collection_data(name: &str, data: &str, cli: &Cli) -> Result<()> {
     // `serve.rs` tries `serde_json::from_slice` first.
     let value_bytes = serde_json::to_vec(&json)?;
 
-    // Put
-    client.put(key.as_bytes(), &value_bytes).await?;
+    // The server builds the storage key from its collection catalog (KEY-01), so the
+    // record is the one typed APIs and the HTTP API read.
+    client.put_record(name, id, &value_bytes).await?;
 
     success(&format!(
         "Inserted document '{}' into collection '{}'",
@@ -215,116 +208,90 @@ async fn list_collections(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
+/// Every record of collection `name`, through the database's name-based API (the key
+/// codec and collection catalog, KEY-01): never by splitting stored keys at a `:`.
+async fn collection_records(name: &str) -> Result<Vec<prkdb::db::NamedRecord>> {
+    let db = crate::database_manager::get_db_instance().await?;
+    Ok(db.scan_collection_records(name).await?)
+}
+
+/// Whether collection `name` exists: it has records, or metadata, or a catalog entry.
+async fn collection_exists(name: &str, records: &[prkdb::db::NamedRecord]) -> Result<bool> {
+    if !records.is_empty() {
+        return Ok(true);
+    }
+    let db = crate::database_manager::get_db_instance().await?;
+    Ok(db.collection_names().await?.iter().any(|n| n == name))
+}
+
+/// A record's value as JSON: stored JSON (the HTTP API, the CLI, `IndexedStorage`), else
+/// bincode (`CollectionHandle`).
+fn record_json(record: &prkdb::db::NamedRecord) -> Option<serde_json::Value> {
+    serde_json::from_slice::<serde_json::Value>(&record.value)
+        .ok()
+        .or_else(|| try_bincode_to_json(&record.value).ok())
+}
+
+/// The record's id for display.
+fn record_id(record: &prkdb::db::NamedRecord) -> String {
+    record
+        .id_hint
+        .clone()
+        .unwrap_or_else(|| format!("0x{}", hex_bytes(&record.id)))
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 async fn describe_collection(name: &str, cli: &Cli) -> Result<()> {
     info(&format!("Describing collection: {}", name));
 
-    // Get all collections by scanning storage directly (same method as list_collections)
-    let all_entries_result = scan_storage().await;
-
-    let result = match all_entries_result {
-        Ok(all_entries) => {
-            // Group entries by collection type prefix to discover real collections
-            let mut collection_found = false;
-            let mut items = 0u64;
-            let mut size_bytes = 0u64;
-            let mut sample_data = Vec::new();
-
-            for (key, value) in &all_entries {
-                let key_str = String::from_utf8_lossy(key);
-
-                // Handle both formats: "collection:id" and "collection::Type:id"
-                let collection_name = if key_str.contains("::") {
-                    // Format: "collection::Type:id" -> extract "collection"
-                    key_str.split(':').next()
-                } else {
-                    // Format: "collection:id" -> extract "collection"
-                    key_str.split(':').next()
-                };
-
-                if let Some(collection_type) = collection_name {
-                    if collection_type == name {
-                        collection_found = true;
-                        items += 1;
-                        size_bytes += (key.len() + value.len()) as u64;
-
-                        // Collect sample data for schema analysis (up to 10 samples)
-                        if sample_data.len() < 10 {
-                            // Try multiple deserialization approaches
-
-                            // 1. Try JSON first (for backward compatibility)
-                            if let Ok(json_value) =
-                                serde_json::from_slice::<serde_json::Value>(value)
-                            {
-                                sample_data.push(json_value);
-                            }
-                            // 2. Try bincode deserialization to JSON-compatible value
-                            else if let Ok(json_value) = try_bincode_to_json(value) {
-                                sample_data.push(json_value);
-                            }
-                            // 3. Try to create a synthetic JSON object from the key structure
-                            else {
-                                // Create a basic object with key information
-                                let mut obj = serde_json::Map::new();
-                                obj.insert(
-                                    "_key".to_string(),
-                                    serde_json::Value::String(key_str.to_string()),
-                                );
-                                obj.insert(
-                                    "_data_format".to_string(),
-                                    serde_json::Value::String("binary".to_string()),
-                                );
-                                obj.insert(
-                                    "_size_bytes".to_string(),
-                                    serde_json::Value::Number(serde_json::Number::from(
-                                        value.len(),
-                                    )),
-                                );
-
-                                // Try to extract ID from key
-                                if let Some(id_part) = key_str.split(':').next_back() {
-                                    obj.insert(
-                                        "_id".to_string(),
-                                        serde_json::Value::String(id_part.to_string()),
-                                    );
-                                }
-
-                                sample_data.push(serde_json::Value::Object(obj));
-                            }
-                        }
-                    }
-                }
-            }
-
-            if collection_found {
-                // Get collection metadata for creation time
-                let created_at = if let Ok(storage) = SledAdapter::open(&cli.database) {
-                    match get_or_create_collection_metadata(&storage, name).await {
-                        Ok(metadata) => metadata.format_created_at(),
-                        Err(_) => "Unknown".to_string(),
-                    }
-                } else {
-                    "Unknown".to_string()
-                };
-
-                // Analyze schema from sample data
-                let schema_info = analyze_schema(&sample_data);
-
-                let details = CollectionDetails {
-                    name: name.to_string(),
-                    items,
-                    size_bytes,
-                    partitions: 1, // Single partition for now
-                    partition_config: Some("DefaultPartitioner".to_string()),
-                    created_at,
-                    schema_info,
-                };
-                Ok(Some(details))
-            } else {
-                Ok(None)
-            }
+    let result: Result<Option<CollectionDetails>> = async {
+        let records = collection_records(name).await?;
+        if !collection_exists(name, &records).await? {
+            return Ok(None);
         }
-        Err(e) => Err(e),
-    };
+        let items = records.len() as u64;
+        let size_bytes = records
+            .iter()
+            .map(|r| (r.key.len() + r.value.len()) as u64)
+            .sum();
+        let sample_data: Vec<serde_json::Value> = records
+            .iter()
+            .take(10)
+            .map(|record| {
+                record_json(record).unwrap_or_else(|| {
+                    serde_json::json!({
+                        "_id": record_id(record),
+                        "_data_format": "binary",
+                        "_size_bytes": record.value.len(),
+                    })
+                })
+            })
+            .collect();
+
+        // Collection metadata for the creation time
+        let created_at = if let Ok(storage) = SledAdapter::open(&cli.database) {
+            match get_or_create_collection_metadata(&storage, name).await {
+                Ok(metadata) => metadata.format_created_at(),
+                Err(_) => "Unknown".to_string(),
+            }
+        } else {
+            "Unknown".to_string()
+        };
+
+        Ok(Some(CollectionDetails {
+            name: name.to_string(),
+            items,
+            size_bytes,
+            partitions: 1, // Single partition for now
+            partition_config: Some("DefaultPartitioner".to_string()),
+            created_at,
+            schema_info: analyze_schema(&sample_data),
+        }))
+    }
+    .await;
 
     match result {
         Ok(Some(details)) => {
@@ -505,42 +472,14 @@ fn analyze_schema(sample_data: &[serde_json::Value]) -> SchemaInfo {
 async fn count_collection(name: &str, cli: &Cli) -> Result<()> {
     info(&format!("Counting items in collection: {}", name));
 
-    // Get all collections by scanning storage directly
-    let all_entries_result = scan_storage().await;
-
-    let result = match all_entries_result {
-        Ok(all_entries) => {
-            let mut collection_found = false;
-            let mut count = 0u64;
-
-            for (key, _) in &all_entries {
-                let key_str = String::from_utf8_lossy(key);
-
-                // Handle both formats: "collection:id" and "collection::Type:id"
-                let collection_name = if key_str.contains("::") {
-                    // Format: "collection::Type:id" -> extract "collection"
-                    key_str.split(':').next()
-                } else {
-                    // Format: "collection:id" -> extract "collection"
-                    key_str.split(':').next()
-                };
-
-                if let Some(collection_type) = collection_name {
-                    if collection_type == name {
-                        collection_found = true;
-                        count += 1;
-                    }
-                }
-            }
-
-            if collection_found {
-                Ok(Some(count))
-            } else {
-                Ok(None)
-            }
+    let result: Result<Option<u64>> = async {
+        let records = collection_records(name).await?;
+        if !collection_exists(name, &records).await? {
+            return Ok(None);
         }
-        Err(e) => Err(e),
-    };
+        Ok(Some(records.len() as u64))
+    }
+    .await;
 
     match result {
         Ok(Some(count)) => match cli.format {
@@ -573,68 +512,16 @@ async fn sample_collection(name: &str, limit: usize, cli: &Cli) -> Result<()> {
         limit, name
     ));
 
-    // Get all collections by scanning storage directly
-    let all_entries_result = scan_storage().await;
-
-    let result = match all_entries_result {
-        Ok(all_entries) => {
-            let mut collection_entries = Vec::new();
-
-            for (key, value) in &all_entries {
-                let key_str = String::from_utf8_lossy(key);
-
-                // Handle both formats: "collection:id" and "collection::Type:id"
-                let collection_name = if key_str.contains("::") {
-                    // Format: "collection::Type:id" -> extract "collection"
-                    key_str.split(':').next()
-                } else {
-                    // Format: "collection:id" -> extract "collection"
-                    key_str.split(':').next()
-                };
-
-                if let Some(collection_type) = collection_name {
-                    if collection_type == name {
-                        // Try multiple deserialization approaches
-                        let mut json_value = None;
-
-                        // 1. Try JSON first (for backward compatibility)
-                        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(value) {
-                            json_value = Some(value);
-                        }
-                        // 2. Try bincode deserialization
-                        else if let Ok(value) = try_bincode_to_json(value) {
-                            json_value = Some(value);
-                        }
-
-                        if let Some(value) = json_value {
-                            collection_entries.push(value);
-                            if collection_entries.len() >= limit {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if collection_entries.is_empty() {
-                // Check if collection exists at all
-                let collection_exists = all_entries.iter().any(|(key, _)| {
-                    let key_str = String::from_utf8_lossy(key);
-                    let collection_name = key_str.split(':').next();
-                    collection_name == Some(name)
-                });
-
-                if collection_exists {
-                    Ok(Some(Vec::new())) // Collection exists but no valid JSON data
-                } else {
-                    Ok(None) // Collection doesn't exist
-                }
-            } else {
-                Ok(Some(collection_entries))
-            }
+    let result: Result<Option<Vec<serde_json::Value>>> = async {
+        let records = collection_records(name).await?;
+        if !collection_exists(name, &records).await? {
+            return Ok(None);
         }
-        Err(e) => Err(e),
-    };
+        Ok(Some(
+            records.iter().filter_map(record_json).take(limit).collect(),
+        ))
+    }
+    .await;
 
     match result {
         Ok(Some(samples)) => {
@@ -684,62 +571,25 @@ async fn browse_collection_data(
         name, limit, offset
     ));
 
-    // Get all collections by scanning storage directly
-    let all_entries_result = scan_storage().await;
+    let all_records_result = collection_records(name).await;
 
-    let result = match all_entries_result {
-        Ok(all_entries) => {
+    let result = match all_records_result {
+        Ok(records) => {
             let mut collection_entries = Vec::new();
 
             // Collect all entries for this collection
-            for (key, value) in &all_entries {
-                let key_str = String::from_utf8_lossy(key);
-
-                // Handle both formats: "collection:id" and "collection::Type:id"
-                let collection_name = if key_str.contains("::") {
-                    // Format: "collection::Type:id" -> extract "collection"
-                    key_str.split(':').next()
-                } else {
-                    // Format: "collection:id" -> extract "collection"
-                    key_str.split(':').next()
-                };
-
-                if let Some(collection_type) = collection_name {
-                    if collection_type == name {
-                        // Try multiple deserialization approaches
-                        let mut entry = None;
-
-                        // 1. Try JSON first (for backward compatibility)
-                        if let Ok(json_value) = serde_json::from_slice::<serde_json::Value>(value) {
-                            entry = Some(json_value);
-                        }
-                        // 2. Try bincode deserialization
-                        else if let Ok(json_value) = try_bincode_to_json(value) {
-                            entry = Some(json_value);
-                        }
-
-                        if let Some(mut json_entry) = entry {
-                            let key_part = if key_str.contains("::") {
-                                // Extract ID from "collection::Type:id" format
-                                key_str.split(':').next_back().unwrap_or("unknown")
-                            } else {
-                                // Extract ID from "collection:id" format
-                                key_str.split(':').nth(1).unwrap_or("unknown")
-                            };
-
-                            if let Some(obj) = json_entry.as_object_mut() {
-                                obj.insert(
-                                    "_key".to_string(),
-                                    serde_json::Value::String(key_part.to_string()),
-                                );
-                                obj.insert(
-                                    "_full_key".to_string(),
-                                    serde_json::Value::String(key_str.to_string()),
-                                );
-                            }
-                            collection_entries.push((key_str.to_string(), json_entry));
-                        }
+            for record in &records {
+                if let Some(mut json_entry) = record_json(record) {
+                    let id = record_id(record);
+                    let full_key = format!("{name}:{id}");
+                    if let Some(obj) = json_entry.as_object_mut() {
+                        obj.insert("_key".to_string(), serde_json::Value::String(id));
+                        obj.insert(
+                            "_full_key".to_string(),
+                            serde_json::Value::String(full_key.clone()),
+                        );
                     }
+                    collection_entries.push((full_key, json_entry));
                 }
             }
 
@@ -788,7 +638,7 @@ async fn browse_collection_data(
                         println!(
                             "\n[{}] Key: {}",
                             offset + i + 1,
-                            key.split(':').nth(1).unwrap_or("unknown")
+                            key.split_once(':').map_or("unknown", |(_, id)| id)
                         );
                         println!("{}", serde_json::to_string_pretty(entry)?);
 

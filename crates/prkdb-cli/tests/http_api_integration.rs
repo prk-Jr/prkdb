@@ -131,38 +131,45 @@ fn reserve_local_port() -> u16 {
         .port()
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct TypedUserRecord {
     id: String,
     name: String,
 }
 
-async fn seed_typed_user_record(db_path: &Path) {
-    let key = typed_collection_key("my_app::User", "1");
-    let value = bincode::serde::encode_to_vec(
-        &TypedUserRecord {
-            id: "1".to_string(),
-            name: "Ada Lovelace".to_string(),
-        },
-        bincode::config::standard(),
-    )
-    .unwrap();
+/// A typed collection persisted as `user`, as a `#[collection(name = "user")]` derive
+/// would declare it.
+impl prkdb_types::collection::Collection for TypedUserRecord {
+    type Id = String;
+    fn id(&self) -> &String {
+        &self.id
+    }
+    fn persisted_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("user")
+    }
+}
 
+/// Seeds one record through the typed API (`CollectionHandle`: the key codec, the
+/// collection catalog and a bincode value), plus an internal metadata key the HTTP
+/// listing must hide.
+async fn seed_typed_user_record(db_path: &Path) {
     let storage = SledAdapter::open(db_path).unwrap();
     storage
         .put(b"__prkdb_metadata:collection:internal", b"ignore-me")
         .await
         .unwrap();
-    storage.put(&key, &value).await.unwrap();
-}
-
-fn typed_collection_key(type_name: &str, id: &str) -> Vec<u8> {
-    let mut key = type_name.as_bytes().to_vec();
-    key.push(b':');
-    let id_bytes =
-        bincode::serde::encode_to_vec(id.to_string(), bincode::config::standard()).unwrap();
-    key.extend_from_slice(&id_bytes);
-    key
+    let db = prkdb::PrkDb::builder()
+        .with_storage(storage)
+        .build()
+        .unwrap();
+    db.collection::<TypedUserRecord>()
+        .put(TypedUserRecord {
+            id: "1".to_string(),
+            name: "Ada Lovelace".to_string(),
+        })
+        .await
+        .unwrap();
+    db.storage().flush().await.unwrap();
 }
 
 #[tokio::test]
@@ -245,11 +252,11 @@ async fn test_http_supports_typed_collection_keys_and_filters_internal_metadata(
         .iter()
         .filter_map(|value| value.as_str())
         .collect::<Vec<_>>();
-    assert!(collections.contains(&"User"));
+    assert!(collections.contains(&"user"), "{collections:?}");
     assert!(!collections.contains(&"__prkdb_metadata"));
 
     let item_response = client
-        .get(format!("{base_url}/collections/User/data/1"))
+        .get(format!("{base_url}/collections/user/data/1"))
         .send()
         .await
         .unwrap();
@@ -260,7 +267,7 @@ async fn test_http_supports_typed_collection_keys_and_filters_internal_metadata(
     assert_eq!(item_body["data"]["name"], "Ada Lovelace");
 
     let count_response = client
-        .get(format!("{base_url}/collections/User/count"))
+        .get(format!("{base_url}/collections/user/count"))
         .send()
         .await
         .unwrap();
