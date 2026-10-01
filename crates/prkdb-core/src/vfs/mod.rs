@@ -63,6 +63,11 @@ pub trait Vfs: Send + Sync {
     ///
     /// A lock held elsewhere is `Err` with [`io::ErrorKind::WouldBlock`]. The file's
     /// contents are the implementation's business (`StdVfs` writes the holder's pid).
+    ///
+    /// For `StdVfs` this holds across processes only on a local filesystem. On Linux NFS
+    /// `flock` is emulated with per-process `fcntl` locks, and SMB/CIFS semantics vary
+    /// with the server and mount options, so another process may be let in. Within one
+    /// process `StdVfs` still refuses a second lock, through a process-wide registry.
     fn lock_exclusive(&self, path: &Path) -> io::Result<Box<dyn LockGuard>>;
 }
 

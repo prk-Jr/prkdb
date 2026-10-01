@@ -194,3 +194,78 @@ fn migrate_ignores_the_lock_file() {
         "{out:?}"
     );
 }
+
+/// Read-only media: `LOCK` cannot be created, so `migrate` inspects without the lock. A
+/// report (current format) and a dry run proceed; a migration that would write is refused.
+#[cfg(unix)]
+#[test]
+fn migrate_on_a_read_only_directory_reports_but_does_not_migrate() {
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Makes `dir` read-only for the test and writable again on drop, so the temp dir
+    /// can be removed even if an assertion fails.
+    struct ReadOnly<'a>(&'a std::path::Path);
+    impl Drop for ReadOnly<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    fn read_only(dir: &std::path::Path) -> Option<ReadOnly<'_>> {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let guard = ReadOnly(dir);
+        // Root ignores directory permissions; nothing to test then.
+        let probe = dir.join("probe");
+        if std::fs::write(&probe, b"").is_ok() {
+            let _ = std::fs::remove_file(probe);
+            return None;
+        }
+        Some(guard)
+    }
+
+    // At the current format: reported, nothing to do.
+    let current = tempfile::tempdir().unwrap();
+    std::fs::write(
+        current.path().join("FORMAT"),
+        "format = 2\ncreated_by = \"0.6.0\"\n",
+    )
+    .unwrap();
+    let Some(_ro) = read_only(current.path()) else {
+        return;
+    };
+    let out = migrate(current.path());
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("not writable"), "{stdout}");
+    assert!(
+        stdout.contains("no migrations available for format 2"),
+        "{stdout}"
+    );
+    assert!(!current.path().join("LOCK").exists());
+
+    // Needs migrating: refused without --dry-run because the lock cannot be taken; with
+    // --dry-run it gets as far as the plan (format 1 has none).
+    let old = tempfile::tempdir().unwrap();
+    std::fs::create_dir(old.path().join("mmap_segment_0")).unwrap();
+    let _ro_old = read_only(old.path()).expect("not root: checked above");
+    let out = migrate(old.path());
+    assert!(!out.status.success(), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("not writable") && err.contains("--dry-run"),
+        "{err}"
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_prkdb-cli"))
+        .args([
+            "migrate",
+            "--data-dir",
+            old.path().to_str().unwrap(),
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("no migrations available for format 1"),
+        "{err}"
+    );
+}

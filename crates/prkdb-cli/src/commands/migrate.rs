@@ -20,11 +20,13 @@
 //!
 //! Each data directory is migrated under its data-directory lock (STO-10), the one every
 //! open takes, so `migrate` refuses a directory a live database holds, and no database
-//! can open one while it is being migrated.
+//! can open one while it is being migrated. A directory that is not writable (read-only
+//! media, permissions) cannot hold `LOCK`: it is still reported, and a `--dry-run` still
+//! lists its plan, but a migration that would write is refused.
 
 use clap::Args;
 use prkdb::storage::format::{detect_format, read_format, unsupported_format, FORMAT_VERSION};
-use prkdb::storage::lock::lock_data_dir;
+use prkdb::storage::lock::lock_data_dir_unless_read_only;
 use prkdb::storage::migrations::plan;
 use prkdb_core::vfs::StdVfs;
 use std::path::{Path, PathBuf};
@@ -103,8 +105,16 @@ fn subdirs(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
 
 /// Migrates one data directory.
 fn migrate_one(dir: &Path, dry_run: bool) -> anyhow::Result<()> {
-    // Held until this directory is done; `LOCK` does not count as data below.
-    let _lock = lock_data_dir(&StdVfs, dir)?;
+    // Held until this directory is done; `LOCK` does not count as data below. `None`: the
+    // directory is not writable (read-only media, permissions), so only a report or a dry
+    // run can proceed; a real migration is refused below.
+    let lock = lock_data_dir_unless_read_only(&StdVfs, dir)?;
+    if lock.is_none() {
+        println!(
+            "data directory {} is not writable; inspecting it read-only, without its lock",
+            dir.display()
+        );
+    }
     // `None`: empty (ignoring `lost+found` and dotfiles). Format 1 had no marker, so a
     // non-empty directory without one is `Some(1)`.
     let Some(found) = detect_format(&StdVfs, dir)? else {
@@ -126,6 +136,13 @@ fn migrate_one(dir: &Path, dry_run: bool) -> anyhow::Result<()> {
     }
     if found > FORMAT_VERSION {
         return Err(unsupported_format(dir, found).into());
+    }
+    if lock.is_none() && !dry_run {
+        anyhow::bail!(
+            "data directory {} is at format {found} and needs migrating, but it is not \
+             writable, so its lock cannot be taken; make it writable (or use --dry-run)",
+            dir.display()
+        );
     }
 
     // Never empty here: `plan` returns an empty chain only for the current format, and

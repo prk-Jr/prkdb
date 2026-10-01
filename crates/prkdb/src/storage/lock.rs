@@ -11,9 +11,19 @@
 //! nothing, and a process that dies (even by `SIGKILL`) releases it. The file's content
 //! is the holder's pid, written best effort for the refusal message. `LOCK` is not data:
 //! the format emptiness check ignores it.
+//!
+//! # Local filesystems only
+//!
+//! The data directory must be on a local filesystem. On Linux NFS, `flock` is emulated
+//! with per-process `fcntl` locks: another client may not be excluded, and within one
+//! process a second open would succeed and closing either descriptor would drop the lock
+//! for both. `StdVfs` closes the in-process gap with a process-wide registry of held lock
+//! files, but cannot fix the cross-process one. SMB/CIFS behaviour varies with the server
+//! and mount options. Neither is supported for a data directory.
 
 use prkdb_core::vfs::{LockGuard, OpenMode, Vfs};
 use prkdb_types::error::StorageError;
+use std::io;
 use std::path::Path;
 
 /// The lock file's name, at the data directory's root.
@@ -24,10 +34,46 @@ const MAX_PID_BYTES: usize = 32;
 
 /// Takes `dir`'s lock. `dir` must exist. Released when the guard drops.
 pub fn lock_data_dir(vfs: &dyn Vfs, dir: &Path) -> Result<Box<dyn LockGuard>, StorageError> {
+    lock_or_read_only(vfs, dir)?.map_err(|(path, e)| io_err(&path, e))
+}
+
+/// [`lock_data_dir`] for a caller that can do useful read-only work without the lock:
+/// `Ok(None)` when `LOCK` cannot be created or opened for writing because the directory
+/// is not writable (permission denied, read-only filesystem). That is not exclusion: a
+/// process with write access may hold the lock and be writing, so the caller must not
+/// write, and should treat what it reads as possibly in flux.
+pub fn lock_data_dir_unless_read_only(
+    vfs: &dyn Vfs,
+    dir: &Path,
+) -> Result<Option<Box<dyn LockGuard>>, StorageError> {
+    match lock_or_read_only(vfs, dir)? {
+        Ok(guard) => Ok(Some(guard)),
+        Err((_, e)) if is_read_only(&e) => Ok(None),
+        Err((path, e)) => Err(io_err(&path, e)),
+    }
+}
+
+fn is_read_only(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
+    )
+}
+
+fn io_err(path: &Path, e: io::Error) -> StorageError {
+    StorageError::Internal(format!("{}: {e}", path.display()))
+}
+
+/// A lock that was not refused as held: the guard, or the `LOCK` path and the I/O failure
+/// for the caller to classify.
+type Attempt = Result<Box<dyn LockGuard>, (std::path::PathBuf, io::Error)>;
+
+/// `Err(Locked)` if the lock is held elsewhere.
+fn lock_or_read_only(vfs: &dyn Vfs, dir: &Path) -> Result<Attempt, StorageError> {
     let path = dir.join(LOCK_FILE);
     match vfs.lock_exclusive(&path) {
-        Ok(guard) => Ok(guard),
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+        Ok(guard) => Ok(Ok(guard)),
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
             let holder = match holder_pid(vfs, &path) {
                 Some(pid) => format!("pid {pid}"),
                 None => "pid unknown".to_string(),
@@ -38,7 +84,7 @@ pub fn lock_data_dir(vfs: &dyn Vfs, dir: &Path) -> Result<Box<dyn LockGuard>, St
                 dir.display()
             )))
         }
-        Err(e) => Err(StorageError::Internal(format!("{}: {e}", path.display()))),
+        Err(e) => Ok(Err((path, e))),
     }
 }
 
