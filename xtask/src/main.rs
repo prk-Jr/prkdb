@@ -33,7 +33,7 @@ fn print_usage_and_exit() -> ! {
          cargo run -p xtask -- repo-status <snapshot|audit|render> [--fail-on-objective-drift|--run-commands]\n  \
          cargo run -p xtask -- readme-tests [--check]\n  \
          cargo run -p xtask -- remediation <check|render> [--check]\n  \
-         cargo run -p xtask -- verify [--profile blocking|discovery] [--seed N] [--seed-offset N] [--seeds K] [--ops M] [--mode durable]"
+         cargo run -p xtask -- verify [--profile core|blocking|discovery] [--seed N] [--seed-offset N] [--seeds K] [--ops M] [--mode durable]"
     );
     std::process::exit(2);
 }
