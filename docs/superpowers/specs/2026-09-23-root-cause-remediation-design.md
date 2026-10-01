@@ -98,6 +98,7 @@ Sources: **A** = 2026-09-23 correctness audit (A#n), **R** = 2026-09-07 senior r
 | KEY-01 | HIGH | Primary keys not namespaced by collection: `User{id:1}` and `Order{id:1}` overwrite each other. | `indexed_storage.rs:4280-4287`, `5273-5276` (A#13, R01) | Reported ×2 | 2 |
 | KEY-02 | HIGH | `upsert` removes index entries of the new record, not the old; `query_by` never re-checks; `#[index(unique)]` never enforced. | `indexed_storage.rs:4733` (A#14) | Spot-checked | 2 |
 | KEY-03 | HIGH | `AHasher::default()` is randomly seeded per process; same key → different partition after restart or on another node. | `partitioning.rs:51` (A#12) | Verified | 2 |
+| KEY-05 | MED | The collection catalog (KEY-01) is per node and not replicated, so on multi-raft the name-addressed record API (HTTP server, CLI `PutRecord`) keeps raw `name:id` keys: multi-raft collections bypass the key codec, typed APIs (which write to the node-local meta storage) and name-addressed writes (Raft partitions) see different records, and allocating ids per node would give one collection different ids on different nodes. Found in the Task 2.12 review. | `db.rs:652-668` (`collection_record_key`), `raft/grpc_service.rs:310` (`put_record`) | Verified | 4 |
 
 ### 3.3 Events, outbox, consumers (EVT)
 
@@ -522,6 +523,7 @@ No unrelated refactoring.
 |---|---|---|
 | 1 | 2026-09-23 | Initial spec from the 2026-09-23 audits and the 2026-09-07 review; decisions D1–D9 (D9: publishing policy). |
 | 2 | 2026-09-23 | Spec review pass 1: `Vfs` seam defined in Phase 1, WAL routed through it in 2a; per-area `verified`; tripwires instead of expected-failure lists; single-phase IDs (DOC-11, DOC-12, TST-05..07 split out); harness op profiles per phase (§7.1); Fast mode from 2a; commit-based workflow with phase-PR CI sequence; private backup repo with Actions off; storage-compat timing; single globally ordered WAL; like-for-like Raft gate; madsim budget; DOC-11 interim wording. |
+| 16 | 2026-10-01 | Execution: KEY-05 added (multi-raft collection catalog is node-local; name-addressed records on multi-raft use raw `name:id` keys). Found in the Task 2.12 review. |
 | 15 | 2026-10-01 | D12 wording: ids use the order-preserving `memcomparable` encoding (Task 2.12 review), not bincode. |
 | 14 | 2026-10-01 | Execution: STO-10 added (no data-directory lock). |
 | 13 | 2026-10-01 | Decision D13 (Task 2.9 deletion list confirmed; streaming log rebuilt on the single WAL in Task 2.15b; Raft-only replication incl. the HTTP module in Phase 4). |

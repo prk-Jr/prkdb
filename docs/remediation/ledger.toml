@@ -138,6 +138,19 @@ evidence = ["crates/prkdb/src/partitioning.rs:51"]
 regression_tests = ["test:crates/prkdb/tests/tripwires.rs::key03_partition_is_stable_across_processes", "test:crates/prkdb/tests/partitioning_tests.rs::default_partitioner_golden_vectors"]
 changes = ["8da967f"]
 
+[[finding]]
+id = "KEY-05"
+title = "Multi-raft collection catalog is node-local; name-addressed records on multi-raft use raw name:id keys"
+area = "keys"
+severity = "medium"
+phase = 4
+status = "open"
+sources = ["task-2.12-review-2026-10-01"]
+evidence = [
+  "crates/prkdb/src/db.rs:652-668",
+  "crates/prkdb/src/raft/grpc_service.rs:310",
+]
+
 # ---------------------------------------------------------------------------
 # 3.3 Events, outbox, consumers (EVT)
 # ---------------------------------------------------------------------------
