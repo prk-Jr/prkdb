@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod checkpoint; // Index snapshots that let recovery replay only the tail (Task 2.14)
 pub mod collection_partitioned_adapter; // Per-collection routing over the one WAL (D11)
+pub mod compaction; // Rewrites sealed WAL segments keeping only live records (Task 2.15)
 pub mod config;
 pub mod format; // FORMAT marker and open rules (D3)
 pub mod lock; // Data-directory lock (STO-10)
@@ -13,6 +14,7 @@ pub mod writer_liveness; // Client-side time bounds for the WAL write path
 mod in_memory;
 pub use in_memory::InMemoryAdapter;
 
+pub use compaction::CompactionReport;
 pub use config::CompactionConfig;
 
 // Export WAL adapters

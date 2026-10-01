@@ -1,5 +1,6 @@
 //! The storage adapter under simulated power loss (Task 2.8a): STO-02 and STO-04 end to end.
 
+use prkdb::storage::compaction::CompactionStep;
 use prkdb::storage::config::StorageConfig;
 use prkdb::storage::WalStorageAdapter;
 use prkdb_core::vfs::{OpenMode, Vfs};
@@ -8,6 +9,7 @@ use prkdb_types::storage::StorageAdapter;
 use prkdb_verify::faultfs::{FaultFs, Tear};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -120,4 +122,176 @@ async fn a_corrupt_sealed_segment_fails_the_open_by_name() {
         err.to_string().contains("00000000000000000001.wal"),
         "{err}"
     );
+}
+
+// ---------------------------------------------------------------------------------------
+// Compaction under power loss (Task 2.15)
+// ---------------------------------------------------------------------------------------
+
+async fn contents(db: &WalStorageAdapter) -> BTreeMap<Vec<u8>, Vec<u8>> {
+    let mut out = BTreeMap::new();
+    for k in db.get_all_keys() {
+        let v = db.get(&k).await.unwrap().expect("indexed key readable");
+        out.insert(k, v);
+    }
+    out
+}
+
+/// Enough overwrites, deletes and batches over 16 KiB segments for a compaction to rewrite
+/// several sealed segments, drop deletes, and remove fully elided segments from the front;
+/// a checkpoint first, so the run has one to delete. Everything is flushed: the contents
+/// before compaction are durable, so every crash must recover exactly them.
+async fn compaction_workload(db: &WalStorageAdapter) {
+    for round in 0..12u32 {
+        for k in 0..24u32 {
+            db.put(format!("k{k}").as_bytes(), &[round as u8; 200])
+                .await
+                .unwrap();
+        }
+        if round == 2 {
+            db.save_checkpoint_async().await.unwrap();
+        }
+        if round % 4 == 1 {
+            db.delete(format!("k{round}").as_bytes()).await.unwrap();
+            db.put_batch(vec![
+                (format!("b{round}").into_bytes(), vec![round as u8; 64]),
+                (b"k0".to_vec(), vec![0xB0 | round as u8; 32]),
+            ])
+            .await
+            .unwrap();
+        }
+    }
+    db.delete(b"k5").await.unwrap();
+    for round in [1u32, 5, 9] {
+        // Rewritten, so the oldest segments end up fully elided and are removed.
+        db.put(format!("b{round}").as_bytes(), b"again")
+            .await
+            .unwrap();
+    }
+    for k in 0..24u32 {
+        db.put(format!("tail{k}").as_bytes(), &[0xEE; 200])
+            .await
+            .unwrap(); // seal the last delete's segment
+    }
+    db.flush().await.unwrap();
+}
+
+type Steps = Arc<parking_lot::Mutex<Vec<CompactionStep>>>;
+
+/// A power loss right after any step of a compaction run — with any tear, in either mode
+/// — recovers exactly the contents from before the run, and a later run on the recovered
+/// directory keeps them too.
+#[tokio::test(flavor = "multi_thread")]
+async fn compaction_is_crash_safe_at_every_step() {
+    for mode in [SyncMode::Durable, SyncMode::Fast] {
+        // A clean run lists the steps; every run of the same workload takes the same ones.
+        let fs = fresh();
+        let db = open(&fs, mode);
+        compaction_workload(&db).await;
+        let expected = contents(&db).await;
+        let steps: Steps = Arc::default();
+        let record = steps.clone();
+        db.compact_with_hook(move |step| {
+            record.lock().push(step);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(contents(&db).await, expected, "{mode:?}: a clean run");
+        drop(db);
+        let steps = steps.lock().clone();
+        for kind in [
+            "CompactFileWritten",
+            "LogSynced",
+            "CheckpointsDeleted",
+            "SegmentReplaced",
+            "SegmentRemoved",
+            "SegmentsDone",
+            "CheckpointWritten",
+        ] {
+            assert!(
+                steps.iter().any(|s| format!("{s:?}").starts_with(kind)),
+                "{mode:?}: the workload never reaches {kind}: {steps:?}"
+            );
+        }
+
+        for (cut, at) in steps.iter().enumerate() {
+            for (t, tear) in [Tear::None, Tear::Prefix, Tear::ZeroTail, Tear::Garbage]
+                .into_iter()
+                .enumerate()
+            {
+                let fs = fresh();
+                let db = open(&fs, mode);
+                compaction_workload(&db).await;
+                let mut seen = 0usize;
+                let power = fs.clone();
+                let seed = (cut * 4 + t) as u64;
+                let outcome = db
+                    .compact_with_hook(move |_| {
+                        seen += 1;
+                        if seen == cut + 1 {
+                            power.power_loss(&mut ChaCha8Rng::seed_from_u64(seed), tear);
+                            return Err("power cut".to_string());
+                        }
+                        Ok(())
+                    })
+                    .await;
+                assert!(
+                    outcome.is_err(),
+                    "{mode:?} {at:?}: the hook must abort the run"
+                );
+                drop(db);
+
+                let db = open(&fs, mode);
+                let ctx = format!("{mode:?}, power cut after {at:?} (step {cut}), {tear:?}");
+                assert_eq!(contents(&db).await, expected, "{ctx}");
+                let report = db.compact().await.unwrap_or_else(|e| panic!("{ctx}: {e}"));
+                assert_eq!(contents(&db).await, expected, "{ctx}: then {report:?}");
+                drop(db);
+                let db = open(&fs, mode);
+                assert_eq!(contents(&db).await, expected, "{ctx}: reopened after rerun");
+            }
+        }
+    }
+}
+
+/// The case compaction's log sync exists for (Fast mode): an overwrite or delete that
+/// superseded a durable record is still unsynced when compaction drops the old record.
+/// Without the sync a power cut would lose both the old record and its replacement.
+#[tokio::test(flavor = "multi_thread")]
+async fn compaction_never_drops_a_record_whose_replacement_is_unsynced() {
+    for tear in [Tear::None, Tear::Prefix, Tear::ZeroTail, Tear::Garbage] {
+        let fs = fresh();
+        let db = open(&fs, SyncMode::Fast);
+        db.put(b"k", b"old").await.unwrap();
+        db.put(b"gone", b"durable").await.unwrap();
+        for i in 0..100u32 {
+            db.put(format!("filler{i}").as_bytes(), &[1u8; 200])
+                .await
+                .unwrap(); // seal both segments' worth
+        }
+        db.flush().await.unwrap(); // `old` and `gone` are durable
+        db.put(b"k", b"new").await.unwrap(); // unsynced (no periodic sync for an hour)
+        db.put(b"marker", b"before the delete").await.unwrap();
+        db.delete(b"gone").await.unwrap(); // unsynced
+        let report = db.compact().await.unwrap();
+        assert!(report.segments_rewritten > 0, "{report:?}");
+        fs.power_loss(&mut ChaCha8Rng::seed_from_u64(9), tear);
+        drop(db);
+
+        let db = open(&fs, SyncMode::Fast);
+        let k = db.get(b"k").await.unwrap();
+        assert!(
+            k.as_deref() == Some(&b"old"[..]) || k.as_deref() == Some(&b"new"[..]),
+            "{tear:?}: k must be old or new, got {k:?}"
+        );
+        // A prefix of the log: if the delete survived, so did the put written before it.
+        if db.get(b"gone").await.unwrap().is_none() {
+            assert_eq!(
+                db.get(b"marker").await.unwrap().as_deref(),
+                Some(&b"before the delete"[..]),
+                "{tear:?}: the delete survived without the write before it"
+            );
+        }
+    }
 }
