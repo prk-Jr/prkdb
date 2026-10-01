@@ -15,16 +15,23 @@
 //! The pre-D11 optimized-storage layout (`collections/<name>/` under a root with no
 //! `FORMAT`) is **not** a container: since Task 2.9b that root is one data directory, and
 //! opening it refuses it as format 1, so `migrate` reports format 1 too.
+//!
+//! # Locking
+//!
+//! Each data directory is migrated under its data-directory lock (STO-10), the one every
+//! open takes, so `migrate` refuses a directory a live database holds, and no database
+//! can open one while it is being migrated.
 
 use clap::Args;
 use prkdb::storage::format::{detect_format, read_format, unsupported_format, FORMAT_VERSION};
+use prkdb::storage::lock::lock_data_dir;
 use prkdb::storage::migrations::plan;
 use prkdb_core::vfs::StdVfs;
 use std::path::{Path, PathBuf};
 
 #[derive(Args, Clone, Debug)]
 pub struct MigrateArgs {
-    /// Data directory to migrate. Must not be open in a running process.
+    /// Data directory to migrate. Refused while a running process has it open.
     #[arg(long)]
     pub data_dir: PathBuf,
     /// List the migrations that would run, without running them.
@@ -96,6 +103,8 @@ fn subdirs(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
 
 /// Migrates one data directory.
 fn migrate_one(dir: &Path, dry_run: bool) -> anyhow::Result<()> {
+    // Held until this directory is done; `LOCK` does not count as data below.
+    let _lock = lock_data_dir(&StdVfs, dir)?;
     // `None`: empty (ignoring `lost+found` and dotfiles). Format 1 had no marker, so a
     // non-empty directory without one is `Some(1)`.
     let Some(found) = detect_format(&StdVfs, dir)? else {

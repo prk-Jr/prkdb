@@ -133,3 +133,64 @@ fn migrate_on_a_pre_d11_collections_root_reports_format_1_like_open() {
         "open and migrate agree"
     );
 }
+
+/// STO-10: `migrate` takes the data-directory lock, so it refuses a directory a live
+/// database holds, and works once that database is closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn migrate_on_a_locked_directory_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = prkdb::storage::WalStorageAdapter::new(prkdb_core::wal::WalConfig {
+        log_dir: dir.path().to_path_buf(),
+        ..prkdb_core::wal::WalConfig::test_config()
+    })
+    .unwrap();
+    let out = migrate(dir.path());
+    assert!(!out.status.success(), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("in use by another process")
+            && (!cfg!(unix) || err.contains(&format!("pid {}", std::process::id()))),
+        "{err}"
+    );
+
+    drop(db);
+    let out = migrate(dir.path());
+    assert!(out.status.success(), "{out:?}");
+}
+
+/// STO-10: a multi-raft root with a live database refuses for every member it holds.
+#[tokio::test(flavor = "multi_thread")]
+async fn migrate_on_a_live_multi_raft_root_refuses_each_member() {
+    let root = tempfile::tempdir().unwrap();
+    let db = prkdb::PrkDb::new_multi_raft(
+        2,
+        prkdb::raft::ClusterConfig::default(),
+        root.path().to_path_buf(),
+    )
+    .unwrap();
+    let out = migrate(root.path());
+    assert!(!out.status.success(), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    for member in ["meta", "partition_0", "partition_1"] {
+        let dir = root.path().join(member).display().to_string();
+        assert!(
+            err.lines()
+                .any(|l| l.contains(&dir) && l.contains("in use by another process")),
+            "{member} not refused as locked: {err}"
+        );
+    }
+    drop(db);
+}
+
+/// The lock file does not make an empty directory look like format-1 data.
+#[test]
+fn migrate_ignores_the_lock_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("LOCK"), b"").unwrap();
+    let out = migrate(dir.path());
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("is empty"),
+        "{out:?}"
+    );
+}

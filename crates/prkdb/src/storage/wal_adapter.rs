@@ -7,7 +7,7 @@ use prkdb_types::snapshot::{CompressionType, SnapshotHeader};
 
 use papaya::HashMap as LockFreeHashMap;
 use prkdb_core::batching::adaptive::AdaptiveBatchConfig;
-use prkdb_core::vfs::{StdVfs, Vfs};
+use prkdb_core::vfs::{LockGuard, StdVfs, Vfs};
 use prkdb_core::wal::batch::{Batch, BatchOp};
 use prkdb_core::wal::frame::FrameKind;
 use prkdb_core::wal::{
@@ -98,7 +98,7 @@ impl WalStorageAdapterBuilder {
 /// [`FaultInjectingVfs`]: fault_injection::FaultInjectingVfs
 #[cfg(test)]
 pub(crate) mod fault_injection {
-    use prkdb_core::vfs::{OpenMode, Vfs, VfsFile};
+    use prkdb_core::vfs::{LockGuard, OpenMode, Vfs, VfsFile};
     use std::collections::HashSet;
     use std::io;
     use std::path::{Path, PathBuf};
@@ -291,6 +291,9 @@ pub(crate) mod fault_injection {
         fn sync_dir(&self, dir: &Path) -> io::Result<()> {
             self.inner.sync_dir(dir)
         }
+        fn lock_exclusive(&self, path: &Path) -> io::Result<Box<dyn LockGuard>> {
+            self.inner.lock_exclusive(path)
+        }
     }
 
     struct FaultInjectingFile {
@@ -477,6 +480,13 @@ struct WalStorageInner {
     bounds: LivenessBounds,
     recovery: Arc<RecoveryManager>,
     progress: Arc<PublishProgress>,
+    /// The data-directory lock (STO-10). Last, so it drops after `wal`, whose drop closes
+    /// the log and joins its writer: nothing writes the directory once it is released.
+    _lock: Box<dyn LockGuard>,
+}
+
+fn dir_err(dir: &Path, e: std::io::Error) -> StorageError {
+    StorageError::Internal(format!("{}: {e}", dir.display()))
 }
 
 /// Maps a WAL error onto the storage error a caller can act on (D12).
@@ -596,6 +606,16 @@ impl WalStorageAdapter {
             log_dir.clone(),
         ));
 
+        // The data-directory lock (STO-10), before anything else reads or writes the
+        // directory, held until the last clone of this adapter drops (a refused open drops
+        // it on return). The directory must exist to hold `LOCK`; `ensure_format` syncs
+        // its parent before it writes `FORMAT` into a new one.
+        if !vfs.exists(&log_dir).map_err(|e| dir_err(&log_dir, e))? {
+            vfs.create_dir_all(&log_dir)
+                .map_err(|e| dir_err(&log_dir, e))?;
+        }
+        let lock = super::lock::lock_data_dir(vfs.as_ref(), &log_dir)?;
+
         // The open rules (spec 2b, D3): before `Wal::open`, so `FORMAT` exists before the
         // first segment, and a format-1 directory (no `FORMAT`, old files) is refused
         // before an empty log could be opened next to it and make the database look wiped.
@@ -656,6 +676,7 @@ impl WalStorageAdapter {
             recovery: Arc::new(RecoveryManager::new(vfs, log_dir)),
             progress: Arc::new(PublishProgress::default()),
             config,
+            _lock: lock,
         };
         Ok(Self {
             inner: Arc::new(inner),
@@ -2082,7 +2103,14 @@ mod tests {
             .expect("the batch commits");
         assert_eq!(adapter.max_offset(), 1, "the whole batch is one frame");
 
-        for adapter in [adapter, WalStorageAdapter::open(config).unwrap()] {
+        // Live, then reopened (one open at a time: the directory is locked, STO-10).
+        let mut adapter = Some(adapter);
+        for reopen in [false, true] {
+            if reopen {
+                drop(adapter.take());
+                adapter = Some(WalStorageAdapter::open(config.clone()).unwrap());
+            }
+            let adapter = adapter.as_ref().unwrap();
             assert_eq!(
                 adapter.get(b"survivor").await.expect("read survivor"),
                 Some(b"second".to_vec()),

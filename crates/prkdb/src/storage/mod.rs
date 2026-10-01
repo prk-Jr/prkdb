@@ -3,6 +3,7 @@ pub mod checkpoint; // Empty until Task 2.14 writes an index snapshot
 pub mod collection_partitioned_adapter; // Per-collection routing over the one WAL (D11)
 pub mod config;
 pub mod format; // FORMAT marker and open rules (D3)
+pub mod lock; // Data-directory lock (STO-10)
 pub mod migrations; // Migration registry (D4)
 pub mod recovery;
 pub mod snapshot;

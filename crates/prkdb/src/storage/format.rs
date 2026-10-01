@@ -28,11 +28,12 @@
 //!   not a list of format-1 file names: a name missing from an ignore list refuses a
 //!   directory that could have been opened (fail closed), while a name missing from an
 //!   evidence list would open old data as an empty database (the failure this exists
-//!   to prevent);
+//!   to prevent). `LOCK`, the data-directory lock every open takes first
+//!   ([`super::lock`]), is not data either;
 //! - `FORMAT` says 2: opens;
 //! - no `FORMAT` on a non-empty directory (format 1, which had no marker) or any other
 //!   number: refused with [`StorageError::UnsupportedFormat`] before a single byte is
-//!   written. A format-1 log must never be shadowed by an empty format-2 log next to it,
+//!   written (the directory may gain a `LOCK` file, taken before the check). A format-1 log must never be shadowed by an empty format-2 log next to it,
 //!   which would make the database look wiped.
 
 use prkdb_core::vfs::{OpenMode, StdVfs, Vfs};
@@ -123,15 +124,17 @@ fn is_ignorable(path: &Path) -> bool {
         .is_some_and(|n| n == "lost+found" || n.starts_with('.'))
 }
 
-/// Whether `dir` holds anything other than ignorable entries and a stale `FORMAT.tmp`,
-/// i.e. whether a directory without `FORMAT` must be treated as format 1.
+/// Whether `dir` holds anything other than ignorable entries, a stale `FORMAT.tmp` and the
+/// directory lock's `LOCK` (which every open creates before the format check), i.e.
+/// whether a directory without `FORMAT` must be treated as format 1.
 pub fn holds_data(vfs: &dyn Vfs, dir: &Path) -> Result<bool, StorageError> {
     let tmp = dir.join(FORMAT_TMP_FILE);
+    let lock = dir.join(super::lock::LOCK_FILE);
     Ok(vfs
         .read_dir(dir)
         .map_err(|e| io_err(dir, e))?
         .iter()
-        .any(|p| *p != tmp && !is_ignorable(p)))
+        .any(|p| *p != tmp && *p != lock && !is_ignorable(p)))
 }
 
 /// Reads `dir/FORMAT` without creating anything. `Ok(None)` if the file does not exist.
@@ -299,6 +302,15 @@ mod tests {
         assert!(!holds_data(&StdVfs, dir.path()).unwrap());
         std::fs::write(dir.path().join("00000000000000000001.wal"), b"x").unwrap();
         assert!(holds_data(&StdVfs, dir.path()).unwrap());
+    }
+
+    #[test]
+    fn the_lock_file_does_not_count_as_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let _held = crate::storage::lock::lock_data_dir(&StdVfs, dir.path()).unwrap();
+        assert!(!holds_data(&StdVfs, dir.path()).unwrap());
+        assert_eq!(detect_format(&StdVfs, dir.path()).unwrap(), None);
+        assert_eq!(ensure_format(&StdVfs, dir.path()).unwrap(), FormatMarker::current());
     }
 
     #[test]

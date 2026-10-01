@@ -1,4 +1,4 @@
-use super::{OpenMode, Vfs, VfsFile};
+use super::{LockGuard, OpenMode, Vfs, VfsFile};
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -70,6 +70,15 @@ impl VfsFile for StdFile {
     }
 }
 
+/// An OS file lock (`std::fs::File::try_lock`: `flock(LOCK_EX | LOCK_NB)` on Unix,
+/// `LockFileEx` on Windows), released when the file is closed, which the OS also does when
+/// the process dies.
+struct StdLock {
+    _file: File,
+}
+
+impl LockGuard for StdLock {}
+
 impl Vfs for StdVfs {
     fn open(&self, path: &Path, mode: OpenMode) -> io::Result<Arc<dyn VfsFile>> {
         let file = match mode {
@@ -117,5 +126,31 @@ impl Vfs for StdVfs {
             let _ = dir;
             Ok(())
         }
+    }
+    fn lock_exclusive(&self, path: &Path) -> io::Result<Box<dyn LockGuard>> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!("{} is locked", path.display()),
+                ))
+            }
+            Err(fs::TryLockError::Error(e)) => return Err(e),
+        }
+        // Who holds it, for the refusal message only: best effort and never synced, so a
+        // failure here does not fail the lock, and a reader treats anything unparsable as
+        // "unknown".
+        let pid = format!("{}\n", std::process::id());
+        if file.set_len(0).is_ok() {
+            let _ = io::Write::write_all(&mut &file, pid.as_bytes());
+        }
+        Ok(Box::new(StdLock { _file: file }))
     }
 }

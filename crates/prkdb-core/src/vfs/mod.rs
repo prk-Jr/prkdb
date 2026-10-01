@@ -56,7 +56,18 @@ pub trait Vfs: Send + Sync {
     /// Durably persists directory entry changes (creates, renames, removes) in
     /// `dir`. Best-effort no-op on non-Unix platforms.
     fn sync_dir(&self, dir: &Path) -> io::Result<()>;
+    /// Takes an exclusive advisory lock on `path`, creating the file if it is missing
+    /// (its parent must exist), without blocking. The lock excludes every other
+    /// `lock_exclusive` on the same path, from this process or another, until the
+    /// returned guard drops or the holding process dies.
+    ///
+    /// A lock held elsewhere is `Err` with [`io::ErrorKind::WouldBlock`]. The file's
+    /// contents are the implementation's business (`StdVfs` writes the holder's pid).
+    fn lock_exclusive(&self, path: &Path) -> io::Result<Box<dyn LockGuard>>;
 }
+
+/// Holds a [`Vfs::lock_exclusive`] lock; dropping it releases the lock.
+pub trait LockGuard: Send + Sync {}
 
 /// Shared conformance tests; every `Vfs` implementation must pass them.
 ///
@@ -99,6 +110,15 @@ pub mod conformance {
         assert_eq!(vfs.read_dir(&dir).unwrap(), vec![q.clone()]);
         vfs.remove(&q).unwrap();
         assert!(!vfs.exists(&q).unwrap());
+
+        // An exclusive lock excludes a second one until it is dropped.
+        let lock = dir.join("LOCK");
+        let held = vfs.lock_exclusive(&lock).unwrap();
+        assert!(vfs.exists(&lock).unwrap(), "the lock file is created");
+        let refused = vfs.lock_exclusive(&lock).err().expect("held elsewhere");
+        assert_eq!(refused.kind(), io::ErrorKind::WouldBlock);
+        drop(held);
+        drop(vfs.lock_exclusive(&lock).unwrap());
     }
 }
 

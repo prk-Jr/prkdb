@@ -145,6 +145,12 @@ pub enum StorageError {
     /// was written to the directory.
     #[error("{0}")]
     UnsupportedFormat(String),
+
+    /// The data directory is open in another process, or already open in this one (its
+    /// `LOCK` is held, STO-10). Nothing was read or written; retry once the holder has
+    /// closed it. The text names the directory and, when known, the holder's pid.
+    #[error("{0}")]
+    Locked(String),
 }
 
 /// Compute handler errors

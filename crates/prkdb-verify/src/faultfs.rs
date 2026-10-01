@@ -28,7 +28,7 @@
 //!   in between the check and the operation.
 
 use parking_lot::Mutex;
-use prkdb_core::vfs::{OpenMode, Vfs, VfsFile};
+use prkdb_core::vfs::{LockGuard, OpenMode, Vfs, VfsFile};
 use rand::Rng;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -125,6 +125,11 @@ struct State {
     /// instead of silently operating on a different logical generation of
     /// the file.
     epoch: u64,
+    /// `Vfs::lock_exclusive` locks held, by path, each with the token of the guard that
+    /// holds it. Process-level state, not filesystem state: `power_loss` (the process
+    /// is gone) clears it, the way the OS releases a dead process's locks.
+    locks: BTreeMap<PathBuf, u64>,
+    next_lock: u64,
 }
 
 #[derive(Clone, Default)]
@@ -308,6 +313,7 @@ impl FaultFs {
     pub fn power_loss(&self, rng: &mut impl Rng, tear: Tear) {
         let mut s = self.state.lock();
         s.epoch += 1;
+        s.locks.clear();
 
         // Directory durability: BFS from the filesystem root(s) (paths with
         // no parent) down through `durable_children`.
@@ -358,6 +364,25 @@ impl FaultFs {
             // uncertainty about this truncation is now resolved: don't let a
             // *later* power loss re-roll the same already-settled event.
             c.truncated_since_sync = None;
+        }
+    }
+}
+
+/// A held `lock_exclusive` lock. Dropping it releases the lock only if it is still this
+/// guard's: after a `power_loss` another holder may have taken the path.
+struct FaultLock {
+    state: Arc<Mutex<State>>,
+    path: PathBuf,
+    token: u64,
+}
+
+impl LockGuard for FaultLock {}
+
+impl Drop for FaultLock {
+    fn drop(&mut self) {
+        let mut s = self.state.lock();
+        if s.locks.get(&self.path) == Some(&self.token) {
+            s.locks.remove(&self.path);
         }
     }
 }
@@ -568,6 +593,38 @@ impl Vfs for FaultFs {
             .collect();
         s.durable_children.insert(dir.to_path_buf(), entries);
         Ok(())
+    }
+    fn lock_exclusive(&self, path: &Path) -> io::Result<Box<dyn LockGuard>> {
+        let mut s = self.state.lock();
+        match s.live.get(path) {
+            Some(Entry::Dir) => return Err(is_directory(path)),
+            Some(Entry::File(_)) => {}
+            None => {
+                // Created like `create` creates a new file: an unsynced directory entry.
+                let parent_dir = parent(path);
+                if !matches!(s.live.get(&parent_dir), Some(Entry::Dir)) {
+                    return Err(not_found(&parent_dir));
+                }
+                let inode = s.next_inode;
+                s.next_inode += 1;
+                s.inodes.insert(inode, Content::default());
+                s.live.insert(path.to_path_buf(), Entry::File(inode));
+            }
+        }
+        if s.locks.contains_key(path) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!("{} is locked", path.display()),
+            ));
+        }
+        let token = s.next_lock;
+        s.next_lock += 1;
+        s.locks.insert(path.to_path_buf(), token);
+        Ok(Box::new(FaultLock {
+            state: self.state.clone(),
+            path: path.to_path_buf(),
+            token,
+        }))
     }
 }
 

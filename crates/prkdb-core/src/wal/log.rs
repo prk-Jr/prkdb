@@ -1374,6 +1374,12 @@ mod tests {
         fn sync_dir(&self, d: &Path) -> std::io::Result<()> {
             StdVfs.sync_dir(d)
         }
+        fn lock_exclusive(
+            &self,
+            p: &Path,
+        ) -> std::io::Result<Box<dyn crate::vfs::LockGuard>> {
+            StdVfs.lock_exclusive(p)
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
