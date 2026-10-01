@@ -1451,6 +1451,49 @@ mod tests {
         assert_eq!(seen, vec![(1, b"hello".to_vec())]);
     }
 
+    /// The drop guard, in isolation: a request destroyed without an answer (writer panic,
+    /// queue teardown) answers `Err(Closed)` rather than closing the channel silently, so
+    /// its caller is never left with a bare `oneshot` cancellation. (Moved here from the
+    /// adapter's `PendingWrite` tests in Task 2.8c.)
+    #[test]
+    fn dropping_an_unanswered_reply_answers_closed() {
+        let (tx, mut rx) = oneshot::channel();
+        drop(Reply(Some(tx)));
+        match rx.try_recv() {
+            Ok(Err(WalError::Closed)) => {}
+            other => panic!("the drop guard must answer Closed, got {other:?}"),
+        }
+    }
+
+    /// The other direction: once the sender has been taken out, the guard sends nothing,
+    /// or every answered request would race its own destructor.
+    #[test]
+    fn a_reply_whose_sender_was_taken_sends_nothing() {
+        let (tx, mut rx) = oneshot::channel::<Result<RecordLoc, WalError>>();
+        let mut reply = Reply(Some(tx));
+        let taken = reply.0.take().expect("the reply holds its sender");
+        drop(reply);
+        assert!(
+            matches!(rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "a disarmed guard must not answer"
+        );
+
+        // `answer` is the production way to take it: the caller sees that answer only.
+        drop(taken);
+        let (tx, mut rx) = oneshot::channel();
+        let loc = RecordLoc {
+            lsn: 7,
+            segment: 1,
+            offset: SEGMENT_HEADER_LEN,
+            payload_len: 3,
+        };
+        Reply(Some(tx)).answer(Ok(loc));
+        match rx.try_recv() {
+            Ok(Ok(got)) => assert_eq!(got, loc),
+            other => panic!("the answer must arrive, not the guard's Closed: {other:?}"),
+        }
+    }
+
     #[test]
     fn append_blocking_and_sync_blocking_work_on_a_current_thread_runtime() {
         let rt = tokio::runtime::Builder::new_current_thread()

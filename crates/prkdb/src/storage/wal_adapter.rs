@@ -1,8 +1,8 @@
 use super::cache::ShardedLruCache;
-use super::config::{StorageConfig, SyncMode};
+use super::config::{CompactionConfig, StorageConfig, SyncMode};
 use super::recovery::RecoveryManager;
 use super::snapshot::SnapshotWriter;
-use super::writer_liveness::{unix_millis, LivenessBounds, WriterFailure};
+use super::writer_liveness::{unix_millis, LivenessBounds};
 use prkdb_types::snapshot::{CompressionType, SnapshotHeader};
 
 use papaya::HashMap as LockFreeHashMap;
@@ -10,7 +10,6 @@ use prkdb_core::batching::adaptive::AdaptiveBatchConfig;
 use prkdb_core::replication::{Change, ReplicationManager};
 use prkdb_core::vfs::{StdVfs, Vfs};
 use prkdb_core::wal::batch::{Batch, BatchOp};
-use prkdb_core::wal::compaction::CompactionConfig;
 use prkdb_core::wal::frame::FrameKind;
 use prkdb_core::wal::{
     CommitHook, LogOperation, LogRecord, Lsn, RecordLoc, Wal, WalConfig, WalError, WalHealth,
@@ -22,8 +21,7 @@ use prkdb_types::storage::{StorageAdapter, WritePathHealth};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{oneshot, OwnedRwLockWriteGuard, RwLock};
-use tokio::task::AbortHandle;
+use tokio::sync::{OwnedRwLockWriteGuard, RwLock};
 use tracing::{info, instrument};
 
 /// Builder for WalStorageAdapter
@@ -111,14 +109,12 @@ pub(crate) mod fault_injection {
         static WRITER_STALL: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
         static WRITER_PANIC: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
         static APPEND_FAILURE: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-        static NO_WRITER: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
         let slot = match kind {
             Fault::FlushFailure => &FLUSH_FAILURE,
             Fault::WriterStall => &WRITER_STALL,
             Fault::WriterPanic => &WRITER_PANIC,
             Fault::AppendFailure => &APPEND_FAILURE,
-            Fault::WriterNeverStarted => &NO_WRITER,
         };
         slot.get_or_init(|| Mutex::new(HashSet::new()))
     }
@@ -136,7 +132,6 @@ pub(crate) mod fault_injection {
         WriterStall,
         WriterPanic,
         AppendFailure,
-        WriterNeverStarted,
     }
 
     fn arm(kind: Fault, dir: impl Into<PathBuf>) {
@@ -193,25 +188,6 @@ pub(crate) mod fault_injection {
 
     fn append_should_fail(dir: &Path) -> bool {
         armed(Fault::AppendFailure, dir)
-    }
-
-    /// Open an adapter whose writer subsystem never starts.
-    ///
-    /// The single WAL always starts its writer thread with the log, so this seam has no
-    /// equivalent any more; Task 2.8c deletes it.
-    #[allow(dead_code, reason = "wired to the Vfs wrapper in Task 2.8b")]
-    pub fn never_start_writer_at(dir: impl Into<PathBuf>) {
-        arm(Fault::WriterNeverStarted, dir);
-    }
-
-    #[allow(dead_code, reason = "wired to the Vfs wrapper in Task 2.8b")]
-    pub fn clear_never_start_writer(dir: &Path) {
-        disarm(Fault::WriterNeverStarted, dir);
-    }
-
-    #[allow(dead_code, reason = "wired to the Vfs wrapper in Task 2.8b")]
-    pub(super) fn writer_should_not_start(dir: &Path) -> bool {
-        armed(Fault::WriterNeverStarted, dir)
     }
 
     /// Make the writer's `write_at` block until [`clear_writer_stall`], with the writer
@@ -442,71 +418,6 @@ pub(crate) mod fault_injection {
 #[derive(Clone)]
 pub struct WalStorageAdapter {
     inner: Arc<WalStorageInner>,
-}
-
-/// One client write waiting for the flush loop to publish it.
-///
-/// The flush loop is gone (Task 2.8a); `Wal`'s own `Reply` drop guard replaces this, and
-/// its tests move to `log.rs` in Task 2.8c.
-#[allow(dead_code)] // deleted in Task 2.8c
-struct PendingWrite {
-    record: Option<LogRecord>,
-    tx: Option<oneshot::Sender<Result<u64, StorageError>>>,
-}
-
-#[allow(dead_code)] // deleted in Task 2.8c
-impl PendingWrite {
-    fn new(record: LogRecord) -> (Self, oneshot::Receiver<Result<u64, StorageError>>) {
-        let (tx, rx) = oneshot::channel();
-        (
-            Self {
-                record: Some(record),
-                tx: Some(tx),
-            },
-            rx,
-        )
-    }
-
-    /// The collection this write belongs to, for the flush loop's grouping pass.
-    fn operation(&self) -> &LogOperation {
-        &self
-            .record
-            .as_ref()
-            .expect("PendingWrite still holds its record until into_parts")
-            .operation
-    }
-
-    /// Split into the record to write and the sender to answer, disarming the drop guard.
-    fn into_parts(
-        mut self,
-    ) -> (
-        LogRecord,
-        Option<oneshot::Sender<Result<u64, StorageError>>>,
-    ) {
-        let record = self
-            .record
-            .take()
-            .expect("PendingWrite::into_parts called once");
-        (record, self.tx.take())
-    }
-}
-
-impl Drop for PendingWrite {
-    fn drop(&mut self) {
-        if let Some(tx) = self.tx.take() {
-            let _ = tx.send(Err(StorageError::WriteNotConfirmed(
-                "the queued write was discarded before its outcome was known".to_string(),
-            )));
-        }
-    }
-}
-
-/// Handles for the flush loop and the task that supervised it. Unused since Task 2.8a:
-/// the WAL's writer is a thread the `Wal` owns and joins itself.
-#[allow(dead_code)] // deleted in Task 2.8c
-struct WriterTasks {
-    flush_loop: AbortHandle,
-    supervisor: AbortHandle,
 }
 
 /// Write-path accounting for [`WalStorageAdapter::write_path_health`], updated by the
@@ -1233,18 +1144,6 @@ impl WalStorageAdapter {
         Ok(max_offset)
     }
 
-    /// What to log about a discharge, or `None` when there is nothing worth saying.
-    /// Unused since the flush loop went (Task 2.8a).
-    #[allow(dead_code)] // deleted in Task 2.8c
-    fn discharge_report(discharged: u64, failure: &WriterFailure) -> Option<String> {
-        (discharged > 0).then(|| {
-            format!(
-                "Discharged {} unpublished write(s) with a not-confirmed result: {}",
-                discharged, failure
-            )
-        })
-    }
-
     /// State of the write path, for health and readiness probes.
     ///
     /// Computed on demand from the WAL's own state and a few atomics: there is no
@@ -1519,6 +1418,23 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(adapter.inner.cache.capacity(), 1_600);
+    }
+
+    /// `with_compaction_config` takes `prkdb::storage::CompactionConfig` (Task 2.8c moved
+    /// it out of `prkdb-core`'s compaction module, which Task 2.9 deletes) and keeps it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_builder_keeps_the_compaction_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let wanted = crate::storage::CompactionConfig {
+            min_wal_size_bytes: 1,
+            min_interval: Duration::from_secs(1),
+            keep_segments: 7,
+        };
+        let adapter = WalStorageAdapter::builder(dir.path().to_path_buf())
+            .with_compaction_config(wanted.clone())
+            .build()
+            .unwrap();
+        assert_eq!(adapter.inner.config.compaction, wanted);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2330,48 +2246,6 @@ mod tests {
             },
             ..StorageConfig::default()
         }
-    }
-
-    /// The drop guard, in isolation. This is what makes the `oneshot canceled` handler
-    /// reachable for the first time: before it, a queued write destroyed without a result
-    /// closed its channel silently and no path in the program guaranteed even that.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn dropping_a_queued_write_answers_its_caller() {
-        let (pending, rx) = PendingWrite::new(LogRecord::new(LogOperation::Delete {
-            collection: String::new(),
-            id: b"k".to_vec(),
-        }));
-
-        drop(pending);
-
-        let result = rx
-            .await
-            .expect("the drop guard must send a result, not close the channel");
-        let error = result.expect_err("a dropped write cannot report an offset");
-        assert!(
-            error.is_write_unconfirmed(),
-            "a dropped write may already have reached the log, got: {error}"
-        );
-    }
-
-    /// The other direction: a write the publisher has taken responsibility for must not
-    /// also be answered by the guard, or every successful write would race its own
-    /// destructor.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn taking_a_write_apart_disarms_the_drop_guard() {
-        let (pending, rx) = PendingWrite::new(LogRecord::new(LogOperation::Delete {
-            collection: String::new(),
-            id: b"k".to_vec(),
-        }));
-
-        let (_record, tx) = pending.into_parts();
-        let tx = tx.expect("into_parts hands the sender to the publisher");
-        drop(tx);
-
-        assert!(
-            rx.await.is_err(),
-            "into_parts must transfer the obligation, not duplicate it"
-        );
     }
 
     /// A healthy adapter under tight bounds must not be reported as stalled. A detector
