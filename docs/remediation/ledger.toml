@@ -113,8 +113,8 @@ phase = 2
 status = "fixed"
 sources = ["audit-2026-09-23#13", "review-2026-09-07#R01"]
 evidence = ["crates/prkdb/src/indexed_storage.rs:4280-4287,5273-5276"]
-regression_tests = ["test:crates/prkdb/tests/tripwires.rs::key01_collections_with_same_id_are_independent", "test:crates/prkdb/tests/key_codec.rs::catalog_ids_survive_restart", "test:crates/prkdb/tests/key_codec.rs::concurrent_first_use_from_two_catalogs_allocates_each_name_once"]
-changes = ["3c47a77"]
+regression_tests = ["test:crates/prkdb/tests/tripwires.rs::key01_collections_with_same_id_are_independent", "test:crates/prkdb/tests/key_codec.rs::catalog_ids_survive_restart", "test:crates/prkdb/tests/key_codec.rs::concurrent_first_use_from_two_catalogs_allocates_each_name_once", "test:crates/prkdb/tests/key_codec.rs::a_second_type_for_a_pinned_name_is_refused", "test:crates/prkdb/tests/key_codec.rs::generic_instantiations_sharing_a_default_name_are_refused", "test:crates/prkdb/tests/key_codec.rs::a_record_written_by_name_is_read_by_type_and_vice_versa", "test:crates/prkdb/tests/key_codec.rs::a_range_scan_returns_exactly_the_id_range_in_order"]
+changes = ["3c47a77", "35c9c39", "608e9bf", "d362199"]
 
 [[finding]]
 id = "KEY-02"
