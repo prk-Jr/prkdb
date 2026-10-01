@@ -81,7 +81,9 @@ async fn recovery_from_a_checkpoint_equals_full_replay() {
                         .await
                         .unwrap(),
                     6..=7 => db.delete(&key).await.unwrap(),
-                    8 => db.save_checkpoint().unwrap(),
+                    // Both entry points: the blocking one and its async wrapper.
+                    8 if i % 2 == 0 => db.save_checkpoint().unwrap(),
+                    8 => db.save_checkpoint_async().await.unwrap(),
                     _ => db
                         .put_batch(vec![
                             (key.clone(), vec![i as u8; 64]),
@@ -131,10 +133,7 @@ async fn a_checkpoint_taken_under_concurrent_writes_recovers_exactly() {
                 })
                 .collect();
             for _ in 0..10 {
-                let db = db.clone();
-                tokio::task::spawn_blocking(move || db.save_checkpoint().unwrap())
-                    .await
-                    .unwrap();
+                db.save_checkpoint_async().await.unwrap();
                 tokio::task::yield_now().await;
             }
             for w in writers {

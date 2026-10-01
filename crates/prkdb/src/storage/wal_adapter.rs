@@ -1057,6 +1057,9 @@ impl WalStorageAdapter {
     /// entry's LSN, so in `SyncMode::Fast` the snapshot never points at a frame a power
     /// cut could still take. The file is written atomically (see
     /// [`checkpoint::write_checkpoint`]) and replaces the previous one.
+    ///
+    /// Blocks the calling thread for the copy and the fsyncs; async callers use
+    /// [`Self::save_checkpoint_async`].
     pub fn save_checkpoint(&self) -> Result<(), StorageError> {
         let inner = &self.inner;
         let _one_at_a_time = inner.checkpointing.lock();
@@ -1097,6 +1100,20 @@ impl WalStorageAdapter {
             &entries,
         )?;
         Ok(())
+    }
+
+    /// [`Self::save_checkpoint`] for async callers: runs on tokio's blocking pool, so the
+    /// index copy, the encode and the fsyncs do not hold a runtime worker. Outside a tokio
+    /// runtime it runs inline (there is no worker to protect, and no pool to run on).
+    pub async fn save_checkpoint_async(&self) -> Result<(), StorageError> {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return self.save_checkpoint();
+        };
+        let this = self.clone();
+        runtime
+            .spawn_blocking(move || this.save_checkpoint())
+            .await
+            .map_err(|e| StorageError::Internal(format!("checkpoint task failed: {e}")))?
     }
 
     /// What the open that created this adapter did to rebuild its index: the checkpoint

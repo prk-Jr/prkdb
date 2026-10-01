@@ -73,7 +73,7 @@ async fn sto01_checkpoint_keeps_pre_checkpoint_keys() {
             a.put(&[b'k', i], b"v").await.unwrap();
         }
         a.flush().await.unwrap();
-        a.save_checkpoint().unwrap();
+        a.save_checkpoint_async().await.unwrap();
         a.put(b"after", b"checkpoint").await.unwrap();
     }
     let b = WalStorageAdapter::open_async(wal_config(dir.path()))

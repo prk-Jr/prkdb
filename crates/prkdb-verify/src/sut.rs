@@ -118,7 +118,7 @@ impl Sut for WalSut {
     }
     async fn checkpoint(&mut self) -> anyhow::Result<()> {
         self.db().flush().await?;
-        Ok(self.db().save_checkpoint()?)
+        Ok(self.db().save_checkpoint_async().await?)
     }
 }
 
@@ -228,7 +228,7 @@ impl Sut for FaultSut {
         self.open().await
     }
     async fn checkpoint(&mut self) -> anyhow::Result<()> {
-        Ok(self.db().save_checkpoint()?)
+        Ok(self.db().save_checkpoint_async().await?)
     }
     async fn power_loss(&mut self, tear: Tear, fault_seed: u64) -> anyhow::Result<()> {
         // The loss comes first: the adapter's handles are stale afterwards, so
