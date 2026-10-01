@@ -311,6 +311,15 @@ impl StorageAdapter for SledAdapter {
         Ok(res)
     }
 
+    async fn count_prefix(&self, prefix: &[u8]) -> Result<usize, StorageError> {
+        let mut n = 0;
+        for key in self.kv.scan_prefix(prefix).keys() {
+            key.map_err(|e| StorageError::BackendError(e.to_string()))?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
     async fn scan_range(
         &self,
         start: &[u8],

@@ -456,6 +456,15 @@ impl StorageAdapter for SegmentedLogAdapter {
         Ok(())
     }
 
+    async fn count_prefix(&self, prefix: &[u8]) -> Result<usize, StorageError> {
+        let guard = self.inner.lock().await;
+        Ok(guard
+            .index
+            .iter()
+            .filter(|(k, v)| v.is_some() && k.starts_with(prefix))
+            .count())
+    }
+
     async fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
         let guard = self.inner.lock().await;
         let mut items: Vec<_> = guard

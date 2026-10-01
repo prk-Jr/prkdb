@@ -6348,16 +6348,15 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     ///
     /// Uses lock-free DashMap for concurrent access.
     pub async fn count<T: Indexed + Collection>(&self) -> Result<usize, StorageError> {
-        // A prefix scan of the collection: the in-memory indexes miss records that have no
-        // indexed field, and everything written before a restart.
+        // A key-only count of the collection's prefix: the in-memory indexes miss records
+        // that have no indexed field, and everything written before a restart; reading
+        // every value just to count them would make `count` a full scan.
         let Some(coll) = self.catalog.lookup(&T::persisted_name()).await? else {
             return Ok(0);
         };
-        Ok(self
-            .storage
-            .scan_prefix(&collection_prefix(&[], coll))
-            .await?
-            .len())
+        self.storage
+            .count_prefix(&collection_prefix(&[], coll))
+            .await
     }
 
     /// Get detailed index statistics for a collection
@@ -7586,5 +7585,48 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    /// An adapter that can count keys but refuses to read values by prefix.
+    struct CountOnly(crate::storage::InMemoryAdapter);
+
+    #[async_trait::async_trait]
+    impl StorageAdapter for CountOnly {
+        async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+            self.0.get(key).await
+        }
+        async fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+            self.0.put(key, value).await
+        }
+        async fn delete(&self, key: &[u8]) -> Result<(), StorageError> {
+            self.0.delete(key).await
+        }
+        async fn scan_prefix(&self, _: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+            Err(StorageError::Internal("count must not read values".into()))
+        }
+        async fn count_prefix(&self, prefix: &[u8]) -> Result<usize, StorageError> {
+            self.0.count_prefix(prefix).await
+        }
+    }
+
+    /// Review M2: `count` counts keys (`count_prefix`) and never reads the collection's
+    /// values, and counts records with no indexed field too.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn count_is_key_only() {
+        let indexed =
+            IndexedStorage::new(Arc::new(CountOnly(crate::storage::InMemoryAdapter::new())));
+        assert_eq!(indexed.count::<Person>().await.unwrap(), 0);
+        for i in 0..5 {
+            indexed
+                .insert(&Person {
+                    id: i.to_string(),
+                    age: i,
+                    name: format!("p{i}"),
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(indexed.count::<Person>().await.unwrap(), 5);
+        assert_eq!(indexed.count::<TestUser>().await.unwrap(), 0);
     }
 }

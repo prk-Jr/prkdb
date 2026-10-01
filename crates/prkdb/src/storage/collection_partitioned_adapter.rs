@@ -430,6 +430,10 @@ impl StorageAdapter for CollectionPartitionedAdapter {
         self.inner.scan_prefix(prefix).await
     }
 
+    async fn count_prefix(&self, prefix: &[u8]) -> Result<usize, StorageError> {
+        self.inner.count_prefix(prefix).await
+    }
+
     async fn scan_range(
         &self,
         start: &[u8],

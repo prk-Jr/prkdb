@@ -123,6 +123,13 @@ impl StorageAdapter for InMemoryAdapter {
         Ok(res)
     }
 
+    async fn count_prefix(&self, prefix: &[u8]) -> Result<usize, StorageError> {
+        let m = self.inner.read().await;
+        Ok(m.iter()
+            .filter(|entry| entry.key().starts_with(prefix))
+            .count())
+    }
+
     async fn scan_range(
         &self,
         start: &[u8],

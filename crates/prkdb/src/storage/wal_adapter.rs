@@ -1314,6 +1314,12 @@ impl StorageAdapter for WalStorageAdapter {
         self.read_all(hits).await
     }
 
+    /// From the in-memory index alone: no WAL read, no value copied.
+    async fn count_prefix(&self, prefix: &[u8]) -> Result<usize, StorageError> {
+        let pinned = self.inner.index.pin();
+        Ok(pinned.keys().filter(|key| key.starts_with(prefix)).count())
+    }
+
     /// Every change in the log after `offset` (an LSN), one per op, in LSN order. Reads
     /// acknowledged frames (`Wal::scan_from`), so a Fast-mode write is visible to a
     /// consumer as soon as it is acknowledged.
@@ -1424,6 +1430,29 @@ mod tests {
 
         // Clean up
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Review M2: `count_prefix` counts live keys from the index, deletes included, and
+    /// agrees with a prefix scan.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn count_prefix_counts_live_keys_from_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = WalStorageAdapter::new(WalConfig {
+            log_dir: dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        })
+        .unwrap();
+        for i in 0..10u8 {
+            adapter.put(&[b'p', i], b"v").await.unwrap();
+        }
+        adapter.put(b"q", b"v").await.unwrap();
+        adapter.delete(&[b'p', 3]).await.unwrap();
+        assert_eq!(adapter.count_prefix(b"p").await.unwrap(), 9);
+        assert_eq!(
+            adapter.count_prefix(b"p").await.unwrap(),
+            adapter.scan_prefix(b"p").await.unwrap().len()
+        );
+        assert_eq!(adapter.count_prefix(b"").await.unwrap(), 10);
     }
 
     #[tokio::test(flavor = "multi_thread")]

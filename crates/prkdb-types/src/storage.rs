@@ -187,6 +187,15 @@ pub trait StorageAdapter: Send + Sync + 'static {
     }
 
     /// Optional: scan a half-open key range [start, end) (lexicographic).
+    /// How many live keys start with `prefix`, without reading their values.
+    ///
+    /// The default counts a [`scan_prefix`](Self::scan_prefix), which reads every value;
+    /// an adapter that can count from its keys alone (an in-memory index, `COUNT(*)`)
+    /// overrides it, because counting a collection must not cost a full read of it.
+    async fn count_prefix(&self, prefix: &[u8]) -> Result<usize, StorageError> {
+        Ok(self.scan_prefix(prefix).await?.len())
+    }
+
     async fn scan_range(
         &self,
         _start: &[u8],
