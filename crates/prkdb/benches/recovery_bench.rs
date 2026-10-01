@@ -2,7 +2,9 @@
 //!
 //! Writes `RECOVERY_BENCH_BYTES` (default: 1 GiB) of 1 KiB values via `put_batch`,
 //! flushes, then times `WalStorageAdapter::open_async` re-reading and rebuilding the
-//! index from that WAL. The write phase runs once, outside the measured region; each
+//! index from that WAL (`open_async_after_large_wal`: full replay), then again after
+//! an index checkpoint at the log's tail (`open_async_after_checkpoint_at_tail`, Task
+//! 2.14). The write phase runs once, outside the measured region; each
 //! measured iteration reopens the same (unmodified) directory, since recovery is
 //! read-only.
 //!
@@ -74,7 +76,46 @@ fn bench_recovery(c: &mut Criterion) {
     // within the harness's time budget while still giving Criterion a spread to report.
     group.sample_size(10);
 
+    // Full replay: no checkpoint exists yet.
+    let full = rt
+        .block_on(WalStorageAdapter::open_async(config.clone()))
+        .expect("open");
+    assert_eq!(
+        full.last_recovery().checkpoint_lsn,
+        None,
+        "full replay measured"
+    );
+    drop(full);
     group.bench_function("open_async_after_large_wal", |b| {
+        b.to_async(&rt).iter(|| async {
+            let adapter = WalStorageAdapter::open_async(config.clone())
+                .await
+                .expect("recovery succeeds");
+            drop(adapter);
+        });
+    });
+
+    // Task 2.14: the same log with an index checkpoint at its tail. Every segment is
+    // still scanned and CRC-checked; only the replay into the index is skipped.
+    let ckpt = rt
+        .block_on(WalStorageAdapter::open_async(config.clone()))
+        .expect("open");
+    ckpt.save_checkpoint().expect("checkpoint at the tail");
+    drop(ckpt);
+    let check = rt
+        .block_on(WalStorageAdapter::open_async(config.clone()))
+        .expect("open");
+    assert!(
+        check.last_recovery().checkpoint_lsn.is_some(),
+        "checkpoint measured"
+    );
+    assert_eq!(
+        check.last_recovery().frames_replayed,
+        0,
+        "nothing after the checkpoint"
+    );
+    drop(check);
+    group.bench_function("open_async_after_checkpoint_at_tail", |b| {
         b.to_async(&rt).iter(|| async {
             let adapter = WalStorageAdapter::open_async(config.clone())
                 .await

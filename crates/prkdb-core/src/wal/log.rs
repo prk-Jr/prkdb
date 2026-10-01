@@ -148,6 +148,27 @@ impl Shared {
     }
 }
 
+/// Blocks the calling thread on `fut`, outside tokio's cooperative budget.
+///
+/// Every blocking wait in this file (`append_blocking`, `sync_blocking`, the close in
+/// `Drop`) waits on tokio primitives (the admission `Semaphore`, reply `oneshot`s) with
+/// `futures::executor::block_on`. When the caller is a tokio task, those primitives charge
+/// the task's cooperative budget. Once it is spent, each of their polls answers `Pending`
+/// and wakes itself so the task yields back to the runtime, which refills the budget. But
+/// `block_on` is not the runtime: it re-polls on the wake, gets `Pending` again, and spins
+/// forever on that worker. A task reaches an empty budget after about 128 ready awaits in
+/// a row, so a checkpoint or a drop after a burst of writes hung.
+///
+/// `tokio::task::unconstrained` turns budgeting off for the wrapped future, which is what
+/// a blocking wait means anyway: it gives the runtime nothing back until it returns. It
+/// fixes all three waits in one place and keeps them on the same async code as their
+/// `async` versions. Replacing the replies with `std::sync::mpsc` would fix the oneshots
+/// only: `append_blocking` also waits on the admission semaphore, which would need a
+/// second, std-based admission path. Outside a runtime, `unconstrained` is a no-op.
+fn block_on_unbudgeted<F: std::future::Future>(fut: F) -> F::Output {
+    futures::executor::block_on(tokio::task::unconstrained(fut))
+}
+
 /// Admission permits for one payload of `len` bytes. Nothing is queued yet: dropping a
 /// `Reservation` returns the permits and leaves no trace in the log.
 pub struct Reservation {
@@ -506,8 +527,8 @@ impl Wal {
     }
 
     /// For callers that are not async (checkpoint, compaction, tests). Waits with
-    /// `futures::executor::block_on` on the same `reserve`/`PendingAppend` futures; never
-    /// with tokio's `blocking_recv`/`blocking_lock`, which panic when called from inside a
+    /// [`block_on_unbudgeted`] on the same `reserve`/`PendingAppend` futures; never with
+    /// tokio's `blocking_recv`/`blocking_lock`, which panic when called from inside a
     /// runtime. Safe on a runtime worker thread because the writer is a `std::thread`, not
     /// a task that this blocked worker would have to run; it only blocks that worker for
     /// the duration of the write.
@@ -516,7 +537,7 @@ impl Wal {
         payload: Vec<u8>,
         hook: Option<CommitHook>,
     ) -> Result<RecordLoc, WalError> {
-        futures::executor::block_on(self.append(payload, hook))
+        block_on_unbudgeted(self.append(payload, hook))
     }
 
     /// Makes every write acknowledged so far durable; returns the durable watermark.
@@ -529,10 +550,10 @@ impl Wal {
         rx.await.unwrap_or(Err(WalError::Closed))
     }
 
-    /// `sync` for non-async callers; waits with `futures::executor::block_on` (see
+    /// `sync` for non-async callers; waits with [`block_on_unbudgeted`] (see
     /// `append_blocking`).
     pub fn sync_blocking(&self) -> Result<Lsn, WalError> {
-        futures::executor::block_on(self.sync())
+        block_on_unbudgeted(self.sync())
     }
 
     pub fn read(&self, loc: RecordLoc) -> Result<Vec<u8>, WalError> {
@@ -660,7 +681,7 @@ impl Wal {
         if let Some(sender) = self.sender.take() {
             let (tx, rx) = oneshot::channel();
             if sender.send(Request::Close { reply: tx }).is_ok() {
-                result = futures::executor::block_on(rx).unwrap_or(Err(WalError::Closed));
+                result = block_on_unbudgeted(rx).unwrap_or(Err(WalError::Closed));
             }
             drop(sender);
         }

@@ -1,6 +1,7 @@
 use super::cache::ShardedLruCache;
+use super::checkpoint;
 use super::config::{CompactionConfig, StorageConfig, SyncMode};
-use super::recovery::RecoveryManager;
+use super::recovery::{open_and_recover, RecoveryManager, RecoveryStats};
 use super::snapshot::SnapshotWriter;
 use super::writer_liveness::{unix_millis, LivenessBounds};
 use prkdb_types::snapshot::{CompressionType, SnapshotHeader};
@@ -417,7 +418,9 @@ pub(crate) mod fault_injection {
 /// sync in `SyncMode::Durable`. The frame's keys are published into the in-memory index
 /// by a commit hook that the WAL's writer thread runs in LSN order, after the frame is
 /// durable (`Durable`) or written (`Fast`), so the live index always equals what recovery
-/// would rebuild from the same log (STO-03). Recovery is a full replay of the log.
+/// would rebuild from the same log (STO-03). Recovery loads the newest valid index
+/// checkpoint ([`Self::save_checkpoint`]) and replays the frames after it, or replays the
+/// whole log when there is none ([`Self::last_recovery`] says which).
 #[derive(Clone)]
 pub struct WalStorageAdapter {
     inner: Arc<WalStorageInner>,
@@ -479,6 +482,12 @@ struct WalStorageInner {
     transaction_barrier: Arc<RwLock<()>>,
     bounds: LivenessBounds,
     recovery: Arc<RecoveryManager>,
+    /// The filesystem the log lives on; checkpoints are written through it too.
+    vfs: Arc<dyn Vfs>,
+    /// One `save_checkpoint` at a time (they share the temp file name for a given LSN).
+    checkpointing: parking_lot::Mutex<()>,
+    /// What the open that created this adapter did to rebuild the index.
+    last_recovery: RecoveryStats,
     progress: Arc<PublishProgress>,
     /// The data-directory lock (STO-10). Last, so it drops after `wal`, whose drop closes
     /// the log and joins its writer: nothing writes the directory once it is released.
@@ -621,39 +630,26 @@ impl WalStorageAdapter {
         // before an empty log could be opened next to it and make the database look wiped.
         super::format::ensure_format(vfs.as_ref(), &log_dir)?;
 
+        // Recovery (Task 2.14): the newest valid index checkpoint, then the frames after it;
+        // a full replay when there is none or it does not fit the log.
         let start = std::time::Instant::now();
         let index: LockFreeHashMap<Vec<u8>, RecordLoc> = LockFreeHashMap::new();
-        let (wal, report) = {
-            let pinned = index.pin();
-            let mut replay = |loc: RecordLoc, kind: FrameKind, payload: &[u8]| {
-                if kind != FrameKind::Batch {
-                    return Ok(());
-                }
-                for op in Batch::decode(payload)?.ops {
-                    match op {
-                        BatchOp::Put { key, .. } => {
-                            pinned.insert(key, loc);
-                        }
-                        BatchOp::Delete { key } => {
-                            pinned.remove(&key);
-                        }
-                    }
-                }
-                Ok(())
-            };
-            Wal::open(
-                vfs.clone(),
-                &log_dir,
-                WalOptions::from_config(&config.wal),
-                1,
-                &mut replay,
-            )
-            .map_err(wal_err)?
-        };
+        let (wal, recovered) = open_and_recover(
+            vfs.clone(),
+            &log_dir,
+            WalOptions::from_config(&config.wal),
+            &index,
+        )
+        .map_err(wal_err)?;
         info!(
-            "Replayed {} frame(s) from {} segment(s) in {:?}",
-            report.frames,
-            report.segments,
+            checkpoint_lsn = ?recovered.checkpoint_lsn,
+            checkpoint_entries = recovered.checkpoint_entries,
+            frames_replayed = recovered.frames_replayed,
+            frames_scanned = recovered.frames_scanned,
+            truncated = ?recovered.truncated,
+            rejected_checkpoints = recovered.rejected_checkpoints.len(),
+            "recovered {} in {:?}",
+            log_dir.display(),
             start.elapsed()
         );
 
@@ -673,7 +669,10 @@ impl WalStorageAdapter {
             metrics,
             transaction_barrier: Arc::new(RwLock::new(())),
             bounds: LivenessBounds::from_max_flush_ms(config.batching.max_flush_ms),
-            recovery: Arc::new(RecoveryManager::new(vfs, log_dir)),
+            recovery: Arc::new(RecoveryManager::new(vfs.clone(), log_dir)),
+            vfs,
+            checkpointing: parking_lot::Mutex::new(()),
+            last_recovery: recovered,
             progress: Arc::new(PublishProgress::default()),
             config,
             _lock: lock,
@@ -1043,14 +1042,85 @@ impl WalStorageAdapter {
         self.inner.config.wal.log_dir.clone()
     }
 
-    /// Makes everything acknowledged so far durable, and nothing else yet.
+    /// Makes everything acknowledged so far durable, then writes a snapshot of the index
+    /// so the next open replays only the frames after it (Task 2.14).
     ///
-    /// Recovery replays the whole log, which is always correct; the old JSON checkpoint
-    /// let recovery skip keys written before it (STO-01) and is no longer written or read.
-    /// Task 2.14 adds a checkpoint that is an index snapshot.
+    /// The snapshot is fuzzy, and writers are never paused: `covered` is the highest
+    /// published LSN when the snapshot starts (every frame at or below it is reflected in
+    /// the index), then the index is copied while writes continue, so entries published
+    /// meanwhile may or may not be in it. Recovery replays every frame above `covered` on
+    /// top, in LSN order, which makes the result exactly the full replay's (spec 2d:
+    /// `recover(checkpoint, wal) == recover(∅, wal)`).
+    ///
+    /// Only durable frames are referenced: the log is synced after the copy and before the
+    /// file is written, and the sync's durable watermark must cover `covered` and every
+    /// entry's LSN, so in `SyncMode::Fast` the snapshot never points at a frame a power
+    /// cut could still take. The file is written atomically (see
+    /// [`checkpoint::write_checkpoint`]) and replaces the previous one.
+    ///
+    /// Blocks the calling thread for the copy and the fsyncs; async callers use
+    /// [`Self::save_checkpoint_async`].
     pub fn save_checkpoint(&self) -> Result<(), StorageError> {
-        self.inner.wal.sync_blocking().map_err(wal_err)?;
+        let inner = &self.inner;
+        let _one_at_a_time = inner.checkpointing.lock();
+
+        // Acquire pairs with the hook's Release store: every insert and remove of every
+        // frame up to `covered` is visible to the copy below.
+        let covered = inner.applied_lsn.load(Ordering::Acquire);
+        let mut entries: Vec<(Vec<u8>, RecordLoc)> = {
+            let pinned = inner.index.pin();
+            pinned
+                .iter()
+                .map(|(key, loc)| (key.clone(), *loc))
+                .collect()
+        };
+        // Sorted, so the same index always encodes to the same bytes.
+        entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
+        let durable = inner.wal.sync_blocking().map_err(wal_err)?;
+        let newest = entries
+            .iter()
+            .map(|(_, loc)| loc.lsn)
+            .max()
+            .unwrap_or(0)
+            .max(covered);
+        if durable < newest {
+            // Unreachable while hooks run on the writer thread before it serves the sync;
+            // checked because a checkpoint referencing a frame that is not durable would
+            // outlive that frame after a power cut.
+            return Err(StorageError::Internal(format!(
+                "checkpoint not written: the log is durable to LSN {durable}, but the \
+                 snapshot references LSN {newest}"
+            )));
+        }
+        checkpoint::write_checkpoint(
+            inner.vfs.as_ref(),
+            &inner.config.wal.log_dir,
+            covered,
+            &entries,
+        )?;
         Ok(())
+    }
+
+    /// [`Self::save_checkpoint`] for async callers: runs on tokio's blocking pool, so the
+    /// index copy, the encode and the fsyncs do not hold a runtime worker. Outside a tokio
+    /// runtime it runs inline (there is no worker to protect, and no pool to run on).
+    pub async fn save_checkpoint_async(&self) -> Result<(), StorageError> {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return self.save_checkpoint();
+        };
+        let this = self.clone();
+        runtime
+            .spawn_blocking(move || this.save_checkpoint())
+            .await
+            .map_err(|e| StorageError::Internal(format!("checkpoint task failed: {e}")))?
+    }
+
+    /// What the open that created this adapter did to rebuild its index: the checkpoint
+    /// it loaded (if any), how many frames it replayed, the torn tail it truncated, and
+    /// any checkpoint it ignored and why. Also logged at `info` on open.
+    pub fn last_recovery(&self) -> &RecoveryStats {
+        &self.inner.last_recovery
     }
 
     /// Take a full snapshot of the database
