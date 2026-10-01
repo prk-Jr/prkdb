@@ -632,18 +632,10 @@ impl WalStorageAdapter {
             log_dir.clone(),
         ));
 
-        // Until the FORMAT marker (Task 2.11): a format-1 directory holds the old mmap
-        // WAL, and opening a new log next to it would make the database look wiped.
-        let old_log = vfs
-            .exists(&log_dir.join("mmap_segment_0"))
-            .map_err(|e| StorageError::Internal(format!("{}: {e}", log_dir.display())))?;
-        if old_log {
-            return Err(StorageError::Corruption(format!(
-                "data directory {} was created by an older PrkDB (format 1); this version \
-                 reads format 2. See docs/guide/upgrade",
-                log_dir.display()
-            )));
-        }
+        // The open rules (spec 2b, D3): before `Wal::open`, so `FORMAT` exists before the
+        // first segment, and a format-1 directory (no `FORMAT`, old files) is refused
+        // before an empty log could be opened next to it and make the database look wiped.
+        super::format::ensure_format(vfs.as_ref(), &log_dir)?;
 
         let start = std::time::Instant::now();
         let index: LockFreeHashMap<Vec<u8>, RecordLoc> = LockFreeHashMap::new();

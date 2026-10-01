@@ -138,6 +138,13 @@ pub enum StorageError {
 
     #[error("Validation failed: {0}")]
     Validation(String),
+
+    /// The data directory is at a format this build does not read (spec 2b, D3): no
+    /// `FORMAT` file on a non-empty directory (format 1), or a `FORMAT` naming another
+    /// version. The text names the format found and points at the upgrade guide; nothing
+    /// was written to the directory.
+    #[error("{0}")]
+    UnsupportedFormat(String),
 }
 
 /// Compute handler errors
