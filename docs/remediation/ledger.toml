@@ -34,8 +34,8 @@ evidence = [
   "crates/prkdb-core/src/wal/mmap_log_segment.rs:279-281",
   "crates/prkdb/src/storage/wal_adapter.rs:497",
 ]
-regression_tests = ["test:crates/prkdb-verify/tests/power_loss.rs::durable_put_survives_power_loss", "test:crates/prkdb-verify/tests/wal_power_loss.rs::durable_acks_survive_power_loss_with_any_tear", "test:crates/prkdb-core/tests/wal_log.rs::durable_appends_are_synced_before_the_ack", "test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_on_current_code", "test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_in_fast_mode"]
-changes = ["b7a45cb", "4f1783e", "d192525"]
+regression_tests = ["test:crates/prkdb-verify/tests/power_loss.rs::durable_put_survives_power_loss", "test:crates/prkdb-verify/tests/wal_power_loss.rs::durable_acks_survive_power_loss_with_any_tear", "test:crates/prkdb-core/tests/wal_log.rs::durable_appends_are_synced_before_the_ack", "test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_on_current_code", "test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_in_fast_mode", "test:crates/prkdb-core/tests/wal_log.rs::blocking_waits_finish_on_a_task_with_no_tokio_budget_left", "test:crates/prkdb-verify/tests/checkpoint.rs::a_checkpoint_and_drop_finish_on_a_task_with_no_tokio_budget_left"]
+changes = ["b7a45cb", "4f1783e", "d192525", "9ce3462"]
 
 [[finding]]
 id = "STO-03"
