@@ -1,6 +1,8 @@
 //! Tripwires assert that a known bug STILL EXISTS. They pass today and fail the
 //! moment the bug is fixed, forcing the fixer to invert them into regression tests
 //! and update docs/remediation/ledger.toml. See spec §4.1.
+//! Inverted tripwires stay here under their regression names, so the history of each
+//! finding is in one file.
 //!
 //! Tests that need a fresh process re-run this test binary as a child with
 //! PRKDB_TRIPWIRE_CHILD set; the child prints `CHILD_RESULT=<value>`.
@@ -61,9 +63,9 @@ fn wal_config(dir: &std::path::Path) -> WalConfig {
     }
 }
 
-/// STO-01: keys written before a checkpoint vanish after reopen.
+/// STO-01 regression (was the tripwire): keys written before a checkpoint survive reopen.
 #[tokio::test(flavor = "multi_thread")]
-async fn sto01_checkpoint_drops_pre_checkpoint_keys_tripwire() {
+async fn sto01_checkpoint_keeps_pre_checkpoint_keys() {
     let dir = tempfile::tempdir().unwrap();
     {
         let a = WalStorageAdapter::new(wal_config(dir.path())).unwrap();
@@ -72,24 +74,22 @@ async fn sto01_checkpoint_drops_pre_checkpoint_keys_tripwire() {
         }
         a.flush().await.unwrap();
         a.save_checkpoint().unwrap();
+        a.put(b"after", b"checkpoint").await.unwrap();
     }
     let b = WalStorageAdapter::open_async(wal_config(dir.path()))
         .await
         .unwrap();
-    // Checkpoint recovery replays only from `max_offset` onward, so every key
-    // written before the checkpoint is dropped on reopen. Count how many of the
-    // 5 keys survive rather than pinning exact indices: because all 5 keys route
-    // to the same segment (collection is "") and the recovery scan's bound is
-    // inclusive, asserting on a specific index (e.g. k0 vs k4) would fail for
-    // reasons unrelated to STO-01 itself (segment/routing changes, off-by-one
-    // fixes elsewhere) rather than tracking the bug this tripwire is for.
-    let mut recovered = 0;
     for i in 0..5u8 {
-        if b.get(&[b'k', i]).await.unwrap().is_some() {
-            recovered += 1;
-        }
+        assert_eq!(
+            b.get(&[b'k', i]).await.unwrap().as_deref(),
+            Some(&b"v"[..]),
+            "k{i}"
+        );
     }
-    assert!(recovered < 5, "STO-01 appears fixed: invert this tripwire");
+    assert_eq!(
+        b.get(b"after").await.unwrap().as_deref(),
+        Some(&b"checkpoint"[..])
+    );
 }
 
 #[derive(Collection, Serialize, Deserialize, Clone, Debug)]

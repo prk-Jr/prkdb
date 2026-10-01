@@ -3,14 +3,9 @@ use prkdb_core::wal::compaction::CompactionConfig;
 use prkdb_core::wal::WalConfig;
 use std::path::PathBuf;
 
-/// Synchronization mode for WAL writes
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SyncMode {
-    /// Durable mode: fsync after every write (safest, slower)
-    Durable,
-    /// Performance mode: rely on OS page cache and background flush (faster, less safe)
-    Performance,
-}
+/// When a write is acknowledged. One knob, on `WalConfig::sync_mode`: the old
+/// `StorageConfig::sync_mode` was a second setting nothing read (root cause 4, D12).
+pub use prkdb_core::wal::SyncMode;
 
 /// Configuration for the storage engine
 #[derive(Debug, Clone)]
@@ -21,14 +16,13 @@ pub struct StorageConfig {
     /// Cache capacity (number of items)
     pub cache_capacity: usize,
 
-    /// Compaction configuration
+    /// Compaction configuration. Not read until Task 2.15 adds compaction for the single
+    /// WAL: the old `Compactor` drove the mmap WAL, which the adapter no longer uses.
     pub compaction: CompactionConfig,
 
-    /// Batching configuration
+    /// Batching configuration. Only `max_flush_ms` is still read: the write path's
+    /// liveness bounds derive from it.
     pub batching: AdaptiveBatchConfig,
-
-    /// Synchronization mode
-    pub sync_mode: SyncMode,
 }
 
 impl StorageConfig {
@@ -42,7 +36,6 @@ impl StorageConfig {
             cache_capacity: 100_000, // Default 100k items for production workloads
             compaction: CompactionConfig::default(),
             batching: AdaptiveBatchConfig::default(),
-            sync_mode: SyncMode::Performance, // Default to performance for now
         }
     }
 }

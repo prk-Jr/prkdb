@@ -37,7 +37,6 @@ async fn main() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let config = WalConfig {
         log_dir: dir.path().to_path_buf(),
-        segment_count: 4,
         ..WalConfig::default()
     };
 
@@ -111,7 +110,6 @@ async fn main() -> anyhow::Result<()> {
     let dir2 = tempfile::tempdir()?;
     let config2 = WalConfig {
         log_dir: dir2.path().to_path_buf(),
-        segment_count: 4,
         ..WalConfig::default()
     };
     let wal2 = Arc::new(MmapParallelWal::create(config2, 4).await?);

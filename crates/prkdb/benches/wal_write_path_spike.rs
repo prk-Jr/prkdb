@@ -758,7 +758,10 @@ fn main() {
                                     log_dir: dir.clone(),
                                     ..WalConfig::test_config()
                                 };
-                                let n = cfg.segment_count;
+                                // The old `WalConfig::segment_count` default; the
+                                // field went with its last reader in Task 2.8a.
+                                const SEGMENTS: usize = 4;
+                                let n = SEGMENTS;
                                 Target::Mmap(
                                     MmapParallelWal::open_or_create(cfg, n)
                                         .await

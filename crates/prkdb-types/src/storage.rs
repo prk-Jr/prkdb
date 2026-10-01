@@ -39,15 +39,15 @@ pub struct WritePathHealth {
     /// second source incrementing it would mean a stalled writer never looks stalled for
     /// as long as any other traffic continues. See [`Self::direct_appends_total`].
     pub publishes_total: u64,
-    /// Writes appended straight to the log by `put` and `delete`, monotonic.
+    /// Writes appended straight to the log, bypassing the background writer, monotonic.
     ///
-    /// A separate series rather than part of `publishes_total`, for the reason given
-    /// there. These writes never enter the queue: they are appended synchronously and are
-    /// durable by the time the call returns, so they have no window in which they are
-    /// accepted but unpublished and nothing about them can stall.
+    /// Always `0` for `WalStorageAdapter` since Task 2.8a: every write now goes through
+    /// the single WAL's writer thread, so there is one path and `publishes_total` counts
+    /// all of it. The field stays so the probe's schema does not change.
     ///
-    /// Reported so that a deployment whose traffic is single puts is not indistinguishable
-    /// from an idle one. Before this, such a database showed zero publishes forever.
+    /// It was a separate series from `publishes_total`, for the reason given there, when
+    /// `put` and `delete` appended synchronously while `put_many` queued for a background
+    /// flush loop; it kept a single-put workload from looking like an idle database.
     pub direct_appends_total: u64,
 }
 

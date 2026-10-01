@@ -22,6 +22,13 @@ pub enum SyncMode {
     Fast,
 }
 
+impl SyncMode {
+    /// The old name for [`SyncMode::Fast`].
+    #[deprecated(note = "renamed to SyncMode::Fast")]
+    #[allow(non_upper_case_globals)]
+    pub const Performance: SyncMode = SyncMode::Fast;
+}
+
 /// Configuration for Write-Ahead Log
 #[derive(Debug, Clone)]
 pub struct WalConfig {
@@ -49,15 +56,6 @@ pub struct WalConfig {
 
     /// Max time to wait for batch flush (milliseconds, default: 10)
     pub flush_interval_ms: u64,
-
-    /// Number of parallel segments (default: 4)
-    pub segment_count: usize,
-
-    /// Number of WAL shards for parallel writes (default: 16)
-    /// Valid range: 1-32. Higher values = more parallelism but more overhead.
-    /// Recommended: 8-16 for most workloads, matching CPU core count.
-    /// Set to 1 to disable sharding (single WAL mode).
-    pub shard_count: Option<usize>,
 
     /// Workload profile (default: Balanced)
     pub workload_profile: WorkloadProfile,
@@ -87,8 +85,6 @@ impl Default for WalConfig {
             compression: CompressionConfig::default(), // LZ4 by default
             batch_size: 100,
             flush_interval_ms: 10,
-            segment_count: 4,
-            shard_count: Some(16), // 16 WAL shards for maximum parallelism
             workload_profile: WorkloadProfile::Balanced,
             adaptive_config: AdaptiveBatchConfig::default(),
             sync_mode: SyncMode::Durable,
@@ -121,8 +117,6 @@ impl WalConfig {
             compression: CompressionConfig::none(),
             batch_size: 10,
             flush_interval_ms: 10,
-            segment_count: 4,
-            shard_count: Some(4), // Fewer shards for testing
             workload_profile: WorkloadProfile::Balanced,
             adaptive_config: AdaptiveBatchConfig::default(),
             sync_mode: SyncMode::Durable,
@@ -143,8 +137,6 @@ impl WalConfig {
             compression: CompressionConfig::none(),
             batch_size: 1000,
             flush_interval_ms: 10,
-            segment_count: 8,
-            shard_count: Some(16), // Maximum sharding for benchmarks
             workload_profile: WorkloadProfile::Balanced,
             adaptive_config: AdaptiveBatchConfig::default(),
             sync_mode: SyncMode::Durable,
@@ -165,8 +157,6 @@ impl WalConfig {
             compression: CompressionConfig::default(),
             batch_size: 100,
             flush_interval_ms: 10,
-            segment_count: 4,
-            shard_count: Some(16), // 16 shards for production
             workload_profile: WorkloadProfile::Balanced,
             adaptive_config: AdaptiveBatchConfig::default(),
             sync_mode: SyncMode::Durable,
@@ -187,8 +177,6 @@ impl WalConfig {
             compression: CompressionConfig::compression_optimized(),
             batch_size: 100,
             flush_interval_ms: 10,
-            segment_count: 4,
-            shard_count: Some(16), // 16 shards
             workload_profile: WorkloadProfile::Balanced,
             adaptive_config: AdaptiveBatchConfig::default(),
             sync_mode: SyncMode::Durable,

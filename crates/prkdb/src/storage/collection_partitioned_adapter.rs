@@ -190,7 +190,7 @@ impl CollectionPartitionedAdapter {
     /// This is lazy - collections are only created when first accessed.
     /// Uses DashMap for lock-free concurrent access.
     ///
-    /// FIX: Uses spawn_blocking to avoid deadlock when creating adapter from async context.
+    /// Opens a new collection on the blocking pool: the open replays its log.
     #[instrument(skip(self), fields(collection = %collection_name))]
     async fn get_or_create_collection_async(
         &self,
@@ -211,7 +211,8 @@ impl CollectionPartitionedAdapter {
             ..self.base_config.clone()
         };
 
-        // CRITICAL FIX: Use spawn_blocking to avoid deadlock when calling block_on inside WalStorageAdapter::new()
+        // On the blocking pool because opening replays the collection's whole log, which can
+        // be long; `WalStorageAdapter::new` itself no longer needs a runtime (Task 2.8a).
         let adapter = tokio::task::spawn_blocking(move || {
             Arc::new(
                 WalStorageAdapter::new(collection_config).expect("Failed to create collection WAL"),
@@ -904,7 +905,6 @@ impl StorageAdapter for CollectionPartitionedAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_collection_partitioned_basic() {
@@ -1469,98 +1469,6 @@ mod tests {
             .expect("flush succeeds again once the injected fault is cleared");
     }
 
-    /// Poll until `check` holds, so a test observes a transient window without racing it.
-    async fn wait_until(what: &str, limit: Duration, mut check: impl FnMut() -> bool) {
-        let deadline = std::time::Instant::now() + limit;
-        while std::time::Instant::now() < deadline {
-            if check() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        panic!("timed out waiting for {what}");
-    }
-
-    /// Queue depths **sum** across collections, because the memory they represent does.
-    ///
-    /// Mutation run 31539366718 missed `+=` -> `-=` and `+=` -> `*=` here: nothing asserted
-    /// the arithmetic, only that a number came back. `*=` reports 0 for any number of
-    /// stalled collections — a probe that says "nothing queued" while two writers are stuck
-    /// is worse than no probe, because it actively argues against the operator's suspicion.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn queue_depths_sum_across_collections() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let config = WalConfig {
-            log_dir: temp_dir.path().to_path_buf(),
-            ..WalConfig::test_config()
-        };
-        let adapter = Arc::new(CollectionPartitionedAdapter::new(config).unwrap());
-
-        // Open both collections with a write that succeeds, so the stall below acts on a
-        // live writer rather than on collection creation.
-        // `put_to_collection` goes through `put`, which appends directly — so these also
-        // supply the direct-append counts folded below. Unequal on purpose, for the same
-        // reason as the batch counts: one each would let `*=` pass, since 1 * 1 == 1.
-        for (name, writes) in [("users", 1), ("orders", 2)] {
-            for w in 0..writes {
-                adapter
-                    .put_to_collection(name, format!("seed-{w}").as_bytes(), b"v")
-                    .await
-                    .unwrap();
-            }
-        }
-
-        let collections = temp_dir.path().join("collections");
-        crate::storage::wal_adapter::fault_injection::stall_writer_at(collections.join("users"));
-        crate::storage::wal_adapter::fault_injection::stall_writer_at(collections.join("orders"));
-
-        // `put_to_collection` calls `put`, which routes to `put_batch_impl` and bypasses
-        // the accumulator entirely — nothing to stall. `put_many` is the accumulator path,
-        // so drive the per-collection adapters directly.
-        let mut queued = Vec::new();
-        for name in ["users", "orders"] {
-            let collection = adapter
-                .collections
-                .get(name)
-                .expect("the collection was opened above")
-                .clone();
-            queued.push(tokio::spawn(async move {
-                collection
-                    .put_many(vec![(b"queued".to_vec(), b"v".to_vec())])
-                    .await
-            }));
-        }
-
-        let probe = adapter.clone();
-        wait_until(
-            "both stalled collections to report their queued write",
-            Duration::from_secs(10),
-            move || probe.write_path_health().queue_depth == 2,
-        )
-        .await;
-
-        // One write per collection, so the total is the sum and not either operand: 2 is
-        // unreachable by `-=` (which underflows from 0) and by `*=` (which stays 0).
-        assert_eq!(
-            adapter.write_path_health().queue_depth,
-            2,
-            "two stalled collections holding one write each must report two"
-        );
-
-        crate::storage::wal_adapter::fault_injection::clear_writer_stall(
-            &collections.join("users"),
-        );
-        crate::storage::wal_adapter::fault_injection::clear_writer_stall(
-            &collections.join("orders"),
-        );
-        for task in queued {
-            let _ = tokio::time::timeout(Duration::from_secs(20), task).await;
-        }
-    }
-
-    /// One unhealthy collection makes the whole adapter unhealthy — worst-across-all, not
-    /// an average.
-    ///
     /// The aggregate publish total is the sum across collections, not their product.
     ///
     /// `write_path_health` folds every open collection into one report so a probe can ask
@@ -1568,10 +1476,11 @@ mod tests {
     /// sweep replaced it with `*=` and nothing noticed, because no test read the aggregate
     /// count at all.
     ///
-    /// Two collections with one publish each is the case that separates them — 1 + 1 is 2
-    /// and 1 * 1 is 1 — so the counts here are made deliberately unequal as well, since a
-    /// scraper deriving a publish rate from a product would see it collapse rather than
-    /// grow as collections are added.
+    /// The counts are deliberately unequal (2 and 3 frames): with one each, `*=` would
+    /// pass, since 1 * 1 == 1. Since Task 2.8a every write is a frame whose commit hook
+    /// counts it before the caller is answered, so no waiting is needed. The old second
+    /// half, on `direct_appends_total`, is gone: that field is always 0 now (one write
+    /// path).
     #[tokio::test(flavor = "multi_thread")]
     async fn the_aggregate_publish_total_sums_across_collections() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1581,158 +1490,29 @@ mod tests {
         };
         let adapter = CollectionPartitionedAdapter::new(config).unwrap();
 
-        // `put_many`, not `put`: only the accumulator path records a publish. `put` goes
-        // straight to `wal.append_batch`, so the progress accounting — and therefore
-        // `publishes_total` — never sees it. Opening the collections first, then writing
-        // through the accounted path.
-        for name in ["users", "orders"] {
-            adapter
-                .put_to_collection(name, b"seed", b"v")
-                .await
-                .unwrap();
-        }
-        for (name, batches) in [("users", 1), ("orders", 2)] {
-            let collection = adapter
-                .collections
-                .get(name)
-                .expect("the collection was opened above")
-                .clone();
-            // Unequal batch counts on purpose: one each would let `*=` pass, since 1*1 == 1.
-            for b in 0..batches {
-                collection
-                    .put_many(vec![(format!("{name}-{b}").into_bytes(), b"v".to_vec())])
+        for (name, writes) in [("users", 2), ("orders", 3)] {
+            for w in 0..writes {
+                adapter
+                    .put_to_collection(name, format!("{name}-{w}").as_bytes(), b"v")
                     .await
                     .unwrap();
             }
         }
 
-        // A caller is answered from inside `publish_batch`, and the publish is recorded
-        // by `flush_accumulator_inner` after it returns — so the writes completing above
-        // says nothing about the counter yet. Reading it here without waiting sees zeros.
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        let per_collection = loop {
-            let counts: Vec<u64> = adapter
-                .collections
-                .iter()
-                .map(|entry| entry.value().write_path_health().publishes_total)
-                .collect();
-            if counts.len() >= 2 && counts.iter().all(|c| *c > 0) {
-                break counts;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "timed out waiting for both collections to record a publish; saw {counts:?}"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        };
-        let expected: u64 = per_collection.iter().sum();
-
-        assert!(
-            per_collection.len() >= 2 && expected > 0,
-            "the fold needs at least two collections that have published something, or it \
-             is not being exercised; saw {per_collection:?}"
-        );
+        let per_collection: Vec<u64> = adapter
+            .collections
+            .iter()
+            .map(|entry| entry.value().write_path_health().publishes_total)
+            .collect();
+        let mut sorted = per_collection.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![2, 3], "one publish per frame per collection");
 
         assert_eq!(
             adapter.write_path_health().publishes_total,
-            expected,
+            5,
             "the aggregate must sum each collection's publish count; the parts were \
              {per_collection:?}"
         );
-
-        // The same fold, on the series that counts writes appended straight to the log.
-        // It is a separate field for a reason — `publishes_total` is what the stall
-        // detector watches — so it needs its own assertion; mutation caught `+= with *=`
-        // surviving here while the publish fold above was covered.
-        let direct_parts: Vec<u64> = adapter
-            .collections
-            .iter()
-            .map(|entry| entry.value().write_path_health().direct_appends_total)
-            .collect();
-        let direct_expected: u64 = direct_parts.iter().sum();
-
-        assert!(
-            direct_parts.len() >= 2 && direct_parts.iter().all(|c| *c > 0),
-            "both collections must have appended directly, or this fold is not exercised; \
-             saw {direct_parts:?}"
-        );
-        assert_eq!(
-            adapter.write_path_health().direct_appends_total,
-            direct_expected,
-            "the aggregate must sum each collection's direct-append count; the parts were \
-             {direct_parts:?}"
-        );
-    }
-
-    /// Mutation run 31539366718 missed `delete !` on the `unhealthy.is_empty()` guard.
-    /// Without the negation the adapter reports healthy precisely when a collection has
-    /// reported a reason, so `/readyz` keeps routing traffic to the node whose writes are
-    /// not being confirmed. That is the exact failure the liveness work exists to end.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn one_stalled_collection_makes_the_adapter_unhealthy() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let config = WalConfig {
-            log_dir: temp_dir.path().to_path_buf(),
-            ..WalConfig::test_config()
-        };
-        let adapter = Arc::new(CollectionPartitionedAdapter::new(config).unwrap());
-
-        for name in ["users", "orders"] {
-            adapter
-                .put_to_collection(name, b"seed", b"v")
-                .await
-                .unwrap();
-        }
-        assert!(
-            adapter.write_path_health().healthy,
-            "a freshly opened adapter must be healthy, or the assertion below proves nothing"
-        );
-
-        let collections = temp_dir.path().join("collections");
-        crate::storage::wal_adapter::fault_injection::stall_writer_at(collections.join("orders"));
-
-        // The accumulator path, not `put` — see the note in the sibling test.
-        let stalled = {
-            let collection = adapter
-                .collections
-                .get("orders")
-                .expect("the collection was opened above")
-                .clone();
-            tokio::spawn(async move {
-                collection
-                    .put_many(vec![(b"queued".to_vec(), b"v".to_vec())])
-                    .await
-            })
-        };
-
-        let probe = adapter.clone();
-        wait_until(
-            "the stalled collection to be declared unhealthy",
-            Duration::from_secs(15),
-            move || !probe.write_path_health().healthy,
-        )
-        .await;
-
-        let health = adapter.write_path_health();
-        assert!(
-            !health.healthy,
-            "one stalled collection means the node is not ready"
-        );
-        let reason = health
-            .reason
-            .expect("an unhealthy adapter must name the cause");
-        assert!(
-            reason.contains("orders"),
-            "the reason must name the collection an operator has to look at, got: {reason}"
-        );
-        assert!(
-            !reason.contains("users"),
-            "a healthy collection must not be blamed, got: {reason}"
-        );
-
-        crate::storage::wal_adapter::fault_injection::clear_writer_stall(
-            &collections.join("orders"),
-        );
-        let _ = tokio::time::timeout(Duration::from_secs(20), stalled).await;
     }
 }

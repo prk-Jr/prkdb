@@ -1,5 +1,6 @@
 use prkdb::builder::OptimizationLevel;
 use prkdb::prelude::*;
+use prkdb::storage::config::SyncMode;
 use prkdb_macros::Collection;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -153,9 +154,11 @@ async fn test_multiple_collections_legendary() -> anyhow::Result<()> {
 async fn test_performance_comparison() -> anyhow::Result<()> {
     let temp_dir = tempfile::tempdir()?;
 
-    // Test legendary performance is actually faster
+    // Test legendary performance is actually faster. A throughput comparison, not a
+    // durability test, so both run in Fast mode: in Durable it would compare fsyncs.
     let db_legendary = Builder::new()
         .with_data_dir(temp_dir.path().join("legendary")) // Automatic 1.2M ops/sec!
+        .with_sync_mode(SyncMode::Fast)
         .register_collection::<TestRecord>()
         .build()?;
 
@@ -164,6 +167,7 @@ async fn test_performance_comparison() -> anyhow::Result<()> {
             temp_dir.path().join("balanced"),
             OptimizationLevel::Balanced,
         )
+        .with_sync_mode(SyncMode::Fast)
         .register_collection::<TestRecord>()
         .build()?;
 
@@ -213,6 +217,8 @@ async fn test_batch_operations_legendary() -> anyhow::Result<()> {
 
     let db = Builder::new()
         .with_data_dir(temp_dir.path()) // Automatic legendary performance!
+        // A throughput test, not a durability one: Durable would measure fsync.
+        .with_sync_mode(SyncMode::Fast)
         .register_collection::<TestRecord>()
         .build()?;
 

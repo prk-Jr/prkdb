@@ -552,12 +552,16 @@ async fn a_raft_batch_returns_one_result_per_entry() {
 // being read back. A database that compresses its WAL — which is the default
 // configuration, `CompressionConfig::default()` is LZ4 — would lose reads for every
 // batched write. The tests never noticed because the tests never compressed anything.
+//
+// Since Task 2.8a there is one frame shape, a `Batch`, and one decode path for it; the
+// batch codec compresses a frame whose ops clear `min_compress_bytes`. The tests below
+// keep checking that compressed frames are written, replayed and read back correctly.
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// The same round trip, with the WAL compressing.
 ///
-/// Not a duplicate of the tests above: it produces different `LogOperation` variants, and
-/// those variants have their own match arms in both the write and read paths.
+/// Not a duplicate of the tests above: the frames it writes are compressed, and
+/// decompression is its own step on both the replay and the read path.
 fn compressing_adapter(dir: &std::path::Path) -> WalStorageAdapter {
     let config = WalConfig {
         log_dir: dir.to_path_buf(),
@@ -588,7 +592,7 @@ async fn compressed_batches_round_trip() {
 
         {
             let a = compressing_adapter(dir.path());
-            a.put_many(pairs.clone())
+            a.put_batch(pairs.clone())
                 .await
                 .expect("compressed batch write");
             a.flush().await.unwrap();
@@ -658,7 +662,7 @@ async fn compressed_batch_deletes_are_applied() {
 
         {
             let a = compressing_adapter(dir.path());
-            a.put_many(pairs.clone())
+            a.put_batch(pairs.clone())
                 .await
                 .expect("compressed batch write");
             a.delete_many(pairs.iter().take(4).map(|(k, _)| k.clone()).collect())
@@ -723,7 +727,7 @@ async fn scan_range_reads_compressed_batches() {
 
         {
             let a = compressing_adapter(dir.path());
-            a.put_many(pairs.clone()).await.unwrap();
+            a.put_batch(pairs.clone()).await.unwrap();
             a.flush().await.unwrap();
         }
 
@@ -762,7 +766,7 @@ async fn get_changes_since_expands_compressed_batches() {
                 )
             })
             .collect();
-        a.put_many(pairs.clone()).await.unwrap();
+        a.put_batch(pairs.clone()).await.unwrap();
         a.flush().await.unwrap();
 
         let changes = a
@@ -790,41 +794,34 @@ async fn get_changes_since_expands_compressed_batches() {
     .await;
 }
 // ═══════════════════════════════════════════════════════════════════════════
-// A compressed batch delete, written directly to the WAL
+// A compressed batch delete
 //
-// `CompressedDeleteBatch` has an arm in `flush_accumulator_inner`, `rebuild_index_async`,
-// `get_many` and `get_changes_since` — and now in `scan_prefix`. No public method reaches
-// it: `delete` and `delete_many` both go straight to `delete_many_impl`, which writes one
-// uncompressed `Delete` per key, and only `put_many` and the raft appends feed the
-// accumulator that produces batch records. So the record type is *writable by the format
-// and by live code in `flush_accumulator_inner`*, but not reachable from the adapter's own
-// API today.
-//
-// That is exactly the situation where an arm rots unnoticed, so the record is written
-// through `MmapParallelWal` directly — the same WAL the adapter opens — and the adapter is
-// then pointed at the resulting directory. This is what recovering a log written by a
-// future version, or by the delete-accumulation path once anything feeds it, looks like.
+// Since Task 2.8a every write is one `Batch` frame, compressed by the batch codec when
+// the adapter's `CompressionConfig` says so and the encoded ops clear `min_compress_bytes`.
+// These tests used to write compressed `LogRecord`s straight into the mmap WAL, because
+// the adapter's own API could not produce every record variant; now it produces every
+// frame shape there is, so they write through the adapter and check that compression
+// really happened (the log is far smaller than the bytes written) before trusting it.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// `scan_prefix` must honour a `CompressedDeleteBatch`, not just a `DeleteBatch`.
+/// Total size of the WAL segment files in `dir`.
+fn log_bytes(dir: &std::path::Path) -> u64 {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "wal"))
+        .map(|p| std::fs::metadata(p).unwrap().len())
+        .sum()
+}
+
+/// `scan_prefix` must honour a compressed batch delete, not just a plain one.
 #[tokio::test(flavor = "multi_thread")]
 async fn scan_prefix_honours_a_compressed_batch_delete() {
     bounded("scan_prefix_honours_a_compressed_batch_delete", async {
-        use prkdb_core::wal::compression::CompressionConfig;
-        use prkdb_core::wal::mmap_parallel_wal::MmapParallelWal;
-        use prkdb_core::wal::{LogOperation, LogRecord};
-
         let dir = tempfile::tempdir().unwrap();
-        let config = WalConfig {
-            log_dir: dir.path().to_path_buf(),
-            compression: CompressionConfig::default(),
-            ..WalConfig::test_config()
-        };
 
-        // 120 keys under the `w:` prefix; the first 100 are then deleted in one batch. The
-        // count and the key length are not arbitrary: the serialised id list has to clear
-        // `min_compress_bytes` (256) and then actually shrink, or the record stays a plain
-        // `DeleteBatch`. The assertions below check that it did.
+        // 120 keys under the `w:` prefix; the first 100 are then deleted in one batch. Both
+        // batches clear `min_compress_bytes` (256): the id list alone is 1.6 KB.
         let items: Vec<(Vec<u8>, Vec<u8>)> = (0..120)
             .map(|i| {
                 (
@@ -834,51 +831,25 @@ async fn scan_prefix_honours_a_compressed_batch_delete() {
             })
             .collect();
         let deleted: Vec<Vec<u8>> = items.iter().take(100).map(|(k, _)| k.clone()).collect();
+        let raw: u64 = items.iter().map(|(k, v)| (k.len() + v.len()) as u64).sum();
 
         {
-            let wal = MmapParallelWal::open_or_create(config.clone(), config.segment_count)
+            let a = compressing_adapter(dir.path());
+            a.put_batch(items.clone())
                 .await
-                .expect("open the WAL directly");
-
-            let compression = CompressionConfig::default();
-            let put = LogRecord::new_with_compression(
-                LogOperation::PutBatch {
-                    collection: String::new(),
-                    items: items.clone(),
-                },
-                &compression,
-            )
-            .expect("build a put batch record");
-            let del = LogRecord::new_with_compression(
-                LogOperation::DeleteBatch {
-                    collection: String::new(),
-                    ids: deleted.clone(),
-                },
-                &compression,
-            )
-            .expect("build a delete batch record");
-
-            // Assert the compression actually happened. If either payload fell below
-            // `min_compress_bytes` or failed to shrink, `new_with_compression` hands back the
-            // *uncompressed* variant and this test would silently exercise the arms that
-            // already worked — passing while proving nothing.
-            assert!(
-                matches!(put.operation, LogOperation::CompressedPutBatch { .. }),
-                "the put batch was not compressed, so this test would not reach the compressed arm"
-            );
-            assert!(
-            matches!(del.operation, LogOperation::CompressedDeleteBatch { .. }),
-            "the delete batch was not compressed, so this test would not reach the compressed arm"
+                .expect("compressed put batch");
+            a.delete_many(deleted.clone())
+                .await
+                .expect("compressed delete batch");
+        }
+        assert!(
+            log_bytes(dir.path()) < raw / 2,
+            "the log holds {} bytes for {raw} bytes written: the batch was not compressed, \
+             so this test would not exercise the compressed path",
+            log_bytes(dir.path())
         );
 
-            // In order, and into the same segment: both records carry the same collection, and
-            // routing is by collection, so the delete lands after the put.
-            wal.append(put).await.expect("append the put batch");
-            wal.append(del).await.expect("append the delete batch");
-            wal.sync().await.expect("sync the WAL");
-        }
-
-        let a = WalStorageAdapter::new(config).expect("open an adapter over the prepared WAL");
+        let a = compressing_adapter(dir.path());
         let scanned: Vec<Vec<u8>> = a
             .scan_prefix(b"w:")
             .await
@@ -890,9 +861,8 @@ async fn scan_prefix_honours_a_compressed_batch_delete() {
         let survivors: Vec<Vec<u8>> = items.iter().skip(100).map(|(k, _)| k.clone()).collect();
         assert_eq!(
             scanned, survivors,
-            "scan_prefix returned keys removed by a compressed batch delete; without the \
-         CompressedDeleteBatch arm the tombstones are invisible and every deleted key \
-         reappears in the scan"
+            "scan_prefix returned keys removed by a compressed batch delete; the tombstones \
+             were not replayed and every deleted key reappears in the scan"
         );
     })
     .await;
@@ -900,33 +870,13 @@ async fn scan_prefix_honours_a_compressed_batch_delete() {
 
 /// `get_many` reads each key's own value out of a **compressed** batch.
 ///
-/// Two survivors from the nightly sweep live on this path, and both are the same defect
-/// the `scan_prefix` fix (362271d) already found once in a neighbouring arm: compressed
-/// records handled by an arm no test reaches.
-///
-/// - deleting the `CompressedPutBatch` arm makes every key in the batch read as missing;
-/// - flipping `item_id == &key` to `!=` returns the *first other* key's value, which is a
-///   silent wrong answer rather than a visible absence.
-///
-/// A plain `PutBatch` exercises neither, so the assertion below that the record really was
-/// compressed is load-bearing — without it this test passes against both mutants while
-/// proving nothing.
+/// Returning the *first other* key's value is a silent wrong answer rather than a visible
+/// absence, which is why every key below has a distinct value and each one is pinned.
 #[tokio::test(flavor = "multi_thread")]
 async fn get_many_reads_each_key_out_of_a_compressed_batch() {
     bounded("get_many_reads_each_key_out_of_a_compressed_batch", async {
-        use prkdb_core::wal::compression::CompressionConfig;
-        use prkdb_core::wal::mmap_parallel_wal::MmapParallelWal;
-        use prkdb_core::wal::{LogOperation, LogRecord};
-
         let dir = tempfile::tempdir().expect("tempdir");
-        let config = WalConfig {
-            log_dir: dir.path().to_path_buf(),
-            compression: CompressionConfig::default(),
-            ..WalConfig::test_config()
-        };
 
-        // Sized to clear `min_compress_bytes` (256) and then actually shrink, as the
-        // delete-batch test above documents; the assertion after it checks that it did.
         let items: Vec<(Vec<u8>, Vec<u8>)> = (0..120)
             .map(|i| {
                 (
@@ -935,37 +885,22 @@ async fn get_many_reads_each_key_out_of_a_compressed_batch() {
                 )
             })
             .collect();
+        let raw: u64 = items.iter().map(|(k, v)| (k.len() + v.len()) as u64).sum();
 
         {
-            let wal = MmapParallelWal::open_or_create(config.clone(), config.segment_count)
+            let a = compressing_adapter(dir.path());
+            a.put_batch(items.clone())
                 .await
-                .expect("open the WAL directly");
-            let put = LogRecord::new_with_compression(
-                LogOperation::PutBatch {
-                    collection: String::new(),
-                    items: items.clone(),
-                },
-                &CompressionConfig::default(),
-            )
-            .expect("build a put batch record");
-
-            assert!(
-                matches!(put.operation, LogOperation::CompressedPutBatch { .. }),
-                "the batch was not compressed, so this test would exercise the plain \
-                 PutBatch arm that already works and prove nothing about the compressed one"
-            );
-
-            wal.append(put).await.expect("append the compressed batch");
-            wal.sync().await.expect("sync the WAL");
+                .expect("write the compressed batch");
         }
+        assert!(
+            log_bytes(dir.path()) < raw / 2,
+            "the batch was not compressed, so this test would prove nothing about the \
+             compressed path"
+        );
 
-        let a = WalStorageAdapter::new(config).expect("open an adapter over the prepared WAL");
-
-        // Sixty of the hundred and twenty, deliberately: `get_many` sends more than 100
-        // cache misses down a scan-based path and fewer down an index-based one, and the
-        // compressed arm that the survivors live on is the *index* path. Reading all 120
-        // back exercises the other branch entirely and leaves both mutants alive — the
-        // first version of this test did exactly that and passed against `!=`.
+        // Cold: every read decodes the one compressed frame.
+        let a = compressing_adapter(dir.path());
         let wanted: Vec<(Vec<u8>, Vec<u8>)> = items.iter().take(60).cloned().collect();
         let keys: Vec<Vec<u8>> = wanted.iter().map(|(k, _)| k.clone()).collect();
         let got = a.get_many(keys).await.expect("get_many succeeds");
@@ -986,34 +921,22 @@ async fn get_many_reads_each_key_out_of_a_compressed_batch() {
 
 /// A read reports the bytes it moved, not the product of two lengths.
 ///
-/// `record_read` is called with `key.len() + value.len()` in four separate arms of `get`:
-/// the cache hit, the `PutBatch` arm, the `CompressedPutBatch` arm, and the single-`Put`
-/// tail. The nightly sweep replaced `+` with `*` in all four and nothing noticed, because
-/// no test had ever read the byte counter.
+/// `record_read` is called with `key.len() + value.len()` on the cache-hit path and on the
+/// WAL-read path. The nightly sweep once replaced `+` with `*` in every such call and
+/// nothing noticed, because no test had ever read the byte counter.
 ///
-/// Not a correctness defect — a wrong total misreports throughput rather than returning
-/// wrong data. Still worth pinning: read-bytes is the series an operator sizes hardware
-/// from, and the error grows with the value size rather than staying a fixed offset.
-///
-/// Each arm needs its own record shape *and* a cold cache, which is why this reopens the
-/// adapter between phases rather than reading twice. A first attempt did read twice from
-/// one adapter, and `put` had already populated the cache, so both reads were cache hits
-/// and three of the four arms were never reached — the test passed against three of the
-/// four mutants.
+/// Each shape needs a cold cache, which is why this reopens the adapter between phases
+/// rather than reading twice: `put` populates the cache.
 ///
 /// Lengths are chosen so sum and product cannot coincide: 5 + 7 = 12, 5 * 7 = 35.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_read_reports_the_bytes_it_moved() {
     bounded("a_read_reports_the_bytes_it_moved", async {
-        use prkdb_core::wal::compression::CompressionConfig;
-        use prkdb_core::wal::mmap_parallel_wal::MmapParallelWal;
-        use prkdb_core::wal::{LogOperation, LogRecord};
-
         const KEY: &[u8] = b"abcde"; // 5
         const VAL: &[u8] = b"1234567"; // 7 — sum 12, product 35
         let expected = (KEY.len() + VAL.len()) as u64;
 
-        // ── the PutBatch arm, plus the cache-hit arm ────────────────────────────────
+        // ── a batch frame, then the cache-hit path ──────────────────────────────────
         let batch_dir = tempfile::tempdir().expect("tempdir");
         {
             let a = adapter(batch_dir.path());
@@ -1048,21 +971,12 @@ async fn a_read_reports_the_bytes_it_moved() {
             "a cache-served read must report the same bytes as a WAL-served one"
         );
 
-        // ── the single-Put arm and the compressed arm ───────────────────────────────
+        // ── a single-put frame and a compressed frame ───────────────────────────────
         for compressed in [false, true] {
             let dir = tempfile::tempdir().expect("tempdir");
-            let config = WalConfig {
-                log_dir: dir.path().to_path_buf(),
-                compression: CompressionConfig::default(),
-                ..WalConfig::test_config()
-            };
-
             {
-                let wal = MmapParallelWal::open_or_create(config.clone(), config.segment_count)
-                    .await
-                    .expect("open the WAL directly");
-
-                let op = if compressed {
+                let a = compressing_adapter(dir.path());
+                if compressed {
                     // Padded so the batch clears `min_compress_bytes` and actually shrinks.
                     let mut items = vec![(KEY.to_vec(), VAL.to_vec())];
                     items.extend((0..120).map(|i| {
@@ -1071,32 +985,13 @@ async fn a_read_reports_the_bytes_it_moved() {
                             format!("{}-{i}", "padding".repeat(32)).into_bytes(),
                         )
                     }));
-                    LogOperation::PutBatch {
-                        collection: String::new(),
-                        items,
-                    }
+                    a.put_batch(items).await.expect("write the padded batch");
                 } else {
-                    LogOperation::Put {
-                        collection: String::new(),
-                        id: KEY.to_vec(),
-                        data: VAL.to_vec(),
-                    }
-                };
-
-                let record = LogRecord::new_with_compression(op, &CompressionConfig::default())
-                    .expect("build the record");
-                assert_eq!(
-                    matches!(record.operation, LogOperation::CompressedPutBatch { .. }),
-                    compressed,
-                    "the record shape decides which arm of `get` runs, so a batch that \
-                     failed to compress would silently retest an arm already covered"
-                );
-
-                wal.append(record).await.expect("append");
-                wal.sync().await.expect("sync");
+                    a.put(KEY, VAL).await.expect("write one key");
+                }
             }
 
-            let a = WalStorageAdapter::new(config).expect("open over the prepared WAL");
+            let a = compressing_adapter(dir.path());
             let before = a.metrics().read_bytes_total;
             assert_eq!(
                 a.get(KEY).await.expect("read"),
@@ -1116,17 +1011,23 @@ async fn a_read_reports_the_bytes_it_moved() {
 /// The three plain accessors report the adapter's real state, not a default.
 ///
 /// `max_offset`, `get_log_dir` and `save_checkpoint` were each replaceable with a constant
-/// — `0`, an empty `PathBuf`, and a bare `Ok(())` — with the whole suite still green. They
-/// are small, but two of them are load-bearing: `get_log_dir` is what a caller uses to find
-/// the data directory, and `save_checkpoint` exists so the next startup can recover
-/// incrementally rather than rescanning the log. A `save_checkpoint` that reports success
-/// without writing anything is the same shape as every other defect in this file — it
-/// claims work it did not do, and the cost lands at the next restart.
+/// — `0`, an empty `PathBuf`, and a bare `Ok(())` — with the whole suite still green.
+/// `get_log_dir` is what a caller uses to find the data directory, and `save_checkpoint`
+/// makes everything acknowledged so far durable (Task 2.8a; Task 2.14 adds an index
+/// snapshot). A `save_checkpoint` that reports success without syncing claims work it did
+/// not do, which is why this runs in `Fast` mode with the periodic sync out of reach:
+/// only the checkpoint can move the durable watermark.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_adapter_accessors_report_real_state() {
     bounded("the_adapter_accessors_report_real_state", async {
         let dir = tempfile::tempdir().expect("tempdir");
-        let a = adapter(dir.path());
+        let a = WalStorageAdapter::new(WalConfig {
+            log_dir: dir.path().to_path_buf(),
+            sync_mode: prkdb_core::wal::SyncMode::Fast,
+            sync_interval_ms: 3_600_000,
+            ..WalConfig::test_config()
+        })
+        .expect("open a Fast-mode adapter");
 
         assert_eq!(
             a.get_log_dir(),
@@ -1139,28 +1040,23 @@ async fn the_adapter_accessors_report_real_state() {
         a.put(b"offset-key", b"offset-value")
             .await
             .expect("write something to move the offset");
-        a.flush().await.expect("flush");
         let after = a.max_offset();
         assert!(
             after > before,
             "max_offset must advance as records are appended; it reported {after} after a \
              write with {before} before it"
         );
-
-        let checkpoint_path = dir.path().join("checkpoint.json");
         assert!(
-            !checkpoint_path.exists(),
-            "no checkpoint should exist before one is saved, or the assertion below would \
-             pass without save_checkpoint doing anything"
+            a.durable_lsn() < after,
+            "nothing may have synced the write yet, or the assertion below proves nothing"
         );
 
         a.save_checkpoint().expect("save a checkpoint");
 
-        assert!(
-            checkpoint_path.exists(),
-            "save_checkpoint returned Ok without writing {}; the next startup would find \
-             no checkpoint and rescan the whole log",
-            checkpoint_path.display()
+        assert_eq!(
+            a.durable_lsn(),
+            a.max_offset(),
+            "save_checkpoint returned Ok without making the acknowledged writes durable"
         );
     })
     .await;

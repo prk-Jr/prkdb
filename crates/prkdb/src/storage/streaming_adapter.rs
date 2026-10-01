@@ -242,7 +242,6 @@ impl StreamingStorageAdapter {
     pub async fn new(config: StreamingConfig) -> Result<Self, StorageError> {
         let wal_config = WalConfig {
             log_dir: config.log_dir.clone(),
-            segment_count: config.segment_count,
             ..WalConfig::default()
         };
 

@@ -19,9 +19,8 @@ evidence = [
   "crates/prkdb/src/storage/checkpoint.rs:44-51",
   "crates/prkdb-core/src/wal/mmap_parallel_wal.rs:310",
   "crates/prkdb/src/storage/wal_adapter.rs:1737",
-  "test:crates/prkdb-verify/tests/harness.rs::sto01_discovery_profile_finds_checkpoint_loss_tripwire",
 ]
-tripwire = "test:crates/prkdb/tests/tripwires.rs::sto01_checkpoint_drops_pre_checkpoint_keys_tripwire"
+tripwire = ""
 
 [[finding]]
 id = "STO-02"
