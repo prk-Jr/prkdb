@@ -98,6 +98,8 @@ impl Builder {
         self
     }
 
+    /// Namespace every collection record key (KEY-01) with `ns`, at most
+    /// [`MAX_NAMESPACE_LEN`](crate::keys::MAX_NAMESPACE_LEN) bytes (checked by `build`).
     pub fn with_namespace(mut self, ns: impl AsRef<[u8]>) -> Self {
         self.namespace = Some(ns.as_ref().to_vec());
         self
@@ -248,6 +250,20 @@ impl Builder {
         namespace: Option<Vec<u8>>,
         collection_registry: crate::db::CollectionRegistry,
     ) -> Result<PrkDb, DbError> {
+        // The key codec carries the namespace behind a one-byte length (KEY-01): refuse a
+        // longer one here rather than on every first write.
+        if let Some(ns) = &namespace {
+            if ns.len() > crate::keys::MAX_NAMESPACE_LEN {
+                return Err(DbError::Storage(
+                    prkdb_types::error::StorageError::Validation(format!(
+                        "namespace of {} bytes exceeds the {}-byte limit",
+                        ns.len(),
+                        crate::keys::MAX_NAMESPACE_LEN
+                    )),
+                ));
+            }
+        }
+
         // Create consumer group coordinator with storage-based offset store
         let offset_store = Arc::new(StorageOffsetStore::new(storage.clone()));
         let consumer_coordinator = Arc::new(ConsumerGroupCoordinator::new(

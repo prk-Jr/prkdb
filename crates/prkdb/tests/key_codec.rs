@@ -652,3 +652,19 @@ mod by_name_and_by_type {
             .contains(&"ghosts".to_string()));
     }
 }
+
+/// Review LOW: a namespace longer than the codec's one-byte length is refused when the
+/// database is built, not on its first write.
+#[test]
+fn a_namespace_longer_than_255_bytes_is_refused_at_build() {
+    let err = prkdb::PrkDb::builder()
+        .with_namespace([b'n'; 256])
+        .build()
+        .err()
+        .expect("must refuse");
+    assert!(err.to_string().contains("255"), "{err}");
+    assert!(prkdb::PrkDb::builder()
+        .with_namespace([b'n'; 255])
+        .build()
+        .is_ok());
+}

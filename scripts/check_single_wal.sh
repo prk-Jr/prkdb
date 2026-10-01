@@ -9,7 +9,11 @@ cd "$(dirname "$0")/.."
 if grep -rnwE 'ParallelWal|AsyncParallelWal|MmapParallelWal|WriteAheadLog|MmapLogSegment|AsyncLogSegment' crates --include='*.rs'; then
   echo "a second WAL implementation is back (STO-06)"; exit 1
 fi
-test "$(grep -rlF 'impl Wal {' crates/prkdb-core/src/wal | wc -l | tr -d ' ')" = "1"
+wal_impls="$(grep -rlF 'impl Wal {' crates/prkdb-core/src/wal | wc -l | tr -d ' ')"
+if [ "$wal_impls" != "1" ]; then
+  echo "expected exactly one 'impl Wal {' in crates/prkdb-core/src/wal, found $wal_impls (STO-06)"
+  exit 1
+fi
 
 # D11: one WAL per data directory; no per-collection or outbox WALs beside it.
 # (The format-1 guard's check for an old `collections/` directory is allowed; a map of
