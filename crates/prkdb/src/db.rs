@@ -589,6 +589,45 @@ impl PrkDb {
         Ok(events)
     }
 
+    /// The changes after `offset` (a position in the storage's change log) whose keys
+    /// belong to the collection persisted as `collection` **in this database's
+    /// namespace**: those under its key-codec prefix. An unknown collection has none; an
+    /// empty name is the bare cursor (every change). This is what `FetchSegment` serves;
+    /// `StorageAdapter::changes_in_collection` knows no namespace, so a
+    /// `with_namespace` database would get an empty stream from it.
+    pub async fn changes_in_collection(
+        &self,
+        collection: &str,
+        offset: u64,
+    ) -> Result<Vec<prkdb_types::replication::Change>, Error> {
+        use prkdb_types::replication::Change;
+
+        let changes = self
+            .storage
+            .get_changes_since(offset)
+            .await
+            .map_err(Error::Storage)?;
+        if collection.is_empty() {
+            return Ok(changes);
+        }
+        let Some(coll) = self
+            .catalog
+            .lookup(collection)
+            .await
+            .map_err(Error::Storage)?
+        else {
+            return Ok(Vec::new());
+        };
+        let prefix =
+            crate::keys::collection_prefix(self.namespace.as_deref().unwrap_or_default(), coll);
+        Ok(changes
+            .into_iter()
+            .filter(|change| match change {
+                Change::Put { key, .. } | Change::Delete { key, .. } => key.starts_with(&prefix),
+            })
+            .collect())
+    }
+
     /// `(partition, events, bytes)` per partition, sorted by partition.
     async fn partition_totals(&self, collection_name: &str) -> Result<Vec<(u32, u64, u64)>, Error> {
         let mut by_partition: std::collections::BTreeMap<u32, (u64, u64)> =

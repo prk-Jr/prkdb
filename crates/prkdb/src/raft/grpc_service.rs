@@ -1036,15 +1036,12 @@ impl<S: prkdb_schema::SchemaStorage + 'static> PrkDbServiceTrait for PrkDbGrpcSe
         let stream = async_stream::try_stream! {
             let mut current_offset = start_offset;
             let mut bytes_sent: u64 = 0;
-            let storage = db.storage.clone();
 
             // Use the (collection, offset) pair as the cursor: the offset is a position in
-            // the data directory's one WAL (D11), and the collection selects its changes.
-            // `segment_id` was logged and otherwise ignored (S-09). An empty collection
-            // means every collection.
-            match storage
-                .changes_in_collection(&collection, current_offset)
-                .await
+            // the data directory's one WAL (D11), and the collection (a persisted name, in
+            // this database's namespace) selects its changes. `segment_id` was logged and
+            // otherwise ignored (S-09). An empty collection means every collection.
+            match db.changes_in_collection(&collection, current_offset).await
             {
                 Ok(changes) => {
                     let mut chunk_data: Vec<u8> = Vec::with_capacity(CHUNK_SIZE);

@@ -252,3 +252,73 @@ async fn a_range_scan_returns_exactly_the_id_range_in_order() {
         .collect();
     assert_eq!(got, (100u64..300).collect::<Vec<_>>());
 }
+
+// ── Namespaced change streams (review M3) ────────────────────────────────────
+
+#[derive(
+    prkdb_macros::Collection, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+)]
+struct NsItem {
+    #[id]
+    id: u64,
+}
+
+/// Bytes `FetchSegment` streams for `collection`, through the gRPC service itself.
+async fn fetch_segment_bytes(db: Arc<prkdb::PrkDb>, collection: &str) -> usize {
+    use futures::StreamExt;
+    use prkdb::raft::rpc::prk_db_service_server::PrkDbService;
+    use prkdb::raft::rpc::FetchSegmentRequest;
+
+    let svc = prkdb::raft::PrkDbGrpcService::new(db, String::new());
+    let mut stream = svc
+        .fetch_segment(tonic::Request::new(FetchSegmentRequest {
+            collection: collection.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .expect("FetchSegment starts")
+        .into_inner();
+    let mut bytes = 0;
+    while let Some(chunk) = stream.next().await {
+        bytes += chunk.expect("FetchSegment chunk").data.len();
+    }
+    bytes
+}
+
+/// Review M3: a `with_namespace` database's collection change stream is its own, not
+/// empty. The adapter's namespace-less `changes_in_collection` cannot see it; the
+/// database's, which `FetchSegment` serves, does.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_namespaced_collection_has_a_change_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(
+        prkdb::PrkDb::builder()
+            .with_data_dir(dir.path())
+            .with_namespace("tenant")
+            .register_collection::<NsItem>()
+            .build()
+            .unwrap(),
+    );
+    for id in [1, 2] {
+        db.collection::<NsItem>().put(NsItem { id }).await.unwrap();
+    }
+
+    assert_eq!(
+        db.changes_in_collection("ns_item", 0).await.unwrap().len(),
+        2
+    );
+    assert!(db
+        .changes_in_collection("missing", 0)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(
+        db.storage()
+            .changes_in_collection("ns_item", 0)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the adapter's routing API is the empty namespace"
+    );
+    assert!(fetch_segment_bytes(db, "ns_item").await > 0);
+}
