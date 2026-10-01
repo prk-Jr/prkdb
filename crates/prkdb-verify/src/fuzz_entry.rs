@@ -23,7 +23,7 @@ use std::path::Path;
 pub type EntryPoint = fn(&[u8]);
 
 /// Every entry point, by the name of its cargo-fuzz target and seed-corpus directory.
-pub const TARGETS: [(&str, EntryPoint); 7] = [
+pub const TARGETS: [(&str, EntryPoint); 10] = [
     ("frame_decode", frame_decode),
     ("batch_decode", batch_decode),
     ("segment_scan", segment_scan),
@@ -31,6 +31,9 @@ pub const TARGETS: [(&str, EntryPoint); 7] = [
     ("proto_decode", proto_decode),
     ("key_decode", key_decode),
     ("format_parse", format_parse),
+    ("snapshot_restore", snapshot_restore),
+    ("file_decode", file_decode),
+    ("snapshot_entries", snapshot_entries),
 ];
 
 /// Recomputes the CRC of every frame in `buf` whose claimed length fits, walking frames
@@ -182,4 +185,29 @@ pub fn format_parse(data: &[u8]) {
         file.write_at(0, data).expect("in-memory write");
     }
     let _ = read_format_with(&fs, dir);
+}
+
+/// The Raft state machine's snapshot parser (`PrkDbStateMachine::restore`), whose bytes
+/// are a peer's `InstallSnapshotRequest.data`.
+pub fn snapshot_restore(data: &[u8]) {
+    let _ = prkdb::raft::state_machine::parse_snapshot(data);
+}
+
+/// The whole-file bincode decodes, whose limit scales with the input: the Raft
+/// `snapshot.bin` (native) and the segmented adapter's `index.snapshot` (serde).
+pub fn file_decode(data: &[u8]) {
+    use prkdb_types::codec::{decode_file, decode_serde_file};
+    use std::collections::HashMap;
+    let _ = decode_file::<(u64, u64, Vec<u8>)>(data);
+    let _ = decode_serde_file::<HashMap<Vec<u8>, Option<Vec<u8>>>>(data);
+}
+
+/// A backup snapshot read entry by entry (`SnapshotReader`), plain or gzip as its
+/// header says.
+pub fn snapshot_entries(data: &[u8]) {
+    use prkdb::storage::snapshot::SnapshotReader;
+    let Ok(mut reader) = SnapshotReader::from_reader(std::io::Cursor::new(data.to_vec())) else {
+        return;
+    };
+    while let Ok(Some(_)) = reader.next_entry() {}
 }

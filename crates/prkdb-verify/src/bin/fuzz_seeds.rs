@@ -17,8 +17,13 @@
 use anyhow::{bail, Context, Result};
 use prkdb::keys::{collection_prefix, encode_id, encode_key, encode_record_key, CollectionId};
 use prkdb::raft::command::Command;
+use prkdb::raft::state_machine::{parse_snapshot, PrkDbStateMachine, StateMachine};
 use prkdb::storage::checkpoint::{checkpoint_dir, decode_checkpoint, encode_checkpoint};
 use prkdb::storage::format::{ensure_format, FORMAT_FILE};
+use prkdb::storage::snapshot::{
+    CompressionType as SnapshotCompression, SnapshotHeader, SnapshotReader, SnapshotWriter,
+    SNAPSHOT_VERSION,
+};
 use prkdb::storage::WalStorageAdapter;
 use prkdb_core::vfs::StdVfs;
 use prkdb_core::wal::batch::{Batch, BatchOp};
@@ -29,7 +34,9 @@ use prkdb_proto::raft;
 use prkdb_types::storage::StorageAdapter;
 use prkdb_verify::fuzz_entry::TARGETS;
 use prost::Message;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 fn put(key: &str, value: &str) -> BatchOp {
     BatchOp::Put {
@@ -86,17 +93,22 @@ fn frame(lsn: Lsn, kind: FrameKind, payload: &[u8]) -> Vec<u8> {
 struct RealFiles {
     segment: Vec<u8>,
     checkpoint: Vec<u8>,
+    /// `PrkDbStateMachine::snapshot` of the same data (an `InstallSnapshot` payload).
+    raft_snapshot: Vec<u8>,
+    /// `take_snapshot` backups of the same data, plain and gzip.
+    backups: Vec<Vec<u8>>,
 }
 
 async fn real_files() -> Result<RealFiles> {
     let dir = tempfile::tempdir()?;
+    let backup_dir = tempfile::tempdir()?;
     let cfg = WalConfig {
         log_dir: dir.path().to_path_buf(),
         segment_bytes: 64 * 1024,
         ..WalConfig::test_config()
     };
-    {
-        let db = WalStorageAdapter::open_async(cfg).await?;
+    let (raft_snapshot, backups) = {
+        let db = Arc::new(WalStorageAdapter::open_async(cfg).await?);
         for i in 0..6 {
             db.put(
                 format!("key-{i}").as_bytes(),
@@ -107,7 +119,40 @@ async fn real_files() -> Result<RealFiles> {
         db.delete(b"key-2").await?;
         db.put(b"key-3", b"value-3b").await?;
         db.save_checkpoint()?;
-    }
+        // The state machine writes keys in index order, which is not stable across
+        // runs; sort the entries so the seed is.
+        let raw = PrkDbStateMachine::new(db.clone()).snapshot().await?;
+        let mut entries = parse_snapshot(&raw)?;
+        entries.sort();
+        let raft_snapshot = encode_raft_snapshot(&entries);
+        // Backups through `SnapshotWriter` with a fixed header: `take_snapshot` stamps
+        // `created_at` with the wall clock, which would change the seeds on every run.
+        let mut backups = Vec::new();
+        for (name, compression) in [
+            ("backup.bin", SnapshotCompression::None),
+            ("backup.gz", SnapshotCompression::Gzip),
+        ] {
+            let path = backup_dir.path().join(name);
+            let mut keys = db.get_all_keys();
+            keys.sort();
+            let header = SnapshotHeader {
+                version: SNAPSHOT_VERSION,
+                created_at: 0,
+                max_offset: 8,
+                index_entries: keys.len() as u64,
+                compression,
+            };
+            let mut writer = SnapshotWriter::new(&path, header)?;
+            for key in keys {
+                if let Some(value) = db.get(&key).await? {
+                    writer.write_entry(&key, &value)?;
+                }
+            }
+            writer.finish()?;
+            backups.push(std::fs::read(&path)?);
+        }
+        (raft_snapshot, backups)
+    };
     let segment = std::fs::read(dir.path().join(segment_file_name(1)))?;
     let ckpt_dir = checkpoint_dir(dir.path());
     let mut ckpts: Vec<PathBuf> = std::fs::read_dir(&ckpt_dir)
@@ -121,6 +166,8 @@ async fn real_files() -> Result<RealFiles> {
     Ok(RealFiles {
         segment,
         checkpoint: std::fs::read(newest)?,
+        raft_snapshot,
+        backups,
     })
 }
 
@@ -310,6 +357,22 @@ fn check_valid(target: &str, seeds: &[Vec<u8>]) -> Result<()> {
             "frame_decode" => matches!(decode_frame(seed), Decoded::Frame { .. }),
             "batch_decode" => Batch::decode(seed).is_ok(),
             "checkpoint_load" => decode_checkpoint(seed).is_ok(),
+            "snapshot_restore" => parse_snapshot(seed).is_ok(),
+            "snapshot_entries" => {
+                let mut reader = SnapshotReader::from_reader(std::io::Cursor::new(seed.clone()))?;
+                let mut ok = true;
+                loop {
+                    match reader.next_entry() {
+                        Ok(Some(_)) => {}
+                        Ok(None) => break,
+                        Err(_) => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                ok
+            }
             _ => true,
         };
         if !ok {
@@ -317,6 +380,42 @@ fn check_valid(target: &str, seeds: &[Vec<u8>]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `PrkDbStateMachine::snapshot`'s format: `[u64 count][u64 key_len, key, u64 value_len,
+/// value]...`.
+fn encode_raft_snapshot(entries: &[(&[u8], &[u8])]) -> Vec<u8> {
+    let mut out = (entries.len() as u64).to_le_bytes().to_vec();
+    for (k, v) in entries {
+        out.extend_from_slice(&(k.len() as u64).to_le_bytes());
+        out.extend_from_slice(k);
+        out.extend_from_slice(&(v.len() as u64).to_le_bytes());
+        out.extend_from_slice(v);
+    }
+    out
+}
+
+/// A real state-machine snapshot plus hand-built ones.
+fn snapshot_restore_seeds(real: &RealFiles) -> Vec<Vec<u8>> {
+    vec![
+        real.raft_snapshot.clone(),
+        encode_raft_snapshot(&[]),
+        encode_raft_snapshot(&[(b"user:1", b"alice"), (b"", b""), (b"user:2", b"bob")]),
+    ]
+}
+
+/// The whole-file decodes: a Raft `snapshot.bin` (native `(index, term, data)`) and a
+/// segmented `index.snapshot` (serde map).
+fn file_decode_seeds(real: &RealFiles) -> Result<Vec<Vec<u8>>> {
+    let standard = bincode::config::standard();
+    let mut index: BTreeMap<Vec<u8>, Option<Vec<u8>>> = BTreeMap::new();
+    index.insert(b"k1".to_vec(), Some(b"v1".to_vec()));
+    index.insert(b"gone".to_vec(), None);
+    Ok(vec![
+        bincode::encode_to_vec((7u64, 2u64, real.raft_snapshot.clone()), standard)?,
+        bincode::encode_to_vec((0u64, 0u64, Vec::<u8>::new()), standard)?,
+        bincode::serde::encode_to_vec(&index, standard)?,
+    ])
 }
 
 fn write_seeds(root: &Path, target: &str, seeds: &[Vec<u8>]) -> Result<()> {
@@ -356,6 +455,9 @@ async fn main() -> Result<()> {
             "proto_decode" => proto_seeds(),
             "key_decode" => key_seeds()?,
             "format_parse" => format_seeds()?,
+            "snapshot_restore" => snapshot_restore_seeds(&real),
+            "file_decode" => file_decode_seeds(&real)?,
+            "snapshot_entries" => real.backups.clone(),
             other => bail!("no seed generator for fuzz target {other}"),
         };
         check_valid(target, &seeds)?;

@@ -2765,6 +2765,7 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bincode",
  "crc32fast",
  "parking_lot 0.12.5",
  "prkdb",

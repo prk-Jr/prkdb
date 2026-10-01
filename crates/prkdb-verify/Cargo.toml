@@ -15,6 +15,7 @@ prkdb-types = { workspace = true }
 prkdb-proto = { workspace = true }
 prost = { workspace = true }
 crc32fast = "1.4"
+bincode = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }

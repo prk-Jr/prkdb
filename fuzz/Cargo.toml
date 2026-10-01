@@ -79,3 +79,24 @@ path = "fuzz_targets/format_parse.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "snapshot_restore"
+path = "fuzz_targets/snapshot_restore.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "file_decode"
+path = "fuzz_targets/file_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "snapshot_entries"
+path = "fuzz_targets/snapshot_entries.rs"
+test = false
+doc = false
+bench = false

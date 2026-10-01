@@ -536,7 +536,7 @@ jobs:
     # honour rust-toolchain.toml; it builds only the `fuzz/` crate (excluded from the
     # workspace), never the gated workspace. The same entry points run on the pinned
     # toolchain in every PR through `prkdb-verify`'s `fuzz_corpus` test, over the same
-    # seeds. Seven targets x 4 minutes plus a cold sanitizer build fits well inside 60.
+    # seeds. Ten targets x 3 minutes plus a cold sanitizer build fits inside 60.
     timeout-minutes: 60
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
@@ -558,12 +558,12 @@ jobs:
       # scratch directory goes first and the committed seeds are only read. A crash
       # becomes a new seed (cargo run -p prkdb-verify --bin fuzz_seeds, or the artifact
       # copied into fuzz/corpus/<target>/) plus a ledger finding.
-      - name: Run each target for 4 minutes
+      - name: Run each target for 3 minutes
         run: |
           set -euo pipefail
-          for t in frame_decode batch_decode segment_scan checkpoint_load proto_decode key_decode format_parse; do
+          for t in frame_decode batch_decode segment_scan checkpoint_load proto_decode key_decode format_parse snapshot_restore file_decode snapshot_entries; do
             mkdir -p "$RUNNER_TEMP/corpus/$t"
-            cargo +nightly fuzz run "$t" "$RUNNER_TEMP/corpus/$t" "fuzz/corpus/$t" -- -max_total_time=240
+            cargo +nightly fuzz run "$t" "$RUNNER_TEMP/corpus/$t" "fuzz/corpus/$t" -- -max_total_time=180
           done
       - if: failure()
         uses: actions/upload-artifact@v4
