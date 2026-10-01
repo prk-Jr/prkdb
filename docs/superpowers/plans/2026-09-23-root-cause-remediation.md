@@ -6638,8 +6638,8 @@ exit "$fail"
   - [x] `WalStorageAdapter::open` creates a missing directory (Task 2.8a).
   - [x] Deleted public types (D13, Task 2.9): `prkdb::storage::{ShardedWalAdapter, StreamingStorageAdapter, StreamingConfig, StreamingRecord, PartitionedStreamingAdapter, PartitionedStreamingConfig, PartitionStrategy}`; `prkdb_core::wal::{ParallelWal, WriteAheadLog, LogSegment, OffsetIndex}` and the parallel/async/mmap WAL modules with `wal::{compaction, async_fsync, buffer_pool, metrics}`; `prkdb_core::replication` (`FollowerServer`, `ReplicationManager`, `ReplicaClient`, protocol types); `WalStorageAdapter::new_with_replication`. Streaming returns in Task 2.15b.
   - [x] `CollectionPartitionedAdapter` (the `with_data_dir` default) stores every collection in one WAL at the data directory root; `load_all_collections` is replaced by `collection_names` (Task 2.9b, D11).
-  - [ ] `IndexedStorage` primary keys are bincode, not JSON; `CollectionHandle` keys no longer contain the partition (Task 2.12).
-  - [ ] A collection's stored name is its snake_case type name unless `#[collection(name = "...")]` pins it; renaming an unpinned type orphans its data (Task 2.12, spec revision 11).
+  - [x] `IndexedStorage` primary keys are bincode, not JSON; `CollectionHandle` keys no longer contain the partition (Task 2.12).
+  - [x] A collection's stored name is its snake_case type name unless `#[collection(name = "...")]` pins it; renaming an unpinned type orphans its data (Task 2.12, spec revision 11).
   - [ ] Fast mode: a power cut can lose up to `sync_interval` of acknowledged writes, and the sequence of an event lost that way may be reused by a later event; a consumer that read the lost event is ahead of the log (Task 2.21).
   - [ ] A server whose schema registry cannot be loaded refuses to start instead of starting empty (Task 2.22).
 

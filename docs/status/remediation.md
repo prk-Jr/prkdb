@@ -33,7 +33,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | EVT-04 | high | 3 | open | Sled "atomic" outbox methods apply two independent tree batches |
 | EVT-05 | high | 3 | open | put_with_outbox errors fall back to a non-atomic path, hiding real errors |
 | EVT-06 | high | 3 | open | Auto-commit commits inside poll() before processing; no generation fencing; unassigned consumer falls back to partition 0 |
-| KEY-01 | high | 2 | open | Primary keys not namespaced by collection; different types can overwrite each other |
+| KEY-01 | high | 2 | fixed | Primary keys not namespaced by collection; different types can overwrite each other |
 | KEY-02 | high | 2 | open | upsert removes the new record's index entries instead of the old; unique index unenforced |
 | KEY-03 | high | 2 | fixed | AHasher::default() is randomly seeded per process; a key's partition changes after restart |
 | REL-01 | high | 5 | open | prkdb-client path dep has no version; dry-run failures suppressed; validate_all.sh reports success on failure |
