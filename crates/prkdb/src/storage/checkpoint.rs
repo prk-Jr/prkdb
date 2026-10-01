@@ -27,6 +27,7 @@
 //! ```text
 //! magic   b"PRKDBCKP"
 //! format  u32            FORMAT_VERSION
+//! flags   u32            reserved: written as 0; a reader refuses any bit it does not know
 //! covered u64            every frame with lsn <= covered is reflected in the entries
 //! count   u64
 //! count × entry          klen u32 | key | lsn u64 | segment u64 | offset u64 | payload_len u32
@@ -59,8 +60,14 @@ const FILE_PREFIX: &str = "index-";
 const FILE_SUFFIX: &str = ".ckpt";
 const TMP_SUFFIX: &str = ".tmp";
 
-/// `magic(8) + format(4) + covered(8) + count(8)`.
-const HEADER_LEN: usize = 28;
+/// `magic(8) + format(4) + flags(4) + covered(8) + count(8)`.
+const HEADER_LEN: usize = 32;
+
+/// Header flag bits this build understands: none yet. The field exists so a later
+/// format-2 build can mark an optional feature of the file. A reader refuses a checkpoint
+/// with any bit outside this mask, and recovery then falls back to the log, so a newer
+/// writer's file is never misread as an older one.
+const KNOWN_FLAGS: u32 = 0;
 const CRC_LEN: usize = 4;
 /// `klen(4) + lsn(8) + segment(8) + offset(8) + payload_len(4)`, with an empty key.
 const MIN_ENTRY_LEN: usize = 32;
@@ -109,6 +116,7 @@ pub fn encode_checkpoint(covered: Lsn, entries: &[Entry]) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER_LEN + body + CRC_LEN);
     out.extend_from_slice(&CHECKPOINT_MAGIC);
     out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+    out.extend_from_slice(&KNOWN_FLAGS.to_le_bytes());
     out.extend_from_slice(&covered.to_le_bytes());
     out.extend_from_slice(&(entries.len() as u64).to_le_bytes());
     for (key, loc) in entries {
@@ -159,7 +167,7 @@ impl<'a> Reader<'a> {
 /// (Task 2.23's `checkpoint_load` fuzz target calls this).
 ///
 /// Checks, in order: length, CRC over every byte before the trailing CRC, magic, format
-/// ([`FORMAT_VERSION`]), then every entry: bounds, keys strictly ascending, and the
+/// ([`FORMAT_VERSION`]), header flags (no unknown bits), then every entry: bounds, keys strictly ascending, and the
 /// location's own sanity (`1 <= segment <= lsn`, offset past the segment header, payload
 /// no larger than a frame can hold). Whether the locations exist in the log is the
 /// caller's check ([`validate_against_log`]), since it needs the log.
@@ -191,6 +199,10 @@ pub fn decode_checkpoint(bytes: &[u8]) -> Result<Decoded, StorageError> {
         return Err(corrupt(format!(
             "format {format}; this build reads format {FORMAT_VERSION}"
         )));
+    }
+    let unknown = r.u32()? & !KNOWN_FLAGS;
+    if unknown != 0 {
+        return Err(corrupt(format!("unknown header flags {unknown:#010x}")));
     }
     let covered = r.u64()?;
     let count = r.u64()?;
@@ -438,10 +450,15 @@ mod tests {
         let bytes = encode_checkpoint(5, &[(b"k".to_vec(), loc(2))]);
         assert_eq!(&bytes[..8], b"PRKDBCKP");
         assert_eq!(&bytes[8..12], &FORMAT_VERSION.to_le_bytes());
-        assert_eq!(&bytes[12..20], &5u64.to_le_bytes());
-        assert_eq!(&bytes[20..28], &1u64.to_le_bytes());
-        assert_eq!(&bytes[28..32], &1u32.to_le_bytes());
-        assert_eq!(bytes[32], b'k');
+        assert_eq!(
+            &bytes[12..16],
+            &0u32.to_le_bytes(),
+            "flags are written as 0"
+        );
+        assert_eq!(&bytes[16..24], &5u64.to_le_bytes());
+        assert_eq!(&bytes[24..32], &1u64.to_le_bytes());
+        assert_eq!(&bytes[32..36], &1u32.to_le_bytes());
+        assert_eq!(bytes[36], b'k');
         assert_eq!(bytes.len(), HEADER_LEN + MIN_ENTRY_LEN + 1 + CRC_LEN);
         let crc = crc32fast::hash(&bytes[..bytes.len() - 4]);
         assert_eq!(&bytes[bytes.len() - 4..], &crc.to_le_bytes());
@@ -486,8 +503,18 @@ mod tests {
         let e = decode_checkpoint(&reseal(format)).unwrap_err();
         assert!(e.to_string().contains("format"), "{e}");
 
+        for bit in 0..32 {
+            let mut flags = good.clone();
+            flags[12..16].copy_from_slice(&(1u32 << bit).to_le_bytes());
+            let e = decode_checkpoint(&reseal(flags)).unwrap_err();
+            assert!(
+                e.to_string().contains("unknown header flags"),
+                "bit {bit}: {e}"
+            );
+        }
+
         let mut count = good.clone();
-        count[20..28].copy_from_slice(&u64::MAX.to_le_bytes());
+        count[24..32].copy_from_slice(&u64::MAX.to_le_bytes());
         assert!(decode_checkpoint(&reseal(count)).is_err());
 
         let unsorted = encode_checkpoint(9, &[(b"b".to_vec(), loc(1)), (b"a".to_vec(), loc(2))]);
