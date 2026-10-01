@@ -93,12 +93,14 @@ title = "BatchAccumulator::flush() sleeps and returns Ok while dropping executor
 area = "storage"
 severity = "high"
 phase = 2
-status = "open"
+status = "fixed"
 sources = ["review-2026-09-07#R06"]
 evidence = [
   "crates/prkdb/src/batch_accumulator.rs:49,81,92,131-135",
   "crates/prkdb/src/collection_handle.rs:177-187",
 ]
+regression_tests = ["test:crates/prkdb/src/batch_accumulator.rs::flush_stays_pending_while_the_executor_is_blocked", "test:crates/prkdb/src/batch_accumulator.rs::flush_returns_the_executor_error", "test:crates/prkdb/tests/batch_accumulator_flush.rs::a_batched_handle_flush_reports_failed_writes"]
+changes = ["e41a32d"]
 
 # ---------------------------------------------------------------------------
 # 3.2 Keys, indexes, partitioning (KEY)
