@@ -563,17 +563,13 @@ impl PrkDb {
         &self,
         collection_name: &str,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Error> {
-        let Some(coll) = self
-            .catalog
-            .lookup(collection_name)
-            .await
-            .map_err(Error::Storage)?
-        else {
-            return Ok(Vec::new());
-        };
-        let ns = self.namespace.as_deref().unwrap_or_default();
-        self.scan_prefix_across_data_stores(&crate::keys::collection_prefix(ns, coll))
-            .await
+        // One scan for every caller, multi-raft included (raw `name:` keys there).
+        Ok(self
+            .scan_collection_records(collection_name)
+            .await?
+            .into_iter()
+            .map(|record| (record.key, record.value))
+            .collect())
     }
 
     /// The collection's event stream, `(partition, seq, bytes)` per event, from the outbox
@@ -660,11 +656,20 @@ impl PrkDb {
         allocate: bool,
     ) -> Result<Option<Vec<u8>>, Error> {
         if self.partition_manager.is_some() {
+            // A persisted name has no ':', so `name:id` splits one way only: without the
+            // check, `a:b` + `c` and `a` + `b:c` would be one key.
+            if let Err(e) = crate::catalog::Catalog::validate_name(name) {
+                return if allocate {
+                    Err(Error::Storage(e))
+                } else {
+                    Ok(None)
+                };
+            }
             return Ok(Some(format!("{name}:{id}").into_bytes()));
         }
         let coll = if allocate {
             self.catalog
-                .id_for_name(name)
+                .id_for_name_with(name, crate::catalog::ValueEncoding::Json)
                 .await
                 .map_err(Error::Storage)?
         } else {
@@ -690,6 +695,18 @@ impl PrkDb {
             .collection_record_key(name, id, true)
             .await?
             .ok_or_else(|| Error::Internal("an allocating key lookup found no key".into()))?;
+        // The name API writes JSON; a collection a `CollectionHandle` type owns stores
+        // bincode, which that type could not read back. Refuse rather than corrupt it.
+        if self.partition_manager.is_none() {
+            if let Some(record) = self.catalog.recorded(name).await.map_err(Error::Storage)? {
+                if record.encoding == crate::catalog::ValueEncoding::Bincode {
+                    return Err(Error::Storage(StorageError::Validation(format!(
+                        "collection {name} belongs to type {} through CollectionHandle, which                          stores bincode values; the name-based API (HTTP, CLI) writes JSON.                          Write it through CollectionHandle, or keep collections shared with                          HTTP/CLI on IndexedStorage (JSON)",
+                        record.type_name
+                    ))));
+                }
+            }
+        }
         self.put(&key, value).await
     }
 
@@ -756,6 +773,24 @@ impl PrkDb {
         if self.partition_manager.is_none() {
             for (name, _) in self.catalog.list().await.map_err(Error::Storage)? {
                 names.insert(name);
+            }
+        } else {
+            // Multi-raft records are raw `name:id` keys (the catalog is node-local). The
+            // name API only writes persisted names, which contain no ':', so the text
+            // before the first ':' of a key is its collection when that text is a valid
+            // persisted name. System keyspaces never are (`__…`), except `meta:col:`,
+            // the collection metadata `list_collections` already reports, which is
+            // skipped.
+            for (key, _) in self.scan_prefix_across_data_stores(b"").await? {
+                let Some(split) = key.iter().position(|b| *b == b':') else {
+                    continue;
+                };
+                let Ok(name) = std::str::from_utf8(&key[..split]) else {
+                    continue;
+                };
+                if name != "meta" && crate::catalog::Catalog::validate_name(name).is_ok() {
+                    names.insert(name.to_string());
+                }
             }
         }
         Ok(names.into_iter().collect())

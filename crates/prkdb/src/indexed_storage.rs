@@ -3240,7 +3240,8 @@ impl<'a, S: StorageAdapter + 'static> Transaction<'a, S> {
 
         self.operations.push(TxOperation::Insert {
             collection: collection_name.into_owned(),
-            ty: crate::catalog::CollectionType::of::<T>(),
+            ty: crate::catalog::CollectionType::of::<T>()
+                .with_encoding(crate::catalog::ValueEncoding::Json),
             id,
             data,
             index_values,
@@ -3262,7 +3263,8 @@ impl<'a, S: StorageAdapter + 'static> Transaction<'a, S> {
 
         self.operations.push(TxOperation::Delete {
             collection: collection_name.into_owned(),
-            ty: crate::catalog::CollectionType::of::<T>(),
+            ty: crate::catalog::CollectionType::of::<T>()
+                .with_encoding(crate::catalog::ValueEncoding::Json),
             id,
             index_values,
         });
@@ -3468,7 +3470,10 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     /// `T::persisted_name()` (KEY-01). Allocates the collection's id on first use, so it
     /// is for writes; reads use [`Self::existing_key`].
     async fn primary_key<T: Collection>(&self, id: &T::Id) -> Result<Vec<u8>, StorageError> {
-        let coll = self.catalog.id_for::<T>().await?;
+        let coll = self
+            .catalog
+            .id_for_encoded::<T>(crate::catalog::ValueEncoding::Json)
+            .await?;
         encode_record_key(&[], coll, id)
     }
 
@@ -5995,7 +6000,10 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         }
 
         let collection_name = T::persisted_name().into_owned();
-        let coll = self.catalog.id_for::<T>().await?;
+        let coll = self
+            .catalog
+            .id_for_encoded::<T>(crate::catalog::ValueEncoding::Json)
+            .await?;
 
         // Step 1: Serialize all records
         let serialized: Vec<_> = records
@@ -6119,7 +6127,10 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         }
 
         let collection_name = T::persisted_name();
-        let coll = self.catalog.id_for::<T>().await?;
+        let coll = self
+            .catalog
+            .id_for_encoded::<T>(crate::catalog::ValueEncoding::Json)
+            .await?;
 
         // Step 1: Check which records exist using lock-free index
         let mut new_records = Vec::with_capacity(records.len());

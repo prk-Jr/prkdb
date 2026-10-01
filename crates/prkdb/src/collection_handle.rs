@@ -49,7 +49,11 @@ impl<C: Collection> CollectionHandle<C> {
     /// (D12): partitions are logical (spec 2c) and still route the outbox stream and the
     /// metrics. Allocates the collection's id on first use, so it is for writes.
     async fn record_key(&self, id: &C::Id) -> Result<Vec<u8>, StorageError> {
-        let coll = self.db.catalog().id_for::<C>().await?;
+        let coll = self
+            .db
+            .catalog()
+            .id_for_encoded::<C>(crate::catalog::ValueEncoding::Bincode)
+            .await?;
         encode_record_key(self.namespace(), coll, id)
     }
 
@@ -330,7 +334,11 @@ where
         let mut outbox_ops = Vec::with_capacity(items.len());
         let mut serialized_items = Vec::with_capacity(items.len());
 
-        let coll = self.db.catalog().id_for::<C>().await?;
+        let coll = self
+            .db
+            .catalog()
+            .id_for_encoded::<C>(crate::catalog::ValueEncoding::Bincode)
+            .await?;
 
         // Phase 1: Serialize all items in batch (reduces overhead)
         for item in &items {

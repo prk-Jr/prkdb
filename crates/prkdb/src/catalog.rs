@@ -5,9 +5,10 @@
 //!
 //! All entries live under [`SYSTEM_COLLECTION`] in the catalog's namespace:
 //!
-//! - `catalog/name/{name}` → id, `u32` big-endian, followed by the Rust type name that
-//!   allocated it (empty when a name-based API did) — the forward entry; it is what makes
-//!   a name allocated;
+//! - `catalog/name/{name}` → id, `u32` big-endian, then one byte naming the value
+//!   encoding of the API that allocated it ([`ValueEncoding`]), then the Rust type name
+//!   that allocated it (empty when a name-based API did) — the forward entry; it is what
+//!   makes a name allocated;
 //! - `catalog/id/{id BE}` → name (the reverse entry);
 //! - `catalog/next` → the next id to hand out, `u32` big-endian, starting at 1.
 //!
@@ -52,11 +53,47 @@ type AllocationLock = Arc<tokio::sync::Mutex<()>>;
 /// `(namespace, persisted name)` → the type that claimed it, for one storage.
 type TypeRegistry = DashMap<(Vec<u8>, String), (TypeId, &'static str)>;
 
-/// The Rust type a typed API resolves a collection for.
+/// How the API that allocated a collection encodes its values, recorded in the forward
+/// entry so another API can refuse to write values the owner cannot read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ValueEncoding {
+    /// Allocated by an API that does not say (the routing API, `Catalog::id_for`).
+    Unspecified = 0,
+    /// JSON: `IndexedStorage`, the HTTP API and the CLI.
+    Json = 1,
+    /// bincode: `CollectionHandle`.
+    Bincode = 2,
+}
+
+impl ValueEncoding {
+    fn from_byte(byte: u8) -> Result<Self, StorageError> {
+        match byte {
+            0 => Ok(Self::Unspecified),
+            1 => Ok(Self::Json),
+            2 => Ok(Self::Bincode),
+            other => Err(StorageError::Corruption(format!(
+                "catalog/name/ value encoding {other} is unknown"
+            ))),
+        }
+    }
+}
+
+/// What a forward entry records about a collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionRecord {
+    pub id: CollectionId,
+    pub encoding: ValueEncoding,
+    /// The Rust type name that allocated it; empty for a name-based API.
+    pub type_name: String,
+}
+
+/// The Rust type a typed API resolves a collection for, and its value encoding.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CollectionType {
     id: TypeId,
     name: &'static str,
+    encoding: ValueEncoding,
 }
 
 impl CollectionType {
@@ -64,7 +101,12 @@ impl CollectionType {
         Self {
             id: TypeId::of::<C>(),
             name: std::any::type_name::<C>(),
+            encoding: ValueEncoding::Unspecified,
         }
+    }
+
+    pub(crate) fn with_encoding(self, encoding: ValueEncoding) -> Self {
+        Self { encoding, ..self }
     }
 }
 
@@ -101,6 +143,8 @@ pub struct Catalog {
     /// Ids already resolved for a type in this catalog: the typed hot path (one
     /// `TypeId` hash, no name hashing, no registry check after the first use).
     typed: DashMap<TypeId, CollectionId>,
+    /// Forward entries already read (they never change once written).
+    records: DashMap<String, CollectionRecord>,
     /// `storage.allocation_lock()`, or a per-`Catalog` lock when it has none.
     lock: AllocationLock,
     types: Arc<TypeRegistry>,
@@ -119,6 +163,7 @@ impl Catalog {
             cache: DashMap::new(),
             names: DashMap::new(),
             typed: DashMap::new(),
+            records: DashMap::new(),
             lock,
             types,
         }
@@ -144,7 +189,31 @@ impl Catalog {
     /// callers (the routing API, the CLI and HTTP server); typed callers use
     /// [`Self::id_for`], which also checks the type.
     pub async fn id_for_name(&self, name: &str) -> Result<CollectionId, StorageError> {
-        self.allocate(name, "").await
+        self.allocate(name, "", ValueEncoding::Unspecified).await
+    }
+
+    /// As [`Self::id_for_name`], recording `encoding` if it allocates.
+    pub(crate) async fn id_for_name_with(
+        &self,
+        name: &str,
+        encoding: ValueEncoding,
+    ) -> Result<CollectionId, StorageError> {
+        self.allocate(name, "", encoding).await
+    }
+
+    /// As [`Self::id_for`], recording `encoding` if it allocates.
+    pub(crate) async fn id_for_encoded<C: Collection>(
+        &self,
+        encoding: ValueEncoding,
+    ) -> Result<CollectionId, StorageError> {
+        if let Some(id) = self.typed.get(&TypeId::of::<C>()) {
+            return Ok(*id);
+        }
+        self.id_for_type(
+            CollectionType::of::<C>().with_encoding(encoding),
+            &C::persisted_name(),
+        )
+        .await
     }
 
     /// The id of collection `C`, by its persisted name, allocated on first use. Refuses a
@@ -176,7 +245,7 @@ impl Catalog {
             return Ok(*id);
         }
         self.claim(ty, name)?;
-        let id = self.allocate(name, ty.name).await?;
+        let id = self.allocate(name, ty.name, ty.encoding).await?;
         self.check_recorded_type(ty, name).await?;
         self.typed.insert(ty.id, id);
         Ok(id)
@@ -225,7 +294,8 @@ impl Catalog {
         ty: CollectionType,
         name: &str,
     ) -> Result<(), StorageError> {
-        if let Some((_, recorded)) = self.read_forward_entry(name).await? {
+        if let Some(entry) = self.read_forward_entry(name).await? {
+            let recorded = entry.type_name;
             if !recorded.is_empty() && recorded != ty.name {
                 tracing::warn!(
                     collection = name,
@@ -241,8 +311,13 @@ impl Catalog {
         Ok(())
     }
 
-    /// The id for `name`, allocating it (recording `type_name`) on first use.
-    async fn allocate(&self, name: &str, type_name: &str) -> Result<CollectionId, StorageError> {
+    /// The id for `name`, allocating it (recording `type_name` and `encoding`) on first use.
+    async fn allocate(
+        &self,
+        name: &str,
+        type_name: &str,
+        encoding: ValueEncoding,
+    ) -> Result<CollectionId, StorageError> {
         Self::validate_name(name)?;
         if let Some(id) = self.cache.get(name) {
             return Ok(*id);
@@ -280,7 +355,12 @@ impl Catalog {
         self.storage
             .put(&self.reverse_key(id)?, name.as_bytes())
             .await?;
-        let forward = [&id.0.to_be_bytes()[..], type_name.as_bytes()].concat();
+        let forward = [
+            &id.0.to_be_bytes()[..],
+            &[encoding as u8],
+            type_name.as_bytes(),
+        ]
+        .concat();
         self.storage.put(&self.forward_key(name)?, &forward).await?;
         self.remember(name, id);
         Ok(id)
@@ -305,13 +385,19 @@ impl Catalog {
     /// The Rust type name recorded when `name` was allocated (empty if a name-based API
     /// allocated it); `None` if it never was.
     pub async fn recorded_type(&self, name: &str) -> Result<Option<String>, StorageError> {
+        Ok(self.recorded(name).await?.map(|entry| entry.type_name))
+    }
+
+    /// Everything the forward entry records about `name`; `None` if it was never
+    /// allocated. Cached after the first read: an entry never changes once written.
+    pub async fn recorded(&self, name: &str) -> Result<Option<CollectionRecord>, StorageError> {
         if Self::validate_name(name).is_err() {
             return Ok(None);
         }
-        Ok(self
-            .read_forward_entry(name)
-            .await?
-            .map(|(_, recorded)| recorded))
+        if let Some(entry) = self.records.get(name) {
+            return Ok(Some(entry.clone()));
+        }
+        self.read_forward_entry(name).await
     }
 
     /// Reverse lookup for ids this storage has allocated (cached; reads the entry on a
@@ -340,7 +426,7 @@ impl Catalog {
             let Ok(name) = String::from_utf8(key[prefix.len()..].to_vec()) else {
                 continue;
             };
-            let (id, _) = decode_forward(&value)?;
+            let id = decode_forward(&value)?.id;
             self.remember(&name, id);
             out.push((name, id));
         }
@@ -354,15 +440,19 @@ impl Catalog {
     }
 
     async fn read_forward(&self, name: &str) -> Result<Option<CollectionId>, StorageError> {
-        Ok(self.read_forward_entry(name).await?.map(|(id, _)| id))
+        Ok(self.read_forward_entry(name).await?.map(|entry| entry.id))
     }
 
     async fn read_forward_entry(
         &self,
         name: &str,
-    ) -> Result<Option<(CollectionId, String)>, StorageError> {
+    ) -> Result<Option<CollectionRecord>, StorageError> {
         match self.storage.get(&self.forward_key(name)?).await? {
-            Some(bytes) => Ok(Some(decode_forward(&bytes)?)),
+            Some(bytes) => {
+                let entry = decode_forward(&bytes)?;
+                self.records.insert(name.to_string(), entry.clone());
+                Ok(Some(entry))
+            }
             None => Ok(None),
         }
     }
@@ -380,19 +470,24 @@ impl Catalog {
     }
 }
 
-/// A forward entry: the id, then the allocating type's name (possibly empty).
-fn decode_forward(bytes: &[u8]) -> Result<(CollectionId, String), StorageError> {
-    if bytes.len() < 4 {
+/// A forward entry: the id, the value-encoding byte, then the allocating type's name
+/// (possibly empty).
+fn decode_forward(bytes: &[u8]) -> Result<CollectionRecord, StorageError> {
+    if bytes.len() < 5 {
         return Err(StorageError::Corruption(format!(
-            "catalog entry catalog/name/ holds {} bytes, expected at least 4",
+            "catalog entry catalog/name/ holds {} bytes, expected at least 5",
             bytes.len()
         )));
     }
-    let (id, type_name) = bytes.split_at(4);
-    let type_name = String::from_utf8(type_name.to_vec()).map_err(|_| {
+    let (id, rest) = bytes.split_at(4);
+    let type_name = String::from_utf8(rest[1..].to_vec()).map_err(|_| {
         StorageError::Corruption("catalog/name/ type name is not UTF-8".to_string())
     })?;
-    Ok((CollectionId(decode_u32(id, "catalog/name/")?), type_name))
+    Ok(CollectionRecord {
+        id: CollectionId(decode_u32(id, "catalog/name/")?),
+        encoding: ValueEncoding::from_byte(rest[0])?,
+        type_name,
+    })
 }
 
 fn decode_u32(bytes: &[u8], what: &str) -> Result<u32, StorageError> {

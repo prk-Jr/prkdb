@@ -312,15 +312,23 @@ impl<S: prkdb_schema::SchemaStorage + 'static> PrkDbServiceTrait for PrkDbGrpcSe
         request: Request<PutRecordRequest>,
     ) -> Result<Response<PutResponse>, Status> {
         let req = request.into_inner();
+        // A bad collection name or a collection whose owner cannot read JSON is the
+        // caller's mistake, not the server's.
+        let status = |e: prkdb_types::error::Error| match e {
+            prkdb_types::error::Error::Storage(prkdb_types::error::StorageError::Validation(
+                message,
+            )) => Status::invalid_argument(message),
+            other => Status::internal(format!("PutRecord failed: {other}")),
+        };
         self.db
             .put_collection_record(&req.collection, &req.id, &req.value)
             .await
-            .map_err(|e| Status::internal(format!("PutRecord failed: {}", e)))?;
+            .map_err(status)?;
         let key = self
             .db
             .collection_record_key(&req.collection, &req.id, false)
             .await
-            .map_err(|e| Status::internal(format!("PutRecord failed: {}", e)))?
+            .map_err(status)?
             .unwrap_or_default();
         let partition = match &self.db.partition_manager {
             Some(pm) => pm.get_partition_for_key(&key),

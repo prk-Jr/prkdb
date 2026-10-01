@@ -144,7 +144,8 @@ fn write_id<I: serde::Serialize>(out: Vec<u8>, id: &I) -> Result<Vec<u8>, Storag
 }
 
 /// A printable form of an encoded id, for tools that do not know the id's type (the CLI
-/// and HTTP server): a string id as itself, an 8-byte id as an unsigned integer, anything
+/// and HTTP server): a string id as itself, an 8-byte id as `0x`-prefixed hex (it may be
+/// a `u64`, an `i64` with its sign bit flipped, or anything else of 8 bytes), anything
 /// else `None`.
 pub fn decode_id_hint(id: &[u8]) -> Option<String> {
     // `memcomparable`'s decoder panics on truncated input, so only well-formed bytes reach
@@ -155,9 +156,10 @@ pub fn decode_id_hint(id: &[u8]) -> Option<String> {
         }
     }
     if id.len() == 8 {
-        return memcomparable::from_slice::<u64>(id)
-            .ok()
-            .map(|n| n.to_string());
+        return Some(format!(
+            "0x{}",
+            id.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        ));
     }
     None
 }
@@ -257,7 +259,8 @@ mod tests {
         );
         assert_eq!(
             decode_id_hint(&encode_id(&42u64).unwrap()).as_deref(),
-            Some("42")
+            Some("0x000000000000002a"),
+            "an 8-byte id's type is unknown: hex, not a guessed u64"
         );
         assert_eq!(decode_id_hint(&[1, 2, 3]), None, "truncated: no panic");
         assert_eq!(
@@ -269,6 +272,33 @@ mod tests {
             decode_id_hint(&encode_id(&"a string longer than eight").unwrap()).as_deref(),
             Some("a string longer than eight")
         );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(4096))]
+
+        /// `memcomparable`'s decoder panics on malformed input; `decode_id_hint` reads
+        /// bytes from storage and must never pass it any.
+        #[test]
+        fn decoding_an_id_hint_never_panics(
+            bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..64)
+        ) {
+            let _ = decode_id_hint(&bytes);
+        }
+
+        /// The same, for inputs shaped like an encoded string (flag 1, 9-byte groups) whose
+        /// markers are arbitrary.
+        #[test]
+        fn decoding_a_near_string_never_panics(
+            groups in proptest::collection::vec(
+                proptest::collection::vec(proptest::prelude::any::<u8>(), 9), 0..6)
+        ) {
+            let mut bytes = vec![1u8];
+            for group in groups {
+                bytes.extend(group);
+            }
+            let _ = decode_id_hint(&bytes);
+        }
     }
 
     #[test]

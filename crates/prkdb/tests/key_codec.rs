@@ -668,3 +668,107 @@ fn a_namespace_longer_than_255_bytes_is_refused_at_build() {
         .build()
         .is_ok());
 }
+
+// ── Re-review follow-ups ─────────────────────────────────────────────────────
+
+mod follow_ups {
+    use prkdb_types::error::{Error, StorageError};
+    use prkdb_types::storage::StorageAdapter;
+    use std::sync::Arc;
+
+    #[derive(prkdb_macros::Collection, serde::Serialize, serde::Deserialize, Clone, Debug)]
+    #[collection(name = "owned")]
+    struct Owned {
+        #[id]
+        id: String,
+    }
+
+    /// The name API writes JSON; a collection a `CollectionHandle` type allocated stores
+    /// bincode. Writing JSON into it is refused, naming the type and the fix.
+    #[tokio::test]
+    async fn the_name_api_refuses_a_bincode_collection() {
+        let db = prkdb::PrkDb::builder().build().unwrap();
+        db.collection::<Owned>()
+            .put(Owned { id: "1".into() })
+            .await
+            .unwrap();
+        let err = db
+            .put_collection_record("owned", "2", br#"{"id":"2"}"#)
+            .await
+            .unwrap_err();
+        let text = err.to_string();
+        assert!(
+            matches!(err, Error::Storage(StorageError::Validation(_)))
+                && text.contains("follow_ups::Owned")
+                && text.contains("CollectionHandle"),
+            "{text}"
+        );
+        // A collection the name API owns stays writable by it.
+        db.put_collection_record("notes", "1", br#"{"id":"1"}"#)
+            .await
+            .unwrap();
+    }
+
+    /// `PutRecord` reports a caller's mistake as `InvalidArgument`, not `Internal`.
+    #[tokio::test]
+    async fn put_record_validation_errors_are_invalid_argument() {
+        use prkdb::raft::rpc::prk_db_service_server::PrkDbService;
+        use prkdb::raft::rpc::PutRecordRequest;
+
+        let db = Arc::new(prkdb::PrkDb::builder().build().unwrap());
+        let svc = prkdb::raft::PrkDbGrpcService::new(db, String::new());
+        let status = svc
+            .put_record(tonic::Request::new(PutRecordRequest {
+                collection: "Not A Name".into(),
+                id: "1".into(),
+                value: b"{}".to_vec(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument, "{status}");
+    }
+
+    /// Multi-raft: name-addressed records are raw `name:id` keys in the partitions. Stats,
+    /// samples and the collection listing find them; a name that could split a key two
+    /// ways (`a:b` + `c` vs `a` + `b:c`) is refused.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn multi_raft_names_scans_and_validation() {
+        let root = tempfile::tempdir().unwrap();
+        let db = prkdb::PrkDb::new_multi_raft(
+            2,
+            prkdb::raft::ClusterConfig::default(),
+            root.path().to_path_buf(),
+        )
+        .unwrap();
+        let pm = db.partition_manager.clone().unwrap();
+        // What a committed PUT /collections/orders/data leaves in a partition, written
+        // directly so the test needs no elected leader.
+        let partition = pm.get_partition_storage(1).unwrap();
+        partition.put(b"orders:1", br#"{"id":"1"}"#).await.unwrap();
+        partition
+            .put(b"__prkdb_metadata:internal", b"x")
+            .await
+            .unwrap();
+
+        let names = db.collection_names().await.unwrap();
+        assert!(names.contains(&"orders".to_string()), "{names:?}");
+        assert!(!names.iter().any(|n| n.starts_with("__")), "{names:?}");
+        assert_eq!(db.get_collection_stats("orders").await.unwrap().0, 1);
+        let records = db.scan_collection_records("orders").await.unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id_hint.as_deref(), Some("1"));
+        assert_eq!(db.sample_collection("orders", 5).await.unwrap().len(), 1);
+
+        assert!(db.collection_record_key("a:b", "c", true).await.is_err());
+        assert_eq!(
+            db.collection_record_key("a:b", "c", false).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            db.collection_record_key("orders", "b:c", true)
+                .await
+                .unwrap(),
+            Some(b"orders:b:c".to_vec())
+        );
+    }
+}
