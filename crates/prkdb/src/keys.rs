@@ -147,8 +147,12 @@ fn write_id<I: serde::Serialize>(out: Vec<u8>, id: &I) -> Result<Vec<u8>, Storag
 /// and HTTP server): a string id as itself, an 8-byte id as an unsigned integer, anything
 /// else `None`.
 pub fn decode_id_hint(id: &[u8]) -> Option<String> {
-    if let Ok(s) = memcomparable::from_slice::<String>(id) {
-        return Some(s);
+    // `memcomparable`'s decoder panics on truncated input, so only well-formed bytes reach
+    // it: these bytes come from storage, which a tool must not crash on.
+    if is_memcomparable_bytes(id) {
+        if let Ok(s) = memcomparable::from_slice::<String>(id) {
+            return Some(s);
+        }
     }
     if id.len() == 8 {
         return memcomparable::from_slice::<u64>(id)
@@ -156,6 +160,27 @@ pub fn decode_id_hint(id: &[u8]) -> Option<String> {
             .map(|n| n.to_string());
     }
     None
+}
+
+/// Whether `bytes` is exactly one memcomparable byte string: `[0]` (empty), or `[1]`
+/// followed by 9-byte groups (8 data bytes and a marker), every marker but the last 9, the
+/// last one 1..=8.
+fn is_memcomparable_bytes(bytes: &[u8]) -> bool {
+    match bytes.split_first() {
+        Some((0, rest)) => rest.is_empty(),
+        Some((1, rest)) if !rest.is_empty() && rest.len() % 9 == 0 => {
+            let groups = rest.len() / 9;
+            rest.chunks(9).enumerate().all(|(i, group)| {
+                let marker = group[8];
+                if i + 1 < groups {
+                    marker == 9
+                } else {
+                    (1..=8).contains(&marker)
+                }
+            })
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -234,7 +259,16 @@ mod tests {
             decode_id_hint(&encode_id(&42u64).unwrap()).as_deref(),
             Some("42")
         );
-        assert_eq!(decode_id_hint(&[1, 2, 3]), None);
+        assert_eq!(decode_id_hint(&[1, 2, 3]), None, "truncated: no panic");
+        assert_eq!(
+            decode_id_hint(&[1, 0, 0, 0, 0, 0, 0, 0, 0, 9]),
+            None,
+            "no last group"
+        );
+        assert_eq!(
+            decode_id_hint(&encode_id(&"a string longer than eight").unwrap()).as_deref(),
+            Some("a string longer than eight")
+        );
     }
 
     #[test]
