@@ -136,3 +136,37 @@ async fn multi_raft_partitions_are_format_2_data_directories() {
     .expect("must refuse");
     assert!(err.to_string().contains("format 1"), "{err}");
 }
+
+/// Until Task 2.9b, each `collections/<name>/` is its own data directory, opened lazily on
+/// first access. An old one is refused when the database is built, not by a panic later.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_old_collection_directory_is_refused_when_the_database_is_built() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(
+        root.path()
+            .join("collections")
+            .join("users")
+            .join("mmap_segment_0"),
+    )
+    .unwrap();
+    let err = prkdb::PrkDb::builder()
+        .with_optimized_storage(root.path(), prkdb::builder::OptimizationLevel::Balanced)
+        .build()
+        .err()
+        .expect("must refuse");
+    assert!(err.to_string().contains("format 1"), "{err}");
+}
+
+/// What a filesystem puts in a fresh volume root (ext4 `lost+found`, e.g. a Kubernetes
+/// PVC) or what an OS drops into any directory (`.DS_Store`) is not data.
+#[tokio::test(flavor = "multi_thread")]
+async fn lost_and_found_and_dotfiles_do_not_make_a_directory_format_1() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("lost+found")).unwrap();
+    std::fs::write(dir.path().join(".DS_Store"), b"x").unwrap();
+    drop(WalStorageAdapter::new(cfg(dir.path())).unwrap());
+    assert_eq!(
+        read_format(dir.path()).unwrap().unwrap().format,
+        FORMAT_VERSION
+    );
+}

@@ -11,9 +11,24 @@
 //! can add fields. The number is [`FORMAT_VERSION`], the same one written into every WAL
 //! segment header, so the program has exactly one format version.
 //!
+//! # Frozen syntax
+//!
+//! Every future version must keep writing the version as a line `format = <integer>`
+//! (decimal `u32`; whitespace around `=` is free; a quoted `"<integer>"` is also read).
+//! That one line is how an older build recognises a newer directory and refuses it by
+//! number instead of as unreadable, so it is the only part of this file that can never
+//! change. Everything else, `created_by` included, is informational.
+//!
 //! # Open rules ([`ensure_format`])
 //!
-//! - absent or empty directory: created as format 2, `FORMAT` written before anything else;
+//! - absent or empty directory: created as format 2, `FORMAT` written before anything else.
+//!   "Empty" ignores what a filesystem or OS puts in a fresh directory on its own:
+//!   `lost+found` (the root of an ext4 volume, e.g. a Kubernetes PVC mount) and dotfiles
+//!   (`.DS_Store`). Anything else counts as data. This is deliberately an ignore list,
+//!   not a list of format-1 file names: a name missing from an ignore list refuses a
+//!   directory that could have been opened (fail closed), while a name missing from an
+//!   evidence list would open old data as an empty database (the failure this exists
+//!   to prevent);
 //! - `FORMAT` says 2: opens;
 //! - no `FORMAT` on a non-empty directory (format 1, which had no marker) or any other
 //!   number: refused with [`StorageError::UnsupportedFormat`] before a single byte is
@@ -22,7 +37,7 @@
 
 use prkdb_core::vfs::{OpenMode, StdVfs, Vfs};
 use prkdb_types::error::StorageError;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub use prkdb_core::format::FORMAT_VERSION;
 
@@ -68,7 +83,7 @@ impl FormatMarker {
                 continue;
             };
             match key.trim() {
-                "format" => format = Some(value.trim().parse::<u32>().ok()?),
+                "format" => format = Some(value.trim().trim_matches('"').parse::<u32>().ok()?),
                 "created_by" => created_by = value.trim().trim_matches('"').to_string(),
                 _ => {}
             }
@@ -97,6 +112,26 @@ pub fn unsupported_format(dir: &Path, found: u32) -> StorageError {
 
 fn io_err(path: &Path, e: std::io::Error) -> StorageError {
     StorageError::Internal(format!("{}: {e}", path.display()))
+}
+
+/// Entries a filesystem or OS creates in a directory on its own, which do not make it a
+/// data directory: `lost+found` and dotfiles. See the module docs for why this is an
+/// ignore list.
+fn is_ignorable(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n == "lost+found" || n.starts_with('.'))
+}
+
+/// Whether `dir` holds anything other than ignorable entries and a stale `FORMAT.tmp`,
+/// i.e. whether a directory without `FORMAT` must be treated as format 1.
+pub fn holds_data(vfs: &dyn Vfs, dir: &Path) -> Result<bool, StorageError> {
+    let tmp = dir.join(FORMAT_TMP_FILE);
+    Ok(vfs
+        .read_dir(dir)
+        .map_err(|e| io_err(dir, e))?
+        .iter()
+        .any(|p| *p != tmp && !is_ignorable(p)))
 }
 
 /// Reads `dir/FORMAT` without creating anything. `Ok(None)` if the file does not exist.
@@ -144,13 +179,33 @@ pub fn read_format_with(vfs: &dyn Vfs, dir: &Path) -> Result<Option<FormatMarker
         })
 }
 
+/// The format of an existing directory, read-only: `Some(n)` from its `FORMAT`, `Some(1)`
+/// for a directory without one that [`holds_data`], `None` for an empty one (which the
+/// open rules would create as format 2).
+pub fn detect_format(vfs: &dyn Vfs, dir: &Path) -> Result<Option<u32>, StorageError> {
+    if let Some(marker) = read_format_with(vfs, dir)? {
+        return Ok(Some(marker.format));
+    }
+    Ok(holds_data(vfs, dir)?.then_some(1))
+}
+
+/// The open rules' refusal, without creating or writing anything: `Ok` if `dir` is at
+/// format 2 or empty.
+pub fn check_format(vfs: &dyn Vfs, dir: &Path) -> Result<(), StorageError> {
+    match detect_format(vfs, dir)? {
+        Some(n) if n != FORMAT_VERSION => Err(unsupported_format(dir, n)),
+        _ => Ok(()),
+    }
+}
+
 /// The open rules: an absent or empty directory is created as format 2 (FORMAT written
 /// atomically: `FORMAT.tmp` create → write → sync_data → rename → sync_dir); `FORMAT == 2`
 /// opens; anything else is refused before a single byte is written.
 ///
-/// "Empty" means `read_dir` returns nothing, or only a stale `FORMAT.tmp` from a crash
-/// during creation (removed first). A directory this call creates has its parent synced,
-/// as `Wal::open` does, so the marker cannot outlive its own directory entry.
+/// "Empty" means [`holds_data`] is false: nothing but ignorable entries and a stale
+/// `FORMAT.tmp` from a crash during creation (removed first). The parent is synced before
+/// the marker is written, as `Wal::open` does, so the marker cannot outlive its own
+/// directory entry.
 pub fn ensure_format(vfs: &dyn Vfs, dir: &Path) -> Result<FormatMarker, StorageError> {
     if !vfs.exists(dir).map_err(|e| io_err(dir, e))? {
         vfs.create_dir_all(dir).map_err(|e| io_err(dir, e))?;
@@ -169,13 +224,20 @@ pub fn ensure_format(vfs: &dyn Vfs, dir: &Path) -> Result<FormatMarker, StorageE
         return Err(unsupported_format(dir, marker.format));
     }
 
-    let tmp = dir.join(FORMAT_TMP_FILE);
-    let entries: Vec<PathBuf> = vfs.read_dir(dir).map_err(|e| io_err(dir, e))?;
-    if entries.iter().any(|p| *p != tmp) {
+    if holds_data(vfs, dir)? {
         return Err(unsupported_format(dir, 1));
     }
-    if !entries.is_empty() {
+    let tmp = dir.join(FORMAT_TMP_FILE);
+    if vfs.exists(&tmp).map_err(|e| io_err(&tmp, e))? {
         vfs.remove(&tmp).map_err(|e| io_err(&tmp, e))?;
+    }
+    // The directory may itself be new and unsynced (`PartitionManager` creates partition
+    // directories with plain `create_dir_all`): sync its parent so the marker cannot
+    // outlive its own directory entry.
+    if let Some(parent) = dir.parent() {
+        if vfs.exists(parent).map_err(|e| io_err(parent, e))? {
+            vfs.sync_dir(parent).map_err(|e| io_err(parent, e))?;
+        }
     }
     write_format(vfs, dir)
 }
@@ -219,6 +281,24 @@ mod tests {
     fn a_marker_without_a_numeric_format_does_not_parse() {
         assert_eq!(FormatMarker::parse("created_by = \"1\"\n"), None);
         assert_eq!(FormatMarker::parse("format = two\n"), None);
+    }
+
+    #[test]
+    fn a_quoted_integer_format_parses() {
+        assert_eq!(
+            FormatMarker::parse("format = \"3\"\n").map(|m| m.format),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn lost_and_found_and_dotfiles_do_not_count_as_data() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("lost+found")).unwrap();
+        std::fs::write(dir.path().join(".DS_Store"), b"x").unwrap();
+        assert!(!holds_data(&StdVfs, dir.path()).unwrap());
+        std::fs::write(dir.path().join("00000000000000000001.wal"), b"x").unwrap();
+        assert!(holds_data(&StdVfs, dir.path()).unwrap());
     }
 
     #[test]
