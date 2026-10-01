@@ -5,7 +5,7 @@
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use prkdb_types::codec::{decode_with_limit, MAX_HEADER_BYTES};
+use prkdb_types::codec::{decode_with_limit, MAX_HEADER_BYTES, MAX_RECORD_BYTES};
 use prkdb_types::error::StorageError;
 pub use prkdb_types::snapshot::{CompressionType, SnapshotHeader};
 use std::fs::File;
@@ -81,13 +81,18 @@ impl SnapshotWriter {
 pub struct SnapshotReader {
     reader: Box<dyn Read>,
     pub header: SnapshotHeader,
+    /// Entries returned so far; never more than `header.index_entries`.
+    entries_read: u64,
 }
 
 impl SnapshotReader {
     pub fn open(path: &Path) -> Result<Self, StorageError> {
         let file = File::open(path).map_err(|e| StorageError::BackendError(e.to_string()))?;
-        let mut buf_reader = BufReader::new(file);
+        Self::from_reader(BufReader::new(file))
+    }
 
+    /// Reads a snapshot from any byte stream (the file `open` reads, or bytes in memory).
+    pub fn from_reader(mut buf_reader: impl Read + 'static) -> Result<Self, StorageError> {
         // Read header length
         let mut len_bytes = [0u8; 4];
         buf_reader
@@ -117,12 +122,33 @@ impl SnapshotReader {
             CompressionType::Gzip => Box::new(GzDecoder::new(buf_reader)),
         };
 
-        Ok(Self { reader, header })
+        Ok(Self {
+            reader,
+            header,
+            entries_read: 0,
+        })
     }
 
     /// Returns next entry as (key, value). Returns None on EOF.
+    ///
+    /// Bounded whatever the file says, including a small gzip stream that inflates without
+    /// limit: a key or value over [`MAX_RECORD_BYTES`] is refused before it is read, and
+    /// the stream may hold no more than the header's `index_entries` entries (the key count
+    /// the writer saw; deletes during the snapshot can only make it hold fewer). So reading
+    /// a whole snapshot decompresses at most `index_entries` x 2 x [`MAX_RECORD_BYTES`].
     pub fn next_entry(&mut self) -> Result<Option<SnapshotEntry>, StorageError> {
         let mut len_bytes = [0u8; 4];
+        if self.entries_read == self.header.index_entries {
+            let mut probe = [0u8; 1];
+            return match self.reader.read(&mut probe) {
+                Ok(0) => Ok(None),
+                Ok(_) => Err(StorageError::Corruption(format!(
+                    "snapshot holds more than the {} entries its header declares",
+                    self.header.index_entries
+                ))),
+                Err(e) => Err(StorageError::BackendError(e.to_string())),
+            };
+        }
         if let Err(e) = self.reader.read_exact(&mut len_bytes) {
             if e.kind() == std::io::ErrorKind::UnexpectedEof {
                 return Ok(None);
@@ -136,14 +162,21 @@ impl SnapshotReader {
             .map_err(|e| StorageError::BackendError(e.to_string()))?;
         let val = read_prefixed(&mut self.reader, u32::from_le_bytes(len_bytes))?;
 
+        self.entries_read += 1;
         Ok(Some((key, val)))
     }
 }
 
 /// Reads exactly `len` bytes, growing the buffer as bytes arrive rather than allocating
-/// the declared length up front: a corrupt length then costs at most what the file holds,
-/// not up to 4 GiB per entry.
+/// the declared length up front, and refusing a length over [`MAX_RECORD_BYTES`] (no
+/// stored key or value is larger) before reading anything: a corrupt length, or a gzip
+/// stream that inflates without limit, cannot drive a 4 GiB entry.
 fn read_prefixed(reader: &mut dyn Read, len: u32) -> Result<Vec<u8>, StorageError> {
+    if len as usize > MAX_RECORD_BYTES {
+        return Err(StorageError::Corruption(format!(
+            "snapshot entry declares {len} bytes, over the {MAX_RECORD_BYTES}-byte record limit"
+        )));
+    }
     let mut buf = Vec::new();
     reader
         .take(u64::from(len))

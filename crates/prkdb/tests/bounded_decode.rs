@@ -75,3 +75,52 @@ fn rft11_snapshot_entry_declaring_an_oversized_length_is_refused() {
     let mut reader = SnapshotReader::open(&path).unwrap();
     assert!(reader.next_entry().is_err());
 }
+
+/// A gzip snapshot whose stream is `[key_len = u32::MAX]` and 64 KiB of zeros (a few
+/// hundred compressed bytes) is refused by the record limit before any of the declared
+/// 4 GiB is inflated.
+#[test]
+fn rft11_gzip_snapshot_entry_declaring_u32_max_is_refused() {
+    use flate2::write::GzEncoder;
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("snap.gz");
+    let writer =
+        SnapshotWriter::new(&path, SnapshotHeader::new(1, 1, CompressionType::Gzip)).unwrap();
+    writer.finish().unwrap();
+    // Keep the length-prefixed header, replace the gzip stream with a hostile one.
+    let mut bytes = std::fs::read(&path).unwrap();
+    let header_end = 4 + u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+    bytes.truncate(header_end);
+    let mut gz = GzEncoder::new(Vec::new(), flate2::Compression::best());
+    gz.write_all(&u32::MAX.to_le_bytes()).unwrap();
+    gz.write_all(&vec![0u8; 64 * 1024]).unwrap();
+    let hostile = gz.finish().unwrap();
+    assert!(hostile.len() < 1024);
+    bytes.extend_from_slice(&hostile);
+    std::fs::write(&path, &bytes).unwrap();
+
+    let mut reader = SnapshotReader::open(&path).unwrap();
+    assert!(reader.next_entry().is_err());
+}
+
+/// The stream may hold no more entries than the header declares, which is what bounds
+/// the total a gzip snapshot can inflate to.
+#[test]
+fn rft11_snapshot_with_more_entries_than_declared_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("snap.bin");
+    let mut writer =
+        SnapshotWriter::new(&path, SnapshotHeader::new(1, 1, CompressionType::None)).unwrap();
+    writer.write_entry(b"a", b"1").unwrap();
+    writer.write_entry(b"b", b"2").unwrap();
+    writer.finish().unwrap();
+
+    let mut reader = SnapshotReader::open(&path).unwrap();
+    assert_eq!(
+        reader.next_entry().unwrap(),
+        Some((b"a".to_vec(), b"1".to_vec()))
+    );
+    assert!(reader.next_entry().is_err());
+}
