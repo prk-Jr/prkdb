@@ -1015,8 +1015,8 @@ async fn a_read_reports_the_bytes_it_moved() {
 /// `max_offset`, `get_log_dir` and `save_checkpoint` were each replaceable with a constant
 /// — `0`, an empty `PathBuf`, and a bare `Ok(())` — with the whole suite still green.
 /// `get_log_dir` is what a caller uses to find the data directory, and `save_checkpoint`
-/// makes everything acknowledged so far durable (Task 2.8a; Task 2.14 adds an index
-/// snapshot). A `save_checkpoint` that reports success without syncing claims work it did
+/// makes everything acknowledged so far durable before it writes an index snapshot
+/// (Tasks 2.8a, 2.14). A `save_checkpoint` that reports success without syncing claims work it did
 /// not do, which is why this runs in `Fast` mode with the periodic sync out of reach:
 /// only the checkpoint can move the durable watermark.
 #[tokio::test(flavor = "multi_thread")]

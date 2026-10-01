@@ -1,16 +1,202 @@
-//! Health checks and backups for the single WAL (Task 2.8a).
+//! Opening the log and rebuilding the index (Tasks 2.8a, 2.14), plus health checks and
+//! backups for the single WAL.
 //!
-//! Recovery itself is not here: it is `Wal::open`, which every constructor runs. A torn
-//! tail on the last segment is truncated there, and corruption anywhere earlier refuses
-//! the open naming the file. Nothing repairs mid-log corruption automatically.
+//! Recovery is [`open_and_recover`], which every constructor runs: load the newest valid
+//! index checkpoint, then `Wal::open` with `replay_from = covered + 1`. `Wal::open` still
+//! scans and CRC-checks every segment whether or not a checkpoint was loaded, so a torn
+//! tail on the last segment is truncated and corruption anywhere earlier refuses the open
+//! naming the file (STO-04), exactly as without a checkpoint. A checkpoint that turns out
+//! invalid is ignored with a warning naming the file, and recovery falls back to an older
+//! one or to a full replay. Nothing repairs mid-log corruption automatically.
 
+use super::checkpoint::{self, Decoded};
+use papaya::HashMap as LockFreeHashMap;
 use prkdb_core::vfs::{OpenMode, Vfs};
+use prkdb_core::wal::batch::{Batch, BatchOp};
+use prkdb_core::wal::frame::FrameKind;
 use prkdb_core::wal::segment::{parse_segment_file_name, scan_segment, SEGMENT_HEADER_LEN};
-use prkdb_core::wal::Lsn;
+use prkdb_core::wal::{Lsn, RecordLoc, Wal, WalError, WalOptions};
 use prkdb_types::error::StorageError;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{info, instrument, warn};
+
+/// What the last open did to rebuild the index
+/// ([`WalStorageAdapter::last_recovery`](super::WalStorageAdapter::last_recovery)).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecoveryStats {
+    /// The LSN covered by the checkpoint the index was loaded from; `None` = full replay.
+    pub checkpoint_lsn: Option<Lsn>,
+    /// Index entries loaded from that checkpoint.
+    pub checkpoint_entries: u64,
+    /// Frames applied to the index on top of the checkpoint (every frame on a full
+    /// replay).
+    pub frames_replayed: u64,
+    /// Frames `Wal::open` scanned and CRC-checked: every frame in the log, checkpoint or
+    /// not.
+    pub frames_scanned: u64,
+    /// Set when the last segment ended in a torn frame and was truncated: path, offset
+    /// and fault.
+    pub truncated: Option<String>,
+    /// Checkpoints that were ignored, each with the reason (also logged at `warn`).
+    pub rejected_checkpoints: Vec<String>,
+}
+
+type Index = LockFreeHashMap<Vec<u8>, RecordLoc>;
+
+/// Applies one frame to the index: puts insert the frame's location, deletes remove it.
+fn apply_frame(
+    index: &Index,
+    loc: RecordLoc,
+    kind: FrameKind,
+    payload: &[u8],
+) -> Result<(), WalError> {
+    if kind != FrameKind::Batch {
+        return Ok(());
+    }
+    let pinned = index.pin();
+    for op in Batch::decode(payload)?.ops {
+        match op {
+            BatchOp::Put { key, .. } => {
+                pinned.insert(key, loc);
+            }
+            BatchOp::Delete { key } => {
+                pinned.remove(&key);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reject(stats: &mut RecoveryStats, path: &Path, reason: impl std::fmt::Display) {
+    warn!(
+        path = %path.display(),
+        %reason,
+        "ignoring index checkpoint; recovery falls back to an older checkpoint or a full replay"
+    );
+    stats
+        .rejected_checkpoints
+        .push(format!("{}: {reason}", path.display()));
+}
+
+/// Loads a decoded checkpoint into the (empty) index; returns the LSN it covers.
+fn load_into(index: &Index, checkpoint: Decoded, stats: &mut RecoveryStats) -> Lsn {
+    let (covered, entries) = checkpoint;
+    stats.checkpoint_lsn = Some(covered);
+    stats.checkpoint_entries = entries.len() as u64;
+    let pinned = index.pin();
+    for (key, loc) in entries {
+        pinned.insert(key, loc);
+    }
+    covered
+}
+
+/// Opens the log at `log_dir` and rebuilds `index` (which must be empty) from the newest
+/// valid checkpoint plus the frames after it, or from a full replay.
+///
+/// 1. Checkpoints are listed newest first; the first one that reads and decodes (CRC,
+///    magic, format, entry sanity, name matches contents) is loaded into the index. Ones
+///    that do not are rejected.
+/// 2. `Wal::open(replay_from = covered + 1)` scans every segment and replays the frames
+///    after the checkpoint on top of it (`replay_from = 1` without one).
+/// 3. The loaded checkpoint's locations are checked against the opened log
+///    ([`checkpoint::validate_against_log`]). If that fails, the index is cleared and
+///    rebuilt from the next older checkpoint that passes, or from a full replay, by
+///    scanning the now-open log.
+///
+/// A checkpoint is never trusted over the log: every way it can be wrong ends in a
+/// rejection and a replay, never in a missing key.
+pub(crate) fn open_and_recover(
+    vfs: Arc<dyn Vfs>,
+    log_dir: &Path,
+    opts: WalOptions,
+    index: &Index,
+) -> Result<(Wal, RecoveryStats), WalError> {
+    let mut stats = RecoveryStats::default();
+    let mut candidates = match checkpoint::list_checkpoints(vfs.as_ref(), log_dir) {
+        Ok(found) => found.into_iter(),
+        Err(e) => {
+            reject(&mut stats, &checkpoint::checkpoint_dir(log_dir), e);
+            Vec::new().into_iter()
+        }
+    };
+
+    // The entries go into the index before replay, which applies every later put and
+    // delete on top of them; only their locations are kept for the check after open.
+    let mut replay_from = 1;
+    let mut pending_check: Option<(PathBuf, Lsn, Vec<RecordLoc>)> = None;
+    for (named, path) in candidates.by_ref() {
+        match checkpoint::read_checkpoint(vfs.as_ref(), &path, named) {
+            Ok(decoded) => {
+                let locations = decoded.1.iter().map(|(_, loc)| *loc).collect();
+                replay_from = load_into(index, decoded, &mut stats) + 1;
+                pending_check = Some((path, named, locations));
+                break;
+            }
+            Err(e) => reject(&mut stats, &path, e),
+        }
+    }
+
+    let mut replayed = 0u64;
+    let (wal, report) = Wal::open(
+        vfs.clone(),
+        log_dir,
+        opts,
+        replay_from,
+        &mut |loc, kind, payload| {
+            replayed += 1;
+            apply_frame(index, loc, kind, payload)
+        },
+    )?;
+    stats.frames_replayed = replayed;
+    stats.frames_scanned = report.frames;
+    stats.truncated = report
+        .truncated
+        .as_ref()
+        .map(|(path, offset, fault)| format!("{} at byte {offset}: {fault:?}", path.display()));
+
+    let Some((path, covered, locations)) = pending_check else {
+        return Ok((wal, stats));
+    };
+    let last_lsn = wal.next_lsn().saturating_sub(1);
+    let segments = wal.segments();
+    let Err(reason) = checkpoint::validate_against_log(covered, &locations, last_lsn, &segments)
+    else {
+        return Ok((wal, stats));
+    };
+
+    // The loaded checkpoint does not fit this log: start over on the open log.
+    reject(&mut stats, &path, reason);
+    index.pin().clear();
+    stats.checkpoint_lsn = None;
+    stats.checkpoint_entries = 0;
+    let mut from = 1;
+    for (named, path) in candidates {
+        let older = match checkpoint::read_checkpoint(vfs.as_ref(), &path, named) {
+            Ok(older) => older,
+            Err(e) => {
+                reject(&mut stats, &path, e);
+                continue;
+            }
+        };
+        let locations: Vec<RecordLoc> = older.1.iter().map(|(_, loc)| *loc).collect();
+        if let Err(reason) =
+            checkpoint::validate_against_log(older.0, &locations, last_lsn, &segments)
+        {
+            reject(&mut stats, &path, reason);
+            continue;
+        }
+        from = load_into(index, older, &mut stats) + 1;
+        break;
+    }
+    let mut replayed = 0u64;
+    wal.scan_from(from, &mut |loc, kind, payload| {
+        replayed += 1;
+        apply_frame(index, loc, kind, payload)
+    })?;
+    stats.frames_replayed = replayed;
+    Ok((wal, stats))
+}
 
 /// Manages health checks and backups for the storage engine
 pub struct RecoveryManager {

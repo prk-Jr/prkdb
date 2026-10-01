@@ -1,5 +1,5 @@
 pub mod cache;
-pub mod checkpoint; // Empty until Task 2.14 writes an index snapshot
+pub mod checkpoint; // Index snapshots that let recovery replay only the tail (Task 2.14)
 pub mod collection_partitioned_adapter; // Per-collection routing over the one WAL (D11)
 pub mod config;
 pub mod format; // FORMAT marker and open rules (D3)
@@ -17,4 +17,5 @@ pub use config::CompactionConfig;
 
 // Export WAL adapters
 pub use collection_partitioned_adapter::CollectionPartitionedAdapter;
+pub use recovery::RecoveryStats;
 pub use wal_adapter::WalStorageAdapter;
