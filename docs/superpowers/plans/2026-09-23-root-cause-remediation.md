@@ -4644,6 +4644,7 @@ Every stall test waits with `tokio::time::timeout` (fail, never hang) and clears
   Recommendation: delete all of it — each exists to showcase the parallel mmap WAL (spec 2a: "Delete the other WAL implementations after migrating their callers"; these adapters *are* the callers, and a second, unverified log path per data directory is root cause 4). Alternatives if the maintainer wants to keep parts:
   - streaming adapters kept → port them: `StreamingStorageAdapter` becomes a thin wrapper over `Wal` (`append_batch(records)` → one `append` of the encoded records, returning the LSN; `read_from(offset)` → `wal.scan_from(offset)`), and `PartitionedStreamingAdapter` holds one such wrapper per partition directory;
   - core replication kept → `new_with_replication` stays on the 2.8a conversion path, `LogRecord`/`LogOperation` stay for its protocol, and the replication files are removed from the deletion list.
+    Note from the Task 2.8a review: on the 2.8a path `replicate_batch` runs on the caller's task after the append, so two concurrent commits can replicate out of LSN order (the old flush loop replicated sequentially). If core replication is kept, replication must move into the commit hook or a single ordered sender before it has a non-test caller.
 
   Record the decision in the commit body.
 - [ ] **Step 2: The regression check first, and watch it fail.** Create `scripts/check_single_wal.sh`:
