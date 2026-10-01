@@ -264,6 +264,13 @@ async fn run_ops_counted(
                 Ok(()) => model.delete(k),
                 Err(e) => return sut_failure(e, idx, op),
             },
+            // Compaction changes no logical state; whatever it syncs is reported by
+            // `unsynced_acked` like any other sync.
+            Op::Compact => {
+                if let Err(e) = sut.compact().await {
+                    return sut_failure(e, idx, op);
+                }
+            }
             Op::Checkpoint => match sut.checkpoint().await {
                 Ok(()) => model.mark_durable(),
                 Err(e) => return sut_failure(e, idx, op),

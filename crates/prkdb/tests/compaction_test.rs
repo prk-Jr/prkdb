@@ -658,3 +658,101 @@ async fn the_background_task_waits_for_its_thresholds() {
         "no run happened, so no checkpoint was written"
     );
 }
+
+/// Writers are not stalled by compaction: it runs off the WAL writer thread and asks the
+/// writer for at most one sync per rewritten segment. Measures put latency with and
+/// without compaction running alongside, in both modes, and the space a run reclaims
+/// (printed; run with `--no-capture` to see the numbers). The bound is loose on purpose
+/// (debug build, shared CI machines): it catches a compaction that holds up the writer
+/// for the length of a run, not a few percent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn compaction_does_not_stall_writers() {
+    use prkdb_core::wal::SyncMode;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn summary(mut lat: Vec<Duration>) -> (Duration, Duration, Duration) {
+        lat.sort_unstable();
+        let at = |q: f64| lat[((lat.len() - 1) as f64 * q) as usize];
+        (at(0.5), at(0.99), *lat.last().unwrap())
+    }
+    async fn timed_puts(db: &WalStorageAdapter, n: u32, tag: u8) -> Vec<Duration> {
+        let mut lat = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            let start = Instant::now();
+            db.put(format!("w{}", i % 500).as_bytes(), &[tag; 256])
+                .await
+                .unwrap();
+            lat.push(start.elapsed());
+        }
+        lat
+    }
+
+    for mode in [SyncMode::Fast, SyncMode::Durable] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(
+            WalStorageAdapter::new(prkdb_core::wal::WalConfig {
+                sync_mode: mode,
+                ..compaction_cfg(dir.path(), 64 * 1024)
+            })
+            .unwrap(),
+        );
+        // Mostly dead data across many sealed segments: 40 overwrites of 500 keys.
+        for round in 0..40u32 {
+            db.put_batch(
+                (0..500u32)
+                    .map(|k| (format!("w{k}").into_bytes(), vec![round as u8; 256]))
+                    .collect(),
+            )
+            .await
+            .unwrap();
+        }
+        db.flush().await.unwrap();
+        let n = if mode == SyncMode::Fast { 3000 } else { 600 };
+        let baseline = summary(timed_puts(&db, n, 1).await);
+
+        let busy = Arc::new(AtomicBool::new(true));
+        let compactor = {
+            let (db, busy) = (db.clone(), busy.clone());
+            tokio::spawn(async move {
+                let mut runs = Vec::new();
+                while busy.load(Ordering::Acquire) {
+                    runs.push(db.compact().await.unwrap());
+                }
+                runs
+            })
+        };
+        let during = summary(timed_puts(&db, n, 2).await);
+        busy.store(false, Ordering::Release);
+        let runs = compactor.await.unwrap();
+        let first = &runs[0];
+        println!(
+            "{mode:?}: put latency p50/p99/max without compaction {:?}/{:?}/{:?}, during \
+             {} compaction runs {:?}/{:?}/{:?}; first run reclaimed {} of {} bytes \
+             ({} segments rewritten, {} removed)",
+            baseline.0,
+            baseline.1,
+            baseline.2,
+            runs.len(),
+            during.0,
+            during.1,
+            during.2,
+            first.bytes_before - first.bytes_after,
+            first.bytes_before,
+            first.segments_rewritten,
+            first.segments_removed,
+        );
+        assert!(first.segments_rewritten > 0, "{first:?}");
+        assert!(
+            first.bytes_after * 4 < first.bytes_before,
+            "most of 40 overwrites is reclaimable: {first:?}"
+        );
+        assert!(
+            during.1 <= baseline.1 * 20 + Duration::from_millis(50),
+            "{mode:?}: p99 put latency went from {:?} to {:?} while compacting",
+            baseline.1,
+            during.1
+        );
+    }
+}

@@ -36,6 +36,10 @@ pub trait Sut: Send {
     async fn reopen(&mut self) -> anyhow::Result<()>;
     async fn crash(&mut self) -> anyhow::Result<()>;
     async fn checkpoint(&mut self) -> anyhow::Result<()>;
+    /// Runs a WAL compaction to completion (Task 2.15).
+    async fn compact(&mut self) -> anyhow::Result<()> {
+        Err(Unsupported("compact").into())
+    }
     /// Cuts power (everything not synced may be lost or torn per `tear`,
     /// with `fault_seed` driving the fault injector's choices), then reopens.
     /// Only SUTs on a simulated filesystem can do this.
@@ -119,6 +123,10 @@ impl Sut for WalSut {
     async fn checkpoint(&mut self) -> anyhow::Result<()> {
         self.db().flush().await?;
         Ok(self.db().save_checkpoint_async().await?)
+    }
+    async fn compact(&mut self) -> anyhow::Result<()> {
+        self.db().compact().await?;
+        Ok(())
     }
 }
 
@@ -229,6 +237,10 @@ impl Sut for FaultSut {
     }
     async fn checkpoint(&mut self) -> anyhow::Result<()> {
         Ok(self.db().save_checkpoint_async().await?)
+    }
+    async fn compact(&mut self) -> anyhow::Result<()> {
+        self.db().compact().await?;
+        Ok(())
     }
     async fn power_loss(&mut self, tear: Tear, fault_seed: u64) -> anyhow::Result<()> {
         // The loss comes first: the adapter's handles are stale afterwards, so
