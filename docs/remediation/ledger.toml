@@ -12,15 +12,15 @@ title = "Checkpoint recovery drops pre-checkpoint keys"
 area = "storage"
 severity = "critical"
 phase = 2
-status = "open"
+status = "fixed"
 sources = ["audit-2026-09-23#1"]
 evidence = [
-  "crates/prkdb/src/storage/wal_adapter.rs:1050-1058",
-  "crates/prkdb/src/storage/checkpoint.rs:44-51",
-  "crates/prkdb-core/src/wal/mmap_parallel_wal.rs:310",
-  "crates/prkdb/src/storage/wal_adapter.rs:1737",
+  "crates/prkdb/src/storage/wal_adapter.rs:644-671",
+  "crates/prkdb/src/storage/wal_adapter.rs:1077-1085",
+  "crates/prkdb/src/storage/checkpoint.rs:1-6",
 ]
-tripwire = ""
+regression_tests = ["test:crates/prkdb/tests/tripwires.rs::sto01_checkpoint_keeps_pre_checkpoint_keys", "test:crates/prkdb-verify/tests/harness.rs::discovery_profile_checkpoint_keeps_every_key"]
+changes = ["b7a45cb", "28896a3"]
 
 [[finding]]
 id = "STO-02"
@@ -28,13 +28,14 @@ title = "Writes acked before fsync; SyncMode::Durable never honored"
 area = "storage"
 severity = "critical"
 phase = 2
-status = "open"
+status = "fixed"
 sources = ["audit-2026-09-23#11"]
 evidence = [
   "crates/prkdb-core/src/wal/mmap_log_segment.rs:279-281",
   "crates/prkdb/src/storage/wal_adapter.rs:497",
 ]
-regression_tests = ["test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_on_current_code", "test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_in_fast_mode"]
+regression_tests = ["test:crates/prkdb-verify/tests/power_loss.rs::durable_put_survives_power_loss", "test:crates/prkdb-verify/tests/wal_power_loss.rs::durable_acks_survive_power_loss_with_any_tear", "test:crates/prkdb-core/tests/wal_log.rs::durable_appends_are_synced_before_the_ack", "test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_on_current_code", "test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_in_fast_mode"]
+changes = ["b7a45cb", "4f1783e", "d192525"]
 
 [[finding]]
 id = "STO-03"
@@ -42,9 +43,11 @@ title = "WAL append outside publish_barrier can leave the live index pointing at
 area = "storage"
 severity = "medium"
 phase = 2
-status = "open"
+status = "fixed"
 sources = ["audit-2026-09-23#17"]
 evidence = ["crates/prkdb/src/storage/wal_adapter.rs:478-509"]
+regression_tests = ["test:crates/prkdb/tests/durability.rs::concurrent_same_key_live_equals_recovered", "test:crates/prkdb-core/tests/wal_log.rs::commit_hooks_run_in_lsn_order"]
+changes = ["b7a45cb", "4f1783e"]
 
 [[finding]]
 id = "STO-04"
@@ -52,10 +55,11 @@ title = "scan_mmap skips CRC on open; torn records become invisible; directories
 area = "storage"
 severity = "medium"
 phase = 2
-status = "open"
+status = "fixed"
 sources = ["audit-2026-09-23#18"]
 evidence = ["crates/prkdb-core/src/wal/mmap_log_segment.rs:676-720"]
-regression_tests = ["test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_on_current_code", "test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_in_fast_mode"]
+regression_tests = ["test:crates/prkdb-verify/tests/wal_power_loss.rs::torn_tail_is_truncated_and_later_appends_survive", "test:crates/prkdb-verify/tests/wal_power_loss.rs::a_new_segment_is_durable_after_roll", "test:crates/prkdb-verify/tests/wal_power_loss.rs::corruption_in_a_sealed_segment_refuses_to_open", "test:crates/prkdb-verify/tests/wal_power_loss.rs::a_fresh_fast_log_survives_power_loss_before_any_sync", "test:crates/prkdb-verify/tests/power_loss.rs::a_torn_adapter_tail_keeps_earlier_keys_and_accepts_new_writes", "test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_on_current_code", "test:crates/prkdb-verify/tests/harness.rs::blocking_profile_is_green_in_fast_mode"]
+changes = ["b7a45cb", "4f1783e"]
 
 [[finding]]
 id = "STO-05"
@@ -63,9 +67,11 @@ title = "WAL routing uses unstable DefaultHasher; replay ordered by segment id, 
 area = "storage"
 severity = "medium"
 phase = 2
-status = "open"
+status = "fixed"
 sources = ["audit-2026-09-23#19"]
 evidence = ["crates/prkdb-core/src/wal/mmap_parallel_wal.rs:407-418"]
+regression_tests = ["test:crates/prkdb-core/tests/wal_log.rs::replay_order_equals_append_order_across_segment_roll", "test:crates/prkdb/tests/durability.rs::concurrent_same_key_live_equals_recovered"]
+changes = ["b7a45cb"]
 
 [[finding]]
 id = "STO-06"
@@ -633,9 +639,11 @@ title = "WalConfig::segment_bytes ignored by the mmap WAL (segment size hardcode
 area = "storage"
 severity = "low"
 phase = 2
-status = "open"
+status = "fixed"
 sources = ["task-1.10-2026-09-24"]
 evidence = ["crates/prkdb-core/src/wal/mmap_log_segment.rs:50", "crates/prkdb-core/src/wal/write_ahead_log.rs:115"]
+regression_tests = ["test:crates/prkdb/tests/durability.rs::segment_bytes_is_honored"]
+changes = ["b7a45cb"]
 
 [[finding]]
 id = "STO-09"
