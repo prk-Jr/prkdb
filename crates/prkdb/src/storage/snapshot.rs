@@ -5,6 +5,7 @@
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use prkdb_types::codec::{decode_with_limit, MAX_HEADER_BYTES};
 use prkdb_types::error::StorageError;
 pub use prkdb_types::snapshot::{CompressionType, SnapshotHeader};
 use std::fs::File;
@@ -93,6 +94,13 @@ impl SnapshotReader {
             .read_exact(&mut len_bytes)
             .map_err(|e| StorageError::BackendError(e.to_string()))?;
         let len = u32::from_le_bytes(len_bytes) as usize;
+        // A header is a few fixed-size fields; a larger length is corruption, refused
+        // before it sizes an allocation.
+        if len > MAX_HEADER_BYTES {
+            return Err(StorageError::Corruption(format!(
+                "snapshot header of {len} bytes exceeds the {MAX_HEADER_BYTES}-byte limit"
+            )));
+        }
 
         // Read header
         let mut header_bytes = vec![0u8; len];
@@ -100,8 +108,7 @@ impl SnapshotReader {
             .read_exact(&mut header_bytes)
             .map_err(|e| StorageError::BackendError(e.to_string()))?;
 
-        let config = bincode::config::standard();
-        let header: SnapshotHeader = bincode::decode_from_slice(&header_bytes, config)
+        let header: SnapshotHeader = decode_with_limit::<_, MAX_HEADER_BYTES>(&header_bytes)
             .map_err(|e| StorageError::Internal(format!("Failed to deserialize header: {}", e)))?
             .0;
 
@@ -122,23 +129,33 @@ impl SnapshotReader {
             }
             return Err(StorageError::BackendError(e.to_string()));
         }
-        let key_len = u32::from_le_bytes(len_bytes) as usize;
-        let mut key = vec![0u8; key_len];
-        self.reader
-            .read_exact(&mut key)
-            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        let key = read_prefixed(&mut self.reader, u32::from_le_bytes(len_bytes))?;
 
         self.reader
             .read_exact(&mut len_bytes)
             .map_err(|e| StorageError::BackendError(e.to_string()))?;
-        let val_len = u32::from_le_bytes(len_bytes) as usize;
-        let mut val = vec![0u8; val_len];
-        self.reader
-            .read_exact(&mut val)
-            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        let val = read_prefixed(&mut self.reader, u32::from_le_bytes(len_bytes))?;
 
         Ok(Some((key, val)))
     }
+}
+
+/// Reads exactly `len` bytes, growing the buffer as bytes arrive rather than allocating
+/// the declared length up front: a corrupt length then costs at most what the file holds,
+/// not up to 4 GiB per entry.
+fn read_prefixed(reader: &mut dyn Read, len: u32) -> Result<Vec<u8>, StorageError> {
+    let mut buf = Vec::new();
+    reader
+        .take(u64::from(len))
+        .read_to_end(&mut buf)
+        .map_err(|e| StorageError::BackendError(e.to_string()))?;
+    if buf.len() != len as usize {
+        return Err(StorageError::Corruption(format!(
+            "snapshot entry declares {len} bytes, file has {}",
+            buf.len()
+        )));
+    }
+    Ok(buf)
 }
 
 #[cfg(test)]

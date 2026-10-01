@@ -5,11 +5,9 @@ use crate::error::DbError;
 use crate::keys::{collection_prefix, encode_record_key, CollectionId};
 use crate::outbox::{make_outbox_id_for_type, save_outbox_event, OutboxRecord};
 use crate::partitioning::{DefaultPartitioner, PartitionId, Partitioner};
-use bincode::{
-    config,
-    serde::{decode_from_slice, encode_to_vec},
-};
+use bincode::{config, serde::encode_to_vec};
 use futures::future;
+use prkdb_types::codec::decode_serde;
 use prkdb_types::collection::{ChangeEvent, Collection};
 use prkdb_types::error::StorageError;
 use serde::{de::DeserializeOwned, Serialize};
@@ -499,7 +497,7 @@ where
         for value_opt in values {
             match value_opt {
                 Some(item_bytes) => {
-                    let item: C = decode_from_slice::<C, _>(&item_bytes, config::standard())
+                    let item: C = decode_serde::<C>(&item_bytes)
                         .map_err(|e| StorageError::Deserialization(e.to_string()))?
                         .0;
                     results.push(Some(item));
@@ -685,7 +683,7 @@ where
 
         match self.db.storage.get(&key).await? {
             Some(item_bytes) => {
-                let item: C = decode_from_slice::<C, _>(&item_bytes, config::standard())
+                let item: C = decode_serde::<C>(&item_bytes)
                     .map_err(|e| StorageError::Deserialization(e.to_string()))?
                     .0;
                 Ok(Some(item))
@@ -711,8 +709,8 @@ where
         let rows = self.db.storage.scan_prefix(&key_prefix).await?;
         let mut out = Vec::with_capacity(rows.len());
         for (_k, v) in rows {
-            let (item, _): (C, _) = decode_from_slice(&v, config::standard())
-                .map_err(|e| StorageError::Deserialization(e.to_string()))?;
+            let (item, _): (C, _) =
+                decode_serde(&v).map_err(|e| StorageError::Deserialization(e.to_string()))?;
             out.push(item);
         }
         Ok(out)
@@ -734,8 +732,8 @@ where
         let rows = self.db.storage.scan_range(&start_key, &end_key).await?;
         let mut out = Vec::with_capacity(rows.len());
         for (_k, v) in rows {
-            let (item, _): (C, _) = decode_from_slice(&v, config::standard())
-                .map_err(|e| StorageError::Deserialization(e.to_string()))?;
+            let (item, _): (C, _) =
+                decode_serde(&v).map_err(|e| StorageError::Deserialization(e.to_string()))?;
             out.push(item);
         }
         Ok(out)

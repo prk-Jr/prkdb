@@ -19,7 +19,7 @@
 
 use crate::db::PrkDb;
 use crate::outbox::OutboxEnvelope;
-use bincode::{config, serde::decode_from_slice};
+use prkdb_types::codec::decode_serde;
 use prkdb_core::collection::Collection;
 use prkdb_core::error::StorageError;
 use serde::{de::DeserializeOwned, Serialize};
@@ -85,7 +85,7 @@ impl RetentionPolicy {
             .filter(|(id, _)| id.starts_with(&prefix))
             .filter_map(|(id, bytes)| {
                 // Decode envelope to get timestamp
-                let envelope: OutboxEnvelope<C> = match decode_from_slice(&bytes, config::standard()) {
+                let envelope: OutboxEnvelope<C> = match decode_serde(&bytes) {
                     Ok((env, _)) => env,
                     Err(_) => return None,
                 };

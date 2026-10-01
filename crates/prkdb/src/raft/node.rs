@@ -249,10 +249,11 @@ impl RaftNode {
         let snapshot_path = storage.get_log_dir().join("snapshot.bin");
         if snapshot_path.exists() {
             if let Ok(encoded) = std::fs::read(&snapshot_path) {
-                if let Ok((state, _)) = bincode::decode_from_slice::<(u64, u64, Vec<u8>), _>(
-                    &encoded,
-                    bincode::config::standard(),
-                ) {
+                // A whole snapshot can be far larger than one record, so the decode limit
+                // scales with the file (`prkdb_types::codec::decode_file`).
+                if let Ok((state, _)) =
+                    prkdb_types::codec::decode_file::<(u64, u64, Vec<u8>)>(&encoded)
+                {
                     tracing::info!(
                         "Loaded snapshot from disk: index {}, term {}",
                         state.0,

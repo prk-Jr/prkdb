@@ -48,9 +48,11 @@ impl Command {
         bincode::serde::encode_to_vec(self, bincode::config::standard()).unwrap()
     }
 
+    /// `None` for bytes that are not a command, including one whose declared lengths
+    /// exceed a record's limit (`prkdb_types::codec`): log entries arrive from peers and
+    /// from disk, and an unbounded decode would allocate whatever length they declare.
     pub fn deserialize(data: &[u8]) -> Option<Self> {
-        let (command, _len): (Self, usize) =
-            bincode::serde::decode_from_slice(data, bincode::config::standard()).ok()?;
+        let (command, _len): (Self, usize) = prkdb_types::codec::decode_serde(data).ok()?;
         Some(command)
     }
 }
