@@ -255,7 +255,13 @@ impl Builder {
             AssignmentStrategy::RoundRobin,
         ));
 
+        let catalog = Arc::new(crate::catalog::Catalog::new(
+            storage.clone(),
+            namespace.clone().unwrap_or_default(),
+        ));
+
         Ok(PrkDb {
+            catalog,
             storage,
             event_bus: Arc::new(event_bus),
             compute_handlers: Arc::new(compute_handlers),
@@ -349,12 +355,9 @@ impl Builder {
         let (sender, _) = broadcast::channel::<ChangeEvent<C>>(self.event_capacity);
         self.event_bus.insert(TypeId::of::<C>(), Box::new(sender));
 
-        // Register the collection name in the registry
-        let collection_name = std::any::type_name::<C>()
-            .split("::")
-            .last()
-            .unwrap_or(std::any::type_name::<C>())
-            .to_string();
+        // Register the collection's persisted name: the dashboard and the admin calls look
+        // collections up by it in the catalog.
+        let collection_name = C::persisted_name().into_owned();
         self.collection_registry
             .insert(TypeId::of::<C>(), collection_name);
     }

@@ -2,6 +2,7 @@ use crate::batch_accumulator::BatchAccumulator;
 use crate::compute::{ComputeHandler, Context};
 use crate::db::PrkDb;
 use crate::error::DbError;
+use crate::keys::{collection_prefix, encode_id, encode_key, CollectionId};
 use crate::outbox::{make_outbox_id_for_type, save_outbox_event, OutboxRecord};
 use crate::partitioning::{DefaultPartitioner, PartitionId, Partitioner};
 use bincode::{
@@ -16,41 +17,6 @@ use std::any::TypeId;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-
-/// Build a namespaced key for the given collection `C` and id of that collection.
-/// This ensures keys for different collections don't collide.
-/// Optionally includes partition information for partitioned collections.
-fn get_namespaced_key<C: Collection>(
-    id: &C::Id,
-    partition: Option<PartitionId>,
-) -> Result<Vec<u8>, StorageError>
-where
-    C::Id: Serialize,
-{
-    // simple namespacing: type name + `:` + partition (if any) + `:` + serialized id
-    let id_bytes = encode_to_vec(id, config::standard())
-        .map_err(|e| StorageError::Serialization(e.to_string()))?;
-
-    let type_name = std::any::type_name::<C>();
-    let mut key = if let Some(p) = partition {
-        let partition_str = p.to_string();
-        let capacity = type_name.len() + 1 + partition_str.len() + 1 + id_bytes.len();
-        let mut k = Vec::with_capacity(capacity);
-        k.extend_from_slice(type_name.as_bytes());
-        k.push(b':');
-        k.extend_from_slice(partition_str.as_bytes());
-        k.push(b':');
-        k
-    } else {
-        let mut k = Vec::with_capacity(type_name.len() + 1 + id_bytes.len());
-        k.extend_from_slice(type_name.as_bytes());
-        k.push(b':');
-        k
-    };
-
-    key.extend_from_slice(&id_bytes);
-    Ok(key)
-}
 
 impl<C: Collection> CollectionHandle<C> {
     fn ensure_event_sender(&self) -> broadcast::Sender<ChangeEvent<C>>
@@ -74,15 +40,22 @@ impl<C: Collection> CollectionHandle<C> {
         sender
     }
 
-    fn apply_namespace(&self, key: Vec<u8>) -> Vec<u8> {
-        if let Some(ns) = &self.db.namespace {
-            let mut out = Vec::with_capacity(ns.len() + 1 + key.len());
-            out.extend_from_slice(ns);
-            out.push(b'|');
-            out.extend_from_slice(&key);
-            return out;
-        }
-        key
+    fn namespace(&self) -> &[u8] {
+        self.db.namespace.as_deref().unwrap_or_default()
+    }
+
+    /// The stored key of `id`: the key codec over this database's namespace and the
+    /// catalog id of `C::persisted_name()` (KEY-01). The partition is not part of the key
+    /// (D12): partitions are logical (spec 2c) and still route the outbox stream and the
+    /// metrics. Allocates the collection's id on first use, so it is for writes.
+    async fn record_key(&self, id: &C::Id) -> Result<Vec<u8>, StorageError> {
+        let coll = self.db.catalog().id_for::<C>().await?;
+        encode_key(self.namespace(), coll, &encode_id(id)?)
+    }
+
+    /// The collection's id if it was ever written; reads never allocate one.
+    async fn existing_collection(&self) -> Result<Option<CollectionId>, StorageError> {
+        self.db.catalog().lookup(&C::persisted_name()).await
     }
 }
 
@@ -273,7 +246,7 @@ where
     /// Immediate put without batching (internal helper).
     async fn put_immediate(&self, item: C) -> Result<(), DbError> {
         let partition = self.get_partition(item.id());
-        let key = self.apply_namespace(get_namespaced_key::<C>(item.id(), partition)?);
+        let key = self.record_key(item.id()).await?;
         let item_bytes = encode_to_vec(&item, config::standard())
             .map_err(|e| StorageError::Serialization(e.to_string()))?;
         // Persist item and outbox record. Prefer atomic path if adapter supports it.
@@ -357,16 +330,19 @@ where
         let mut outbox_ops = Vec::with_capacity(items.len());
         let mut serialized_items = Vec::with_capacity(items.len());
 
+        let coll = self.db.catalog().id_for::<C>().await?;
+
         // Phase 1: Serialize all items in batch (reduces overhead)
         for item in &items {
             let partition = self.get_partition(item.id());
-            let key = match get_namespaced_key::<C>(item.id(), partition) {
-                Ok(k) => self.apply_namespace(k),
-                Err(e) => {
-                    results.push(Err(e.into()));
-                    continue;
-                }
-            };
+            let key =
+                match encode_id(item.id()).and_then(|id| encode_key(self.namespace(), coll, &id)) {
+                    Ok(k) => k,
+                    Err(e) => {
+                        results.push(Err(e.into()));
+                        continue;
+                    }
+                };
 
             let item_bytes = match encode_to_vec(item, config::standard()) {
                 Ok(b) => b,
@@ -468,12 +444,13 @@ where
 
         let mut results = Vec::with_capacity(ids.len());
         let mut keys = Vec::with_capacity(ids.len());
+        let Some(coll) = self.existing_collection().await? else {
+            return Ok(vec![None; ids.len()]);
+        };
 
         // Phase 1: Build all keys
         for id in &ids {
-            let partition = self.get_partition(id);
-            let key = self.apply_namespace(get_namespaced_key::<C>(id, partition)?);
-            keys.push(key);
+            keys.push(encode_key(self.namespace(), coll, &encode_id(id)?)?);
         }
 
         // Phase 2: Fetch all values with bulk API
@@ -504,11 +481,15 @@ where
 
         let mut results = Vec::with_capacity(ids.len());
         let mut delete_ops = Vec::new();
+        let Some(coll) = self.existing_collection().await? else {
+            // Never written: every id is already absent.
+            return Ok(ids.iter().map(|_| Ok(())).collect());
+        };
 
         // Phase 1: Verify items exist and prepare delete operations
         for id in &ids {
             let partition = self.get_partition(id);
-            let key = self.apply_namespace(get_namespaced_key::<C>(id, partition)?);
+            let key = encode_key(self.namespace(), coll, &encode_id(id)?)?;
 
             let maybe_item_bytes = self.db.storage.get(&key).await?;
             if maybe_item_bytes.is_none() {
@@ -591,7 +572,10 @@ where
     /// Delete an item by the collection's Id type.
     pub async fn delete(&self, id: &C::Id) -> Result<(), DbError> {
         let partition = self.get_partition(id);
-        let key = self.apply_namespace(get_namespaced_key::<C>(id, partition)?);
+        let Some(coll) = self.existing_collection().await? else {
+            return Ok(());
+        };
+        let key = encode_key(self.namespace(), coll, &encode_id(id)?)?;
 
         let maybe_item_bytes = self.db.storage.get(&key).await?;
         if maybe_item_bytes.is_none() {
@@ -655,8 +639,10 @@ where
 
     /// Get an item by the collection's Id type.
     pub async fn get(&self, id: &C::Id) -> Result<Option<C>, DbError> {
-        let partition = self.get_partition(id);
-        let key = self.apply_namespace(get_namespaced_key::<C>(id, partition)?);
+        let Some(coll) = self.existing_collection().await? else {
+            return Ok(None);
+        };
+        let key = encode_key(self.namespace(), coll, &encode_id(id)?)?;
 
         match self.db.storage.get(&key).await? {
             Some(item_bytes) => {
@@ -673,11 +659,15 @@ where
         self.ensure_event_sender().subscribe()
     }
 
-    /// Iterate over keys with the collection prefix; yields deserialized items.
+    /// Every record of this collection whose stored key continues with `prefix` after the
+    /// collection prefix. The stored key's tail is the record's id as
+    /// [`encode_id`](crate::keys::encode_id) writes it (bincode), so `prefix` applies to
+    /// those encoded id bytes; `b""` yields the whole collection.
     pub async fn scan_prefix(&self, prefix: &[u8]) -> Result<Vec<C>, DbError> {
-        let type_prefix = std::any::type_name::<C>().as_bytes().to_vec();
-        let mut key_prefix = type_prefix.clone();
-        key_prefix.push(b':');
+        let Some(coll) = self.existing_collection().await? else {
+            return Ok(Vec::new());
+        };
+        let mut key_prefix = collection_prefix(self.namespace(), coll);
         key_prefix.extend_from_slice(prefix);
         let rows = self.db.storage.scan_prefix(&key_prefix).await?;
         let mut out = Vec::with_capacity(rows.len());
@@ -689,16 +679,18 @@ where
         Ok(out)
     }
 
-    /// Range scan by encoded id bytes [start, end).
+    /// Range scan by encoded id bytes `[start, end)`: the bounds are the ids' stored keys,
+    /// so the order is that of their bincode encodings.
     pub async fn scan_range_by_id_bytes(
         &self,
         start_id: &C::Id,
         end_id: &C::Id,
     ) -> Result<Vec<C>, DbError> {
-        let start_partition = self.get_partition(start_id);
-        let end_partition = self.get_partition(end_id);
-        let start_key = self.apply_namespace(get_namespaced_key::<C>(start_id, start_partition)?);
-        let end_key = self.apply_namespace(get_namespaced_key::<C>(end_id, end_partition)?);
+        let Some(coll) = self.existing_collection().await? else {
+            return Ok(Vec::new());
+        };
+        let start_key = encode_key(self.namespace(), coll, &encode_id(start_id)?)?;
+        let end_key = encode_key(self.namespace(), coll, &encode_id(end_id)?)?;
         let rows = self.db.storage.scan_range(&start_key, &end_key).await?;
         let mut out = Vec::with_capacity(rows.len());
         for (_k, v) in rows {

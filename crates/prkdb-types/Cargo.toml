@@ -18,6 +18,8 @@ async-trait = { workspace = true }
 
 # Utilities
 dashmap = { workspace = true }
+# `StorageAdapter::allocation_lock` hands out a `tokio::sync::Mutex`.
+tokio = { version = "1", default-features = false, features = ["sync"] }
 chrono = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]

@@ -34,6 +34,10 @@ impl UringSegmentedAdapter {
 
 #[async_trait]
 impl StorageAdapter for UringSegmentedAdapter {
+    fn allocation_lock(&self) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        self.inner.allocation_lock()
+    }
+
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         self.inner.get(key).await
     }

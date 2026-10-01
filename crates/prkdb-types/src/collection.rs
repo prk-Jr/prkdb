@@ -33,6 +33,61 @@ pub trait Collection: Serialize + DeserializeOwned + Clone + Send + Debug + Sync
 
     /// Get the primary key of this entity
     fn id(&self) -> &Self::Id;
+
+    /// The name this collection is stored under. Recorded in the catalog at first use;
+    /// changing it makes the data unreachable, so the derive pins it: `#[collection(name =
+    /// "...")]`, or the struct name in snake_case. Manual impls get the snake_case of the
+    /// last path segment of the type name.
+    ///
+    /// Renaming a type changes its default name (spec revision 11): pin the name before
+    /// the first write if the type may ever be renamed. Two types with the same name in
+    /// different modules share one collection unless one of them pins another name. A
+    /// persisted name must match `^[a-z][a-z0-9_]{0,63}$`; one that does not is refused
+    /// at first use.
+    fn persisted_name() -> std::borrow::Cow<'static, str>
+    where
+        Self: Sized,
+    {
+        std::borrow::Cow::Owned(crate::collection::default_persisted_name(
+            std::any::type_name::<Self>(),
+        ))
+    }
+}
+
+/// The default persisted name for a type named `type_name` (as `std::any::type_name`
+/// prints it): generics stripped, the segment after the last `::`, CamelCase to
+/// snake_case (`a::HTTPServer<T>` → `http_server`). The `Collection` derive applies the
+/// same conversion to the struct's name, so a derived and a manual impl agree.
+pub fn default_persisted_name(type_name: &str) -> String {
+    let base = type_name.split('<').next().unwrap_or(type_name);
+    let last = base.rsplit("::").next().unwrap_or(base);
+    snake_case(last)
+}
+
+/// CamelCase → snake_case: an underscore before an uppercase letter that follows a
+/// lowercase letter or digit, or that starts a word after an acronym (`HTTPServer` →
+/// `http_server`).
+fn snake_case(ident: &str) -> String {
+    let chars: Vec<char> = ident.chars().collect();
+    let mut out = String::with_capacity(ident.len() + 4);
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_uppercase() {
+            let prev = i.checked_sub(1).map(|p| chars[p]);
+            let next = chars.get(i + 1).copied();
+            let boundary = match prev {
+                Some(p) if p.is_lowercase() || p.is_ascii_digit() => true,
+                Some(p) if p.is_uppercase() => next.is_some_and(|n| n.is_lowercase()),
+                _ => false,
+            };
+            if boundary {
+                out.push('_');
+            }
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Trait for versioned collections that support schema migration
@@ -301,6 +356,21 @@ mod tests {
             name: "test".to_string(),
         };
         assert_eq!(*entity.id(), 1);
+    }
+
+    #[test]
+    fn default_persisted_names_are_snake_case_of_the_last_segment() {
+        for (type_name, want) in [
+            ("User", "user"),
+            ("app::models::UserProfile", "user_profile"),
+            ("a::HTTPServer", "http_server"),
+            ("a::Item2Log", "item2_log"),
+            ("a::Wrapper<b::Inner>", "wrapper"),
+            ("already_snake", "already_snake"),
+        ] {
+            assert_eq!(default_persisted_name(type_name), want, "{type_name}");
+        }
+        assert_eq!(TestEntity::persisted_name(), "test_entity");
     }
 
     #[test]

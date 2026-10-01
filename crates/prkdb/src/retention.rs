@@ -75,7 +75,7 @@ impl RetentionPolicy {
         C: Collection + Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
         C::Id: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
     {
-        let collection_name = std::any::type_name::<C>();
+        let collection_name: &str = &C::persisted_name();
         let entries = db.storage.outbox_list().await?;
         let prefix = format!("{}:", collection_name);
         

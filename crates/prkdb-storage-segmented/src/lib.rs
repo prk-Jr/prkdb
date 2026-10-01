@@ -30,6 +30,8 @@ struct SegmentHandle {
 /// Maintains an in-memory index (key -> optional value), rebuilt on startup or restored from checkpoint.
 pub struct SegmentedLogAdapter {
     inner: Mutex<Inner>,
+    /// Collection-id allocation lock (`StorageAdapter::allocation_lock`), created at open.
+    allocation: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Debug)]
@@ -87,6 +89,7 @@ impl SegmentedLogAdapter {
         };
 
         Ok(Self {
+            allocation: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             inner: Mutex::new(Inner {
                 dir: dir_path,
                 segment_size,
@@ -396,6 +399,10 @@ impl SegmentedLogAdapter {
 
 #[async_trait]
 impl StorageAdapter for SegmentedLogAdapter {
+    fn allocation_lock(&self) -> Option<std::sync::Arc<tokio::sync::Mutex<()>>> {
+        Some(self.allocation.clone())
+    }
+
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         let guard = self.inner.lock().await;
         Ok(guard.index.get(key).cloned().flatten())

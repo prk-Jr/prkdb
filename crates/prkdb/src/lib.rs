@@ -14,6 +14,7 @@ pub mod authz; // Principals, roles and grants (spec R12)
 mod batch_accumulator;
 pub mod builder;
 pub mod cache; // LRU cache layer
+pub mod catalog; // Collection catalog: persisted name -> collection id (KEY-01)
 pub mod collection_handle;
 pub mod compute; // Stub module
 pub mod consumer;
@@ -23,6 +24,7 @@ pub mod dlq; // Dead Letter Queue support
 mod error;
 pub mod indexed_storage; // Secondary index support
 pub mod joins;
+pub mod keys; // Key codec: [ns_len][ns][collection id][key] (KEY-01)
 mod metrics;
 pub mod observability;
 pub mod outbox;

@@ -122,12 +122,7 @@ pub fn make_outbox_id_for_type<C: Collection>(partition: Option<u32>) -> String 
     // Including partition enables efficient filtering by consumers
     let seq = OUTBOX_SEQ.fetch_add(1, Ordering::SeqCst);
     let partition_id = partition.unwrap_or(0);
-    format!(
-        "{}:{}:{:020}",
-        std::any::type_name::<C>(),
-        partition_id,
-        seq
-    )
+    format!("{}:{}:{:020}", C::persisted_name(), partition_id, seq)
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -147,7 +142,7 @@ where
 
 pub fn make_dlq_id_for_type<C: Collection>() -> String {
     let seq = OUTBOX_SEQ.fetch_add(1, Ordering::SeqCst);
-    format!("dlq:{}:{:020}", std::any::type_name::<C>(), seq)
+    format!("dlq:{}:{:020}", C::persisted_name(), seq)
 }
 
 pub async fn save_dlq_event<C: Collection + Serialize + DeserializeOwned>(
@@ -169,7 +164,7 @@ pub async fn save_dlq_event_for<C: Collection + Serialize + DeserializeOwned>(
 }
 
 pub async fn dlq_is_empty_for<C: Collection>(db: &PrkDb) -> Result<bool, StorageError> {
-    let prefix = format!("dlq:{}:", std::any::type_name::<C>());
+    let prefix = format!("dlq:{}:", C::persisted_name());
     let entries = db.storage.outbox_list().await?;
     Ok(!entries.iter().any(|(k, _)| k.starts_with(&prefix)))
 }
@@ -181,7 +176,7 @@ where
     C::Id: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     let entries = db.storage.outbox_list().await?;
-    let prefix = format!("{}:", std::any::type_name::<C>());
+    let prefix = format!("{}:", C::persisted_name());
     let mut ours: Vec<(String, Vec<u8>)> = entries
         .into_iter()
         .filter(|(k, _)| k.starts_with(&prefix))
@@ -341,7 +336,7 @@ where
     let mut state = load_state::<H, C>(db, handler).await?;
 
     let entries = db.storage.outbox_list().await?;
-    let prefix = format!("{}:", std::any::type_name::<C>());
+    let prefix = format!("{}:", C::persisted_name());
     let mut ours: Vec<(String, Vec<u8>)> = entries
         .into_iter()
         .filter_map(|(k, v)| {
@@ -446,7 +441,7 @@ where
     C::Id: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     let entries = db.storage.outbox_list().await?;
-    let prefix = format!("{}:", std::any::type_name::<C>());
+    let prefix = format!("{}:", C::persisted_name());
     let mut ours: Vec<(String, Vec<u8>)> = entries
         .into_iter()
         .filter(|(k, _)| k.starts_with(&prefix))
@@ -537,7 +532,7 @@ where
         return Ok(());
     }
 
-    let prefix = format!("{}:", std::any::type_name::<C>());
+    let prefix = format!("{}:", C::persisted_name());
     let entries = db.storage.outbox_list().await?;
     let mut to_delete: Vec<String> = entries
         .into_iter()
@@ -570,7 +565,7 @@ where
     C::Id: Serialize + DeserializeOwned + Clone + Send + Sync + 'static,
 {
     let entries = db.storage.outbox_list().await?;
-    let prefix = format!("dlq:{}:", std::any::type_name::<C>());
+    let prefix = format!("dlq:{}:", C::persisted_name());
     let mut ours: Vec<(String, Vec<u8>)> = entries
         .into_iter()
         .filter(|(k, _)| k.starts_with(&prefix))

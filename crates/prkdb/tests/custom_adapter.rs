@@ -100,7 +100,8 @@ async fn custom_adapter_put_get_and_outbox() {
     let outbox = adapter.outbox_list().await.expect("outbox list");
     assert_eq!(outbox.len(), 1);
     assert!(
-        outbox[0].0.contains("Widget"),
-        "outbox id should include type hint"
+        outbox[0].0.starts_with("widget:"),
+        "outbox id should start with the collection's persisted name, got {}",
+        outbox[0].0
     );
 }

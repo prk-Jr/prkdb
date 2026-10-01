@@ -470,6 +470,8 @@ struct WalStorageInner {
     /// A validated memo: an entry is used only when its LSN equals the index's.
     cache: Arc<ValueCache>,
     outbox: Arc<LockFreeHashMap<String, Vec<u8>>>, // memory-only until Task 2.19 (EVT-02)
+    /// Collection-id allocation lock (`StorageAdapter::allocation_lock`), created at open.
+    allocation: Arc<tokio::sync::Mutex<()>>,
     metrics: Arc<StorageMetrics>,
     transaction_barrier: Arc<RwLock<()>>,
     bounds: LivenessBounds,
@@ -647,6 +649,7 @@ impl WalStorageAdapter {
                 metrics.clone(),
             )),
             outbox: Arc::new(LockFreeHashMap::new()),
+            allocation: Arc::new(tokio::sync::Mutex::new(())),
             metrics,
             transaction_barrier: Arc::new(RwLock::new(())),
             bounds: LivenessBounds::from_max_flush_ms(config.batching.max_flush_ms),
@@ -1144,6 +1147,10 @@ impl WalStorageAdapter {
 
 #[async_trait::async_trait]
 impl StorageAdapter for WalStorageAdapter {
+    fn allocation_lock(&self) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        Some(self.inner.allocation.clone())
+    }
+
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         let loc = self.inner.index.pin().get(key).copied();
         match loc {

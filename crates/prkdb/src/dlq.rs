@@ -29,7 +29,7 @@ pub trait MessageHandler<C: Collection>: Send + Sync {
 
 /// Get the default DLQ topic name for a collection
 pub fn dlq_topic_name<C: Collection>() -> String {
-    format!("{}.dlq", std::any::type_name::<C>())
+    format!("{}.dlq", C::persisted_name())
 }
 
 /// Internal state for tracking retries per record

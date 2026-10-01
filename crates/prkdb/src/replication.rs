@@ -675,7 +675,7 @@ impl ReplicationManager {
         // Update metrics
         #[cfg(feature = "metrics")]
         {
-            let collection_name = std::any::type_name::<C>().to_string();
+            let collection_name = C::persisted_name().into_owned();
             prkdb_metrics::exporter::REPLICATION_CHANGES_SENT
                 .with_label_values(&[&self.config.self_node.id, &collection_name])
                 .inc();

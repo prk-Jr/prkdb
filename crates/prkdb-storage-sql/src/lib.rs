@@ -8,6 +8,8 @@ use std::str::FromStr;
 #[derive(Clone)]
 pub struct SqliteAdapter {
     pool: SqlitePool,
+    /// Collection-id allocation lock (`StorageAdapter::allocation_lock`), created at open.
+    allocation: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl SqliteAdapter {
@@ -43,12 +45,19 @@ impl SqliteAdapter {
             .execute(&pool)
             .await
             .ok();
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            allocation: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        })
     }
 }
 
 #[async_trait]
 impl StorageAdapter for SqliteAdapter {
+    fn allocation_lock(&self) -> Option<std::sync::Arc<tokio::sync::Mutex<()>>> {
+        Some(self.allocation.clone())
+    }
+
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         let row = sqlx::query("SELECT v FROM kv WHERE k = ?")
             .bind(key)

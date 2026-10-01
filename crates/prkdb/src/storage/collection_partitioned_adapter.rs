@@ -1,4 +1,6 @@
 use super::wal_adapter::WalStorageAdapter;
+use crate::catalog::Catalog;
+use crate::keys::{collection_prefix, decode_key, encode_key};
 use dashmap::DashMap;
 use prkdb_core::wal::WalConfig;
 use prkdb_metrics::storage::StorageMetrics;
@@ -20,16 +22,19 @@ use tracing::{info, instrument};
 /// Every collection is stored in the one `WalStorageAdapter` opened at the data
 /// directory root. There are no per-collection logs: one log gives one global commit
 /// order, atomic writes across collections, and one recovery path (spec 2a). A collection
-/// is part of a record's key, built by one private helper (`collection_key`); it is never
+/// is part of a record's key, built by one private helper (`collection_key`) with the key
+/// codec (`crate::keys`, KEY-01) and this adapter's collection catalog; it is never
 /// recovered by splitting a key at a delimiter.
 ///
 /// # API
 ///
 /// The [`StorageAdapter`] methods forward to the inner adapter unchanged, so keys written
 /// through the trait are stored exactly as given. The routing methods
-/// (`get_from_collection`, `put_to_collection`, …) take the collection explicitly and
-/// build the stored key from it; they exist so callers can name a collection and get
-/// per-collection metrics.
+/// (`get_from_collection`, `put_to_collection`, …) take the collection explicitly (a
+/// persisted name, `^[a-z][a-z0-9_]{0,63}$`) and build the stored key from it in the
+/// empty namespace, the same key an `IndexedStorage` over this adapter writes for that
+/// collection. They exist so callers can name a collection and get per-collection
+/// metrics.
 ///
 /// # Performance
 ///
@@ -39,6 +44,10 @@ use tracing::{info, instrument};
 pub struct CollectionPartitionedAdapter {
     /// The one WAL of this data directory, at its root.
     inner: Arc<WalStorageAdapter>,
+
+    /// Collection ids (empty namespace) over `inner`, allocating under `inner`'s lock, so
+    /// it agrees with every other catalog over this storage.
+    catalog: Catalog,
 
     /// Aggregated metrics across all collections
     metrics: Arc<AggregatedMetrics>,
@@ -101,28 +110,40 @@ impl CollectionPartitionedAdapter {
         );
 
         Ok(Self {
+            catalog: Catalog::new(inner.clone(), Vec::new()),
             inner,
             metrics: Arc::new(AggregatedMetrics::new()),
             collection_sizes: Arc::new(DashMap::new()),
         })
     }
 
-    /// The stored key of `key` in `collection`: `collection ++ b":" ++ key`, exactly the
-    /// bytes a trait-path caller such as `CollectionHandle` writes today, so both paths
-    /// address the same record. Task 2.12 re-implements this with the key codec.
-    fn collection_key(&self, collection: &str, key: &[u8]) -> Result<Vec<u8>, StorageError> {
-        let mut full = Vec::with_capacity(collection.len() + 1 + key.len());
-        full.extend_from_slice(collection.as_bytes());
-        full.push(b':');
-        full.extend_from_slice(key);
-        Ok(full)
+    /// The stored key of `key` in `collection`: the key codec over the empty namespace and
+    /// the collection's catalog id, allocated on first use (so this is for writes).
+    async fn collection_key(&self, collection: &str, key: &[u8]) -> Result<Vec<u8>, StorageError> {
+        encode_key(&[], self.catalog.id_for_name(collection).await?, key)
     }
 
-    /// The collection a trait-path key belongs to, for metrics only. Keys are never
-    /// parsed, so this is `None` until Task 2.12 decodes the collection id with the key
-    /// codec; such an operation counts toward the totals only.
-    fn collection_of(&self, _key: &[u8]) -> Option<String> {
-        None
+    /// As `collection_key` for reads: `None` if `collection` was never written.
+    async fn existing_key(
+        &self,
+        collection: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        match self.catalog.lookup(collection).await? {
+            Some(coll) => Ok(Some(encode_key(&[], coll, key)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// The collection a trait-path key belongs to, for metrics only: the catalog's name for
+    /// the collection id the key codec decodes, when the key is a codec key in this
+    /// adapter's (empty) namespace. Anything else counts toward the totals only.
+    async fn collection_of(&self, key: &[u8]) -> Option<String> {
+        let (ns, coll, _) = decode_key(key).ok()?;
+        if !ns.is_empty() || coll == crate::keys::SYSTEM_COLLECTION {
+            return None;
+        }
+        self.catalog.name_for(coll).await.ok().flatten()
     }
 
     /// Record that `collection` has been seen, for `collection_names` and the metrics.
@@ -158,14 +179,16 @@ impl CollectionPartitionedAdapter {
             .set(total as f64);
     }
 
-    /// Names of the collections this adapter has seen (through the routing API, or a
-    /// trait-path key whose collection is known). Task 2.12 switches this to the
-    /// collection catalog, which also knows collections written before this process
-    /// started.
-    pub fn collection_names(&self) -> Vec<String> {
-        let mut names = self.metrics.get_collection_names();
-        names.sort();
-        names
+    /// Names of every collection the catalog has allocated in this data directory (empty
+    /// namespace), sorted, including those written before this process started.
+    pub async fn collection_names(&self) -> Result<Vec<String>, StorageError> {
+        Ok(self
+            .catalog
+            .list()
+            .await?
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect())
     }
 
     /// Get from a specific collection.
@@ -176,8 +199,10 @@ impl CollectionPartitionedAdapter {
     ) -> Result<Option<Vec<u8>>, StorageError> {
         self.metrics.total_reads.fetch_add(1, Ordering::Relaxed);
         self.note_collection(collection);
-        let full = self.collection_key(collection, key)?;
-        self.inner.get(&full).await
+        match self.existing_key(collection, key).await? {
+            Some(full) => self.inner.get(&full).await,
+            None => Ok(None),
+        }
     }
 
     /// Put to a specific collection.
@@ -189,7 +214,7 @@ impl CollectionPartitionedAdapter {
     ) -> Result<(), StorageError> {
         self.metrics.total_writes.fetch_add(1, Ordering::Relaxed);
         self.note_collection(collection);
-        let full = self.collection_key(collection, key)?;
+        let full = self.collection_key(collection, key).await?;
         self.inner.put(&full, value).await?;
         self.track_size(collection, value.len() as u64);
         Ok(())
@@ -202,8 +227,10 @@ impl CollectionPartitionedAdapter {
         key: &[u8],
     ) -> Result<(), StorageError> {
         self.note_collection(collection);
-        let full = self.collection_key(collection, key)?;
-        self.inner.delete(&full).await
+        match self.existing_key(collection, key).await? {
+            Some(full) => self.inner.delete(&full).await,
+            None => Ok(()),
+        }
     }
 
     /// Batch put to a specific collection: one inner `put_batch`, so one frame.
@@ -217,9 +244,10 @@ impl CollectionPartitionedAdapter {
             .fetch_add(entries.len() as u64, Ordering::Relaxed);
         self.note_collection(collection);
         let bytes: u64 = entries.iter().map(|(_, v)| v.len() as u64).sum();
+        let coll = self.catalog.id_for_name(collection).await?;
         let entries = entries
             .into_iter()
-            .map(|(key, value)| Ok((self.collection_key(collection, &key)?, value)))
+            .map(|(key, value)| Ok((encode_key(&[], coll, &key)?, value)))
             .collect::<Result<Vec<_>, StorageError>>()?;
         self.inner.put_batch(entries).await?;
         self.track_size(collection, bytes);
@@ -260,8 +288,8 @@ impl CollectionPartitionedAdapter {
     }
 
     /// Attribute a trait-path write to its collection, when it is known.
-    fn track_trait_write(&self, key: &[u8], bytes: u64) {
-        if let Some(collection) = self.collection_of(key) {
+    async fn track_trait_write(&self, key: &[u8], bytes: u64) {
+        if let Some(collection) = self.collection_of(key).await {
             self.note_collection(&collection);
             self.track_size(&collection, bytes);
         }
@@ -306,7 +334,7 @@ impl StorageAdapter for CollectionPartitionedAdapter {
             .with_label_values(&["local", "write"])
             .observe(start.elapsed().as_secs_f64());
         if result.is_ok() {
-            self.track_trait_write(key, value.len() as u64);
+            self.track_trait_write(key, value.len() as u64).await;
         }
         result
     }
@@ -321,7 +349,7 @@ impl StorageAdapter for CollectionPartitionedAdapter {
             .collect();
         self.inner.put_batch(entries).await?;
         for (key, bytes) in sizes {
-            self.track_trait_write(&key, bytes);
+            self.track_trait_write(&key, bytes).await;
         }
         Ok(())
     }
@@ -383,7 +411,7 @@ impl StorageAdapter for CollectionPartitionedAdapter {
         self.inner
             .put_with_outbox(key, value, outbox_id, outbox_payload)
             .await?;
-        self.track_trait_write(key, value.len() as u64);
+        self.track_trait_write(key, value.len() as u64).await;
         Ok(())
     }
 
@@ -417,10 +445,11 @@ impl StorageAdapter for CollectionPartitionedAdapter {
     }
 
     /// The changes after `offset` (the global log cursor) whose keys belong to
-    /// `collection`: those under `collection_key(collection, b"")`, the same helper that
-    /// builds every routing-API key. Selected by that prefix, never by parsing a key. An
-    /// unknown collection has no changes; an empty name means every collection (the bare
-    /// cursor, as the trait default and `FetchSegment` define it).
+    /// `collection`: those under the collection's key-codec prefix, which every
+    /// routing-API key (and every `IndexedStorage` key) for it starts with. Selected by
+    /// that prefix, never by parsing a key. An unknown collection has no changes; an empty
+    /// name means every collection (the bare cursor, as the trait default and
+    /// `FetchSegment` define it).
     async fn changes_in_collection(
         &self,
         collection: &str,
@@ -429,7 +458,10 @@ impl StorageAdapter for CollectionPartitionedAdapter {
         if collection.is_empty() {
             return self.inner.get_changes_since(offset).await;
         }
-        let prefix = self.collection_key(collection, b"")?;
+        let Some(coll) = self.catalog.lookup(collection).await? else {
+            return Ok(Vec::new());
+        };
+        let prefix = collection_prefix(&[], coll);
         Ok(self
             .inner
             .get_changes_since(offset)
@@ -449,6 +481,12 @@ impl StorageAdapter for CollectionPartitionedAdapter {
         StorageAdapter::take_snapshot(self.inner.as_ref(), path, compression).await
     }
 
+    /// The inner adapter's lock, so this adapter's catalog, `PrkDb`'s and any
+    /// `IndexedStorage` over it all allocate under one lock.
+    fn allocation_lock(&self) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        self.inner.allocation_lock()
+    }
+
     /// The one writer's health.
     fn write_path_health(&self) -> WritePathHealth {
         self.inner.write_path_health()
@@ -458,7 +496,31 @@ impl StorageAdapter for CollectionPartitionedAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keys::SYSTEM_COLLECTION;
     use prkdb_types::replication::Change;
+
+    fn change_keys(changes: Vec<Change>) -> Vec<Vec<u8>> {
+        changes
+            .into_iter()
+            .map(|c| match c {
+                Change::Put { key, .. } | Change::Delete { key, .. } => key,
+            })
+            .collect()
+    }
+
+    /// Change keys without the catalog's own entries (collection ids are allocated in the
+    /// same log, on first use).
+    fn data_keys(changes: Vec<Change>) -> Vec<Vec<u8>> {
+        change_keys(changes)
+            .into_iter()
+            .filter(|k| !matches!(decode_key(k), Ok((ns, c, _)) if ns.is_empty() && c == SYSTEM_COLLECTION))
+            .collect()
+    }
+
+    /// The routing API's stored key for an existing collection.
+    async fn routed(db: &CollectionPartitionedAdapter, collection: &str, key: &[u8]) -> Vec<u8> {
+        db.existing_key(collection, key).await.unwrap().unwrap()
+    }
 
     /// D11: every collection lands in the one WAL at the directory root, in one order.
     #[tokio::test(flavor = "multi_thread")]
@@ -494,21 +556,13 @@ mod tests {
             "{entries:?}"
         );
 
-        let keys: Vec<Vec<u8>> = db
-            .get_changes_since(0)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|c| match c {
-                Change::Put { key, .. } | Change::Delete { key, .. } => key,
-            })
-            .collect();
+        let keys = data_keys(db.get_changes_since(0).await.unwrap());
         assert_eq!(
             keys,
             vec![
-                b"users:1".to_vec(),
+                routed(&db, "users", b"1").await,
                 b"orders:1".to_vec(),
-                b"invoices:1".to_vec(),
+                routed(&db, "invoices", b"1").await,
                 b"users:2".to_vec()
             ],
             "one global commit order across collections"
@@ -533,9 +587,9 @@ mod tests {
         assert!(err.to_string().contains("format 1"), "{err}");
     }
 
-    /// `changes_in_collection` selects a collection's changes by the key `collection_key`
-    /// builds, from the one log: not a collection whose name merely starts the same, and
-    /// every collection for the empty name.
+    /// `changes_in_collection` selects a collection's changes by its key-codec prefix, from
+    /// the one log: not a collection whose name merely starts the same, and every
+    /// collection for the empty name.
     #[tokio::test(flavor = "multi_thread")]
     async fn changes_in_collection_selects_by_the_collection_key() {
         let dir = tempfile::tempdir().unwrap();
@@ -550,20 +604,13 @@ mod tests {
             .unwrap();
         db.delete_from_collection("users", b"1").await.unwrap();
 
-        let keys = |changes: Vec<Change>| -> Vec<Vec<u8>> {
-            changes
-                .into_iter()
-                .map(|c| match c {
-                    Change::Put { key, .. } | Change::Delete { key, .. } => key,
-                })
-                .collect()
-        };
+        let users_1 = routed(&db, "users", b"1").await;
         assert_eq!(
-            keys(db.changes_in_collection("users", 0).await.unwrap()),
-            vec![b"users:1".to_vec(), b"users:1".to_vec()]
+            change_keys(db.changes_in_collection("users", 0).await.unwrap()),
+            vec![users_1.clone(), users_1]
         );
         assert_eq!(
-            keys(db.changes_in_collection("", 0).await.unwrap()).len(),
+            data_keys(db.changes_in_collection("", 0).await.unwrap()).len(),
             3,
             "the empty name is the bare cursor"
         );
@@ -739,9 +786,9 @@ mod tests {
         );
     }
 
-    /// `collection_names` lists the collections written through the routing API, sorted
-    /// and without duplicates. (It replaced `collection_names_on_disk`, which listed
-    /// per-collection directories; there are none since D11.)
+    /// `collection_names` lists every collection the catalog allocated, sorted and without
+    /// duplicates, including after a reopen (Task 2.12: from the catalog, not from what
+    /// this process happened to touch).
     #[tokio::test(flavor = "multi_thread")]
     async fn collection_names_lists_what_was_written() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -749,26 +796,86 @@ mod tests {
             log_dir: temp_dir.path().to_path_buf(),
             ..WalConfig::test_config()
         };
-        let adapter = CollectionPartitionedAdapter::new(config).unwrap();
-        assert!(adapter.collection_names().is_empty());
+        {
+            let adapter = CollectionPartitionedAdapter::new(config.clone()).unwrap();
+            assert!(adapter.collection_names().await.unwrap().is_empty());
 
-        adapter
-            .put_to_collection("users", b"a", b"1")
-            .await
-            .unwrap();
-        adapter
-            .put_to_collection("orders", b"b", b"2")
-            .await
-            .unwrap();
-        adapter
-            .put_to_collection("users", b"c", b"3")
-            .await
-            .unwrap();
+            adapter
+                .put_to_collection("users", b"a", b"1")
+                .await
+                .unwrap();
+            adapter
+                .put_to_collection("orders", b"b", b"2")
+                .await
+                .unwrap();
+            adapter
+                .put_to_collection("users", b"c", b"3")
+                .await
+                .unwrap();
+            // A read of an unknown collection allocates nothing.
+            assert_eq!(
+                adapter.get_from_collection("ghosts", b"a").await.unwrap(),
+                None
+            );
 
+            assert_eq!(
+                adapter.collection_names().await.unwrap(),
+                vec!["orders".to_string(), "users".to_string()]
+            );
+        }
+        let reopened = CollectionPartitionedAdapter::new(config).unwrap();
         assert_eq!(
-            adapter.collection_names(),
+            reopened.collection_names().await.unwrap(),
             vec!["orders".to_string(), "users".to_string()]
         );
+        assert_eq!(
+            reopened.get_from_collection("users", b"c").await.unwrap(),
+            Some(b"3".to_vec())
+        );
+    }
+
+    /// A trait-path write is attributed to its collection by decoding the key codec and
+    /// asking the catalog, never by parsing the key; a key that is not a codec key counts
+    /// toward the totals only.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn trait_path_writes_are_attributed_through_the_catalog() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let adapter = CollectionPartitionedAdapter::new(WalConfig {
+            log_dir: temp_dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        })
+        .unwrap();
+        // Another catalog over the same storage (as `PrkDb`'s or `IndexedStorage`'s is)
+        // allocates the id; this adapter has never seen the name.
+        let other = Catalog::new(adapter.inner.clone(), Vec::new());
+        let coll = other.id_for_name("events").await.unwrap();
+        let key = encode_key(&[], coll, b"1").unwrap();
+
+        assert_eq!(
+            adapter.collection_of(&key).await,
+            Some("events".to_string())
+        );
+        assert_eq!(adapter.collection_of(b"events:1").await, None);
+        adapter.put(&key, b"v").await.unwrap();
+        assert_eq!(
+            adapter.metrics.get_collection_names(),
+            vec!["events".to_string()]
+        );
+    }
+
+    /// Every catalog over this adapter allocates under its inner adapter's one lock.
+    #[test]
+    fn the_allocation_lock_is_the_inner_adapters() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let adapter = CollectionPartitionedAdapter::new(WalConfig {
+            log_dir: temp_dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        })
+        .unwrap();
+        assert!(Arc::ptr_eq(
+            &adapter.allocation_lock().unwrap(),
+            &adapter.inner.allocation_lock().unwrap()
+        ));
     }
 
     /// The metrics accessors report what was recorded.

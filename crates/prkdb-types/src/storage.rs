@@ -276,6 +276,19 @@ pub trait StorageAdapter: Send + Sync + 'static {
         ))
     }
 
+    /// The lock that serializes collection-id allocation on this storage (spec §7 2c).
+    ///
+    /// Several collection catalogs can sit over one storage (`PrkDb`'s, an
+    /// `IndexedStorage` wrapping `db.storage()`, `CollectionPartitionedAdapter`'s), and
+    /// allocation is read-counter, write-counter, write-entry: two catalogs with their own
+    /// locks could both read the same counter and hand one id to two names. The lock
+    /// therefore belongs to the storage, and every catalog over it allocates under this
+    /// one. An adapter that returns `None` (the default) gets a lock per catalog, so it
+    /// must be used through a single catalog. A wrapper returns its inner adapter's lock.
+    fn allocation_lock(&self) -> Option<std::sync::Arc<tokio::sync::Mutex<()>>> {
+        None
+    }
+
     /// State of the adapter's asynchronous write path, for health and readiness probes.
     ///
     /// Synchronous by design and must stay so. A probe that can block is worse than no
