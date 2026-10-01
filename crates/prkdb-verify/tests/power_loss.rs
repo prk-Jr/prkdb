@@ -139,7 +139,8 @@ async fn contents(db: &WalStorageAdapter) -> BTreeMap<Vec<u8>, Vec<u8>> {
 
 /// Enough overwrites, deletes and batches over 16 KiB segments for a compaction to rewrite
 /// several sealed segments, drop deletes, and remove fully elided segments from the front;
-/// a checkpoint first, so the run has one to delete. Everything is flushed: the contents
+/// a checkpoint early on, so the run has one to delete, and keys it covers that the
+/// rewrite moves. Everything is flushed: the contents
 /// before compaction are durable, so every crash must recover exactly them.
 async fn compaction_workload(db: &WalStorageAdapter) {
     for round in 0..12u32 {
@@ -148,7 +149,16 @@ async fn compaction_workload(db: &WalStorageAdapter) {
                 .await
                 .unwrap();
         }
-        if round == 2 {
+        if round == 3 {
+            // Written once, after dead frames in their segment: the rewrite moves them to
+            // new offsets, so a checkpoint from before the run would point at stale ones.
+            for i in 0..8u32 {
+                db.put(format!("stable{i}").as_bytes(), &[0x5A; 100])
+                    .await
+                    .unwrap();
+            }
+        }
+        if round == 4 {
             db.save_checkpoint_async().await.unwrap();
         }
         if round % 4 == 1 {
@@ -255,43 +265,80 @@ async fn compaction_is_crash_safe_at_every_step() {
     }
 }
 
-/// The case compaction's log sync exists for (Fast mode): an overwrite or delete that
+/// Fast mode: `k = old` and `gone` are durable in a sealed segment; then, unsynced in the
+/// active segment, `k = new`, a marker, and a delete of `gone`.
+async fn unsynced_replacements(db: &WalStorageAdapter) {
+    db.put(b"k", b"old").await.unwrap();
+    db.put(b"gone", b"durable").await.unwrap();
+    for i in 0..100u32 {
+        db.put(format!("filler{i}").as_bytes(), &[1u8; 200])
+            .await
+            .unwrap(); // seal their segment
+    }
+    db.flush().await.unwrap(); // `old` and `gone` are durable
+    db.put(b"k", b"new").await.unwrap(); // unsynced (no periodic sync for an hour)
+    db.put(b"marker", b"before the delete").await.unwrap();
+    db.delete(b"gone").await.unwrap(); // unsynced
+}
+
+/// The case compaction's log sync exists for (Fast mode): an overwrite or a delete that
 /// superseded a durable record is still unsynced when compaction drops the old record.
-/// Without the sync a power cut would lose both the old record and its replacement.
+/// Without the sync, a power cut after the rewrite is renamed into place would lose both
+/// the old record and its replacement. The cut lands right after every step (the fresh
+/// checkpoint at the end syncs the log too, so a cut only after a complete run would not
+/// notice a missing sync), with every tear.
 #[tokio::test(flavor = "multi_thread")]
 async fn compaction_never_drops_a_record_whose_replacement_is_unsynced() {
-    for tear in [Tear::None, Tear::Prefix, Tear::ZeroTail, Tear::Garbage] {
-        let fs = fresh();
-        let db = open(&fs, SyncMode::Fast);
-        db.put(b"k", b"old").await.unwrap();
-        db.put(b"gone", b"durable").await.unwrap();
-        for i in 0..100u32 {
-            db.put(format!("filler{i}").as_bytes(), &[1u8; 200])
-                .await
-                .unwrap(); // seal both segments' worth
-        }
-        db.flush().await.unwrap(); // `old` and `gone` are durable
-        db.put(b"k", b"new").await.unwrap(); // unsynced (no periodic sync for an hour)
-        db.put(b"marker", b"before the delete").await.unwrap();
-        db.delete(b"gone").await.unwrap(); // unsynced
-        let report = db.compact().await.unwrap();
-        assert!(report.segments_rewritten > 0, "{report:?}");
-        fs.power_loss(&mut ChaCha8Rng::seed_from_u64(9), tear);
-        drop(db);
+    let fs = fresh();
+    let db = open(&fs, SyncMode::Fast);
+    unsynced_replacements(&db).await;
+    let steps: Steps = Arc::default();
+    let record = steps.clone();
+    let report = db
+        .compact_with_hook(move |step| {
+            record.lock().push(step);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(report.segments_rewritten > 0, "{report:?}");
+    drop(db);
+    let steps = steps.lock().clone();
 
-        let db = open(&fs, SyncMode::Fast);
-        let k = db.get(b"k").await.unwrap();
-        assert!(
-            k.as_deref() == Some(&b"old"[..]) || k.as_deref() == Some(&b"new"[..]),
-            "{tear:?}: k must be old or new, got {k:?}"
-        );
-        // A prefix of the log: if the delete survived, so did the put written before it.
-        if db.get(b"gone").await.unwrap().is_none() {
-            assert_eq!(
-                db.get(b"marker").await.unwrap().as_deref(),
-                Some(&b"before the delete"[..]),
-                "{tear:?}: the delete survived without the write before it"
+    for (cut, at) in steps.iter().enumerate() {
+        for tear in [Tear::None, Tear::Prefix, Tear::ZeroTail, Tear::Garbage] {
+            let fs = fresh();
+            let db = open(&fs, SyncMode::Fast);
+            unsynced_replacements(&db).await;
+            let mut seen = 0usize;
+            let power = fs.clone();
+            let _ = db
+                .compact_with_hook(move |_| {
+                    seen += 1;
+                    if seen == cut + 1 {
+                        power.power_loss(&mut ChaCha8Rng::seed_from_u64(cut as u64), tear);
+                        return Err("power cut".to_string());
+                    }
+                    Ok(())
+                })
+                .await;
+            drop(db);
+
+            let db = open(&fs, SyncMode::Fast);
+            let ctx = format!("power cut after {at:?} (step {cut}), {tear:?}");
+            let k = db.get(b"k").await.unwrap();
+            assert!(
+                k.as_deref() == Some(&b"old"[..]) || k.as_deref() == Some(&b"new"[..]),
+                "{ctx}: k must be old or new, got {k:?}"
             );
+            // A prefix of the log: if the delete survived, so did the put written before it.
+            if db.get(b"gone").await.unwrap().is_none() {
+                assert_eq!(
+                    db.get(b"marker").await.unwrap().as_deref(),
+                    Some(&b"before the delete"[..]),
+                    "{ctx}: the delete survived without the write before it"
+                );
+            }
         }
     }
 }

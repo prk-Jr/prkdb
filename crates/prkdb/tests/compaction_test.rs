@@ -375,9 +375,17 @@ async fn a_crash_before_the_fresh_checkpoint_reopens_by_full_replay() {
 async fn readers_racing_compaction_never_see_a_wrong_value() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
-    const KEYS: u32 = 40;
+    const KEYS: u32 = 200;
     let dir = tempfile::tempdir().unwrap();
-    let db = Arc::new(WalStorageAdapter::new(compaction_cfg(dir.path(), 4 * 1024)).unwrap());
+    // A cache far smaller than the key set, so reads go to the WAL and meet the swaps.
+    let db = Arc::new(
+        WalStorageAdapter::new_with_config(prkdb::storage::config::StorageConfig {
+            wal: compaction_cfg(dir.path(), 4 * 1024),
+            cache_capacity: 16,
+            ..prkdb::storage::config::StorageConfig::new(dir.path().to_path_buf())
+        })
+        .unwrap(),
+    );
     for i in 0..KEYS * 20 {
         db.put(format!("k{}", i % KEYS).as_bytes(), &i.to_be_bytes())
             .await
