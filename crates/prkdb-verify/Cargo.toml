@@ -10,6 +10,11 @@ description = "Model-based crash/restart verification harness for PrkDB (not pub
 prkdb = { workspace = true }
 prkdb-core = { workspace = true, features = ["vfs-conformance"] }
 prkdb-types = { workspace = true }
+# Fuzz entry points (TST-07): the gRPC messages, and frame CRCs recomputed so mutations
+# reach the parsers behind the checksum.
+prkdb-proto = { workspace = true }
+prost = { workspace = true }
+crc32fast = "1.4"
 tokio = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
