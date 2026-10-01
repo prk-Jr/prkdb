@@ -13,8 +13,9 @@ use syn::{parse_macro_input, Data, DeriveInput, Fields, Ident, Type};
 ///   `user_profile`). The name is recorded in the collection catalog at first write and
 ///   keys every record, so **renaming a type whose name is not pinned orphans its data**:
 ///   pin the name before the first write if the type may ever be renamed. Pinning also
-///   separates two same-named types in different modules, which otherwise share one
-///   collection. Must match `^[a-z][a-z0-9_]{0,63}$` (checked at compile time).
+///   separates two same-named types in different modules: without it, the second type
+///   to use a name over one storage is refused at runtime. Must match
+///   `^[a-z][a-z0-9_]{0,63}$` (checked at compile time).
 ///
 /// # Generated Code
 ///

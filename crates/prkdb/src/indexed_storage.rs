@@ -3113,12 +3113,14 @@ enum TxOperation {
     /// at commit, where the catalog can be asked for the collection's id.
     Insert {
         collection: String,
+        ty: crate::catalog::CollectionType,
         id: Vec<u8>,
         data: Vec<u8>,
         index_values: Vec<(String, Vec<u8>)>,
     },
     Delete {
         collection: String,
+        ty: crate::catalog::CollectionType,
         id: Vec<u8>,
         index_values: Vec<(String, Vec<u8>)>,
     },
@@ -3238,6 +3240,7 @@ impl<'a, S: StorageAdapter + 'static> Transaction<'a, S> {
 
         self.operations.push(TxOperation::Insert {
             collection: collection_name.into_owned(),
+            ty: crate::catalog::CollectionType::of::<T>(),
             id,
             data,
             index_values,
@@ -3259,6 +3262,7 @@ impl<'a, S: StorageAdapter + 'static> Transaction<'a, S> {
 
         self.operations.push(TxOperation::Delete {
             collection: collection_name.into_owned(),
+            ty: crate::catalog::CollectionType::of::<T>(),
             id,
             index_values,
         });
@@ -3317,11 +3321,12 @@ impl<'a, S: StorageAdapter + 'static> Transaction<'a, S> {
             match op {
                 TxOperation::Insert {
                     collection,
+                    ty,
                     id,
                     data,
                     index_values,
                 } => {
-                    let coll = self.storage.catalog.id_for_name(&collection).await?;
+                    let coll = self.storage.catalog.id_for_type(ty, &collection).await?;
                     let key = encode_key(&[], coll, &id)?;
                     // Store record
                     self.storage.storage.put(&key, &data).await?;
@@ -3350,10 +3355,16 @@ impl<'a, S: StorageAdapter + 'static> Transaction<'a, S> {
                 }
                 TxOperation::Delete {
                     collection,
+                    ty,
                     id,
                     index_values,
                 } => {
-                    let coll = self.storage.catalog.id_for_name(&collection).await?;
+                    // Like a non-transactional delete, never allocates: a collection that
+                    // was never written has nothing to delete.
+                    let Some(coll) = self.storage.catalog.lookup_type(ty, &collection).await?
+                    else {
+                        continue;
+                    };
                     let key = encode_key(&[], coll, &id)?;
                     // Delete record
                     self.storage.storage.delete(&key).await?;
@@ -3466,7 +3477,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         &self,
         id: &T::Id,
     ) -> Result<Option<Vec<u8>>, StorageError> {
-        match self.catalog.lookup(&T::persisted_name()).await? {
+        match self.catalog.lookup_for::<T>().await? {
             Some(coll) => Ok(Some(encode_record_key(&[], coll, id)?)),
             None => Ok(None),
         }
@@ -3478,7 +3489,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
     async fn scan_collection<T: Collection + DeserializeOwned>(
         &self,
     ) -> Result<Vec<(Vec<u8>, T)>, StorageError> {
-        let Some(coll) = self.catalog.lookup(&T::persisted_name()).await? else {
+        let Some(coll) = self.catalog.lookup_for::<T>().await? else {
             return Ok(Vec::new());
         };
         let mut rows = self
@@ -6038,7 +6049,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         }
 
         let collection_name = T::persisted_name().into_owned();
-        let Some(coll) = self.catalog.lookup(&collection_name).await? else {
+        let Some(coll) = self.catalog.lookup_for::<T>().await? else {
             // Never written, so there is nothing to delete.
             return Ok(records.len());
         };
@@ -6351,7 +6362,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         // A key-only count of the collection's prefix: the in-memory indexes miss records
         // that have no indexed field, and everything written before a restart; reading
         // every value just to count them would make `count` a full scan.
-        let Some(coll) = self.catalog.lookup(&T::persisted_name()).await? else {
+        let Some(coll) = self.catalog.lookup_for::<T>().await? else {
             return Ok(0);
         };
         self.storage

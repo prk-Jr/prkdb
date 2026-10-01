@@ -55,7 +55,7 @@ impl<C: Collection> CollectionHandle<C> {
 
     /// The collection's id if it was ever written; reads never allocate one.
     async fn existing_collection(&self) -> Result<Option<CollectionId>, StorageError> {
-        self.db.catalog().lookup(&C::persisted_name()).await
+        self.db.catalog().lookup_for::<C>().await
     }
 }
 

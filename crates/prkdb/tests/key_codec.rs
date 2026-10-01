@@ -322,3 +322,189 @@ async fn a_namespaced_collection_has_a_change_stream() {
     );
     assert!(fetch_segment_bytes(db, "ns_item").await > 0);
 }
+
+// ── One type per persisted name (review H1) ──────────────────────────────────
+
+mod one_type_per_name {
+    use prkdb::indexed_storage::IndexedStorage;
+    use prkdb::storage::{InMemoryAdapter, WalStorageAdapter};
+    use prkdb_core::wal::WalConfig;
+    use prkdb_types::collection::Collection;
+    use prkdb_types::error::StorageError;
+    use std::sync::Arc;
+
+    #[derive(prkdb_macros::Collection, serde::Serialize, serde::Deserialize, Clone, Debug)]
+    #[collection(name = "shared")]
+    struct First {
+        #[id]
+        id: u64,
+    }
+
+    #[derive(prkdb_macros::Collection, serde::Serialize, serde::Deserialize, Clone, Debug)]
+    #[collection(name = "shared")]
+    struct Second {
+        #[id]
+        id: u64,
+    }
+
+    /// A generic manual impl: the default name strips generics, so every instantiation
+    /// resolves "wrapper".
+    #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+    struct Wrapper<T> {
+        id: u64,
+        inner: T,
+    }
+
+    impl<T> Collection for Wrapper<T>
+    where
+        T: serde::Serialize
+            + serde::de::DeserializeOwned
+            + Clone
+            + Send
+            + Sync
+            + std::fmt::Debug
+            + 'static,
+    {
+        type Id = u64;
+        fn id(&self) -> &u64 {
+            &self.id
+        }
+    }
+
+    impl<T> prkdb_types::index::Indexed for Wrapper<T>
+    where
+        T: serde::Serialize
+            + serde::de::DeserializeOwned
+            + Clone
+            + Send
+            + Sync
+            + std::fmt::Debug
+            + 'static,
+    {
+        fn indexes() -> &'static [prkdb_types::index::IndexDef] {
+            &[]
+        }
+        fn index_values(&self) -> Vec<(&'static str, Vec<u8>)> {
+            Vec::new()
+        }
+    }
+
+    fn refused(err: StorageError, a: &str, b: &str) {
+        let text = err.to_string();
+        assert!(matches!(err, StorageError::Validation(_)), "{text}");
+        assert!(
+            text.contains(a) && text.contains(b) && text.contains("#[collection(name"),
+            "the refusal names both types and the fix: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_type_for_a_pinned_name_is_refused() {
+        let db = IndexedStorage::new(Arc::new(InMemoryAdapter::new()));
+        db.insert(&First { id: 1 }).await.unwrap();
+        let err = db.insert(&Second { id: 1 }).await.unwrap_err();
+        refused(err, "First", "Second");
+        // Reads are typed resolutions too: they must not see the other type's records.
+        refused(db.get::<Second>(&1).await.unwrap_err(), "First", "Second");
+        assert_eq!(db.get::<First>(&1).await.unwrap().unwrap().id, 1);
+    }
+
+    #[tokio::test]
+    async fn generic_instantiations_sharing_a_default_name_are_refused() {
+        assert_eq!(Wrapper::<u8>::persisted_name(), "wrapper");
+        let db = IndexedStorage::new(Arc::new(InMemoryAdapter::new()));
+        db.insert(&Wrapper { id: 1, inner: 1u8 }).await.unwrap();
+        let err = db
+            .insert(&Wrapper {
+                id: 1,
+                inner: "a".to_string(),
+            })
+            .await
+            .unwrap_err();
+        refused(err, "Wrapper<u8>", "Wrapper<alloc::string::String>");
+    }
+
+    /// Two catalogs over one storage (a `PrkDb`'s and an `IndexedStorage`'s) share the
+    /// registry, so the check holds across APIs.
+    #[tokio::test]
+    async fn the_check_spans_every_catalog_over_one_storage() {
+        let storage = InMemoryAdapter::new();
+        let db = prkdb::PrkDb::builder()
+            .with_storage(storage.clone())
+            .build()
+            .unwrap();
+        db.collection::<First>().put(First { id: 1 }).await.unwrap();
+        let indexed = IndexedStorage::new(Arc::new(storage));
+        refused(
+            indexed.insert(&Second { id: 2 }).await.unwrap_err(),
+            "First",
+            "Second",
+        );
+    }
+
+    #[tokio::test]
+    async fn separate_storages_may_reuse_a_name() {
+        let a = IndexedStorage::new(Arc::new(InMemoryAdapter::new()));
+        let b = IndexedStorage::new(Arc::new(InMemoryAdapter::new()));
+        a.insert(&First { id: 1 }).await.unwrap();
+        b.insert(&Second { id: 1 }).await.unwrap();
+    }
+
+    /// A shared, clonable log buffer for capturing `tracing` output.
+    #[derive(Clone, Default)]
+    struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Logs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// After a restart the in-process registry is empty, so a different type reopening a
+    /// name is compared with the type name recorded at allocation, and only logged: a
+    /// type moved to another module keeps its data.
+    #[tokio::test]
+    async fn a_type_mismatch_after_reopen_is_logged_not_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = || WalConfig {
+            log_dir: dir.path().to_path_buf(),
+            ..WalConfig::test_config()
+        };
+        {
+            let db = IndexedStorage::new(Arc::new(WalStorageAdapter::new(cfg()).unwrap()));
+            db.insert(&First { id: 7 }).await.unwrap();
+            db.inner().flush().await.unwrap();
+        }
+
+        let logs = Logs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer({
+                let logs = logs.clone();
+                move || logs.clone()
+            })
+            .with_ansi(false)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let storage = Arc::new(WalStorageAdapter::new(cfg()).unwrap());
+        let catalog = prkdb::catalog::Catalog::new(storage.clone(), Vec::new());
+        assert!(catalog
+            .recorded_type("shared")
+            .await
+            .unwrap()
+            .unwrap()
+            .ends_with("one_type_per_name::First"));
+        let db = IndexedStorage::new(storage);
+        assert_eq!(db.get::<Second>(&7).await.unwrap().unwrap().id, 7);
+
+        let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.contains("WARN") && text.contains("First") && text.contains("Second"),
+            "expected a warning naming both types, got: {text}"
+        );
+    }
+}

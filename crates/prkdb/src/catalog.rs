@@ -5,8 +5,9 @@
 //!
 //! All entries live under [`SYSTEM_COLLECTION`] in the catalog's namespace:
 //!
-//! - `catalog/name/{name}` → id, `u32` big-endian (the forward entry; it is what makes a
-//!   name allocated);
+//! - `catalog/name/{name}` → id, `u32` big-endian, followed by the Rust type name that
+//!   allocated it (empty when a name-based API did) — the forward entry; it is what makes
+//!   a name allocated;
 //! - `catalog/id/{id BE}` → name (the reverse entry);
 //! - `catalog/next` → the next id to hand out, `u32` big-endian, starting at 1.
 //!
@@ -19,13 +20,25 @@
 //! A crash between them wastes an id and never reuses one; a reverse entry without its
 //! forward entry is ignored. An adapter without an allocation lock gets a per-`Catalog`
 //! lock instead, so it must be used through a single `Catalog`.
+//!
+//! # One type per name (review H1)
+//!
+//! A persisted name is the collection's identity, so two Rust types resolving the same
+//! name in one namespace would silently share records. Every typed resolution
+//! ([`Catalog::id_for`], [`Catalog::lookup_for`]) claims the name for its `TypeId` in a
+//! registry shared by every catalog over the same storage (keyed by the storage's
+//! allocation lock), and a second, different type is refused with
+//! [`StorageError::Validation`]. Across restarts the forward entry's recorded type name
+//! is compared instead, and a mismatch is only **logged**: a type moved to another module
+//! keeps its name and its data.
 
 use crate::keys::{encode_key, CollectionId, SYSTEM_COLLECTION};
 use dashmap::DashMap;
 use prkdb_types::collection::Collection;
 use prkdb_types::error::StorageError;
 use prkdb_types::storage::StorageAdapter;
-use std::sync::Arc;
+use std::any::TypeId;
+use std::sync::{Arc, OnceLock, Weak};
 
 const NAME_ENTRY: &[u8] = b"catalog/name/";
 const ID_ENTRY: &[u8] = b"catalog/id/";
@@ -34,25 +47,79 @@ const NEXT_ENTRY: &[u8] = b"catalog/next";
 /// Longest persisted name.
 pub const MAX_NAME_LEN: usize = 64;
 
+type AllocationLock = Arc<tokio::sync::Mutex<()>>;
+
+/// `(namespace, persisted name)` → the type that claimed it, for one storage.
+type TypeRegistry = DashMap<(Vec<u8>, String), (TypeId, &'static str)>;
+
+/// The Rust type a typed API resolves a collection for.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CollectionType {
+    id: TypeId,
+    name: &'static str,
+}
+
+impl CollectionType {
+    pub(crate) fn of<C: Collection>() -> Self {
+        Self {
+            id: TypeId::of::<C>(),
+            name: std::any::type_name::<C>(),
+        }
+    }
+}
+
+/// The registry for the storage whose allocation lock is `lock`: one per storage, shared
+/// by every catalog over it, dropped with it (entries for dropped storages are pruned, so
+/// a new storage at a reused address starts empty).
+fn registry_for(lock: &AllocationLock) -> Arc<TypeRegistry> {
+    static REGISTRIES: OnceLock<
+        std::sync::Mutex<Vec<(Weak<tokio::sync::Mutex<()>>, Arc<TypeRegistry>)>>,
+    > = OnceLock::new();
+    let mut all = REGISTRIES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    all.retain(|(owner, _)| owner.strong_count() > 0);
+    if let Some((_, registry)) = all
+        .iter()
+        .find(|(owner, _)| owner.upgrade().is_some_and(|l| Arc::ptr_eq(&l, lock)))
+    {
+        return registry.clone();
+    }
+    let registry = Arc::new(TypeRegistry::new());
+    all.push((Arc::downgrade(lock), registry.clone()));
+    registry
+}
+
 /// Maps collection names to ids, persisting each allocation in the storage it describes.
 pub struct Catalog {
     storage: Arc<dyn StorageAdapter>,
     ns: Vec<u8>,
     cache: DashMap<String, CollectionId>,
     names: DashMap<CollectionId, String>,
-    /// Used only when `storage.allocation_lock()` is `None`.
-    fallback: Arc<tokio::sync::Mutex<()>>,
+    /// Ids already resolved for a type in this catalog: the typed hot path (one
+    /// `TypeId` hash, no name hashing, no registry check after the first use).
+    typed: DashMap<TypeId, CollectionId>,
+    /// `storage.allocation_lock()`, or a per-`Catalog` lock when it has none.
+    lock: AllocationLock,
+    types: Arc<TypeRegistry>,
 }
 
 impl Catalog {
     /// A catalog for namespace `ns` over `storage`. Reads nothing until first use.
     pub fn new(storage: Arc<dyn StorageAdapter>, ns: Vec<u8>) -> Self {
+        let lock = storage
+            .allocation_lock()
+            .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
+        let types = registry_for(&lock);
         Self {
             storage,
             ns,
             cache: DashMap::new(),
             names: DashMap::new(),
-            fallback: Arc::new(tokio::sync::Mutex::new(())),
+            typed: DashMap::new(),
+            lock,
+            types,
         }
     }
 
@@ -72,8 +139,109 @@ impl Catalog {
         }
     }
 
-    /// The id for `name`, allocating and persisting one on first use.
+    /// The id for `name`, allocating and persisting one on first use. For name-based
+    /// callers (the routing API, the CLI and HTTP server); typed callers use
+    /// [`Self::id_for`], which also checks the type.
     pub async fn id_for_name(&self, name: &str) -> Result<CollectionId, StorageError> {
+        self.allocate(name, "").await
+    }
+
+    /// The id of collection `C`, by its persisted name, allocated on first use. Refuses a
+    /// name another type already resolved over this storage (module docs).
+    pub async fn id_for<C: Collection>(&self) -> Result<CollectionId, StorageError> {
+        // Hot path first: no persisted-name computation (an allocation for manual impls).
+        if let Some(id) = self.typed.get(&TypeId::of::<C>()) {
+            return Ok(*id);
+        }
+        self.id_for_type(CollectionType::of::<C>(), &C::persisted_name())
+            .await
+    }
+
+    /// As [`Self::id_for`], without allocating: `None` if `C` was never written.
+    pub async fn lookup_for<C: Collection>(&self) -> Result<Option<CollectionId>, StorageError> {
+        if let Some(id) = self.typed.get(&TypeId::of::<C>()) {
+            return Ok(Some(*id));
+        }
+        self.lookup_type(CollectionType::of::<C>(), &C::persisted_name())
+            .await
+    }
+
+    pub(crate) async fn id_for_type(
+        &self,
+        ty: CollectionType,
+        name: &str,
+    ) -> Result<CollectionId, StorageError> {
+        if let Some(id) = self.typed.get(&ty.id) {
+            return Ok(*id);
+        }
+        self.claim(ty, name)?;
+        let id = self.allocate(name, ty.name).await?;
+        self.check_recorded_type(ty, name).await?;
+        self.typed.insert(ty.id, id);
+        Ok(id)
+    }
+
+    pub(crate) async fn lookup_type(
+        &self,
+        ty: CollectionType,
+        name: &str,
+    ) -> Result<Option<CollectionId>, StorageError> {
+        if let Some(id) = self.typed.get(&ty.id) {
+            return Ok(Some(*id));
+        }
+        self.claim(ty, name)?;
+        let Some(id) = self.lookup(name).await? else {
+            return Ok(None);
+        };
+        self.check_recorded_type(ty, name).await?;
+        self.typed.insert(ty.id, id);
+        Ok(Some(id))
+    }
+
+    /// Claims `name` (in this namespace, over this storage) for `ty`, or refuses if a
+    /// different type holds it.
+    fn claim(&self, ty: CollectionType, name: &str) -> Result<(), StorageError> {
+        let entry = self
+            .types
+            .entry((self.ns.clone(), name.to_string()))
+            .or_insert((ty.id, ty.name));
+        let (held_id, held_name) = *entry;
+        if held_id == ty.id {
+            return Ok(());
+        }
+        Err(StorageError::Validation(format!(
+            "types {held_name} and {} share persisted name {name}; pin one with \
+             #[collection(name = \"...\")]",
+            ty.name
+        )))
+    }
+
+    /// Logs (never refuses) a forward entry recorded by a different type name: after a
+    /// restart the registry is empty, and a type moved to another module must keep its
+    /// data.
+    async fn check_recorded_type(
+        &self,
+        ty: CollectionType,
+        name: &str,
+    ) -> Result<(), StorageError> {
+        if let Some((_, recorded)) = self.read_forward_entry(name).await? {
+            if !recorded.is_empty() && recorded != ty.name {
+                tracing::warn!(
+                    collection = name,
+                    recorded = %recorded,
+                    current = ty.name,
+                    "collection {name} was created by type {recorded} and is now used by \
+                     {}; if these are different types they share records (pin a name with \
+                     #[collection(name = \"...\")])",
+                    ty.name
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The id for `name`, allocating it (recording `type_name`) on first use.
+    async fn allocate(&self, name: &str, type_name: &str) -> Result<CollectionId, StorageError> {
         Self::validate_name(name)?;
         if let Some(id) = self.cache.get(name) {
             return Ok(*id);
@@ -83,11 +251,7 @@ impl Catalog {
             return Ok(id);
         }
 
-        let lock = self
-            .storage
-            .allocation_lock()
-            .unwrap_or_else(|| self.fallback.clone());
-        let _guard = lock.lock().await;
+        let _guard = self.lock.lock().await;
 
         // Another `Catalog` over this storage may have allocated it while this one waited.
         if let Some(id) = self.read_forward(name).await? {
@@ -115,16 +279,10 @@ impl Catalog {
         self.storage
             .put(&self.reverse_key(id)?, name.as_bytes())
             .await?;
-        self.storage
-            .put(&self.forward_key(name)?, &id.0.to_be_bytes())
-            .await?;
+        let forward = [&id.0.to_be_bytes()[..], type_name.as_bytes()].concat();
+        self.storage.put(&self.forward_key(name)?, &forward).await?;
         self.remember(name, id);
         Ok(id)
-    }
-
-    /// The id of collection `C`, by its persisted name.
-    pub async fn id_for<C: Collection>(&self) -> Result<CollectionId, StorageError> {
-        self.id_for_name(&C::persisted_name()).await
     }
 
     /// The id for `name` if one was ever allocated; never allocates (admin and read
@@ -141,6 +299,18 @@ impl Catalog {
             self.remember(name, id);
         }
         Ok(found)
+    }
+
+    /// The Rust type name recorded when `name` was allocated (empty if a name-based API
+    /// allocated it); `None` if it never was.
+    pub async fn recorded_type(&self, name: &str) -> Result<Option<String>, StorageError> {
+        if Self::validate_name(name).is_err() {
+            return Ok(None);
+        }
+        Ok(self
+            .read_forward_entry(name)
+            .await?
+            .map(|(_, recorded)| recorded))
     }
 
     /// Reverse lookup for ids this storage has allocated (cached; reads the entry on a
@@ -169,7 +339,7 @@ impl Catalog {
             let Ok(name) = String::from_utf8(key[prefix.len()..].to_vec()) else {
                 continue;
             };
-            let id = CollectionId(decode_u32(&value, "catalog/name/")?);
+            let (id, _) = decode_forward(&value)?;
             self.remember(&name, id);
             out.push((name, id));
         }
@@ -183,8 +353,15 @@ impl Catalog {
     }
 
     async fn read_forward(&self, name: &str) -> Result<Option<CollectionId>, StorageError> {
+        Ok(self.read_forward_entry(name).await?.map(|(id, _)| id))
+    }
+
+    async fn read_forward_entry(
+        &self,
+        name: &str,
+    ) -> Result<Option<(CollectionId, String)>, StorageError> {
         match self.storage.get(&self.forward_key(name)?).await? {
-            Some(bytes) => Ok(Some(CollectionId(decode_u32(&bytes, "catalog/name/")?))),
+            Some(bytes) => Ok(Some(decode_forward(&bytes)?)),
             None => Ok(None),
         }
     }
@@ -200,6 +377,21 @@ impl Catalog {
     fn reverse_key(&self, id: CollectionId) -> Result<Vec<u8>, StorageError> {
         self.key(&[ID_ENTRY, &id.0.to_be_bytes()[..]].concat())
     }
+}
+
+/// A forward entry: the id, then the allocating type's name (possibly empty).
+fn decode_forward(bytes: &[u8]) -> Result<(CollectionId, String), StorageError> {
+    if bytes.len() < 4 {
+        return Err(StorageError::Corruption(format!(
+            "catalog entry catalog/name/ holds {} bytes, expected at least 4",
+            bytes.len()
+        )));
+    }
+    let (id, type_name) = bytes.split_at(4);
+    let type_name = String::from_utf8(type_name.to_vec()).map_err(|_| {
+        StorageError::Corruption("catalog/name/ type name is not UTF-8".to_string())
+    })?;
+    Ok((CollectionId(decode_u32(id, "catalog/name/")?), type_name))
 }
 
 fn decode_u32(bytes: &[u8], what: &str) -> Result<u32, StorageError> {

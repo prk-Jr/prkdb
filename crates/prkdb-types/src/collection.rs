@@ -40,8 +40,12 @@ pub trait Collection: Serialize + DeserializeOwned + Clone + Send + Debug + Sync
     /// last path segment of the type name.
     ///
     /// Renaming a type changes its default name (spec revision 11): pin the name before
-    /// the first write if the type may ever be renamed. Two types with the same name in
-    /// different modules share one collection unless one of them pins another name. A
+    /// the first write if the type may ever be renamed. Two different types resolving
+    /// the same name over one storage (same-named structs in different modules, or
+    /// `Wrapper<A>` and `Wrapper<B>`, whose default drops the generics) are refused at the
+    /// second one's first use, naming both; pin a distinct name on one of them. Across
+    /// restarts the type name recorded at allocation is compared instead, and a mismatch
+    /// is logged, not refused, so a type moved to another module keeps its data. A
     /// persisted name must match `^[a-z][a-z0-9_]{0,63}$`; one that does not is refused
     /// at first use.
     fn persisted_name() -> std::borrow::Cow<'static, str>
