@@ -310,7 +310,10 @@ mod tests {
         let _held = crate::storage::lock::lock_data_dir(&StdVfs, dir.path()).unwrap();
         assert!(!holds_data(&StdVfs, dir.path()).unwrap());
         assert_eq!(detect_format(&StdVfs, dir.path()).unwrap(), None);
-        assert_eq!(ensure_format(&StdVfs, dir.path()).unwrap(), FormatMarker::current());
+        assert_eq!(
+            ensure_format(&StdVfs, dir.path()).unwrap(),
+            FormatMarker::current()
+        );
     }
 
     #[test]
