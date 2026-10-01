@@ -12,19 +12,18 @@
 //! there's no `Sut::crash()` call, no cooperating destructor, just a process
 //! that stops existing mid-flight.
 //!
-//! Passing any test here does not imply fsync durability: the mmap WAL makes
-//! acknowledged writes visible in the page cache, which survives a process
-//! kill but not power loss (STO-02, Phase 2).
+//! The child runs `SyncMode::Durable`, so an `ACK` means fsynced; a process
+//! kill is the weaker fault. Power loss is covered in-process by
+//! `tests/power_loss.rs` (Task 2.8a).
 //!
 //! Four tests, two axes:
-//! - write path: one `put` per key, vs. `put_many` batches (the
-//!   accumulator/flush-loop path).
+//! - write path: one `put` per key, vs. `put_many` batches (one frame per
+//!   batch).
 //! - kill point: after the very last ack (`_survive_sigkill`), vs. at a
 //!   random ack chosen mid-run while the child keeps writing behind it
-//!   (`_survive_mid_stream_sigkill`). The mid-stream tests also use large
-//!   enough values, in a single mmap segment, to force that segment past its
-//!   initial capacity and exercise its resize path (see `MID_STREAM_*`
-//!   below).
+//!   (`_survive_mid_stream_sigkill`). The mid-stream tests also write enough
+//!   data, with a small enough `segment_bytes`, to force the log to roll to
+//!   new segments during the run (see `MID_STREAM_*` below).
 
 #![cfg(unix)]
 
@@ -45,20 +44,18 @@ const NUM_PUTS: u32 = 200;
 /// Batch size for the "run to completion" batched-path test.
 const FULL_RUN_BATCH: usize = 20;
 
-/// Puts, value size, and single-segment config for the two mid-stream-kill
-/// tests. `MID_STREAM_VALUE_BYTES * MID_STREAM_N` (~100 MB) comfortably
-/// exceeds `INITIAL_SEGMENT_SIZE` (64 MB, `mmap_log_segment.rs`) once routed
-/// into a single segment (`--segments 1`), so a bit before 2/3 of the way
-/// through the run the segment's `resize()` path fires; a random kill point
-/// then lands before it most of the time and after it some of the time,
-/// across enough runs. Values are large (1 MiB) specifically to keep the put
-/// *count* small — this crosses the same 64 MB boundary as many small puts
-/// would, but in ~100 calls instead of tens of thousands, which keeps the
-/// test's wall-clock cost low and stable under a loaded CI runner.
+/// Puts, value size, and segment size for the two mid-stream-kill tests.
+/// `MID_STREAM_VALUE_BYTES * MID_STREAM_N` (~100 MB) in `MID_STREAM_SEGMENT_BYTES`
+/// (8 MiB) segments rolls the log about every 8 puts, roughly 12 times per
+/// run, so a random kill point lands on either side of several rolls (and,
+/// for the batched test, a 10 MiB batch is larger than a segment and gets one
+/// of its own). Values are large (1 MiB) specifically to keep the put *count*
+/// small — ~100 calls instead of tens of thousands, which keeps the test's
+/// wall-clock cost low and stable under a loaded CI runner.
 const MID_STREAM_N: u32 = 100;
 const MID_STREAM_VALUE_BYTES: usize = 1024 * 1024;
 const MID_STREAM_BATCH: usize = 10;
-const MID_STREAM_SEGMENTS: usize = 1;
+const MID_STREAM_SEGMENT_BYTES: u64 = 8 * 1024 * 1024;
 
 const STDOUT_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -145,14 +142,11 @@ fn kill_reap_and_join(child: &mut Child, reader_handle: std::thread::JoinHandle<
     reader_handle.join().ok();
 }
 
-async fn reopen(dir: &Path, segment_count: Option<usize>) -> WalStorageAdapter {
-    let mut config = WalConfig {
+async fn reopen(dir: &Path) -> WalStorageAdapter {
+    let config = WalConfig {
         log_dir: dir.to_path_buf(),
         ..WalConfig::test_config()
     };
-    if let Some(segment_count) = segment_count {
-        config.segment_count = segment_count;
-    }
     WalStorageAdapter::open_async(config)
         .await
         .expect("failed to reopen data dir after SIGKILL")
@@ -199,7 +193,7 @@ async fn acknowledged_writes_survive_sigkill() {
     // flush beyond what was already durable when each `ACK` was printed.
     kill_reap_and_join(&mut child.0, reader_handle);
 
-    let db = reopen(dir.path(), None).await;
+    let db = reopen(dir.path()).await;
     let lost = missing_keys(&db, 0..NUM_PUTS).await;
     assert!(
         lost.is_empty(),
@@ -233,7 +227,7 @@ async fn acknowledged_batched_writes_survive_sigkill() {
 
     kill_reap_and_join(&mut child.0, reader_handle);
 
-    let db = reopen(dir.path(), None).await;
+    let db = reopen(dir.path()).await;
     let lost = missing_keys(&db, 0..NUM_PUTS).await;
     assert!(
         lost.is_empty(),
@@ -255,8 +249,8 @@ async fn acknowledged_writes_survive_mid_stream_sigkill_single_puts() {
             MID_STREAM_N.to_string(),
             "--value-bytes".to_string(),
             MID_STREAM_VALUE_BYTES.to_string(),
-            "--segments".to_string(),
-            MID_STREAM_SEGMENTS.to_string(),
+            "--segment-bytes".to_string(),
+            MID_STREAM_SEGMENT_BYTES.to_string(),
         ],
     );
     let stdout = child.0.stdout.take().expect("child stdout not piped");
@@ -273,7 +267,7 @@ async fn acknowledged_writes_survive_mid_stream_sigkill_single_puts() {
     // whatever `k` was picked, right up until this SIGKILL lands.
     kill_reap_and_join(&mut child.0, reader_handle);
 
-    let db = reopen(dir.path(), Some(MID_STREAM_SEGMENTS)).await;
+    let db = reopen(dir.path()).await;
     let lost = missing_keys(&db, 0..=k).await;
     assert!(
         lost.is_empty(),
@@ -298,8 +292,8 @@ async fn acknowledged_writes_survive_mid_stream_sigkill_batched_puts() {
             MID_STREAM_BATCH.to_string(),
             "--value-bytes".to_string(),
             MID_STREAM_VALUE_BYTES.to_string(),
-            "--segments".to_string(),
-            MID_STREAM_SEGMENTS.to_string(),
+            "--segment-bytes".to_string(),
+            MID_STREAM_SEGMENT_BYTES.to_string(),
         ],
     );
     let stdout = child.0.stdout.take().expect("child stdout not piped");
@@ -314,7 +308,7 @@ async fn acknowledged_writes_survive_mid_stream_sigkill_batched_puts() {
 
     kill_reap_and_join(&mut child.0, reader_handle);
 
-    let db = reopen(dir.path(), Some(MID_STREAM_SEGMENTS)).await;
+    let db = reopen(dir.path()).await;
     let lost = missing_keys(&db, 0..=k).await;
     assert!(
         lost.is_empty(),

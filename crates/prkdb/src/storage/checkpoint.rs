@@ -2,6 +2,11 @@
 //!
 //! Checkpoints store the last-known-good offsets for each WAL segment,
 //! allowing recovery to skip already-indexed records.
+//!
+//! **Unused since Task 2.8a.** Skipping records by offset is what lost every key written
+//! before a checkpoint (STO-01); the adapter now always replays the whole log and never
+//! writes or reads this file. Deleted in Task 2.8c; Task 2.14 writes an index snapshot
+//! here instead.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -9,6 +14,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Checkpoint data for WAL recovery optimization
+#[allow(dead_code)] // deleted in Task 2.8c
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
     /// Version for forward/backward compatibility
@@ -66,6 +72,7 @@ impl Checkpoint {
 /// Save checkpoint to file
 ///
 /// Uses atomic write (write to temp, then rename) to prevent corruption.
+#[allow(dead_code)] // deleted in Task 2.8c
 pub fn save_checkpoint(path: &Path, checkpoint: &Checkpoint) -> Result<(), CheckpointError> {
     use std::io::Write;
 
@@ -109,6 +116,7 @@ pub fn save_checkpoint(path: &Path, checkpoint: &Checkpoint) -> Result<(), Check
 ///
 /// Returns `None` if file doesn't exist.
 /// Returns error if file exists but is corrupted.
+#[allow(dead_code)] // deleted in Task 2.8c
 pub fn load_checkpoint(path: &Path) -> Result<Option<Checkpoint>, CheckpointError> {
     if !path.exists() {
         return Ok(None);
@@ -160,6 +168,7 @@ pub fn load_checkpoint(path: &Path) -> Result<Option<Checkpoint>, CheckpointErro
 }
 
 /// Errors that can occur during checkpoint operations
+#[allow(dead_code)] // deleted in Task 2.8c
 #[derive(Debug, Clone)]
 pub enum CheckpointError {
     /// I/O error

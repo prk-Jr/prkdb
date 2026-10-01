@@ -22,9 +22,23 @@
 //! falsifying it and observing a failure.
 
 use prkdb::storage::WalStorageAdapter;
-use prkdb_core::wal::WalConfig;
+use prkdb_core::wal::{SyncMode, WalConfig};
 use prkdb_types::storage::StorageAdapter;
 use proptest::prelude::*;
+
+/// `WalConfig::test_config()` in `SyncMode::Fast`.
+///
+/// These properties are about what the adapter answers, including after an in-process
+/// reopen (a clean close syncs the log, so the answer does not depend on the sync mode).
+/// What survives a power cut is tested in `prkdb-verify/tests/power_loss.rs`. With an
+/// fsync per write (Durable, Task 2.8a) this file took several times longer for no
+/// additional coverage.
+fn test_config() -> WalConfig {
+    WalConfig {
+        sync_mode: SyncMode::Fast,
+        ..WalConfig::test_config()
+    }
+}
 
 // Property: Any key-value pair written should be retrievable
 proptest! {
@@ -36,7 +50,7 @@ proptest! {
             let dir = tempfile::tempdir().unwrap();
             let config = WalConfig {
                 log_dir: dir.path().to_path_buf(),
-                ..WalConfig::test_config()
+                ..test_config()
             };
             let adapter = WalStorageAdapter::new(config).unwrap();
 
@@ -62,7 +76,7 @@ proptest! {
             let dir = tempfile::tempdir().unwrap();
             let config = WalConfig {
                 log_dir: dir.path().to_path_buf(),
-                ..WalConfig::test_config()
+                ..test_config()
             };
             let adapter = WalStorageAdapter::new(config).unwrap();
 
@@ -89,7 +103,7 @@ proptest! {
             let dir = tempfile::tempdir().unwrap();
             let config = WalConfig {
                 log_dir: dir.path().to_path_buf(),
-                ..WalConfig::test_config()
+                ..test_config()
             };
             let adapter = WalStorageAdapter::new(config).unwrap();
 
@@ -124,7 +138,7 @@ proptest! {
             let dir1 = tempfile::tempdir().unwrap();
             let config1 = WalConfig {
                 log_dir: dir1.path().to_path_buf(),
-                ..WalConfig::test_config()
+                ..test_config()
             };
             let adapter1 = WalStorageAdapter::new(config1).unwrap();
 
@@ -137,7 +151,7 @@ proptest! {
             let dir2 = tempfile::tempdir().unwrap();
             let config2 = WalConfig {
                 log_dir: dir2.path().to_path_buf(),
-                ..WalConfig::test_config()
+                ..test_config()
             };
             let adapter2 = WalStorageAdapter::new(config2).unwrap();
 
@@ -173,7 +187,7 @@ proptest! {
             let dir = tempfile::tempdir().unwrap();
             let config = WalConfig {
                 log_dir: dir.path().to_path_buf(),
-                ..WalConfig::test_config()
+                ..test_config()
             };
 
             // Write data
@@ -245,7 +259,7 @@ fn bound() -> impl Strategy<Value = String> {
 fn adapter_at(dir: &std::path::Path) -> CollectionPartitionedAdapter {
     let config = WalConfig {
         log_dir: dir.to_path_buf(),
-        ..WalConfig::test_config()
+        ..test_config()
     };
     CollectionPartitionedAdapter::new(config).unwrap()
 }

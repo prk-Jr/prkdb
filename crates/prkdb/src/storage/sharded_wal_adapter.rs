@@ -24,7 +24,7 @@ impl WalShard {
         // Use blocking in a way that won't deadlock since we're in sync context
         let wal = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                // CRITICAL FIX: Use 1 segment per shard (not config.segment_count=4)
+                // CRITICAL FIX: Use 1 segment per shard (not the old default of 4)
                 // This prevents 16 shards × 4 segments = 64 total segments overhead
                 // Now: 16 shards × 1 segment = 16 total segments (manageable!)
                 // open_or_create: `create` truncates, which would wipe each shard's log
@@ -43,6 +43,9 @@ impl WalShard {
         })
     }
 }
+
+/// Shards per adapter (the old `WalConfig::shard_count` default).
+pub const SHARDS: usize = 16;
 
 /// Multi-WAL sharded storage adapter for high-throughput parallel writes
 ///
@@ -71,12 +74,8 @@ impl WalShard {
 /// repository measures this adapter. See `docs/benchmarks/methodology.md`.
 ///
 /// # Configuration
-/// Set `shard_count` in `WalConfig`:
-/// - 1 shard: Disable sharding (single WAL mode)
-/// - 4 shards: Good for 4-core machines
-/// - 8 shards: Good for 8-core machines  
-/// - 16 shards: Maximum parallelism (recommended)
-/// - 32 shards: Overkill, diminishing returns
+/// Always [`SHARDS`] shards. `WalConfig::shard_count` was removed with its last reader in
+/// Task 2.8a; this adapter is deleted in Task 2.9 (STO-06).
 pub struct ShardedWalAdapter {
     shards: Vec<Arc<WalShard>>,
     shard_count: usize,
@@ -90,19 +89,9 @@ pub struct ShardedWalAdapter {
 
 impl ShardedWalAdapter {
     /// Create a new sharded WAL adapter
-    #[instrument(skip(config), fields(
-        log_dir = %config.log_dir.display(),
-        shard_count = %config.shard_count.unwrap_or(16)
-    ))]
+    #[instrument(skip(config), fields(log_dir = %config.log_dir.display()))]
     pub fn new(config: WalConfig) -> Result<Self, StorageError> {
-        let shard_count = config.shard_count.unwrap_or(16);
-
-        if shard_count == 0 || shard_count > 32 {
-            return Err(StorageError::Internal(format!(
-                "Invalid shard_count: {}. Must be between 1 and 32.",
-                shard_count
-            )));
-        }
+        let shard_count = SHARDS;
 
         info!("Initializing ShardedWalAdapter with {} shards", shard_count);
 
@@ -386,7 +375,6 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let config = WalConfig {
             log_dir: temp_dir.path().to_path_buf(),
-            shard_count: Some(4),
             ..WalConfig::test_config()
         };
 
@@ -410,7 +398,6 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let config = WalConfig {
             log_dir: temp_dir.path().to_path_buf(),
-            shard_count: Some(8),
             ..WalConfig::test_config()
         };
 
@@ -440,7 +427,6 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let config = WalConfig {
             log_dir: temp_dir.path().to_path_buf(),
-            shard_count: Some(16),
             ..WalConfig::test_config()
         };
 

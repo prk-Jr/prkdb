@@ -2481,6 +2481,7 @@ dependencies = [
  "mimalloc",
  "minicbor",
  "papaya",
+ "parking_lot 0.12.5",
  "pin-project",
  "prkdb-client",
  "prkdb-core",

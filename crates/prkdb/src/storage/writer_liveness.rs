@@ -68,6 +68,7 @@ const MIN_FLUSH_INTERVAL_MS: u64 = 1;
 ///
 /// Rendered into the error the waiters receive and into the reason on the health endpoint,
 /// so the wording is operator-facing.
+#[allow(dead_code)] // deleted in Task 2.8c
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriterFailure {
     /// The writer task ended. Carries what `JoinError` said, or "returned" for a clean
@@ -130,6 +131,7 @@ impl WriterFailure {
 /// Every field is an atomic and every read is lock-free except [`Self::failure`], which
 /// takes an uncontended `RwLock` around a small enum. Health probes read this, and a probe
 /// that can block is worse than no probe.
+#[allow(dead_code)] // deleted in Task 2.8c
 #[derive(Debug)]
 pub struct WritePathProgress {
     /// Zero point for the two "when" fields below. `Instant` is not representable as an
@@ -477,6 +479,7 @@ pub fn unix_millis() -> u64 {
 
 /// Convenience alias: the progress tracker is shared between the adapter, the writer and
 /// the supervisor.
+#[allow(dead_code)] // deleted in Task 2.8c
 pub type SharedProgress = Arc<WritePathProgress>;
 
 #[cfg(test)]

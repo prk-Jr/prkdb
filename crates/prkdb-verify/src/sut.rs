@@ -66,10 +66,10 @@ impl Sut for WalSut {
         self.open().await
     }
     async fn crash(&mut self) -> anyhow::Result<()> {
-        // In-process "crash": drop without an explicit flush. NOTE: today's
-        // WalStorageAdapter::drop runs flush_on_last_handle_drop, so this behaves
-        // like a clean reopen. Real crash coverage comes from the SIGKILL test
-        // (Task 1.10) and PowerLoss (Task 2.5); do not read a green run as more.
+        // In-process "crash": drop without an explicit flush. Drop now closes the
+        // log, which syncs; this is a clean process exit, and power loss is
+        // `PowerLoss` from Task 2.10b. Real process-kill coverage comes from the
+        // SIGKILL test (Task 1.10); do not read a green run as more.
         self.db = None;
         self.open().await
     }

@@ -1,7 +1,7 @@
 //! Phase 1 gate tests (Task 1.8): prove the crash/restart harness can itself
 //! fail, that the blocking profile is green on current code, and that the
-//! discovery profile reproduces STO-01 (checkpoint recovery drops
-//! pre-checkpoint keys).
+//! discovery profile no longer finds STO-01 (checkpoint recovery dropped
+//! pre-checkpoint keys until Task 2.8a).
 //!
 //! These are NOT the harness unit self-tests in `self_test.rs` (which prove
 //! the runner/checker/minimizer correctly detect and shrink each class of
@@ -106,58 +106,21 @@ fn is_sto01(failure: &Failure) -> bool {
         )
 }
 
-/// Searches the discovery profile (which, unlike blocking, includes
-/// Checkpoint) across successive seed ranges for an STO-01-shaped finding.
-/// Advances past other findings rather than stopping at them, since
-/// `run_seeds` returns at the first finding it hits. Both the seed range and
-/// the number of skipped findings are bounded, so once STO-01 is fixed this
-/// fails with the inversion message instead of a nextest timeout.
-async fn find_sto01_finding() -> Option<Failure> {
-    const OPS_LEN: usize = 60;
-    const CHUNK: u64 = 25;
-    // STO-01 reproduces on nearly every seed; 300 keeps a wide margin while a
-    // fixed build exhausts the budget in seconds, not minutes.
-    const MAX_SEED: u64 = 300;
-    const MAX_SKIPPED_FINDINGS: usize = 20;
-
-    let mut start = 0u64;
-    let mut skipped = 0usize;
-    while start < MAX_SEED {
-        let report = run_seeds(WalSut::new, start, CHUNK, OPS_LEN, Profile::Discovery)
-            .await
-            .expect("harness error");
-        match report.failure {
-            Some(failure) if is_sto01(&failure) => return Some(failure),
-            Some(failure) => {
-                skipped += 1;
-                assert!(
-                    skipped <= MAX_SKIPPED_FINDINGS,
-                    "discovery keeps finding non-STO-01 failures (last: seed {} {:?}); \
-                     these are new findings, record them in the ledger",
-                    failure.seed,
-                    failure.outcome
-                );
-                start = failure.seed + 1;
-            }
-            None => start += CHUNK,
-        }
-    }
-    None
-}
-
-/// STO-01 tripwire: the discovery profile must reproduce checkpoint recovery
-/// dropping pre-checkpoint keys, with a minimized sequence containing a
-/// `Checkpoint`. This test is meant to fail the moment STO-01 is fixed, at
-/// which point it must be inverted into a regression test (see
-/// docs/remediation/ledger.toml, STO-01).
+/// STO-01 regression (was the discovery tripwire): the discovery profile, which includes
+/// `Checkpoint`, finds no checkpoint-shaped loss.
 #[tokio::test(flavor = "multi_thread")]
-async fn sto01_discovery_profile_finds_checkpoint_loss_tripwire() {
-    match find_sto01_finding().await {
-        // Keep the reproducer visible so inverting this tripwire has it ready.
-        Some(failure) => eprintln!(
-            "STO-01 still reproduces: seed {} ops {:?}",
-            failure.seed, failure.ops
-        ),
-        None => panic!("STO-01 appears fixed: invert this tripwire"),
+async fn discovery_profile_checkpoint_keeps_every_key() {
+    let report = run_seeds(WalSut::new, 0, 100, 60, Profile::Discovery)
+        .await
+        .expect("harness error");
+    if let Some(f) = &report.failure {
+        assert!(
+            !is_sto01(f),
+            "STO-01 is back: seed {} ops {:?}",
+            f.seed,
+            f.ops
+        );
+        panic!("discovery found a different failure; record it in the ledger: {f:?}");
     }
+    assert!(report.checks > 0, "vacuous run");
 }

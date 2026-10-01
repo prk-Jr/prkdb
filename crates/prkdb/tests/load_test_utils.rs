@@ -157,6 +157,11 @@ pub struct LoadTestHarness {
     pub adapter: WalStorageAdapter,
     pub workload_gen: Arc<WorkloadGenerator>,
     pub metrics: Arc<MetricsCollector>,
+    /// Owns the data directory for the harness's lifetime. It used to be dropped at the
+    /// end of `new`, deleting the directory under a live adapter; the mmap WAL kept
+    /// writing into its already-mapped files, but the single WAL (Task 2.8a) creates a new
+    /// segment file when it rolls, and that fails in a deleted directory.
+    _dir: tempfile::TempDir,
 }
 
 impl LoadTestHarness {
@@ -164,6 +169,10 @@ impl LoadTestHarness {
         let dir = tempfile::tempdir().unwrap();
         let config = WalConfig {
             log_dir: dir.path().to_path_buf(),
+            // Load tests measure concurrency and throughput, not durability (that is
+            // `prkdb-verify/tests/power_loss.rs`); an fsync per write would make them
+            // measure the disk instead (Task 2.8a).
+            sync_mode: prkdb_core::wal::SyncMode::Fast,
             ..WalConfig::test_config()
         };
 
@@ -173,6 +182,7 @@ impl LoadTestHarness {
             adapter,
             workload_gen: Arc::new(WorkloadGenerator::new()),
             metrics: Arc::new(MetricsCollector::new()),
+            _dir: dir,
         }
     }
 

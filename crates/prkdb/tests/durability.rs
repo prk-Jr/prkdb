@@ -24,8 +24,12 @@
 //! These tests deliberately use the public `PrkDb` API through a real data directory,
 //! because that is the combination that was broken while every layer looked fine alone.
 
+use prkdb::storage::WalStorageAdapter;
 use prkdb::PrkDb;
+use prkdb_core::wal::{SyncMode, WalConfig};
+use prkdb_types::storage::StorageAdapter;
 use std::path::Path;
+use std::sync::Arc;
 
 fn open(dir: &Path) -> PrkDb {
     PrkDb::builder()
@@ -384,4 +388,97 @@ async fn get_changes_since_is_unsupported_and_says_so() {
         "the refusal must name the collections and the reason, not just say \"not \
          supported\": {text}"
     );
+}
+
+fn wal_config(dir: &Path, segment_bytes: u64) -> WalConfig {
+    WalConfig {
+        log_dir: dir.to_path_buf(),
+        segment_bytes,
+        sync_mode: SyncMode::Fast, // concurrency test: sync cost is not what is measured
+        ..WalConfig::test_config()
+    }
+}
+
+/// STO-03 + STO-05: with many writers racing on the same keys, the value a reader sees
+/// before a restart is the value recovery produces after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_same_key_live_equals_recovered() {
+    let dir = tempfile::tempdir().unwrap();
+    let live = {
+        let db = Arc::new(WalStorageAdapter::new(wal_config(dir.path(), 8 * 1024)).unwrap());
+        let mut tasks = Vec::new();
+        for w in 0..8u32 {
+            let db = db.clone();
+            tasks.push(tokio::spawn(async move {
+                for round in 0..300u32 {
+                    let key = format!("hot-{}", round % 4);
+                    if round % 17 == w {
+                        db.delete(key.as_bytes()).await.unwrap();
+                    } else {
+                        db.put(key.as_bytes(), format!("w{w}-r{round}").as_bytes())
+                            .await
+                            .unwrap();
+                    }
+                }
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+        let mut live = Vec::new();
+        for k in 0..4 {
+            live.push(db.get(format!("hot-{k}").as_bytes()).await.unwrap());
+        }
+        db.flush().await.unwrap();
+        live
+    };
+    let db = WalStorageAdapter::open_async(wal_config(dir.path(), 8 * 1024))
+        .await
+        .unwrap();
+    for (k, want) in live.iter().enumerate() {
+        assert_eq!(
+            &db.get(format!("hot-{k}").as_bytes()).await.unwrap(),
+            want,
+            "hot-{k}"
+        );
+    }
+}
+
+/// STO-08: `WalConfig::segment_bytes` decides when a segment rolls.
+#[tokio::test(flavor = "multi_thread")]
+async fn segment_bytes_is_honored() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = WalStorageAdapter::new(wal_config(dir.path(), 64 * 1024)).unwrap();
+    for i in 0..256u32 {
+        db.put(format!("k{i}").as_bytes(), &vec![b'v'; 4096])
+            .await
+            .unwrap();
+    }
+    db.flush().await.unwrap();
+    let segments: Vec<u64> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "wal"))
+        .map(|p| std::fs::metadata(p).unwrap().len())
+        .collect();
+    assert!(
+        segments.len() >= 16,
+        "1 MiB of writes in 64 KiB segments: {segments:?}"
+    );
+    assert!(
+        segments.iter().all(|&len| len <= 64 * 1024),
+        "a segment overran: {segments:?}"
+    );
+}
+
+/// Until the FORMAT marker (Task 2.11), a format-1 directory is refused by name, never
+/// opened as an empty database next to the old log.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_format_1_directory_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("mmap_segment_0")).unwrap();
+    let err = WalStorageAdapter::new(wal_config(dir.path(), 1 << 20))
+        .err()
+        .expect("must refuse");
+    assert!(err.to_string().contains("format 1"), "{err}");
 }

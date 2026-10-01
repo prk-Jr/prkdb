@@ -79,23 +79,8 @@ async fn main() -> anyhow::Result<()> {
     }
     println!();
 
-    // Test 3: Segment count optimization
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("  TEST 3: Segment Count Optimization");
-    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-
-    for segments in [4, 8, 16] {
-        let dir = tempfile::tempdir()?;
-        let storage = Arc::new(WalStorageAdapter::new(WalConfig {
-            log_dir: dir.path().to_path_buf(),
-            segment_count: segments,
-            ..WalConfig::benchmark_config()
-        })?);
-
-        let ops = bench_extreme_multi(&storage, 10000).await?;
-        println!("  Segments {:>2}: {:>12.0} writes/sec", segments, ops);
-    }
-    println!();
+    // Test 3 (segment count optimization) is gone: the adapter writes one globally
+    // ordered WAL and has no segment count to tune (Task 2.8a).
 
     // Test 4: Index interval optimization
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -123,7 +108,6 @@ async fn main() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(WalStorageAdapter::new(WalConfig {
         log_dir: dir.path().to_path_buf(),
-        segment_count: 8,
         index_interval_bytes: 16384, // Less frequent indexing
         batch_size: 10000,           // Larger WAL batches
         ..WalConfig::benchmark_config()

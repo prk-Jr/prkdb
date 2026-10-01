@@ -6611,10 +6611,10 @@ exit "$fail"
 - 5.3 Release packaging (REL-01).
 - 5.4 Upgrade page (DOC-08) — **Phase 2 breaking changes checklist** (D3, D11, D12; Phase 2 tasks tick their lines as they land, and the page must cover every line):
   - [ ] Format 1 data directories are refused with a message naming the format; `prkdb-cli migrate --data-dir` explains what can be done (Task 2.11).
-  - [ ] A failed fsync poisons the WAL: every later write fails until the database is reopened (Tasks 2.6, 2.8a).
-  - [ ] `StorageConfig::sync_mode` moved to `WalConfig::sync_mode`; `SyncMode::Performance` is a deprecated alias of `SyncMode::Fast`; the default is `Durable` everywhere, with its throughput cost stated (decision record risk 4) (Task 2.8a).
-  - [ ] A write that gets no answer from a stalled writer within the client bound returns `WriteNotConfirmed` (it may still land); a full admission queue returns `WriteBackpressure` (it did not) (Task 2.8a).
-  - [ ] `WalStorageAdapter::open` creates a missing directory (Task 2.8a).
+  - [x] A failed fsync poisons the WAL: every later write fails until the database is reopened (Tasks 2.6, 2.8a).
+  - [x] `StorageConfig::sync_mode` moved to `WalConfig::sync_mode`; `SyncMode::Performance` is a deprecated alias of `SyncMode::Fast`; the default is `Durable` everywhere, with its throughput cost stated (decision record risk 4) (Task 2.8a).
+  - [x] A write that gets no answer from a stalled writer within the client bound returns `WriteNotConfirmed` (it may still land); a full admission queue returns `WriteBackpressure` (it did not) (Task 2.8a).
+  - [x] `WalStorageAdapter::open` creates a missing directory (Task 2.8a).
   - [ ] Deleted public types: the parallel/async/mmap WALs, the streaming and sharded adapters, and core leader/follower replication with `new_with_replication`, as decided at Task 2.9's STOP.
   - [ ] `CollectionPartitionedAdapter` (the `with_data_dir` default) stores every collection in one WAL at the data directory root; `load_all_collections` is replaced by `collection_names` (Task 2.9b, D11).
   - [ ] `IndexedStorage` primary keys are bincode, not JSON; `CollectionHandle` keys no longer contain the partition (Task 2.12).

@@ -1,50 +1,90 @@
-use prkdb_core::wal::mmap_parallel_wal::MmapParallelWal;
+//! Health checks and backups for the single WAL (Task 2.8a).
+//!
+//! Recovery itself is not here: it is `Wal::open`, which every constructor runs. A torn
+//! tail on the last segment is truncated there, and corruption anywhere earlier refuses
+//! the open naming the file. Nothing repairs mid-log corruption automatically.
+
+use prkdb_core::vfs::{OpenMode, Vfs};
+use prkdb_core::wal::segment::{parse_segment_file_name, scan_segment};
+use prkdb_core::wal::Lsn;
 use prkdb_types::error::StorageError;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, instrument, warn};
 
-/// Manages recovery and health checks for the storage engine
+/// Manages health checks and backups for the storage engine
 pub struct RecoveryManager {
-    wal: Arc<MmapParallelWal>,
+    vfs: Arc<dyn Vfs>,
     log_dir: PathBuf,
 }
 
 impl RecoveryManager {
-    pub fn new(wal: Arc<MmapParallelWal>, log_dir: PathBuf) -> Self {
-        Self { wal, log_dir }
+    pub fn new(vfs: Arc<dyn Vfs>, log_dir: PathBuf) -> Self {
+        Self { vfs, log_dir }
     }
 
-    /// Run a full health check on the WAL
-    /// Returns Ok if healthy, Err(StorageError::Corruption) if corrupted
+    /// Re-scan every segment and verify every frame (CRC and LSN).
+    ///
+    /// Returns `Err(StorageError::Corruption)` naming the segment file for any fault,
+    /// including one in the last segment: on a running database a fault there means the
+    /// file changed under the writer.
     #[instrument(skip(self))]
     pub async fn check_health(&self) -> Result<(), StorageError> {
         info!("Starting WAL health check");
-
-        // Verify all segments
-        let result = self.wal.verify_segments().await;
-
+        let result = self.scan_all();
         match &result {
-            Ok(_) => info!("WAL health check passed"),
+            Ok(()) => info!("WAL health check passed"),
             Err(e) => warn!("WAL health check failed: {}", e),
         }
-
-        result.map_err(|e| StorageError::Corruption(e.to_string()))
+        result
     }
 
-    /// Attempt to recover from corrupted segments
+    fn scan_all(&self) -> Result<(), StorageError> {
+        let entries = self
+            .vfs
+            .read_dir(&self.log_dir)
+            .map_err(|e| StorageError::Corruption(format!("{}: {e}", self.log_dir.display())))?;
+        let mut segments: Vec<(Lsn, PathBuf)> = entries
+            .into_iter()
+            .filter_map(|path| {
+                let first = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .and_then(parse_segment_file_name)?;
+                Some((first, path))
+            })
+            .collect();
+        segments.sort();
+
+        for (first_lsn, path) in segments {
+            let file = self
+                .vfs
+                .open(&path, OpenMode::Read)
+                .map_err(|e| StorageError::Corruption(format!("{}: {e}", path.display())))?;
+            let scan = scan_segment(&*file, &path, first_lsn, &mut |_, _, _| Ok(()))
+                .map_err(|e| StorageError::Corruption(e.to_string()))?;
+            if let Some((offset, fault)) = scan.stopped {
+                return Err(StorageError::Corruption(format!(
+                    "{} at byte {offset}: {fault:?}",
+                    path.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// There is no in-place repair.
+    ///
+    /// The old `repair_segments` truncated each segment at its first bad record, wherever
+    /// it was, silently discarding every record after it. The single WAL's rules forbid
+    /// that: a torn tail is truncated by the open path, and anything else refuses to open.
     #[instrument(skip(self))]
     pub async fn recover(&self) -> Result<(), StorageError> {
-        info!("Starting WAL recovery");
-
-        let result = self.wal.repair_segments().await;
-
-        match &result {
-            Ok(_) => info!("WAL recovery completed successfully"),
-            Err(e) => warn!("WAL recovery failed: {}", e),
-        }
-
-        result.map_err(|e| StorageError::Recovery(e.to_string()))
+        Err(StorageError::Recovery(
+            "run the database open path; torn tails are truncated there and mid-log \
+             corruption is not repaired automatically"
+                .to_string(),
+        ))
     }
 
     /// Create a backup of the current WAL state

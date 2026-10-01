@@ -31,6 +31,9 @@ tracing = { workspace = true }
 rand = "0.8"
 dashmap = { workspace = true }
 papaya = "0.1"                                                         # Lock-free HashMap for Phase 5 optimization (better than flurry)
+# The publish lock taken by WAL commit hooks (Task 2.8a): a panicking hook must not poison
+# it for every later reader, which `std::sync::RwLock` would.
+parking_lot = "0.12"
 prkdb-core = { workspace = true }
 prkdb-types = { workspace = true }
 prkdb-metrics = { workspace = true }

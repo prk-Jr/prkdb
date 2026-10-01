@@ -40,6 +40,7 @@ pub struct Builder {
     namespace: Option<Vec<u8>>,
     data_dir: Option<std::path::PathBuf>,
     optimized_storage_level: Option<OptimizationLevel>,
+    sync_mode: prkdb_core::wal::SyncMode,
     event_capacity: usize,
     schema_dialect: SqlDialect,
     schema_migrations: Vec<String>,
@@ -56,6 +57,8 @@ impl Default for Builder {
             namespace: None,
             data_dir: None,
             optimized_storage_level: None,
+            // Durable is the default everywhere (spec §6.2); `with_sync_mode` opts out.
+            sync_mode: prkdb_core::wal::SyncMode::Durable,
             event_capacity: 16,
             schema_dialect: DefaultDialect::current(),
             schema_migrations: Vec::new(),
@@ -104,6 +107,17 @@ impl Builder {
         self.storage = None;
         self.data_dir = Some(path.as_ref().to_path_buf());
         self.optimized_storage_level = Some(OptimizationLevel::Legendary);
+        self
+    }
+
+    /// When a write is acknowledged, for the WAL a `with_data_dir` or
+    /// `with_optimized_storage` database builds. Default [`SyncMode::Durable`]; `Fast`
+    /// acknowledges once the write reaches the OS and can lose up to `sync_interval_ms` of
+    /// acknowledged writes to a power cut.
+    ///
+    /// [`SyncMode::Durable`]: prkdb_core::wal::SyncMode::Durable
+    pub fn with_sync_mode(mut self, mode: prkdb_core::wal::SyncMode) -> Self {
+        self.sync_mode = mode;
         self
     }
 
@@ -167,13 +181,14 @@ impl Builder {
             schema_migrations,
             data_dir,
             optimized_storage_level,
+            sync_mode,
             ..
         } = self;
 
         let has_migrations = !schema_migrations.is_empty();
         let ddls = schema_migrations;
 
-        let storage = Self::build_storage(storage, data_dir, optimized_storage_level)?;
+        let storage = Self::build_storage(storage, data_dir, optimized_storage_level, sync_mode)?;
 
         let db = Self::finish(
             storage,
@@ -208,10 +223,11 @@ impl Builder {
             schema_migrations,
             data_dir,
             optimized_storage_level,
+            sync_mode,
             ..
         } = self;
 
-        let storage = Self::build_storage(storage, data_dir, optimized_storage_level)?;
+        let storage = Self::build_storage(storage, data_dir, optimized_storage_level, sync_mode)?;
 
         let ddls = schema_migrations;
         let db = Self::finish(
@@ -257,6 +273,7 @@ impl Builder {
         storage: Option<Arc<dyn StorageAdapter>>,
         data_dir: Option<std::path::PathBuf>,
         optimized_storage_level: Option<OptimizationLevel>,
+        sync_mode: prkdb_core::wal::SyncMode,
     ) -> Result<Arc<dyn StorageAdapter>, DbError> {
         if let Some(storage) = storage {
             return Ok(storage);
@@ -265,19 +282,23 @@ impl Builder {
         if let Some(path) = data_dir {
             if let Some(level) = optimized_storage_level {
                 let adapter = crate::storage::CollectionPartitionedAdapter::new(
-                    Self::optimized_wal_config(path, level),
+                    Self::optimized_wal_config(path, level, sync_mode),
                 )?;
                 return Ok(Arc::new(adapter) as Arc<dyn StorageAdapter>);
             }
 
-            let adapter = crate::storage::WalStorageAdapter::new(Self::default_wal_config(path))?;
+            let adapter =
+                crate::storage::WalStorageAdapter::new(Self::default_wal_config(path, sync_mode))?;
             return Ok(Arc::new(adapter) as Arc<dyn StorageAdapter>);
         }
 
         Ok(Arc::new(crate::storage::InMemoryAdapter::new()) as Arc<dyn StorageAdapter>)
     }
 
-    fn default_wal_config(path: std::path::PathBuf) -> prkdb_core::wal::WalConfig {
+    fn default_wal_config(
+        path: std::path::PathBuf,
+        sync_mode: prkdb_core::wal::SyncMode,
+    ) -> prkdb_core::wal::WalConfig {
         prkdb_core::wal::WalConfig {
             log_dir: path,
             segment_bytes: 64 * 1024 * 1024,
@@ -287,13 +308,12 @@ impl Builder {
             compression: prkdb_core::wal::CompressionConfig::default(),
             batch_size: 100,
             flush_interval_ms: 10,
-            segment_count: 4,
-            shard_count: Some(16),
             workload_profile: prkdb_core::wal::adaptive::WorkloadProfile::Balanced,
             adaptive_config: prkdb_core::wal::adaptive::AdaptiveBatchConfig::default(),
             // Explicit so a later change to a preset cannot silently weaken this
-            // builder path (controller decision: Durable is the default everywhere).
-            sync_mode: prkdb_core::wal::SyncMode::Durable,
+            // builder path (controller decision: Durable is the default everywhere,
+            // unless the caller chose otherwise with `with_sync_mode`).
+            sync_mode,
             sync_interval_ms: 10,
             max_batch_bytes: 16 * 1024 * 1024,
             max_queued_bytes: 64 * 1024 * 1024,
@@ -303,6 +323,7 @@ impl Builder {
     fn optimized_wal_config(
         path: std::path::PathBuf,
         level: OptimizationLevel,
+        sync_mode: prkdb_core::wal::SyncMode,
     ) -> prkdb_core::wal::WalConfig {
         let (segment_bytes, batch_size) = match level {
             OptimizationLevel::Balanced => (256 * 1024 * 1024, 300),
@@ -317,8 +338,9 @@ impl Builder {
             batch_size,
             compression: prkdb_core::wal::CompressionConfig::none(),
             // Explicit so a later change to a preset cannot silently weaken this
-            // builder path (controller decision: Durable is the default everywhere).
-            sync_mode: prkdb_core::wal::SyncMode::Durable,
+            // builder path (controller decision: Durable is the default everywhere,
+            // unless the caller chose otherwise with `with_sync_mode`).
+            sync_mode,
             ..prkdb_core::wal::WalConfig::benchmark_config()
         }
     }
