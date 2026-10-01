@@ -71,7 +71,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | DOC-10 | low | 5 | open | ignoreDeadLinks: true hides orphaned methodology/status pages |
 | STO-08 | low | 2 | fixed | WalConfig::segment_bytes ignored by the mmap WAL (segment size hardcoded to 64 MB) |
 | STO-09 | low | 2 | fixed | WalStorageAdapter::new_with_config ignores StorageConfig::cache_capacity (hard-coded 100,000 entries) |
-| TST-07 | low | 2 | open | No fuzzing of WAL record, segment, snapshot, and proto decoding |
+| TST-07 | low | 2 | fixed | No fuzzing of WAL record, segment, snapshot, and proto decoding |
 | DOC-01 | high | 0 | verified | Cluster docs and compose files misdescribe multi-node setup (env vars, peer auth, metrics auth) |
 | SCH-01 | high | 0 | verified | Schema collection name joined into a path allows writes outside the registry dir |
 | DOC-11 | medium | 0 | verified | Transactions page claims Serializable is the default; code defaults to ReadCommitted |

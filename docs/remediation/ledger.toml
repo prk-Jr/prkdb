@@ -494,7 +494,9 @@ title = "No fuzzing of WAL record, segment, snapshot, and proto decoding"
 area = "tests"
 severity = "low"
 phase = 2
-status = "open"
+status = "fixed"
+regression_tests = ["test:crates/prkdb-verify/tests/fuzz_corpus.rs::fuzz_entries_accept_their_seed_corpus", "ci-job:ci.yml/fuzz"]
+changes = ["62f6ef9"]
 
 # ---------------------------------------------------------------------------
 # 3.8 Documentation (DOC)
