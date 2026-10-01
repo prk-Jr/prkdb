@@ -390,3 +390,70 @@ async fn a_fast_mode_checkpoint_survives_power_loss_and_recovers_exactly() {
         );
     }
 }
+
+/// Spends the current task's tokio cooperative budget down to nothing with awaits that
+/// are always ready, the state a task reaches after a run of immediately-ready awaits.
+async fn exhaust_coop_budget() {
+    for _ in 0..100_000 {
+        if !tokio::task::coop::has_budget_remaining() {
+            return;
+        }
+        tokio::task::consume_budget().await;
+    }
+    panic!("the tokio budget never ran out; this test no longer sets up what it tests");
+}
+
+/// `save_checkpoint` and the adapter's drop block on the WAL (sync, close). From a tokio
+/// task whose cooperative budget a burst of ready awaits had spent, those blocking waits
+/// spun forever: the reply oneshot answers `Pending` and wakes itself, and
+/// `futures::executor::block_on` re-polls without ever yielding to the runtime that would
+/// refill the budget. Runs on a fresh runtime on its own thread under a 10 s watchdog, on
+/// both runtime flavors: on a current-thread runtime a spinning task leaves no thread to
+/// fire a `tokio::time::timeout`, so the watchdog is a plain thread.
+#[test]
+fn a_checkpoint_and_drop_finish_on_a_task_with_no_tokio_budget_left() {
+    for multi_thread in [true, false] {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let rt = if multi_thread {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+            } else {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+            }
+            .unwrap();
+            let outcome = rt.block_on(async {
+                tokio::spawn(async {
+                    let dir = tempfile::tempdir().unwrap();
+                    let db = WalStorageAdapter::new(WalConfig {
+                        segment_bytes: 1 << 20,
+                        sync_interval_ms: 3_600_000,
+                        ..cfg(dir.path())
+                    })
+                    .unwrap();
+                    for i in 0..200u32 {
+                        db.put(format!("k{i}").as_bytes(), b"v").await.unwrap();
+                    }
+                    exhaust_coop_budget().await;
+                    db.save_checkpoint().unwrap();
+                    exhaust_coop_budget().await;
+                    drop(db);
+                })
+                .await
+            });
+            let _ = tx.send(outcome.map_err(|e| e.to_string()));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(Ok(())) => {}
+            Ok(Err(panic)) => panic!("multi_thread: {multi_thread}: {panic}"),
+            Err(_) => panic!(
+                "multi_thread: {multi_thread}: save_checkpoint or drop hung for 10 s on a \
+                 task with no tokio budget left"
+            ),
+        }
+    }
+}

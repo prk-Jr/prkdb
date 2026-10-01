@@ -727,3 +727,78 @@ async fn a_segment_roll_advances_durable_lsn_for_the_old_segment_in_fast_mode() 
         old_segment_last_lsn
     );
 }
+
+/// Spends the current task's tokio cooperative budget down to nothing with awaits that
+/// are always ready, the state a task reaches after a run of immediately-ready awaits.
+async fn exhaust_coop_budget() {
+    for _ in 0..100_000 {
+        if !tokio::task::coop::has_budget_remaining() {
+            return;
+        }
+        tokio::task::consume_budget().await;
+    }
+    panic!("the tokio budget never ran out; this test no longer sets up what it tests");
+}
+
+/// Runs `scenario` as a task on a fresh runtime on its own thread and fails if it has not
+/// finished within 10 s. A watchdog thread rather than `tokio::time::timeout`, because a
+/// task spinning inside a blocking wait never yields: on a current-thread runtime no
+/// timer could fire, and the test would hang instead of failing.
+fn finishes_within_deadline<F>(
+    name: &str,
+    multi_thread: bool,
+    scenario: impl FnOnce() -> F + Send + 'static,
+) where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let rt = if multi_thread {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+        } else {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+        }
+        .unwrap();
+        let outcome = rt.block_on(async move { tokio::spawn(scenario()).await });
+        let _ = tx.send(outcome.map_err(|e| e.to_string()));
+    });
+    match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(())) => {}
+        Ok(Err(panic)) => panic!("{name} (multi_thread: {multi_thread}): {panic}"),
+        Err(_) => panic!(
+            "{name} (multi_thread: {multi_thread}) hung for 10 s: a blocking WAL wait spins \
+             forever when the calling task's tokio budget is exhausted"
+        ),
+    }
+}
+
+/// `append_blocking`, `sync_blocking` and the close in `Drop` wait on tokio futures with
+/// `futures::executor::block_on`. Called from a tokio task whose cooperative budget is
+/// spent, every budget-aware poll (the admission semaphore, the reply oneshot) answers
+/// `Pending` and wakes itself, and `block_on` never returns to the runtime that would
+/// refill the budget: it spun forever. Each wait must finish whatever the budget.
+#[test]
+fn blocking_waits_finish_on_a_task_with_no_tokio_budget_left() {
+    for multi_thread in [true, false] {
+        finishes_within_deadline("blocking WAL waits", multi_thread, || async {
+            let dir = tempfile::tempdir().unwrap();
+            let (wal, _) = open(Arc::new(StdVfs), dir.path(), opts(SyncMode::Fast, 1 << 20));
+            for i in 0..200u32 {
+                wal.append(format!("record-{i}").into_bytes(), None)
+                    .await
+                    .unwrap();
+            }
+            exhaust_coop_budget().await;
+            wal.append_blocking(b"blocking".to_vec(), None).unwrap();
+            exhaust_coop_budget().await;
+            assert_eq!(wal.sync_blocking().unwrap(), 201);
+            exhaust_coop_budget().await;
+            drop(wal);
+        });
+    }
+}
