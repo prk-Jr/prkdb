@@ -68,13 +68,14 @@ impl CollectionType {
     }
 }
 
+/// Every live storage's registry, with a weak handle on the storage's allocation lock.
+type Registries = std::sync::Mutex<Vec<(Weak<tokio::sync::Mutex<()>>, Arc<TypeRegistry>)>>;
+
 /// The registry for the storage whose allocation lock is `lock`: one per storage, shared
 /// by every catalog over it, dropped with it (entries for dropped storages are pruned, so
 /// a new storage at a reused address starts empty).
 fn registry_for(lock: &AllocationLock) -> Arc<TypeRegistry> {
-    static REGISTRIES: OnceLock<
-        std::sync::Mutex<Vec<(Weak<tokio::sync::Mutex<()>>, Arc<TypeRegistry>)>>,
-    > = OnceLock::new();
+    static REGISTRIES: OnceLock<Registries> = OnceLock::new();
     let mut all = REGISTRIES
         .get_or_init(Default::default)
         .lock()
