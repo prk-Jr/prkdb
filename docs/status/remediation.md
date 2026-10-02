@@ -10,7 +10,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 |---|---|---|---|
 | 0 | Honesty and tracking | gate_passed | 6/6 |
 | 1 | Harness and baseline | gate_passed | 2/2 |
-| 2 | Format v2 and single-node root fixes | not_started | 0/24 |
+| 2 | Format v2 and single-node root fixes | not_started | 0/26 |
 | 3 | Semantics | not_started | 0/9 |
 | 4 | Raft | not_started | 0/15 |
 | 5 | Documentation and release | not_started | 0/9 |
@@ -51,6 +51,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | TST-01 | high | 4 | open | Chaos monkey tolerates 20% of acknowledged writes missing |
 | TST-09 | high | 2 | fixed | Perf gate WAL benches count ~500 instructions: the WAL work is outside the measured region |
 | TST-11 | high | 2 | fixed | FaultFs::power_loss keeps the pre-crash synced baseline: a second power loss can resurrect data the first one lost |
+| TST-12 | high | 2 | fixed | Perf and CI gates pass vacuously: WAL bench rule fails open, compaction tail unenforced, blanket perf_note override, WAL core never mutated |
 | TXN-01 | high | 3 | open | Commit writes puts then deletes in separate append_batch calls; crash between leaves a torn commit |
 | TXN-02 | high | 3 | open | Indexed "atomic" transaction loops over independent puts |
 | TXN-03 | high | 3 | open | Serializable read set keeps only the last read hash; ReadCommitted writers bypass the barrier, losing updates |
@@ -70,6 +71,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | TST-05 | medium | 2 | fixed | No power-loss (unsynced-data) testing; needs the WAL routed through Vfs |
 | TST-06 | medium | 4 | open | No deterministic simulation of the cluster |
 | TST-10 | medium | 4 | open | mTLS cluster test intermittently misses its 15 s replication deadline |
+| TST-13 | medium | 2 | fixed | Wall-clock TTL and timeout tests flake when durable I/O or scheduling is slow |
 | TTL-01 | medium | 3 | open | Expiry deletes without re-checking the version; value and TTL metadata written non-atomically |
 | TXN-04 | medium | 3 | open | Default isolation is ReadCommitted; D5 makes Serializable the default |
 | DOC-10 | low | 5 | open | ignoreDeadLinks: true hides orphaned methodology/status pages |

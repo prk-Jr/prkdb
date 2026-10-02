@@ -222,6 +222,64 @@ jobs:
           path: mutants.out/
           if-no-files-found: warn
 
+  # The single WAL and its codecs (prkdb-core), mutated nightly like `mutants` above.
+  #
+  # Phase 2 moved the write path into `prkdb_core::wal` — the ordered log and its writer
+  # (log.rs), the frame format (frame.rs), segments (segment.rs), the batch codec
+  # (batch.rs), compression (compression.rs) and the LOG_STATE record (log_state.rs) —
+  # and no mutation job covered any of it: the file set above stops at the adapter. That
+  # is the same gap `wal_adapter.rs` was added to close, one crate further down.
+  #
+  # A separate job, not more `--file`s on the one above: cargo-mutants tests each mutant
+  # against the tests of its own package, and prkdb-core's are cheap — 114 tests in ~4s
+  # and a ~5s incremental rebuild locally, against prkdb's 62 integration binaries — so
+  # these mutants would distort the other job's per-shard timing. 476 mutants (measured
+  # with `cargo mutants --list`). At an assumed ~40s each on a CI runner (3-4x the local
+  # build+test), that is ~5.3 hours; ten shards is ~32 minutes each against a 60-minute
+  # limit. Two at a time so the two mutation jobs together stay within the six-runner
+  # budget the `max-parallel: 4` note above is protecting. Recalibrate from the first
+  # run's timings.
+  #
+  # Survivors here are found gaps in prkdb-core's own tests (the adapter- and
+  # harness-level tests in prkdb and prkdb-verify do not run against these mutants); the
+  # fix is a test in prkdb-core, or an entry in .cargo/mutants.toml under its two rules.
+  mutants-core:
+    name: "🧬 Mutation Testing (WAL core)"
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      - uses: Swatinem/rust-cache@v2
+      - name: Mutate the single WAL and its codecs
+        run: |
+          cargo mutants --no-shuffle --timeout 300 \
+            --shard ${{ matrix.shard }}/10 \
+            --package prkdb-core \
+            --file 'crates/prkdb-core/src/wal/log.rs' \
+            --file 'crates/prkdb-core/src/wal/frame.rs' \
+            --file 'crates/prkdb-core/src/wal/segment.rs' \
+            --file 'crates/prkdb-core/src/wal/batch.rs' \
+            --file 'crates/prkdb-core/src/wal/compression.rs' \
+            --file 'crates/prkdb-core/src/wal/log_state.rs'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants-core-${{ github.run_number }}-shard-${{ matrix.shard }}
+          path: mutants.out/
+          if-no-files-found: warn
+
   # Mutation testing on the lines a pull request actually changed.
   #
   # # Why this exists
@@ -343,14 +401,19 @@ jobs:
           # feature and is not compiled either. That is what failed shard 2 of run
           # 35327050707 on `RpcClientPool::check_chaos`.
           #
-          # Package-qualified because two packages are selected and `prkdb-cli` declares
-          # no features; a bare `--features chaos` is rejected in that shape.
+          # Package-qualified because several packages are selected and only `prkdb`
+          # declares `chaos`; a bare `--features chaos` is rejected in that shape.
+          #
+          # `prkdb-core` since Phase 2: the single WAL, its frame/segment/batch codecs and
+          # compression live there, and a pull request touching them was mutated nowhere.
+          # Each mutant runs its own package's tests, and prkdb-core's are cheap, so a
+          # diff in it adds little to the shard time.
           cargo mutants --no-shuffle --timeout 300 \
             --test-tool nextest --jobs 2 \
             --features prkdb/chaos \
             --shard ${{ matrix.shard }}/8 \
             --in-diff /tmp/pr.diff \
-            --package prkdb --package prkdb-cli 2>&1 | tee /tmp/mutants.log
+            --package prkdb --package prkdb-cli --package prkdb-core 2>&1 | tee /tmp/mutants.log
           status=$?
 
           {
@@ -358,7 +421,7 @@ jobs:
             echo
             if grep -q "no Rust source files" /tmp/mutants.log; then
               echo "**No mutants generated.** The diff touches no mutable Rust in"
-              echo '`prkdb` or `prkdb-cli` — test code, comments, or another package.'
+              echo '`prkdb`, `prkdb-cli` or `prkdb-core` — test code, comments, or another package.'
               echo "Nothing was verified here, which is the correct outcome for this"
               echo "diff rather than a clean bill of health."
             elif grep -qE "[0-9]+ mutants? tested" /tmp/mutants.log; then
@@ -430,6 +493,26 @@ jobs:
       # correct, committed, and had never executed, while plan_status.sh reported 55/55.
       - name: Chaos-gated tests are run
         run: bash scripts/check_chaos_tests_run.sh
+
+  perf-gate-floors:
+    name: Perf Gate Self-Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12" # tomllib (>= 3.11) for the floors file
+      # The perf gate (perf-gate.yml) and the WAL bench probe only run on phase PRs and
+      # dispatch, so a broken floors file or parser would first show up there — or,
+      # worse, pass vacuously. TST-09: every WAL bench has a floor, every floor names a
+      # live bench, and every floor can fail (none under 0.01x of its reference).
+      - name: Instruction-count floors
+        run: bash scripts/check_perf_gate_floors.sh
+      # The WAL bench rules fail closed on missing cells, short reps and zero
+      # measurements; the self-test proves they still do.
+      - name: WAL bench rules
+        run: python3 scripts/wal_fast_rule.py --self-test
 
 
   remediation:
@@ -991,8 +1074,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
       
+      # `throughput_bench` (WalStorageAdapter, Kafka perf-test parameters) replaced
+      # `comprehensive_bench` and `partitioned_bench`, which drove the streaming and
+      # partitioned-streaming adapters deleted in Task 2.9 (STO-06).
       - name: Build benchmarks
-        run: cargo build --release --example comprehensive_bench --example partitioned_bench
+        run: cargo build --release -p prkdb --example throughput_bench
           
       - name: Wait for Kafka
         run: |
@@ -1099,13 +1185,13 @@ jobs:
           echo "kafka_consumer_mbps=$AVG_MBPS" >> $GITHUB_OUTPUT
 
       # ═══════════════════════════════════════════════════════════════════════
-      # PRKDB COMPREHENSIVE BENCHMARK
+      # PRKDB THROUGHPUT BENCHMARK
       # ═══════════════════════════════════════════════════════════════════════
-      - name: "🟢 PrkDB Comprehensive Benchmark (Producer + Consumer + Latency)"
+      - name: "🟢 PrkDB Throughput Benchmark (Producer + Consumer + Latency)"
         id: prkdb_comprehensive
         run: |
-          echo "Running PrkDB comprehensive benchmark..."
-          OUTPUT=$(./target/release/examples/comprehensive_bench 2>&1)
+          echo "Running PrkDB throughput benchmark..."
+          OUTPUT=$(./target/release/examples/throughput_bench 2>&1)
           echo "$OUTPUT"
           
           # Extract metrics from output
@@ -1122,6 +1208,7 @@ jobs:
           echo "prkdb_latency_p50_us=$LATENCY_P50" >> $GITHUB_OUTPUT
           echo "prkdb_latency_p95_us=$LATENCY_P95" >> $GITHUB_OUTPUT
           echo "prkdb_latency_p99_us=$LATENCY_P99" >> $GITHUB_OUTPUT
+          echo "prkdb_multi_task_mbps=$(echo "$OUTPUT" | grep "producer_multi_task_mbps=" | cut -d= -f2)" >> "$GITHUB_OUTPUT"
           
       # ═══════════════════════════════════════════════════════════════════════
       # SUSTAINED LOAD TEST (10M Records, ~1GB)
@@ -1149,21 +1236,11 @@ jobs:
         id: prkdb_sustained
         run: |
           echo "Running PrkDB sustained load test (10M records)..."
-          OUTPUT=$(./target/release/examples/comprehensive_bench 10000000 2>&1)
+          OUTPUT=$(./target/release/examples/throughput_bench 10000000 --producer-only 2>&1)
           echo "$OUTPUT"
           
           MBPS=$(echo "$OUTPUT" | grep "producer_avg_mbps=" | cut -d= -f2)
           echo "prkdb_sustained_mbps=$MBPS" >> $GITHUB_OUTPUT
-
-      - name: "🟢 PrkDB Partitioned Benchmark"
-        id: prkdb_partitioned
-        run: |
-          echo "Running PrkDB partitioned benchmark..."
-          OUTPUT=$(./target/release/examples/partitioned_bench 2>&1)
-          echo "$OUTPUT"
-          
-          PEAK_MBPS=$(echo "$OUTPUT" | grep "Peak throughput" | grep -oE '[0-9]+\.[0-9]+' || echo "0")
-          echo "prkdb_peak_mbps=$PEAK_MBPS" >> $GITHUB_OUTPUT
 
       # ═══════════════════════════════════════════════════════════════════════
       # GENERATE COMPREHENSIVE REPORT
@@ -1183,7 +1260,7 @@ jobs:
           PRKDB_P50="${{ steps.prkdb_comprehensive.outputs.prkdb_latency_p50_us }}"
           PRKDB_P95="${{ steps.prkdb_comprehensive.outputs.prkdb_latency_p95_us }}"
           PRKDB_P99="${{ steps.prkdb_comprehensive.outputs.prkdb_latency_p99_us }}"
-          PRKDB_PEAK="${{ steps.prkdb_partitioned.outputs.prkdb_peak_mbps }}"
+          PRKDB_MT="${{ steps.prkdb_comprehensive.outputs.prkdb_multi_task_mbps }}"
           
           KAFKA_SUST="${{ steps.kafka_sustained.outputs.kafka_sustained_mbps }}"
           PRKDB_SUST="${{ steps.prkdb_sustained.outputs.prkdb_sustained_mbps }}"
@@ -1193,7 +1270,7 @@ jobs:
           {
             "timestamp": "$(date -Iseconds)",
             "runner": "${{ runner.os }}-${{ runner.arch }}",
-            "runs": 3,
+            "runs": {"kafka": 3, "prkdb": 1},
             "notes": "Kafka results are single-broker perf-tool reference runs. PrkDB results are local native storage-engine benchmarks. These numbers are not apples-to-apples product comparisons.",
             "kafka": {
               "producer_mbps": $KAFKA_PROD,
@@ -1210,7 +1287,7 @@ jobs:
               "latency_p50_us": $PRKDB_P50,
               "latency_p95_us": $PRKDB_P95,
               "latency_p99_us": $PRKDB_P99,
-              "partitioned_peak_mbps": ${PRKDB_PEAK:-0}
+              "multi_task_producer_mbps": ${PRKDB_MT:-0}
             }
           }
           EOF
@@ -1234,7 +1311,7 @@ jobs:
           - Records: 1,000,000 (Standard) / 10,000,000 (Sustained)
           - Record Size: 100 bytes
           - Batch Size: 10,000
-          - Runs: 3 (averaged)
+          - Runs: Kafka 3 (averaged), PrkDB 1
           
           ## Kafka Reference
           
@@ -1257,7 +1334,7 @@ jobs:
           | **Producer (1M)** | ${PRKDB_PROD} MB/s |
           | **Sustained (10M)** | ${PRKDB_SUST:-N/A} MB/s |
           | **Consumer** | ${PRKDB_CONS} MB/s |
-          | **Partitioned peak** | ${PRKDB_PEAK:-N/A} MB/s |
+          | **Producer (4 tasks)** | ${PRKDB_MT:-N/A} MB/s |
           | **Average batch latency** | ${PRKDB_LAT} μs |
           | **p50 batch latency** | ${PRKDB_P50} μs |
           | **p95 batch latency** | ${PRKDB_P95} μs |
@@ -1266,9 +1343,9 @@ jobs:
           ## 🔬 Methodology
           
           - **Kafka**: Official \`kafka-producer-perf-test\` and \`kafka-consumer-perf-test\`
-          - **PrkDB**: Native Rust local benchmarks with mmap WAL
+          - **PrkDB**: Native Rust local benchmarks on the single WAL (\`throughput_bench\`, WalStorageAdapter)
           - **Environment**: GitHub Actions ubuntu-latest
-          - **Runs**: 3 runs per test, results averaged
+          - **Runs**: Kafka 3 runs per test, averaged; PrkDB 1 run
           - **Interpretation**: use for trend tracking, not apples-to-apples claims
           
           ---
