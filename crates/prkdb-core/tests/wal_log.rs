@@ -230,6 +230,40 @@ async fn oversized_records_are_refused_before_queueing() {
     assert_eq!(wal.next_lsn(), 1, "a refused record consumes no LSN");
 }
 
+/// STO-16: an empty payload was accepted and written as a frame of length 0, which
+/// recovery reads as `BadLength(0)`, a torn tail, and truncates: every acknowledged frame
+/// after it was lost on the next open. It is refused before admission instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_empty_record_is_refused_before_queueing_and_later_writes_survive_a_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let (wal, _) = open(
+        Arc::new(StdVfs),
+        dir.path(),
+        opts(SyncMode::Durable, 1 << 20),
+    );
+    let refused = wal.append(Vec::new(), None).await;
+    assert!(
+        matches!(refused, Err(WalError::EmptyRecord { .. })),
+        "{refused:?}"
+    );
+    assert!(matches!(
+        wal.reserve(0).await,
+        Err(WalError::EmptyRecord { .. })
+    ));
+    assert_eq!(wal.next_lsn(), 1, "a refused record consumes no LSN");
+
+    let after = wal.append(b"after".to_vec(), None).await.unwrap();
+    assert_eq!(after.lsn, 1);
+    wal.close().unwrap();
+
+    let (_wal, replayed) = open(
+        Arc::new(StdVfs),
+        dir.path(),
+        opts(SyncMode::Durable, 1 << 20),
+    );
+    assert_eq!(replayed, vec![(1, b"after".to_vec())]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn read_returns_the_payload_and_rejects_a_stale_location() {
     let dir = tempfile::tempdir().unwrap();
