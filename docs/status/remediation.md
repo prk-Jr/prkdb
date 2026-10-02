@@ -10,7 +10,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 |---|---|---|---|
 | 0 | Honesty and tracking | gate_passed | 6/6 |
 | 1 | Harness and baseline | gate_passed | 2/2 |
-| 2 | Format v2 and single-node root fixes | not_started | 0/20 |
+| 2 | Format v2 and single-node root fixes | not_started | 0/22 |
 | 3 | Semantics | not_started | 0/9 |
 | 4 | Raft | not_started | 0/15 |
 | 5 | Documentation and release | not_started | 0/9 |
@@ -46,6 +46,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | STO-06 | high | 2 | fixed | Four WAL implementations in use; all data writes hash to one shard so fixes do not propagate |
 | STO-07 | high | 2 | fixed | BatchAccumulator::flush() sleeps and returns Ok while dropping executor errors |
 | STO-10 | high | 2 | fixed | No data-directory lock: two processes can open and corrupt the same WAL |
+| STO-11 | high | 2 | open | decode_frame checks the frame kind before the CRC: a valid frame of an unknown kind is treated as a torn tail and the active segment is truncated |
 | TST-01 | high | 4 | open | Chaos monkey tolerates 20% of acknowledged writes missing |
 | TST-09 | high | 2 | fixed | Perf gate WAL benches count ~500 instructions: the WAL work is outside the measured region |
 | TXN-01 | high | 3 | open | Commit writes puts then deletes in separate append_batch calls; crash between leaves a torn commit |
@@ -56,6 +57,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | DOC-07 | medium | 5 | open | prkdb_writer_healthy alert only exported by prkdb-cli serve; /metrics needs Admin; capability split undocumented |
 | DOC-08 | medium | 5 | open | Missing pages: consumer groups, Docker, CLI reference, Raft ops, troubleshooting, Python client, upgrade |
 | DOC-12 | medium | 5 | open | Nothing in CI runs the documented deploy recipes (docker compose up, 3-node setup) |
+| EVT-07 | medium | 2 | open | Fast-mode power loss reissues acked LSNs; a change-feed consumer that committed past them silently skips the new records |
 | KEY-05 | medium | 4 | open | Multi-raft collection catalog is node-local; name-addressed records on multi-raft use raw name:id keys |
 | RFT-08 | medium | 4 | open | RPC client never sends x-prkdb-cluster-secret; mTLS mode configures no server TLS, so cluster cannot elect |
 | RFT-09 | medium | 4 | open | a_committed_write_replicates_to_every_node failed the unmutated baseline in CI run 34021601202 |
