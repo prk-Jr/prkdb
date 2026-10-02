@@ -2606,6 +2606,7 @@ dependencies = [
  "memmap2",
  "prkdb-types",
  "prometheus",
+ "proptest",
  "rand 0.8.5",
  "rkyv",
  "serde",

@@ -84,6 +84,7 @@ use prkdb::keys::{encode_record_key, CollectionId};
 use prkdb::storage::config::StorageConfig;
 use prkdb::storage::{InMemoryAdapter, WalStorageAdapter};
 use prkdb_core::wal::batch::{Batch, BatchOp};
+use prkdb_core::wal::records::{Record, RecordBatch};
 use prkdb_core::wal::{CompressionConfig, WalConfig};
 use prkdb_macros::Collection;
 use prkdb_types::storage::StorageAdapter;
@@ -391,6 +392,66 @@ fn bench_batch_decode(bytes: Vec<u8>) -> Vec<u8> {
     bytes
 }
 
+// The stream frame payload codec (Task 2.15b.2): `RecordBatch::encode`/`decode`, on the
+// same data as the `Batch` references above (one keyed 1 KiB record) and on 100 of them
+// (one stream append batched client-side). Default entry point: pure single-threaded
+// CPU work, like the `Batch` pair.
+fn keyed_records(n: usize) -> RecordBatch {
+    RecordBatch {
+        append_time_ms: 1_700_000_000_000,
+        records: (0..n)
+            .map(|i| Record {
+                key: Some(format!("bench-key-{i}").into_bytes()),
+                value: one_kib_value(),
+                headers: Vec::new(),
+            })
+            .collect(),
+    }
+}
+
+fn setup_records_1() -> RecordBatch {
+    keyed_records(1)
+}
+
+fn setup_records_100() -> RecordBatch {
+    keyed_records(PUT_ITERATIONS)
+}
+
+fn setup_records_decode_1() -> Vec<u8> {
+    keyed_records(1).encode(&CompressionConfig::none()).unwrap()
+}
+
+fn setup_records_decode_100() -> Vec<u8> {
+    keyed_records(PUT_ITERATIONS)
+        .encode(&CompressionConfig::none())
+        .unwrap()
+}
+
+#[library_benchmark(setup = setup_records_1)]
+fn bench_records_encode(batch: RecordBatch) -> RecordBatch {
+    black_box(batch.encode(black_box(&CompressionConfig::none())).unwrap());
+    // Return the fixture so its drop happens outside the counted region.
+    batch
+}
+
+#[library_benchmark(setup = setup_records_decode_1)]
+fn bench_records_decode(bytes: Vec<u8>) -> Vec<u8> {
+    black_box(RecordBatch::decode(black_box(&bytes)).unwrap());
+    bytes
+}
+
+#[library_benchmark(setup = setup_records_100)]
+fn bench_records_encode_100(batch: RecordBatch) -> RecordBatch {
+    black_box(batch.encode(black_box(&CompressionConfig::none())).unwrap());
+    batch
+}
+
+#[library_benchmark(setup = setup_records_decode_100)]
+fn bench_records_decode_100(bytes: Vec<u8>) -> Vec<u8> {
+    black_box(RecordBatch::decode(black_box(&bytes)).unwrap());
+    bytes
+}
+
 // The stored key of one typed record (KEY-01): header plus the order-preserving
 // (memcomparable) id, in one allocation — what every typed put and get computes. Three
 // typical ids: an integer, a short string, and a UUID in its 36-character text form.
@@ -435,6 +496,10 @@ library_benchmark_group!(
         bench_indexed_insert_one,
         bench_batch_encode,
         bench_batch_decode,
+        bench_records_encode,
+        bench_records_decode,
+        bench_records_encode_100,
+        bench_records_decode_100,
         bench_encode_record_key_u64,
         bench_encode_record_key_string,
         bench_encode_record_key_uuid,

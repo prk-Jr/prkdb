@@ -36,6 +36,7 @@ pub mod rate_limit; // Rate limiting for operations
 pub mod replication;
 pub mod scheduler;
 pub mod storage;
+pub mod stream_log;
 pub mod streaming;
 pub mod transaction;
 pub mod ttl;

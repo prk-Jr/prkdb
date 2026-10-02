@@ -42,3 +42,52 @@ fn every_corpus_directory_has_an_entry_point() {
         );
     }
 }
+
+/// Task 2.15b.2: the frame and segment corpora hold `Records` frames (kind 3) that decode,
+/// so mutations of them reach the record batch decoder through both entry points.
+#[test]
+fn the_frame_corpora_hold_records_frames() {
+    use prkdb_core::wal::frame::{decode_frame, Decoded, FrameKind};
+    use prkdb_core::wal::records::RecordBatch;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus");
+    for name in ["frame_decode", "segment_scan"] {
+        let dir = root.join(name);
+        let mut records_frames = 0;
+        for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+            let bytes = std::fs::read(entry.expect("corpus entry").path()).expect("corpus file");
+            let mut rest = &bytes[..];
+            while let Decoded::Frame {
+                kind,
+                payload,
+                frame_len,
+                ..
+            } = decode_frame(rest)
+            {
+                if kind == FrameKind::Records && RecordBatch::decode(payload).is_ok() {
+                    records_frames += 1;
+                }
+                rest = &rest[frame_len..];
+            }
+        }
+        assert!(
+            records_frames >= 2,
+            "{name} holds {records_frames} decodable Records frames"
+        );
+    }
+}
+
+/// STREAM mutations must start from actual version-one encodings, not only errors.
+#[test]
+fn the_stream_manifest_corpus_contains_decodable_manifest_shapes() {
+    let root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/stream_manifest_parse");
+    let mut partitions = Vec::new();
+    for entry in std::fs::read_dir(root).unwrap() {
+        let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+        let manifest = prkdb::stream_log::manifest::StreamManifest::decode(&bytes).unwrap();
+        assert_eq!(manifest.encode().unwrap(), bytes);
+        partitions.push(manifest.partitions);
+    }
+    partitions.sort_unstable();
+    assert_eq!(partitions, [1, 64]);
+}

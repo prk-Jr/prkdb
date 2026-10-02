@@ -140,6 +140,8 @@ fn every_missing_ancestor_is_durable_before_the_first_durable_ack() {
         max_batch_bytes: 1 << 20,
         max_queued_bytes: 8 << 20,
         front_release: FrontRelease::ElidedOnly,
+        append_kind: prkdb_core::wal::frame::FrameKind::Batch,
+        lsn_limit: None,
     };
     let (wal, _) = Wal::open(Arc::new(vfs.clone()), &dir, opts, 1, &mut |_, _, _| Ok(())).unwrap();
     wal.append_blocking(b"acked".to_vec(), None).unwrap();

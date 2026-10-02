@@ -330,7 +330,36 @@ pub(crate) mod fault_injection {
 
     #[cfg(test)]
     mod tests {
+        use super::super::{queued_wal_err, wal_err};
         use super::*;
+        use prkdb_core::wal::WalError;
+        use prkdb_types::error::StorageError;
+
+        #[test]
+        fn invalid_record_batches_are_validation_errors() {
+            for queued in [false, true] {
+                let error = WalError::InvalidRecords("empty batch".into());
+                let mapped = if queued {
+                    queued_wal_err(error)
+                } else {
+                    wal_err(error)
+                };
+                assert!(matches!(mapped, StorageError::Validation(_)), "{mapped:?}");
+            }
+        }
+
+        #[test]
+        fn closed_errors_keep_their_submission_class() {
+            assert!(matches!(
+                wal_err(WalError::Closed),
+                StorageError::WriteAbandoned(_)
+            ));
+            assert!(matches!(
+                queued_wal_err(WalError::Closed),
+                StorageError::WriteNotConfirmed(_)
+            ));
+        }
+
         use prkdb_core::vfs::StdVfs;
         use std::time::Duration;
 
@@ -552,7 +581,7 @@ fn dir_err(dir: &Path, e: std::io::Error) -> StorageError {
 }
 
 /// Maps a WAL error onto the storage error a caller can act on (D12).
-fn wal_err(e: WalError) -> StorageError {
+pub(crate) fn wal_err(e: WalError) -> StorageError {
     match e {
         WalError::Poisoned(reason) => StorageError::Internal(format!(
             "WAL poisoned: {reason}; reopen the database. The outcome of the write that \
@@ -562,9 +591,9 @@ fn wal_err(e: WalError) -> StorageError {
         WalError::Closed => {
             StorageError::WriteAbandoned("the WAL is closed and accepts no more writes".to_string())
         }
-        e @ (WalError::RecordTooLarge { .. } | WalError::EmptyRecord { .. }) => {
-            StorageError::Validation(e.to_string())
-        }
+        e @ (WalError::RecordTooLarge { .. }
+        | WalError::EmptyRecord { .. }
+        | WalError::InvalidRecords(_)) => StorageError::Validation(e.to_string()),
         e @ (WalError::CorruptSegment { .. }
         | WalError::ReplayFailed { .. }
         | WalError::UnsupportedFormat { .. }
@@ -583,7 +612,7 @@ fn wal_err(e: WalError) -> StorageError {
 /// after `write_at` succeeded, and that frame replays on reopen. So it is
 /// `WriteNotConfirmed`, never the definite `WriteAbandoned` that `wal_err` gives a
 /// refusal before queueing.
-fn queued_wal_err(e: WalError) -> StorageError {
+pub(crate) fn queued_wal_err(e: WalError) -> StorageError {
     match e {
         WalError::Closed => StorageError::WriteNotConfirmed(
             "the WAL writer stopped before answering; the write may have landed".to_string(),
@@ -693,7 +722,7 @@ impl WalStorageAdapter {
         // The open rules (spec 2b, D3): before `Wal::open`, so `FORMAT` exists before the
         // first segment, and a format-1 directory (no `FORMAT`, old files) is refused
         // before an empty log could be opened next to it and make the database look wiped.
-        super::format::ensure_format(vfs.as_ref(), &log_dir)?;
+        super::format::ensure_format(vfs.as_ref(), &log_dir, super::format::Kind::Kv)?;
 
         // Recovery (Task 2.14): the newest valid index checkpoint, then the frames after it;
         // a full replay when there is none or it does not fit the log.

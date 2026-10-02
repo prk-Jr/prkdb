@@ -192,3 +192,7 @@ harness = false
 [[bench]]
 name = "wal_write_path"
 harness = false
+
+[[bench]]
+name = "stream_log"
+harness = false

@@ -62,6 +62,7 @@ confirmed by a real Linux CI run of this workflow.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -334,6 +335,101 @@ def regressed(deltas_path: str) -> int:
     return 0
 
 
+# A ledger line this PR adds or changes, in a unified diff of docs/remediation/ledger.toml:
+# `+perf_note = "..."` (a one-line TOML basic string; anything else is not an override).
+ADDED_PERF_NOTE = re.compile(r'^\+\s*perf_note\s*=\s*"(?P<text>(?:[^"\\]|\\.)*)"\s*(?:#.*)?$')
+# How much of a perf_note must be left once the benchmark ids are removed: a note that
+# only lists names gives no durability or correctness reason (spec §6.2).
+MIN_REASON_CHARS = 12
+
+
+def mentions(text: str, bench: str) -> bool:
+    """`bench` appears in `text` as a whole identifier (bench_x_100 is not bench_x_1000)."""
+    return re.search(rf"(?<![A-Za-z0-9_]){re.escape(bench)}(?![A-Za-z0-9_])", text) is not None
+
+
+def added_perf_notes(ledger_diff: str) -> list[str]:
+    return [m["text"] for line in ledger_diff.splitlines() if (m := ADDED_PERF_NOTE.match(line))]
+
+
+def justify(regressed_names: list[str], ledger_diff: str) -> tuple[list[str], list[str]]:
+    """Split regressed benchmarks into (justified, unjustified).
+
+    A regression is justified only by a perf_note this PR adds or changes that names that
+    benchmark (its bare function name, as `bench_short_name` gives it) and still carries a
+    reason once every benchmark name is stripped from it. One note may name several
+    benchmarks; a note naming none justifies nothing.
+    """
+    notes = added_perf_notes(ledger_diff)
+    justified, unjustified = [], []
+    for name in regressed_names:
+        short = bench_short_name(name)
+        ok = False
+        for note in notes:
+            if not mentions(note, short):
+                continue
+            reason = re.sub(r"(?<![A-Za-z0-9_])bench_[A-Za-z0-9_]+", "", note)
+            if len(re.sub(r"[\s,:;()/-]+", " ", reason).strip()) >= MIN_REASON_CHARS:
+                ok = True
+                break
+        (justified if ok else unjustified).append(short)
+    return justified, unjustified
+
+
+def justify_cmd(deltas_path: str, ledger_diff_path: str) -> int:
+    with open(deltas_path, encoding="utf-8") as f:
+        rows = json.load(f)
+    names = [r["name"] for r in rows if r.get("regressed")]
+    if not names:
+        print("perf_gate_deltas.py: gungraun reported a regression but deltas.json flags no "
+              "benchmark; cannot tell which perf_note would cover it", file=sys.stderr)
+        return 1
+    diff = Path(ledger_diff_path).read_text(encoding="utf-8")
+    justified, unjustified = justify(names, diff)
+    for name in justified:
+        print(f"{name}: justified by a ledger perf_note naming it")
+    for name in unjustified:
+        print(f"{name}: NOT justified — add or change a ledger perf_note that names "
+              f"`{name}` and gives the durability or correctness reason")
+    return 1 if unjustified else 0
+
+
+def justify_self_test() -> int:
+    problems = []
+    diff = "\n".join([
+        "--- a/docs/remediation/ledger.toml",
+        "+++ b/docs/remediation/ledger.toml",
+        '-perf_note = "bench_wal_get_one: old reason that was removed"',
+        '+perf_note = "bench_wal_put_100: one fsync bookkeeping record per put (STO-02)"',
+        '+perf_note = "bench_indexed_insert_one"',
+        '+perf_note = "bench_wal_batch_of_1000: unrelated, longer-named benchmark reason"',
+        ' perf_note = "bench_encode_record_key_u64: unchanged context line, not added"',
+    ])
+    cases = [
+        # (regressed, want justified, want unjustified)
+        (["iai_hot_paths::hot_paths::bench_wal_put_100"], ["bench_wal_put_100"], []),
+        # The old blanket rule: any added perf_note justified every regression.
+        (["bench_wal_put_100", "bench_encode_record_key_string"], ["bench_wal_put_100"], ["bench_encode_record_key_string"]),
+        # A removed note does not count, nor an unchanged context line.
+        (["bench_wal_get_one", "bench_encode_record_key_u64"], [], ["bench_wal_get_one", "bench_encode_record_key_u64"]),
+        # A note naming only the benchmark gives no reason.
+        (["bench_indexed_insert_one"], [], ["bench_indexed_insert_one"]),
+        # Whole-identifier match: bench_wal_batch_of_1000 does not cover bench_wal_batch_of_100.
+        (["bench_wal_batch_of_100"], [], ["bench_wal_batch_of_100"]),
+    ]
+    for regressed_names, want_ok, want_bad in cases:
+        got = justify(regressed_names, diff)
+        if got != (want_ok, want_bad):
+            problems.append(f"justify({regressed_names}): got {got}, want {(want_ok, want_bad)}")
+    if justify(["bench_wal_put_100"], "") != ([], ["bench_wal_put_100"]):
+        problems.append("a PR with no ledger change must justify nothing")
+    for p in problems:
+        print(f"justify self-test FAILED: {p}", file=sys.stderr)
+    if not problems:
+        print("perf_gate_deltas.py justify self-test: ok")
+    return 1 if problems else 0
+
+
 def ir_value(ir: dict) -> float | None:
     """Return this run's Ir count from a `find_ir_total` result, or `None` if absent.
 
@@ -359,6 +455,43 @@ def bench_short_name(name: str) -> str:
     file/group prefix.
     """
     return name.rsplit("::", 1)[-1]
+
+
+# The smallest floor a `[floors.*]` entry may declare. A floor is a lower bound on
+# Ir(bench) / Ir(reference); one below 1 % of the reference admits almost any count,
+# including the few hundred Ir of a benchmark whose measured region is empty (TST-09), and
+# prints as "0.0x" — a floor that can never fail. Such an entry is refused, not applied.
+MIN_FLOOR_RATIO = 0.01
+
+
+def validate_floors(floors: dict[str, dict]) -> list[str]:
+    """Problems with the floor declarations themselves (empty list: all usable)."""
+    problems = []
+    if not floors:
+        problems.append("no [floors.*] entries")
+    for name, spec in sorted(floors.items()):
+        if not isinstance(spec, dict):
+            problems.append(f"[floors.{name}] is not a table")
+            continue
+        reference = spec.get("reference")
+        if not isinstance(reference, str) or not reference:
+            problems.append(f"[floors.{name}] has no reference benchmark")
+        elif reference == name:
+            problems.append(f"[floors.{name}] is its own reference")
+        ratio = spec.get("min_ratio")
+        if isinstance(ratio, bool) or not isinstance(ratio, (int, float)):
+            problems.append(f"[floors.{name}] min_ratio must be a number, got {ratio!r}")
+        elif not ratio >= MIN_FLOOR_RATIO:  # also catches NaN
+            problems.append(
+                f"[floors.{name}] min_ratio {ratio} is below {MIN_FLOOR_RATIO}: "
+                "a floor that low cannot fail; set it from a measured count"
+            )
+    return problems
+
+
+def format_ratio(x: float) -> str:
+    """Enough digits that a small ratio never prints as 0.0x."""
+    return f"{x:.3g}x"
 
 
 def load_floors(path: Path) -> dict[str, dict]:
@@ -466,22 +599,37 @@ def print_floors_table(rows: list[dict]) -> None:
             continue
         verdict = "ok" if r["ok"] else "FAIL: below floor"
         print(
-            f"| {r['name']} | {r['ir']:.0f} | {r['reference_ir']:.0f} | {r['ratio']:.1f}x "
-            f"| {r['min_ratio']:.1f}x `{r['reference']}` | {verdict} |"
+            f"| {r['name']} | {r['ir']:.0f} | {r['reference_ir']:.0f} | {format_ratio(r['ratio'])} "
+            f"| {format_ratio(r['min_ratio'])} `{r['reference']}` | {verdict} |"
         )
 
 
 def floors_cmd(gungraun_dir: str, floors_toml: str) -> int:
     ir_by_name = collect_ir_by_name(Path(gungraun_dir))
     floors = load_floors(Path(floors_toml))
-    if not floors:
-        print(f"perf_gate_deltas.py: no [floors.*] entries in {floors_toml}", file=sys.stderr)
+    if floors_validate_report(floors, floors_toml):
         return 1
     rows, all_ok = floors_check(ir_by_name, floors)
     print_floors_table(rows)
     if not all_ok:
         print("\nsome benchmarks fall below their floor: they measured nothing plausible")
     return 0 if all_ok else 1
+
+
+def floors_validate_report(floors: dict[str, dict], floors_toml: str) -> bool:
+    """Print every declaration problem; True if there were any."""
+    problems = validate_floors(floors)
+    for problem in problems:
+        print(f"perf_gate_deltas.py: {floors_toml}: {problem}", file=sys.stderr)
+    return bool(problems)
+
+
+def floors_validate_cmd(floors_toml: str) -> int:
+    floors = load_floors(Path(floors_toml))
+    if floors_validate_report(floors, floors_toml):
+        return 1
+    print(f"{floors_toml}: {len(floors)} floor(s), all at or above {MIN_FLOOR_RATIO}x")
+    return 0
 
 
 def floors_self_test() -> int:
@@ -579,6 +727,28 @@ def floors_self_test() -> int:
     ):
         problems.append(f"expected a zero-Ir reference to fail, not report inf/ok, got: {zero_ref_rows}")
 
+    # Declarations: a floor that cannot fail (0.0, the old 0.005, negative, NaN) or that
+    # lacks a reference or a numeric ratio is refused; real floors pass.
+    good_decl = {"bench_a": {"reference": "bench_ref", "min_ratio": 0.02}}
+    if validate_floors(good_decl):
+        problems.append(f"expected a 0.02 floor to validate, got: {validate_floors(good_decl)}")
+    for label, spec in {
+        "zero": {"reference": "bench_ref", "min_ratio": 0.0},
+        "below minimum": {"reference": "bench_ref", "min_ratio": 0.005},
+        "negative": {"reference": "bench_ref", "min_ratio": -1.0},
+        "nan": {"reference": "bench_ref", "min_ratio": float("nan")},
+        "string ratio": {"reference": "bench_ref", "min_ratio": "1.0"},
+        "no ratio": {"reference": "bench_ref"},
+        "no reference": {"min_ratio": 1.0},
+        "self reference": {"reference": "bench_b", "min_ratio": 1.0},
+    }.items():
+        if not validate_floors({"bench_b": spec}):
+            problems.append(f"expected the {label} floor declaration {spec} to be refused")
+    if not validate_floors({}):
+        problems.append("expected an empty floors table to be refused")
+    if format_ratio(0.027) == "0.0x" or format_ratio(0.005) == "0.0x":
+        problems.append(f"small ratios must not print as 0.0x: {format_ratio(0.027)}, {format_ratio(0.005)}")
+
     for p in problems:
         print(f"floors self-test FAILED: {p}", file=sys.stderr)
     if not problems:
@@ -593,8 +763,14 @@ def main() -> int:
         return regressed(sys.argv[2])
     if len(sys.argv) == 3 and sys.argv[1] == "list-names":
         return list_names(Path(sys.argv[2]))
+    if len(sys.argv) == 3 and sys.argv[1] == "justify" and sys.argv[2] == "--self-test":
+        return justify_self_test()
+    if len(sys.argv) == 4 and sys.argv[1] == "justify":
+        return justify_cmd(sys.argv[2], sys.argv[3])
     if len(sys.argv) == 3 and sys.argv[1] == "floors" and sys.argv[2] == "--self-test":
         return floors_self_test()
+    if len(sys.argv) == 4 and sys.argv[1] == "floors" and sys.argv[2] == "--validate":
+        return floors_validate_cmd(sys.argv[3])
     if len(sys.argv) == 4 and sys.argv[1] == "floors":
         return floors_cmd(sys.argv[2], sys.argv[3])
     if len(sys.argv) == 3 and sys.argv[1] == "extract" and sys.argv[2] == "--self-test":
@@ -626,8 +802,11 @@ def main() -> int:
         "       perf_gate_deltas.py list-names <gungraun-target-dir>\n"
         "       perf_gate_deltas.py floors <gungraun-target-dir> <floors.toml>\n"
         "       perf_gate_deltas.py floors --self-test\n"
+        "       perf_gate_deltas.py floors --validate <floors.toml>\n"
         "       perf_gate_deltas.py --summary <deltas.json>\n"
-        "       perf_gate_deltas.py --regressed <deltas.json>",
+        "       perf_gate_deltas.py --regressed <deltas.json>\n"
+        "       perf_gate_deltas.py justify <deltas.json> <ledger.diff>\n"
+        "       perf_gate_deltas.py justify --self-test",
         file=sys.stderr,
     )
     return 2

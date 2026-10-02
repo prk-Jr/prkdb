@@ -56,6 +56,16 @@ fn current_timestamp_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Source of "now" in milliseconds since the epoch.
+///
+/// Production uses the system clock; tests inject a manual clock so that expiry
+/// decisions do not depend on how long the storage writes in between happen to take.
+type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+fn system_clock() -> Clock {
+    Arc::new(current_timestamp_ms)
+}
+
 /// TTL index for tracking expiration times
 #[derive(Debug, Default)]
 struct TtlIndex {
@@ -103,19 +113,18 @@ impl TtlIndex {
         self.by_key.get(key).copied()
     }
 
-    /// Check if a key is expired
-    fn is_expired(&self, key: &[u8]) -> bool {
+    /// Check if a key is expired as of `now` (ms since epoch)
+    fn is_expired(&self, key: &[u8], now: u64) -> bool {
         if let Some(expires_at) = self.by_key.get(key) {
-            current_timestamp_ms() >= *expires_at
+            now >= *expires_at
         } else {
             false
         }
     }
 
-    /// Get all expired keys up to current time
+    /// Get all expired keys up to `now` (ms since epoch)
     #[allow(dead_code)]
-    fn get_expired(&self) -> Vec<Vec<u8>> {
-        let now = current_timestamp_ms();
+    fn get_expired(&self, now: u64) -> Vec<Vec<u8>> {
         let mut expired = Vec::new();
 
         for (&expires_at, keys) in self.by_expiry.iter() {
@@ -129,9 +138,8 @@ impl TtlIndex {
         expired
     }
 
-    /// Remove expired entries from the index
-    fn cleanup_index(&mut self) -> Vec<Vec<u8>> {
-        let now = current_timestamp_ms();
+    /// Remove entries expired as of `now` (ms since epoch) from the index
+    fn cleanup_index(&mut self, now: u64) -> Vec<Vec<u8>> {
         let mut expired = Vec::new();
 
         // Collect expired timestamps
@@ -166,17 +174,29 @@ pub struct TtlStorage<S: StorageAdapter + 'static = WalStorageAdapter> {
     cleanup_handle: Option<tokio::task::JoinHandle<()>>,
     /// Set to stop the cleanup task at its next key (see [`TtlStorage::start_cleanup`]).
     cleanup_stop: Arc<AtomicBool>,
+    /// Source of the current time for every expiry decision
+    clock: Clock,
 }
 
 impl<S: StorageAdapter + 'static> TtlStorage<S> {
     /// Create a new TTL-aware storage wrapper
     pub fn new(storage: Arc<S>) -> Self {
+        Self::with_clock(storage, system_clock())
+    }
+
+    /// Create a wrapper whose expiry decisions read `clock` instead of the system clock.
+    fn with_clock(storage: Arc<S>, clock: Clock) -> Self {
         Self {
             storage,
             index: Arc::new(RwLock::new(TtlIndex::new())),
             cleanup_handle: None,
             cleanup_stop: Arc::default(),
+            clock,
         }
+    }
+
+    fn now_ms(&self) -> u64 {
+        (self.clock)()
     }
 
     /// Start background cleanup task
@@ -200,6 +220,7 @@ impl<S: StorageAdapter + 'static> TtlStorage<S> {
         let stop = self.cleanup_stop.clone();
         let storage = Arc::downgrade(&self.storage);
         let index = self.index.clone();
+        let clock = self.clock.clone();
 
         let handle = tokio::spawn(async move {
             let mut interval_timer = tokio::time::interval(interval);
@@ -209,7 +230,7 @@ impl<S: StorageAdapter + 'static> TtlStorage<S> {
                 // Get expired keys
                 let expired_keys = {
                     let mut idx = index.write().await;
-                    idx.cleanup_index()
+                    idx.cleanup_index(clock())
                 };
 
                 // Delete expired keys from storage, holding the storage for one key at a
@@ -257,7 +278,7 @@ impl<S: StorageAdapter + 'static> TtlStorage<S> {
         value: &[u8],
         ttl: Duration,
     ) -> Result<(), StorageError> {
-        let expires_at = current_timestamp_ms() + ttl.as_millis() as u64;
+        let expires_at = self.now_ms() + ttl.as_millis() as u64;
 
         // Store the value
         self.storage.put(key, value).await?;
@@ -282,7 +303,7 @@ impl<S: StorageAdapter + 'static> TtlStorage<S> {
         // Check in-memory index first (fast path)
         {
             let index = self.index.read().await;
-            if index.is_expired(key) {
+            if index.is_expired(key, self.now_ms()) {
                 return Ok(None);
             }
         }
@@ -296,7 +317,7 @@ impl<S: StorageAdapter + 'static> TtlStorage<S> {
             if let Some(meta) = self.storage.get(&meta_key).await? {
                 if meta.len() == 8 {
                     let expires_at = u64::from_le_bytes(meta.try_into().unwrap());
-                    if current_timestamp_ms() >= expires_at {
+                    if self.now_ms() >= expires_at {
                         // Expired - lazily delete
                         let _ = self.storage.delete(key).await;
                         let _ = self.storage.delete(&meta_key).await;
@@ -319,7 +340,7 @@ impl<S: StorageAdapter + 'static> TtlStorage<S> {
         {
             let index = self.index.read().await;
             if let Some(expires_at) = index.get(key) {
-                let now = current_timestamp_ms();
+                let now = self.now_ms();
                 if now >= expires_at {
                     return Ok(None); // Expired
                 }
@@ -332,7 +353,7 @@ impl<S: StorageAdapter + 'static> TtlStorage<S> {
         if let Some(meta) = self.storage.get(&meta_key).await? {
             if meta.len() == 8 {
                 let expires_at = u64::from_le_bytes(meta.try_into().unwrap());
-                let now = current_timestamp_ms();
+                let now = self.now_ms();
                 if now >= expires_at {
                     return Ok(None); // Expired
                 }
@@ -429,6 +450,7 @@ impl<S: StorageAdapter + 'static> Drop for TtlStorage<S> {
 mod tests {
     use super::*;
     use prkdb_core::wal::WalConfig;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     async fn create_test_storage() -> Arc<WalStorageAdapter> {
         let dir = tempfile::tempdir().unwrap();
@@ -441,10 +463,33 @@ mod tests {
         )
     }
 
+    /// A clock that only moves when the test moves it, so an expiry decision never
+    /// depends on how long the durable writes before it took.
+    #[derive(Clone)]
+    struct ManualClock(Arc<AtomicU64>);
+
+    impl ManualClock {
+        fn starting_at(ms: u64) -> Self {
+            Self(Arc::new(AtomicU64::new(ms)))
+        }
+
+        fn set(&self, ms: u64) {
+            self.0.store(ms, Ordering::SeqCst);
+        }
+
+        fn clock(&self) -> Clock {
+            let now = self.0.clone();
+            Arc::new(move || now.load(Ordering::SeqCst))
+        }
+    }
+
+    const T0: u64 = 1_700_000_000_000;
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_put_with_ttl_and_get() {
         let storage = create_test_storage().await;
-        let ttl_storage = TtlStorage::new(storage);
+        let clock = ManualClock::starting_at(T0);
+        let ttl_storage = TtlStorage::with_clock(storage, clock.clock());
 
         // Put with 1 second TTL
         ttl_storage
@@ -452,20 +497,27 @@ mod tests {
             .await
             .unwrap();
 
-        // Should be readable immediately
+        // Readable while no time has passed
         let value = ttl_storage.get(b"key1").await.unwrap();
         assert_eq!(value, Some(b"value1".to_vec()));
 
-        // Check TTL exists
-        let remaining = ttl_storage.ttl(b"key1").await.unwrap();
-        assert!(remaining.is_some());
-        assert!(remaining.unwrap().as_millis() > 0);
+        // The full TTL remains, and it counts down with the clock
+        assert_eq!(
+            ttl_storage.ttl(b"key1").await.unwrap(),
+            Some(Duration::from_secs(1))
+        );
+        clock.set(T0 + 400);
+        assert_eq!(
+            ttl_storage.ttl(b"key1").await.unwrap(),
+            Some(Duration::from_millis(600))
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_ttl_expiration() {
         let storage = create_test_storage().await;
-        let ttl_storage = TtlStorage::new(storage);
+        let clock = ManualClock::starting_at(T0);
+        let ttl_storage = TtlStorage::with_clock(storage.clone(), clock.clock());
 
         // Put with very short TTL
         ttl_storage
@@ -473,15 +525,38 @@ mod tests {
             .await
             .unwrap();
 
-        // Should be readable immediately
+        // Readable immediately, and up to the last millisecond before expiry
+        assert!(ttl_storage.get(b"key1").await.unwrap().is_some());
+        clock.set(T0 + 49);
         assert!(ttl_storage.get(b"key1").await.unwrap().is_some());
 
-        // Wait for expiration
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Expired exactly at the deadline, and from then on
+        clock.set(T0 + 50);
+        assert_eq!(ttl_storage.get(b"key1").await.unwrap(), None);
+        assert_eq!(ttl_storage.ttl(b"key1").await.unwrap(), None);
+        clock.set(T0 + 100);
+        assert_eq!(ttl_storage.get(b"key1").await.unwrap(), None);
+    }
 
-        // Should return None after expiration
-        let value = ttl_storage.get(b"key1").await.unwrap();
-        assert_eq!(value, None);
+    #[tokio::test(flavor = "multi_thread")]
+    async fn expiry_survives_a_fresh_wrapper_via_persisted_metadata() {
+        let storage = create_test_storage().await;
+        let clock = ManualClock::starting_at(T0);
+        let writer = TtlStorage::with_clock(storage.clone(), clock.clock());
+        writer
+            .put_with_ttl(b"key1", b"value1", Duration::from_millis(50))
+            .await
+            .unwrap();
+
+        // A wrapper with an empty in-memory index reads the expiry from storage.
+        let reader = TtlStorage::with_clock(storage.clone(), clock.clock());
+        assert_eq!(reader.get(b"key1").await.unwrap(), Some(b"value1".to_vec()));
+
+        let late_reader = TtlStorage::with_clock(storage.clone(), clock.clock());
+        clock.set(T0 + 50);
+        assert_eq!(late_reader.get(b"key1").await.unwrap(), None);
+        // The expired read lazily deleted the record itself.
+        assert_eq!(storage.get(b"key1").await.unwrap(), None);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -508,7 +583,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_persist_removes_ttl() {
         let storage = create_test_storage().await;
-        let ttl_storage = TtlStorage::new(storage);
+        let clock = ManualClock::starting_at(T0);
+        let ttl_storage = TtlStorage::with_clock(storage, clock.clock());
 
         // Put with TTL
         ttl_storage
@@ -520,8 +596,8 @@ mod tests {
         let had_ttl = ttl_storage.persist(b"key1").await.unwrap();
         assert!(had_ttl);
 
-        // Wait past original expiry
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Move past the original expiry
+        clock.set(T0 + 100);
 
         // Should still be readable (no TTL)
         let value = ttl_storage.get(b"key1").await.unwrap();

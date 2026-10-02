@@ -28,6 +28,8 @@ fn open(dir: &Path) -> Wal {
         max_batch_bytes: 1 << 20,
         max_queued_bytes: 8 << 20,
         front_release: FrontRelease::ElidedOnly,
+        append_kind: prkdb_core::wal::frame::FrameKind::Batch,
+        lsn_limit: None,
     };
     Wal::open(Arc::new(StdVfs), dir, opts, 1, &mut |_, _, _| Ok(()))
         .unwrap()

@@ -10,8 +10,9 @@
 //! - `adapter_put`: `WalStorageAdapter::put`, the public write path (Fast; see below).
 //! - `compaction_concurrent_put`: `adapter_put` on 1 MiB segments over a 1,000-key space
 //!   per writer (so the log is mostly dead records), while `WalStorageAdapter::compact`
-//!   runs back to back for the whole cell: put latency with compaction running (Task 2.15;
-//!   its p99 against `adapter_put`'s is what the perf gate compares).
+//!   runs back to back for the whole cell: put latency with compaction running (Task 2.15).
+//!   `wal_fast_rule.py --compaction-tail` (the `probe-wal-bench` job) requires its p99 to
+//!   stay within `COMPACTION_P99_K` times `adapter_put`'s, per cell.
 //! - `model_memcpy_only`: MODEL, not product code — encode the same `Batch`, take one
 //!   async mutex, memcpy into pre-faulted memory. A CPU/memory ceiling for a put.
 //!
@@ -179,7 +180,8 @@ fn load_avg() -> String {
     "n/a".to_string()
 }
 
-/// The row format `scripts/wal_fast_rule.py` parses: cell, writers, value, ops/s first.
+/// The row format `scripts/wal_fast_rule.py` parses: cell, writers, value, ops/s, MB/s, p50,
+/// p99 first (it reads ops/s and p99).
 fn print_header() {
     println!("| cell | writers | value | ops/s | MB/s | p50 µs | p99 µs | p99.9 µs | load1 |");
     println!("|---|---|---|---|---|---|---|---|---|");
@@ -302,6 +304,8 @@ fn open_wal(dir: &Path, sync_mode: SyncMode) -> Target {
         max_batch_bytes: 16 * 1024 * 1024,
         max_queued_bytes: 64 * 1024 * 1024,
         front_release: prkdb_core::wal::FrontRelease::ElidedOnly,
+        append_kind: prkdb_core::wal::frame::FrameKind::Batch,
+        lsn_limit: None,
     };
     let (wal, _) = Wal::open(Arc::new(StdVfs), dir, o, 1, &mut |_, _, _| Ok(())).expect("wal open");
     Target::Wal(wal)

@@ -1752,6 +1752,7 @@ dependencies = [
  "dashmap",
  "flate2",
  "futures",
+ "hashlink",
  "http",
  "lazy_static",
  "lz4",

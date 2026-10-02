@@ -35,8 +35,14 @@ impl<T> BatchAccumulator<T> {
 
     /// Check if batch should be flushed
     pub fn should_flush(&self) -> bool {
+        self.should_flush_at(Instant::now())
+    }
+
+    /// [`should_flush`](Self::should_flush) evaluated at an explicit `now`.
+    fn should_flush_at(&self, now: Instant) -> bool {
         self.buffer.len() >= self.max_batch_size
-            || (!self.buffer.is_empty() && self.last_flush.elapsed() >= self.flush_interval)
+            || (!self.buffer.is_empty()
+                && now.saturating_duration_since(self.last_flush) >= self.flush_interval)
     }
 
     /// Flush the batch and return items
@@ -122,35 +128,42 @@ mod tests {
         });
         acc.add(record);
 
-        // Initially shouldn't flush (just added)
-        assert!(!acc.should_flush());
+        // Evaluate against explicit instants: a descheduled test thread must not
+        // turn "just added" into "timed out".
+        let t0 = acc.last_flush;
 
-        // Wait for timeout
-        sleep(Duration::from_millis(60));
+        // Not due when just added, nor one millisecond before the timeout
+        assert!(!acc.should_flush_at(t0));
+        assert!(!acc.should_flush_at(t0 + Duration::from_millis(49)));
 
-        // Now should flush due to timeout
-        assert!(acc.should_flush());
+        // Due once the timeout has elapsed
+        assert!(acc.should_flush_at(t0 + Duration::from_millis(50)));
 
         let batch = acc.flush();
         assert_eq!(batch.len(), 1);
     }
 
     #[test]
+    fn an_empty_accumulator_never_flushes_on_timeout() {
+        let acc = BatchAccumulator::<LogRecord>::new(100, 50);
+        assert!(!acc.should_flush_at(acc.last_flush + Duration::from_secs(3600)));
+    }
+
+    #[test]
     fn test_accumulator_time_since_flush() {
         let mut acc = BatchAccumulator::<LogRecord>::new(100, 10);
-
-        let initial_time = acc.time_since_flush();
-        assert!(initial_time < Duration::from_millis(10));
+        let created = acc.last_flush;
 
         sleep(Duration::from_millis(20));
 
-        let elapsed = acc.time_since_flush();
-        assert!(elapsed >= Duration::from_millis(20));
+        // Elapsed time only grows, so a lower bound is safe on a slow runner
+        // (an upper bound such as "< 10ms" is not).
+        assert!(acc.time_since_flush() >= Duration::from_millis(20));
 
+        // Flushing restarts the clock at a later mark
         acc.flush();
-
-        let after_flush = acc.time_since_flush();
-        assert!(after_flush < Duration::from_millis(10));
+        assert!(acc.last_flush >= created + Duration::from_millis(20));
+        assert!(acc.time_since_flush() <= created.elapsed());
     }
 
     #[test]

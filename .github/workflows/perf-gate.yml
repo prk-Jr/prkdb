@@ -211,19 +211,25 @@ jobs:
 
           # code == 3 here; any other value already failed the "Bench head SHA" step
           # unconditionally, above.
+          if [ ! -f deltas.json ]; then
+            echo "gungraun reported a regression and there is no deltas.json to say which"
+            exit 1
+          fi
           regressed=$(python3 scripts/perf_gate_deltas.py --regressed deltas.json)
           echo "regressed benchmarks (gungraun exit 3):"
           echo "$regressed"
 
-          # Override (spec §6.2): a regression is allowed when the PR's diff to the
-          # ledger adds or changes a non-empty perf_note. Three-dot diff: compare
-          # against the merge base, so unrelated commits already on main between base
-          # and head (this is fetch-depth: 0, base may not be head's immediate parent)
-          # don't get attributed to this PR's ledger change.
-          if git diff "${{ steps.shas.outputs.base }}...${{ steps.shas.outputs.head }}" -- docs/remediation/ledger.toml | grep -qE '^\+perf_note = ".+"'; then
-            echo "regression justified by a ledger perf_note"
-            exit 0
-          fi
-
-          echo "instruction-count regression without a ledger perf_note"
-          exit 1
+          # Override (spec §6.2), per benchmark: every regressed benchmark must be named
+          # by a perf_note this PR adds or changes in the ledger, which also gives the
+          # durability or correctness reason, e.g.
+          #   perf_note = "bench_wal_put_100: one fsync bookkeeping record per put (STO-02)"
+          # One note may name several benchmarks. A regression no note names still fails
+          # (this used to accept any added perf_note as justification for every
+          # regression). Three-dot diff: compare against the merge base, so unrelated
+          # commits already on main between base and head (this is fetch-depth: 0, base
+          # may not be head's immediate parent) don't get attributed to this PR's ledger
+          # change.
+          git diff "${{ steps.shas.outputs.base }}...${{ steps.shas.outputs.head }}" \
+            -- docs/remediation/ledger.toml > ledger.diff
+          python3 scripts/perf_gate_deltas.py justify --self-test
+          python3 scripts/perf_gate_deltas.py justify deltas.json ledger.diff

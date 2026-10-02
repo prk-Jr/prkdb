@@ -162,6 +162,16 @@ pub enum StorageError {
          were compacted away; resynchronise from a snapshot and resume at or above {floor}"
     )]
     CompactedCursor { cursor: u64, floor: u64 },
+
+    #[error("offset {requested} is outside the stream [{floor}, {end}]: records below {floor} were removed by retention; resume at or above {floor}")]
+    OffsetOutOfRange {
+        requested: u64,
+        floor: u64,
+        end: u64,
+    },
+
+    #[error("committed offset {committed} diverged from the stream: {reason}")]
+    OffsetDiverged { committed: u64, reason: String },
 }
 
 /// Compute handler errors

@@ -123,6 +123,17 @@ fn decode_ops(raw: &[u8]) -> Result<Batch, WalError> {
 impl Batch {
     pub fn encode(&self, compression: &CompressionConfig) -> Result<Vec<u8>, WalError> {
         let raw = encode_ops(&self.ops);
+        // `decode` refuses `raw_len > MAX_PAYLOAD_LEN` before decompressing (the bomb
+        // bound), so a batch over it must never be written, however small it compresses:
+        // it would be acknowledged and then fail recovery (STO-12). `Wal::reserve` checks
+        // only the encoded size.
+        if raw.len() > MAX_PAYLOAD_LEN {
+            return Err(WalError::RecordTooLarge {
+                path: std::path::PathBuf::new(),
+                len: raw.len(),
+                max: MAX_PAYLOAD_LEN,
+            });
+        }
         let raw_len = raw.len() as u32;
 
         // `compress()` itself skips compression below `min_compress_bytes`, returning the
@@ -196,5 +207,52 @@ impl Batch {
         }
 
         decode_ops(&raw)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lz4() -> CompressionConfig {
+        CompressionConfig {
+            compression_type: CompressionType::Lz4,
+            min_compress_bytes: 0,
+            compression_level: 3,
+        }
+    }
+
+    /// One put whose op list is `raw_len` bytes: `count | tag | klen | "k" | vlen | value`.
+    fn one_put_of_raw_len(raw_len: usize) -> Batch {
+        Batch {
+            ops: vec![BatchOp::Put {
+                key: b"k".to_vec(),
+                value: vec![b'x'; raw_len - (4 + 1 + 4 + 1 + 4)],
+            }],
+        }
+    }
+
+    /// STO-12: `decode` refuses `raw_len > MAX_PAYLOAD_LEN`, so `encode` refuses it too
+    /// (`RecordTooLarge`), however small it compresses, and in every codec.
+    #[test]
+    fn encode_refuses_a_raw_batch_the_decoder_would_refuse() {
+        let batch = one_put_of_raw_len(MAX_PAYLOAD_LEN + 1);
+        for cfg in [CompressionConfig::none(), lz4()] {
+            let err = batch.encode(&cfg).unwrap_err();
+            assert!(
+                matches!(err, WalError::RecordTooLarge { len, max, .. }
+                    if len == MAX_PAYLOAD_LEN + 1 && max == MAX_PAYLOAD_LEN),
+                "{cfg:?}: {err}"
+            );
+        }
+    }
+
+    /// The limit is inclusive: a raw batch of exactly `MAX_PAYLOAD_LEN` round-trips.
+    #[test]
+    fn a_raw_batch_of_exactly_the_limit_round_trips() {
+        let batch = one_put_of_raw_len(MAX_PAYLOAD_LEN);
+        let bytes = batch.encode(&lz4()).unwrap();
+        assert!(bytes.len() < MAX_PAYLOAD_LEN / 100, "{} bytes", bytes.len());
+        assert!(Batch::decode(&bytes).unwrap() == batch);
     }
 }
