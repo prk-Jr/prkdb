@@ -116,6 +116,60 @@ async fn interrupted_creation_finishes_only_when_every_partition_has_no_frames()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn interrupted_creation_repairs_an_empty_final_wal() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("orders");
+    let partition = root.join("partition_0");
+    StreamLog::open(StreamConfig::new(&partition))
+        .await
+        .unwrap()
+        .close()
+        .unwrap();
+    let path = partition.join(prkdb_core::wal::segment::segment_file_name(1));
+    std::fs::write(&path, []).unwrap();
+    let stream = open(&root, 1)
+        .await
+        .expect("a zero-length final WAL contains no frames");
+    assert!(root.join("STREAM").exists());
+    stream.append(Route::Partition(0), rec()).await.unwrap();
+    let batch = stream
+        .partition(0)
+        .unwrap()
+        .read_from(StartAt::Earliest, ReadLimits::default())
+        .await
+        .unwrap();
+    assert_eq!(batch.records.len(), 1);
+    assert_eq!(batch.records[0].value, b"value");
+    stream.close().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn interrupted_creation_refuses_an_empty_nonfinal_wal_without_repair() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("orders");
+    let partition = root.join("partition_0");
+    StreamLog::open(StreamConfig::new(&partition))
+        .await
+        .unwrap()
+        .close()
+        .unwrap();
+    let first = partition.join(prkdb_core::wal::segment::segment_file_name(1));
+    std::fs::write(&first, []).unwrap();
+    let last = partition.join(prkdb_core::wal::segment::segment_file_name(2));
+    let file = StdVfs.create(&last).unwrap();
+    prkdb_core::wal::segment::write_segment_header(file.as_ref(), 2).unwrap();
+    file.sync_data().unwrap();
+    let last_before = std::fs::read(&last).unwrap();
+    assert!(matches!(
+        open(&root, 1).await,
+        Err(StorageError::Corruption(_))
+    ));
+    assert!(!root.join("STREAM").exists());
+    assert_eq!(std::fs::read(&first).unwrap(), Vec::<u8>::new());
+    assert_eq!(std::fs::read(&last).unwrap(), last_before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn invalid_stream_name_preserves_existing_data_and_torn_tail() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("Orders");

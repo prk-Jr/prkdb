@@ -71,18 +71,29 @@ fn read_manifest(vfs: &dyn Vfs, path: &Path) -> Result<StreamManifest, StorageEr
 }
 
 fn has_frames(vfs: &dyn Vfs, dir: &Path) -> Result<bool, StorageError> {
-    for path in vfs.read_dir(dir).map_err(|e| io_error(dir, e))? {
-        let Some(lsn) = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .and_then(parse_segment_file_name)
-        else {
-            continue;
-        };
+    let mut segments: Vec<_> = vfs
+        .read_dir(dir)
+        .map_err(|e| io_error(dir, e))?
+        .into_iter()
+        .filter_map(|path| {
+            let lsn = path
+                .file_name()?
+                .to_str()
+                .and_then(parse_segment_file_name)?;
+            Some((lsn, path))
+        })
+        .collect();
+    segments.sort_unstable_by_key(|(lsn, _)| *lsn);
+    for (index, (lsn, path)) in segments.iter().enumerate() {
         let file = vfs
-            .open(&path, OpenMode::Read)
-            .map_err(|e| io_error(&path, e))?;
-        let scan = scan_segment_flow(file.as_ref(), &path, lsn, &mut |_, _, _| {
+            .open(path, OpenMode::Read)
+            .map_err(|e| io_error(path, e))?;
+        // WAL recovery can finish an interrupted header creation only in the final
+        // segment. Classify it without repair; a nonfinal empty file stays corrupt.
+        if index + 1 == segments.len() && file.is_empty().map_err(|e| io_error(path, e))? {
+            continue;
+        }
+        let scan = scan_segment_flow(file.as_ref(), path, *lsn, &mut |_, _, _| {
             Ok(ControlFlow::Break(()))
         })
         .map_err(wal_err)?;
@@ -91,7 +102,7 @@ fn has_frames(vfs: &dyn Vfs, dir: &Path) -> Result<bool, StorageError> {
         }
         if let Some((offset, fault)) = scan.stopped {
             return Err(corruption(
-                &path,
+                path,
                 format!("cannot prove an interrupted partition empty: {fault:?} at {offset}"),
             ));
         }
