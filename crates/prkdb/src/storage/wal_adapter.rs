@@ -562,7 +562,9 @@ fn wal_err(e: WalError) -> StorageError {
         WalError::Closed => {
             StorageError::WriteAbandoned("the WAL is closed and accepts no more writes".to_string())
         }
-        e @ WalError::RecordTooLarge { .. } => StorageError::Validation(e.to_string()),
+        e @ (WalError::RecordTooLarge { .. } | WalError::EmptyRecord { .. }) => {
+            StorageError::Validation(e.to_string())
+        }
         e @ (WalError::CorruptSegment { .. }
         | WalError::ReplayFailed { .. }
         | WalError::UnsupportedFormat { .. }

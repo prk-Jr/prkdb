@@ -678,9 +678,15 @@ impl Wal {
     }
 
     /// Waits for admission permits (`min(len, max_queued_bytes)` bytes). Refuses a `len`
-    /// over `MAX_PAYLOAD_LEN` with `RecordTooLarge`, and returns `Poisoned`/`Closed` without
-    /// waiting when the log cannot accept writes.
+    /// over `MAX_PAYLOAD_LEN` with `RecordTooLarge` and a `len` of 0 with `EmptyRecord`
+    /// (a frame of length 0 reads back as a torn tail, STO-16), and returns
+    /// `Poisoned`/`Closed` without waiting when the log cannot accept writes.
     pub async fn reserve(&self, len: usize) -> Result<Reservation, WalError> {
+        if len == 0 {
+            return Err(WalError::EmptyRecord {
+                path: self.shared.dir.clone(),
+            });
+        }
         if len > MAX_PAYLOAD_LEN {
             return Err(WalError::RecordTooLarge {
                 path: self.shared.dir.clone(),
