@@ -26,6 +26,11 @@
 //!   inode now contains. The epoch that makes a handle stale is checked under
 //!   the same lock as the operation it guards, so a `power_loss` can't slip
 //!   in between the check and the operation.
+//! - What survives a `power_loss` is what is on disk afterward: it becomes
+//!   the new durable baseline for every file (its synced content) and every
+//!   directory (its durable children). A second `power_loss` with no
+//!   operations in between changes nothing; it can't re-tear a torn tail or
+//!   bring back bytes or entries the first one lost.
 
 use parking_lot::Mutex;
 use prkdb_core::vfs::{LockGuard, OpenMode, Vfs, VfsFile};
@@ -347,9 +352,34 @@ impl FaultFs {
                 }
             }
         }
-        s.live = new_live;
+        // What survived is what is on disk: it is the new durable baseline
+        // for every directory, so a later power loss starts from it rather
+        // than from directory snapshots taken before this one (which could
+        // name children this crash already lost, TST-11).
+        let mut durable_children: BTreeMap<PathBuf, BTreeMap<PathBuf, Entry>> = live_dirs
+            .iter()
+            .map(|d| (d.clone(), BTreeMap::new()))
+            .collect();
+        for (p, e) in &new_live {
+            if p.parent().is_some() {
+                if let Some(children) = durable_children.get_mut(&parent(p)) {
+                    children.insert(p.clone(), e.clone());
+                }
+            }
+        }
+        s.durable_children = durable_children;
 
-        // Content tearing.
+        // Content tearing. Only inodes still reachable from a surviving entry
+        // matter: the rest are unreachable for good (every handle to them is
+        // now stale, and no durable entry names them), so they are dropped.
+        let reachable: BTreeSet<u64> = new_live
+            .values()
+            .filter_map(|e| match e {
+                Entry::File(inode) => Some(*inode),
+                Entry::Dir => None,
+            })
+            .collect();
+        s.live = new_live;
         let inodes: Vec<u64> = s.inodes.keys().copied().collect();
         for inode in inodes {
             let torn = tear_content(
@@ -357,12 +387,19 @@ impl FaultFs {
                 tear,
                 rng,
             );
+            if !reachable.contains(&inode) {
+                s.inodes.remove(&inode);
+                continue;
+            }
             let c = s.inodes.get_mut(&inode).expect("inode of tracked content");
+            // The torn result is now the durable content: a later power loss
+            // with no intervening writes must reproduce it exactly, never
+            // re-tear it or fall back to bytes this crash already lost
+            // (TST-11). Whatever `tear_content` decided about an unsynced
+            // truncation (persisted or reverted) is likewise settled.
+            c.synced = torn.clone();
             c.written = torn;
             c.dirty_sectors.clear();
-            // Whatever `tear_content` decided (persisted or reverted), the
-            // uncertainty about this truncation is now resolved: don't let a
-            // *later* power loss re-roll the same already-settled event.
             c.truncated_since_sync = None;
         }
     }
@@ -1011,5 +1048,288 @@ mod tests {
         let fs = FaultFs::new();
         let err = fs.sync_dir(Path::new("/missing")).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    /// Reads the whole of `path` through a fresh handle, or `None` if it
+    /// doesn't exist.
+    fn read_all(fs: &FaultFs, path: &str) -> Option<Vec<u8>> {
+        let f = fs.open(Path::new(path), OpenMode::Read).ok()?;
+        let mut buf = vec![0u8; f.len().unwrap() as usize];
+        let n = f.read_at(0, &mut buf).unwrap();
+        assert_eq!(n, buf.len());
+        Some(buf)
+    }
+
+    /// Every live path and, for files, its contents.
+    fn snapshot(fs: &FaultFs) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+        let paths: Vec<(PathBuf, bool)> = fs
+            .state
+            .lock()
+            .live
+            .iter()
+            .map(|(p, e)| (p.clone(), matches!(e, Entry::File(_))))
+            .collect();
+        paths
+            .into_iter()
+            .map(|(p, is_file)| {
+                let content = is_file.then(|| read_all(fs, p.to_str().unwrap()).unwrap());
+                (p, content)
+            })
+            .collect()
+    }
+
+    const TEARS: [Tear; 4] = [Tear::None, Tear::Prefix, Tear::ZeroTail, Tear::Garbage];
+
+    /// TST-11: the review repro. Synced "old", an unsynced truncate, a first
+    /// crash that persists the truncation (empty file), then a second crash
+    /// with no writes in between must not bring "old" back.
+    #[test]
+    fn tst11_a_persisted_truncation_survives_a_second_power_loss() {
+        let mut checked = 0;
+        for seed in 0..200 {
+            let fs = FaultFs::new();
+            fs.mkdir_durable(Path::new("/d")).unwrap();
+            let f = fs.create(Path::new("/d/a")).unwrap();
+            f.write_at(0, b"old").unwrap();
+            f.sync_data().unwrap();
+            fs.sync_dir(Path::new("/d")).unwrap();
+            f.set_len(0).unwrap();
+
+            fs.power_loss(&mut ChaCha8Rng::seed_from_u64(seed), Tear::None);
+            if read_all(&fs, "/d/a").unwrap() != b"" {
+                continue; // this seed reverted the truncation
+            }
+            for (i, tear) in TEARS.into_iter().enumerate() {
+                fs.power_loss(&mut ChaCha8Rng::seed_from_u64(seed * 31 + i as u64), tear);
+                assert_eq!(
+                    read_all(&fs, "/d/a").unwrap(),
+                    b"",
+                    "seed {seed}, second crash {tear:?} resurrected the truncated bytes"
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked > 0, "no seed persisted the truncation");
+    }
+
+    /// TST-11: same, for a `create` over an existing synced file followed by
+    /// an unsynced write.
+    #[test]
+    fn tst11_a_persisted_create_truncation_survives_a_second_power_loss() {
+        let mut checked = 0;
+        for seed in 0..200 {
+            let fs = FaultFs::new();
+            fs.mkdir_durable(Path::new("/d")).unwrap();
+            let f = fs.create(Path::new("/d/a")).unwrap();
+            f.write_at(0, b"old-content").unwrap();
+            f.sync_data().unwrap();
+            fs.sync_dir(Path::new("/d")).unwrap();
+            let f2 = fs.create(Path::new("/d/a")).unwrap();
+            f2.write_at(0, b"new").unwrap();
+
+            fs.power_loss(&mut ChaCha8Rng::seed_from_u64(seed), Tear::Prefix);
+            let first = read_all(&fs, "/d/a").unwrap();
+            if first.len() >= b"old-content".len() {
+                continue; // reverted
+            }
+            for (i, tear) in TEARS.into_iter().enumerate() {
+                fs.power_loss(&mut ChaCha8Rng::seed_from_u64(seed * 31 + i as u64), tear);
+                assert_eq!(
+                    read_all(&fs, "/d/a").unwrap(),
+                    first,
+                    "seed {seed}, {tear:?}"
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked > 0, "no seed persisted the truncation");
+    }
+
+    /// TST-11: an unsynced in-place overwrite whose new sector survived the
+    /// first crash must not revert to the pre-overwrite bytes on a second.
+    #[test]
+    fn tst11_a_kept_overwrite_survives_a_second_power_loss() {
+        let mut checked = 0;
+        for seed in 0..200 {
+            let fs = FaultFs::new();
+            fs.mkdir_durable(Path::new("/d")).unwrap();
+            let f = fs.create(Path::new("/d/a")).unwrap();
+            f.write_at(0, &[b'A'; 1024]).unwrap();
+            f.sync_data().unwrap();
+            fs.sync_dir(Path::new("/d")).unwrap();
+            f.write_at(512, &[b'B'; 512]).unwrap();
+
+            fs.power_loss(&mut ChaCha8Rng::seed_from_u64(seed), Tear::None);
+            let first = read_all(&fs, "/d/a").unwrap();
+            if first[512] != b'B' {
+                continue; // the sector reverted
+            }
+            for (i, tear) in TEARS.into_iter().enumerate() {
+                fs.power_loss(&mut ChaCha8Rng::seed_from_u64(seed * 31 + i as u64), tear);
+                assert_eq!(
+                    read_all(&fs, "/d/a").unwrap(),
+                    first,
+                    "seed {seed}, second crash {tear:?} reverted a sector the first crash kept"
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked > 0, "no seed kept the overwritten sector");
+    }
+
+    /// TST-11: whatever a torn tail (`Prefix`, `ZeroTail`, `Garbage`) left
+    /// behind is what is on disk; a second crash with no writes must not
+    /// re-tear it (shorten a kept prefix, re-randomize garbage).
+    #[test]
+    fn tst11_a_torn_tail_is_not_re_torn_by_a_second_power_loss() {
+        for tear in [Tear::Prefix, Tear::ZeroTail, Tear::Garbage] {
+            for seed in 0..50 {
+                let fs = FaultFs::new();
+                fs.mkdir_durable(Path::new("/d")).unwrap();
+                let f = fs.create(Path::new("/d/a")).unwrap();
+                f.write_at(0, b"0123456789").unwrap();
+                f.sync_data().unwrap();
+                fs.sync_dir(Path::new("/d")).unwrap();
+                f.write_at(10, &[b'x'; 600]).unwrap();
+
+                fs.power_loss(&mut ChaCha8Rng::seed_from_u64(seed), tear);
+                let first = read_all(&fs, "/d/a").unwrap();
+                for (i, second) in TEARS.into_iter().enumerate() {
+                    fs.power_loss(
+                        &mut ChaCha8Rng::seed_from_u64(seed * 31 + i as u64 + 1),
+                        second,
+                    );
+                    assert_eq!(
+                        read_all(&fs, "/d/a").unwrap(),
+                        first,
+                        "seed {seed}, first {tear:?}, second {second:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// TST-11: a file that was durable inside a directory the first crash
+    /// lost must not come back when the directory is recreated and made
+    /// durable again, then a second crash hits.
+    #[test]
+    fn tst11_a_lost_subdirectory_does_not_resurrect_its_children() {
+        let fs = FaultFs::new();
+        fs.mkdir_durable(Path::new("/d")).unwrap();
+        // "/d/sub/a" is durable within "/d/sub", but "/d/sub" never becomes
+        // a durable child of "/d".
+        fs.create_dir_all(Path::new("/d/sub")).unwrap();
+        let f = fs.create(Path::new("/d/sub/a")).unwrap();
+        f.write_at(0, b"x").unwrap();
+        f.sync_data().unwrap();
+        fs.sync_dir(Path::new("/d/sub")).unwrap();
+
+        fs.power_loss(&mut ChaCha8Rng::seed_from_u64(1), Tear::None);
+        assert!(!fs.exists(Path::new("/d/sub")).unwrap());
+
+        // Recreate "/d/sub" and make *it* durable, but never sync it.
+        fs.create_dir_all(Path::new("/d/sub")).unwrap();
+        fs.sync_dir(Path::new("/d")).unwrap();
+
+        fs.power_loss(&mut ChaCha8Rng::seed_from_u64(2), Tear::None);
+        assert!(fs.exists(Path::new("/d/sub")).unwrap());
+        assert!(
+            !fs.exists(Path::new("/d/sub/a")).unwrap(),
+            "a file the first crash lost came back after the second"
+        );
+    }
+
+    /// TST-11: a durable removal (the directory's entry removal was synced)
+    /// stays removed when the directory is recreated and a second crash
+    /// hits.
+    #[test]
+    fn tst11_a_durably_removed_subdirectory_does_not_resurrect_its_children() {
+        let fs = FaultFs::new();
+        fs.mkdir_durable(Path::new("/d/sub")).unwrap();
+        let f = fs.create(Path::new("/d/sub/a")).unwrap();
+        f.write_at(0, b"x").unwrap();
+        f.sync_data().unwrap();
+        fs.sync_dir(Path::new("/d/sub")).unwrap();
+
+        fs.remove(Path::new("/d/sub/a")).unwrap();
+        fs.remove(Path::new("/d/sub")).unwrap();
+        fs.sync_dir(Path::new("/d")).unwrap(); // "/d/sub" is durably gone
+
+        fs.power_loss(&mut ChaCha8Rng::seed_from_u64(1), Tear::None);
+        assert!(!fs.exists(Path::new("/d/sub")).unwrap());
+
+        fs.create_dir_all(Path::new("/d/sub")).unwrap();
+        fs.sync_dir(Path::new("/d")).unwrap();
+
+        fs.power_loss(&mut ChaCha8Rng::seed_from_u64(2), Tear::None);
+        assert!(fs.exists(Path::new("/d/sub")).unwrap());
+        assert!(!fs.exists(Path::new("/d/sub/a")).unwrap());
+    }
+
+    /// TST-11: an unsynced removal and an unsynced creation, resolved by the
+    /// first crash (removal reverted, creation dropped), stay resolved that
+    /// way across a second crash.
+    #[test]
+    fn tst11_unsynced_entry_changes_stay_resolved_across_a_second_power_loss() {
+        let fs = FaultFs::new();
+        fs.mkdir_durable(Path::new("/d")).unwrap();
+        let f = fs.create(Path::new("/d/kept")).unwrap();
+        f.write_at(0, b"k").unwrap();
+        f.sync_data().unwrap();
+        fs.sync_dir(Path::new("/d")).unwrap();
+
+        fs.remove(Path::new("/d/kept")).unwrap();
+        let g = fs.create(Path::new("/d/new")).unwrap();
+        g.write_at(0, b"n").unwrap();
+        g.sync_data().unwrap();
+
+        fs.power_loss(&mut ChaCha8Rng::seed_from_u64(1), Tear::None);
+        let first = snapshot(&fs);
+        assert_eq!(read_all(&fs, "/d/kept").unwrap(), b"k");
+        assert!(!fs.exists(Path::new("/d/new")).unwrap());
+
+        for (i, tear) in TEARS.into_iter().enumerate() {
+            fs.power_loss(&mut ChaCha8Rng::seed_from_u64(10 + i as u64), tear);
+            assert_eq!(snapshot(&fs), first, "second crash {tear:?}");
+        }
+    }
+
+    /// TST-11, as a property: after any power loss, a second power loss with
+    /// no intervening operations changes nothing, for every tear mode.
+    #[test]
+    fn tst11_power_loss_is_idempotent_without_intervening_writes() {
+        for seed in 0..100u64 {
+            let fs = FaultFs::new();
+            fs.mkdir_durable(Path::new("/d")).unwrap();
+            for (i, name) in ["/d/a", "/d/b", "/d/c"].into_iter().enumerate() {
+                let f = fs.create(Path::new(name)).unwrap();
+                f.write_at(0, &[b'0' + i as u8; 700]).unwrap();
+                f.sync_data().unwrap();
+            }
+            fs.sync_dir(Path::new("/d")).unwrap();
+            // Unsynced changes of every kind.
+            let a = fs.open(Path::new("/d/a"), OpenMode::ReadWrite).unwrap();
+            a.set_len(100).unwrap();
+            a.write_at(100, &[b'x'; 900]).unwrap();
+            let b = fs.open(Path::new("/d/b"), OpenMode::ReadWrite).unwrap();
+            b.write_at(0, &[b'y'; 1200]).unwrap();
+            let _c = fs.create(Path::new("/d/c")).unwrap();
+            fs.remove(Path::new("/d/b")).unwrap();
+            fs.create_dir_all(Path::new("/d/sub")).unwrap();
+            fs.create(Path::new("/d/sub/e"))
+                .unwrap()
+                .sync_data()
+                .unwrap();
+            fs.sync_dir(Path::new("/d/sub")).unwrap();
+
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            let first_tear = Tear::random(&mut rng);
+            fs.power_loss(&mut rng, first_tear);
+            let first = snapshot(&fs);
+            for second in TEARS {
+                fs.power_loss(&mut rng, second);
+                assert_eq!(snapshot(&fs), first, "seed {seed}, second {second:?}");
+            }
+        }
     }
 }
