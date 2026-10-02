@@ -431,6 +431,26 @@ jobs:
       - name: Chaos-gated tests are run
         run: bash scripts/check_chaos_tests_run.sh
 
+  perf-gate-floors:
+    name: Perf Gate Self-Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12" # tomllib (>= 3.11) for the floors file
+      # The perf gate (perf-gate.yml) and the WAL bench probe only run on phase PRs and
+      # dispatch, so a broken floors file or parser would first show up there — or,
+      # worse, pass vacuously. TST-09: every WAL bench has a floor, every floor names a
+      # live bench, and every floor can fail (none under 0.01x of its reference).
+      - name: Instruction-count floors
+        run: bash scripts/check_perf_gate_floors.sh
+      # The WAL bench rules fail closed on missing cells, short reps and zero
+      # measurements; the self-test proves they still do.
+      - name: WAL bench rules
+        run: python3 scripts/wal_fast_rule.py --self-test
+
 
   remediation:
     name: Remediation Ledger

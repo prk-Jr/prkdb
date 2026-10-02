@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # TST-09 regression evidence: every WAL benchmark in iai_hot_paths.rs has a floor, every
 # floor names a benchmark that still exists, and the floor/extract logic rejects a
-# vacuous measurement or a renamed-bench false failure. Runs without Valgrind.
+# vacuous measurement or a renamed-bench false failure, and every declared floor can fail.
+# Runs without Valgrind (CI: ci.yml `perf-gate-floors`; locally: pre-push-check.sh).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 python3 scripts/perf_gate_deltas.py floors --self-test
 python3 scripts/perf_gate_deltas.py extract --self-test
+# Every declared floor is usable: a reference, and a ratio of at least 0.01 (a lower
+# floor admits an empty measured region and can never fail).
+python3 scripts/perf_gate_deltas.py floors --validate scripts/perf_gate_floors.toml
 missing=0
 
 # Every `bench_wal_*` function has a `[floors.*]` entry (a renamed/added WAL benchmark

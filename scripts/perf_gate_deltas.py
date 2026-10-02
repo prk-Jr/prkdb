@@ -361,6 +361,43 @@ def bench_short_name(name: str) -> str:
     return name.rsplit("::", 1)[-1]
 
 
+# The smallest floor a `[floors.*]` entry may declare. A floor is a lower bound on
+# Ir(bench) / Ir(reference); one below 1 % of the reference admits almost any count,
+# including the few hundred Ir of a benchmark whose measured region is empty (TST-09), and
+# prints as "0.0x" — a floor that can never fail. Such an entry is refused, not applied.
+MIN_FLOOR_RATIO = 0.01
+
+
+def validate_floors(floors: dict[str, dict]) -> list[str]:
+    """Problems with the floor declarations themselves (empty list: all usable)."""
+    problems = []
+    if not floors:
+        problems.append("no [floors.*] entries")
+    for name, spec in sorted(floors.items()):
+        if not isinstance(spec, dict):
+            problems.append(f"[floors.{name}] is not a table")
+            continue
+        reference = spec.get("reference")
+        if not isinstance(reference, str) or not reference:
+            problems.append(f"[floors.{name}] has no reference benchmark")
+        elif reference == name:
+            problems.append(f"[floors.{name}] is its own reference")
+        ratio = spec.get("min_ratio")
+        if isinstance(ratio, bool) or not isinstance(ratio, (int, float)):
+            problems.append(f"[floors.{name}] min_ratio must be a number, got {ratio!r}")
+        elif not ratio >= MIN_FLOOR_RATIO:  # also catches NaN
+            problems.append(
+                f"[floors.{name}] min_ratio {ratio} is below {MIN_FLOOR_RATIO}: "
+                "a floor that low cannot fail; set it from a measured count"
+            )
+    return problems
+
+
+def format_ratio(x: float) -> str:
+    """Enough digits that a small ratio never prints as 0.0x."""
+    return f"{x:.3g}x"
+
+
 def load_floors(path: Path) -> dict[str, dict]:
     if tomllib is None:
         sys.exit("floors: this script needs Python >= 3.11 (tomllib) to parse TOML")
@@ -466,22 +503,37 @@ def print_floors_table(rows: list[dict]) -> None:
             continue
         verdict = "ok" if r["ok"] else "FAIL: below floor"
         print(
-            f"| {r['name']} | {r['ir']:.0f} | {r['reference_ir']:.0f} | {r['ratio']:.1f}x "
-            f"| {r['min_ratio']:.1f}x `{r['reference']}` | {verdict} |"
+            f"| {r['name']} | {r['ir']:.0f} | {r['reference_ir']:.0f} | {format_ratio(r['ratio'])} "
+            f"| {format_ratio(r['min_ratio'])} `{r['reference']}` | {verdict} |"
         )
 
 
 def floors_cmd(gungraun_dir: str, floors_toml: str) -> int:
     ir_by_name = collect_ir_by_name(Path(gungraun_dir))
     floors = load_floors(Path(floors_toml))
-    if not floors:
-        print(f"perf_gate_deltas.py: no [floors.*] entries in {floors_toml}", file=sys.stderr)
+    if floors_validate_report(floors, floors_toml):
         return 1
     rows, all_ok = floors_check(ir_by_name, floors)
     print_floors_table(rows)
     if not all_ok:
         print("\nsome benchmarks fall below their floor: they measured nothing plausible")
     return 0 if all_ok else 1
+
+
+def floors_validate_report(floors: dict[str, dict], floors_toml: str) -> bool:
+    """Print every declaration problem; True if there were any."""
+    problems = validate_floors(floors)
+    for problem in problems:
+        print(f"perf_gate_deltas.py: {floors_toml}: {problem}", file=sys.stderr)
+    return bool(problems)
+
+
+def floors_validate_cmd(floors_toml: str) -> int:
+    floors = load_floors(Path(floors_toml))
+    if floors_validate_report(floors, floors_toml):
+        return 1
+    print(f"{floors_toml}: {len(floors)} floor(s), all at or above {MIN_FLOOR_RATIO}x")
+    return 0
 
 
 def floors_self_test() -> int:
@@ -579,6 +631,28 @@ def floors_self_test() -> int:
     ):
         problems.append(f"expected a zero-Ir reference to fail, not report inf/ok, got: {zero_ref_rows}")
 
+    # Declarations: a floor that cannot fail (0.0, the old 0.005, negative, NaN) or that
+    # lacks a reference or a numeric ratio is refused; real floors pass.
+    good_decl = {"bench_a": {"reference": "bench_ref", "min_ratio": 0.02}}
+    if validate_floors(good_decl):
+        problems.append(f"expected a 0.02 floor to validate, got: {validate_floors(good_decl)}")
+    for label, spec in {
+        "zero": {"reference": "bench_ref", "min_ratio": 0.0},
+        "below minimum": {"reference": "bench_ref", "min_ratio": 0.005},
+        "negative": {"reference": "bench_ref", "min_ratio": -1.0},
+        "nan": {"reference": "bench_ref", "min_ratio": float("nan")},
+        "string ratio": {"reference": "bench_ref", "min_ratio": "1.0"},
+        "no ratio": {"reference": "bench_ref"},
+        "no reference": {"min_ratio": 1.0},
+        "self reference": {"reference": "bench_b", "min_ratio": 1.0},
+    }.items():
+        if not validate_floors({"bench_b": spec}):
+            problems.append(f"expected the {label} floor declaration {spec} to be refused")
+    if not validate_floors({}):
+        problems.append("expected an empty floors table to be refused")
+    if format_ratio(0.027) == "0.0x" or format_ratio(0.005) == "0.0x":
+        problems.append(f"small ratios must not print as 0.0x: {format_ratio(0.027)}, {format_ratio(0.005)}")
+
     for p in problems:
         print(f"floors self-test FAILED: {p}", file=sys.stderr)
     if not problems:
@@ -595,6 +669,8 @@ def main() -> int:
         return list_names(Path(sys.argv[2]))
     if len(sys.argv) == 3 and sys.argv[1] == "floors" and sys.argv[2] == "--self-test":
         return floors_self_test()
+    if len(sys.argv) == 4 and sys.argv[1] == "floors" and sys.argv[2] == "--validate":
+        return floors_validate_cmd(sys.argv[3])
     if len(sys.argv) == 4 and sys.argv[1] == "floors":
         return floors_cmd(sys.argv[2], sys.argv[3])
     if len(sys.argv) == 3 and sys.argv[1] == "extract" and sys.argv[2] == "--self-test":
@@ -626,6 +702,7 @@ def main() -> int:
         "       perf_gate_deltas.py list-names <gungraun-target-dir>\n"
         "       perf_gate_deltas.py floors <gungraun-target-dir> <floors.toml>\n"
         "       perf_gate_deltas.py floors --self-test\n"
+        "       perf_gate_deltas.py floors --validate <floors.toml>\n"
         "       perf_gate_deltas.py --summary <deltas.json>\n"
         "       perf_gate_deltas.py --regressed <deltas.json>",
         file=sys.stderr,

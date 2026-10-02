@@ -27,16 +27,23 @@ reference = "bench_batch_encode"
 min_ratio = 1.0
 
 # The stored key of one typed record (KEY-01, review M1): a header plus a memcomparable id
-# in one allocation, a few hundred Ir at most against the reference's ~5.9 K. The floor
-# only rejects a benchmark that counted nothing; a regression shows in the delta.
+# in one allocation, a few hundred Ir against the reference's ~5.9 K. Floors from the
+# Linux probe=iai run https://github.com/prk-Jr/prkdb/actions/runs/36955636796 (at
+# c7609dd): u64 158 Ir, string 420 Ir, uuid 776 Ir, bench_batch_encode 5857 Ir — ratios
+# 0.027, 0.072, 0.132. Each floor sits at roughly 3/4 of its measured ratio (117, 293 and
+# 586 Ir): headroom for instruction-count jitter and small codec changes, while a
+# benchmark whose measured region lost the encode (an empty or optimised-away region)
+# falls below it. A regression shows in the delta, not here. (These were 0.005 before,
+# i.e. 29 Ir: a floor that could never fail. check_perf_gate_floors.sh now refuses any
+# floor under 0.01.)
 [floors.bench_encode_record_key_u64]
 reference = "bench_batch_encode"
-min_ratio = 0.005
+min_ratio = 0.02
 
 [floors.bench_encode_record_key_string]
 reference = "bench_batch_encode"
-min_ratio = 0.005
+min_ratio = 0.05
 
 [floors.bench_encode_record_key_uuid]
 reference = "bench_batch_encode"
-min_ratio = 0.005
+min_ratio = 0.1
