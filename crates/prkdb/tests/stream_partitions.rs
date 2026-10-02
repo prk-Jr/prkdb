@@ -52,7 +52,17 @@ async fn container_creates_stream_partitions_before_publishing_manifest() {
 async fn durable_partition_count_cannot_change_on_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("orders");
-    open(&root, 3).await.unwrap().close().unwrap();
+    let stream = open(&root, 3).await.unwrap();
+    stream.append(Route::Partition(1), rec()).await.unwrap();
+    stream.close().unwrap();
+    let wal = root
+        .join("partition_1")
+        .join(prkdb_core::wal::segment::segment_file_name(1));
+    // Reopening the partition would repair this torn tail. A count refusal must
+    // happen before any partition recovery is allowed to modify the file.
+    let mut bytes = std::fs::read(&wal).unwrap();
+    bytes.extend_from_slice(&[1, 2, 3]);
+    std::fs::write(&wal, &bytes).unwrap();
     let before = std::fs::read(root.join("STREAM")).unwrap();
     assert!(matches!(
         open(&root, 4).await,
@@ -60,6 +70,7 @@ async fn durable_partition_count_cannot_change_on_reopen() {
     ));
     assert_eq!(std::fs::read(root.join("STREAM")).unwrap(), before);
     assert!(!root.join("partition_3").exists());
+    assert_eq!(std::fs::read(&wal).unwrap(), bytes);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -75,6 +86,16 @@ async fn interrupted_creation_finishes_only_when_every_partition_has_no_frames()
             }
             log.close().unwrap();
         }
+        let snapshots: Vec<_> = [0, 2, 9]
+            .into_iter()
+            .map(|p| {
+                let wal = root
+                    .join(format!("partition_{p}"))
+                    .join(prkdb_core::wal::segment::segment_file_name(1));
+                let bytes = std::fs::read(&wal).unwrap();
+                (wal, bytes)
+            })
+            .collect();
         let result = open(&root, 3).await;
         if nonempty {
             let error = result.err().unwrap().to_string();
@@ -84,11 +105,36 @@ async fn interrupted_creation_finishes_only_when_every_partition_has_no_frames()
             );
             assert!(!root.join("STREAM").exists());
             assert!(!root.join("partition_1").exists());
+            for (wal, bytes) in snapshots {
+                assert_eq!(std::fs::read(wal).unwrap(), bytes);
+            }
         } else {
             result.unwrap().close().unwrap();
             assert!(root.join("STREAM").exists());
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invalid_stream_name_preserves_existing_data_and_torn_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("Orders");
+    let log = StreamLog::open(StreamConfig::new(&root)).await.unwrap();
+    log.append(rec()).await.unwrap();
+    log.close().unwrap();
+    let wal = root.join(prkdb_core::wal::segment::segment_file_name(1));
+    let mut bytes = std::fs::read(&wal).unwrap();
+    bytes.extend_from_slice(&[1, 2, 3]);
+    std::fs::write(&wal, &bytes).unwrap();
+    let marker = std::fs::read(root.join("FORMAT")).unwrap();
+    assert!(matches!(
+        open(&root, 3).await,
+        Err(StorageError::Validation(_))
+    ));
+    assert_eq!(std::fs::read(wal).unwrap(), bytes);
+    assert_eq!(std::fs::read(root.join("FORMAT")).unwrap(), marker);
+    assert!(!root.join("STREAM").exists());
+    assert!(!root.join("partition_0").exists());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -221,6 +267,7 @@ async fn published_manifest_cannot_silently_recreate_a_missing_partition() {
 
 struct TraceVfs {
     events: Arc<Mutex<Vec<String>>>,
+    synced_dirs: Arc<Mutex<Vec<std::path::PathBuf>>>,
     fail: Option<&'static str>,
 }
 struct TraceFile {
@@ -293,6 +340,7 @@ impl Vfs for TraceVfs {
         StdVfs.exists(p)
     }
     fn sync_dir(&self, p: &Path) -> std::io::Result<()> {
+        self.synced_dirs.lock().unwrap().push(p.to_path_buf());
         if p.join("STREAM").exists() {
             self.events.lock().unwrap().push("root sync".into());
             if self.fail == Some("dir") {
@@ -315,6 +363,7 @@ async fn manifest_publication_orders_sync_rename_directory_sync_and_propagates_f
         let result = PartitionedStream::open_with_vfs(
             Arc::new(TraceVfs {
                 events: events.clone(),
+                synced_dirs: Arc::default(),
                 fail,
             }),
             &root,
@@ -335,5 +384,43 @@ async fn manifest_publication_orders_sync_rename_directory_sync_and_propagates_f
         } else {
             result.unwrap().close().unwrap();
         }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn durable_append_under_two_new_ancestors_syncs_every_directory_entry() {
+    // Vfs::create_dir_all creates unsynced entries. A durable file below a new
+    // directory survives power loss only when the directory's parent was synced.
+    // Record every directory sync through the real open/append path and require
+    // all three newly created directory entries to be durable before the ack.
+    let dir = tempfile::tempdir().unwrap();
+    let outer = dir.path().join("outer");
+    let inner = outer.join("inner");
+    let root = inner.join("orders");
+    let synced_dirs = Arc::new(Mutex::new(vec![]));
+    let cfg = StreamConfig::new(&root);
+    assert_eq!(cfg.wal.sync_mode, prkdb_core::wal::SyncMode::Durable);
+    let stream = PartitionedStream::open_with_vfs(
+        Arc::new(TraceVfs {
+            events: Arc::default(),
+            synced_dirs: synced_dirs.clone(),
+            fail: None,
+        }),
+        &root,
+        3,
+        cfg,
+    )
+    .await
+    .unwrap();
+    let (partition, ack) = stream.append(Route::Partition(0), rec()).await.unwrap();
+    assert!(stream.partition(partition).unwrap().durable_end() > ack.last());
+    let synced = synced_dirs.lock().unwrap().clone();
+    stream.close().unwrap();
+    for created in [&outer, &inner, &root] {
+        assert!(
+            synced.iter().any(|p| Some(p.as_path()) == created.parent()),
+            "acknowledged Durable data under {} can be lost: parent {} was not synced; syncs: {synced:?}",
+            created.display(), created.parent().unwrap().display()
+        );
     }
 }
