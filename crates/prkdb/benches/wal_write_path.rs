@@ -301,6 +301,7 @@ fn open_wal(dir: &Path, sync_mode: SyncMode) -> Target {
         segment_bytes: 256 * 1024 * 1024,
         max_batch_bytes: 16 * 1024 * 1024,
         max_queued_bytes: 64 * 1024 * 1024,
+        front_release: prkdb_core::wal::FrontRelease::ElidedOnly,
     };
     let (wal, _) = Wal::open(Arc::new(StdVfs), dir, o, 1, &mut |_, _, _| Ok(())).expect("wal open");
     Target::Wal(wal)

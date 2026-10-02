@@ -12,6 +12,7 @@ use crate::wal::frame::{
 };
 use crate::wal::WalError;
 use std::io;
+use std::ops::ControlFlow;
 use std::path::Path;
 
 pub const SEGMENT_MAGIC: [u8; 8] = *b"PRKDBWAL";
@@ -55,12 +56,20 @@ pub struct SegmentScan {
     pub valid_len: u64,
     pub file_len: u64,
     /// Where and why the scan stopped before `file_len`; `None` if every byte was a good
-    /// frame.
+    /// frame, or if the visitor stopped the scan.
     pub stopped: Option<(u64, FrameFault)>,
+    /// The visitor returned `ControlFlow::Break`. `next_lsn` and `valid_len` then point
+    /// just past the frame it stopped at, and the bytes after it were not checked.
+    pub stopped_by_visitor: bool,
 }
 
 /// Callback `scan_segment` invokes for each good frame it finds.
 pub type ScanVisitor<'a> = dyn FnMut(RecordLoc, FrameKind, &[u8]) -> Result<(), WalError> + 'a;
+
+/// A visitor that can stop a scan early: `ControlFlow::Break` ends it after the frame it
+/// was given (Task 2.15b.1, a bounded read never decodes the whole tail).
+pub type ScanFlowVisitor<'a> =
+    dyn FnMut(RecordLoc, FrameKind, &[u8]) -> Result<ControlFlow<()>, WalError> + 'a;
 
 /// Where a frame lives, as handed to the visitor and stored in indexes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -168,12 +177,85 @@ pub fn scan_segment(
 ) -> Result<SegmentScan, WalError> {
     read_header(file, path, first_lsn)?;
     let file_len = file.len()?;
+    scan_frames(
+        file,
+        path,
+        file_len,
+        (first_lsn, SEGMENT_HEADER_LEN),
+        first_lsn,
+        &mut |loc, kind, payload| visit(loc, kind, payload).map(|()| ControlFlow::Continue(())),
+    )
+}
 
+/// [`scan_segment`] with a visitor that can stop the scan early
+/// (`SegmentScan::stopped_by_visitor`).
+pub fn scan_segment_flow(
+    file: &dyn VfsFile,
+    path: &Path,
+    first_lsn: Lsn,
+    visit: &mut ScanFlowVisitor<'_>,
+) -> Result<SegmentScan, WalError> {
+    read_header(file, path, first_lsn)?;
+    let file_len = file.len()?;
+    scan_frames(
+        file,
+        path,
+        file_len,
+        (first_lsn, SEGMENT_HEADER_LEN),
+        first_lsn,
+        visit,
+    )
+}
+
+/// [`scan_segment_flow`] from a known frame boundary instead of the first frame: `start`
+/// is `(lsn, byte offset)` of a frame in this segment, as a sparse offset index records
+/// it (Task 2.15b.1, design note §6.2). The header is still verified. LSN continuity is
+/// checked from `start.0`, so a start that is not that frame's boundary ends the scan
+/// with a fault in `stopped` (`LsnGap`, `BadCrc`, ...), never a visit.
+///
+/// A start inside the header, before `first_lsn`, or past the end of the file is
+/// `CorruptSegment`: the index that supplied it no longer matches the file. A start at
+/// exactly the end of the file visits nothing.
+pub fn scan_segment_from(
+    file: &dyn VfsFile,
+    path: &Path,
+    first_lsn: Lsn,
+    start: (Lsn, u64),
+    visit: &mut ScanFlowVisitor<'_>,
+) -> Result<SegmentScan, WalError> {
+    read_header(file, path, first_lsn)?;
+    let file_len = file.len()?;
+    let (lsn, offset) = start;
+    if lsn < first_lsn || offset < SEGMENT_HEADER_LEN || offset > file_len {
+        return Err(WalError::CorruptSegment {
+            path: path.to_path_buf(),
+            offset,
+            reason: format!(
+                "a scan cannot start at lsn {lsn}, byte {offset}: the segment starts at lsn \
+                 {first_lsn}, its frames at byte {SEGMENT_HEADER_LEN}, and it is {file_len} \
+                 bytes long"
+            ),
+        });
+    }
+    scan_frames(file, path, file_len, start, first_lsn, visit)
+}
+
+/// The frame loop shared by the scans: from `start = (lsn, offset)` to `file_len`, in
+/// `SCAN_CHUNK`-sized reads. The header was already verified.
+fn scan_frames(
+    file: &dyn VfsFile,
+    path: &Path,
+    file_len: u64,
+    start: (Lsn, u64),
+    first_lsn: Lsn,
+    visit: &mut ScanFlowVisitor<'_>,
+) -> Result<SegmentScan, WalError> {
     let mut buf: Vec<u8> = Vec::new();
-    let mut buf_pos = SEGMENT_HEADER_LEN;
-    let mut cursor = SEGMENT_HEADER_LEN;
-    let mut expected_lsn = first_lsn;
+    let mut buf_pos = start.1;
+    let mut cursor = start.1;
+    let mut expected_lsn = start.0;
     let mut stopped: Option<(u64, FrameFault)> = None;
+    let mut stopped_by_visitor = false;
 
     loop {
         let local = (cursor - buf_pos) as usize;
@@ -227,9 +309,13 @@ pub fn scan_segment(
                     offset: cursor,
                     payload_len: payload.len() as u32,
                 };
-                visit(loc, kind, payload)?;
+                let flow = visit(loc, kind, payload)?;
                 expected_lsn += 1;
                 cursor += frame_len as u64;
+                if flow.is_break() {
+                    stopped_by_visitor = true;
+                    break;
+                }
 
                 // Bound memory use: drop consumed bytes once the window grows past a
                 // chunk, rather than keeping the whole segment buffered.
@@ -255,6 +341,7 @@ pub fn scan_segment(
         valid_len: cursor,
         file_len,
         stopped,
+        stopped_by_visitor,
     })
 }
 

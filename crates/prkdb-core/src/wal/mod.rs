@@ -11,7 +11,7 @@ pub mod segment;
 pub use compression::{
     compress, decompress, decompress_bounded, CompressionConfig, CompressionError, CompressionType,
 };
-pub use config::{CompactionPolicy, SyncMode, WalConfig};
+pub use config::{CompactionPolicy, FrontRelease, SyncMode, WalConfig};
 pub use frame::Lsn;
 pub use log::{
     CommitHook, PendingAppend, RecoveryReport, Reservation, SealedSegment, Wal, WalHealth,
@@ -19,7 +19,7 @@ pub use log::{
 };
 pub use log_record::{LogOperation, LogRecord};
 pub use log_state::LogState;
-pub use segment::RecordLoc;
+pub use segment::{RecordLoc, ScanFlowVisitor, ScanVisitor};
 
 fn frame_kind_note(frame_kind: &Option<(u64, u8)>) -> String {
     match frame_kind {
