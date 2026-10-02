@@ -60,8 +60,11 @@ LIMIT = 0.85
 # measured) plus the log sync compaction forces in Fast mode (~0.4 ms p99 for a small
 # write) sees ~3 ms, about 45x. K = 50 admits that and still fails a put path that stalls
 # for a whole compaction pass (many segments, tens to hundreds of ms) in any cell.
-# Calibrate on the next wal-bench probe: K = about 2x the worst per-cell ratio observed,
-# not below the stall bound above, with the raw rows recorded in the decision record.
+# K is a stall detector, not a latency target: passing it does not show the tail latency
+# under compaction is good. Do not set K from what the implementation happens to measure.
+# Task 2.25 Step 1b(d) first sets an absolute latency budget for puts during compaction
+# (p99 and p99.9), then judges repeated Linux measurements against it. K is tightened to
+# match that budget, never loosened to fit a measurement.
 COMPACTION_P99_K = 50.0
 HERE = Path(__file__).resolve().parent
 FIXTURE = HERE / "testdata" / "wal_bench_sample.md"
