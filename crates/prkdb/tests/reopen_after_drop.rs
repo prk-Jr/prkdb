@@ -22,7 +22,7 @@ use prkdb_core::wal::{SyncMode, WalConfig};
 use prkdb_types::error::StorageError;
 use prkdb_types::storage::StorageAdapter;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -207,4 +207,147 @@ async fn ttl_storage_releases_the_directory_when_dropped() {
         drop(ttl);
         drop(adapter);
     }
+}
+
+/// How [`GatedDeletes`] holds its first delete.
+enum Hold {
+    /// Blocks the worker thread until the test sends: the delete then completes without
+    /// ever yielding, so only a check inside the tick can stop the rest of it.
+    Block(std::sync::Mutex<std::sync::mpsc::Receiver<()>>),
+    /// Parks on a signal the test never sends.
+    Park(Arc<tokio::sync::Notify>),
+}
+
+/// A storage whose first delete is held (see [`Hold`]), that counts its deletes and
+/// reports its own drop.
+struct GatedDeletes {
+    deletes: Arc<AtomicUsize>,
+    first_delete: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    hold: Hold,
+    held_delete_completed: Arc<AtomicBool>,
+    dropped: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+impl GatedDeletes {
+    fn new(
+        hold: Hold,
+    ) -> (
+        Arc<Self>,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let storage = Arc::new(Self {
+            deletes: Arc::default(),
+            first_delete: std::sync::Mutex::new(Some(first_tx)),
+            hold,
+            held_delete_completed: Arc::default(),
+            dropped: std::sync::Mutex::new(Some(dropped_tx)),
+        });
+        (storage, first_rx, dropped_rx)
+    }
+}
+
+impl Drop for GatedDeletes {
+    fn drop(&mut self) {
+        if let Some(tx) = self.dropped.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl StorageAdapter for GatedDeletes {
+    async fn get(&self, _: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        Ok(None)
+    }
+    async fn put(&self, _: &[u8], _: &[u8]) -> Result<(), StorageError> {
+        Ok(())
+    }
+    async fn delete(&self, _: &[u8]) -> Result<(), StorageError> {
+        if self.deletes.fetch_add(1, Ordering::SeqCst) == 0 {
+            if let Some(tx) = self.first_delete.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            match &self.hold {
+                Hold::Block(go) => {
+                    let _ = go.lock().unwrap().recv();
+                }
+                Hold::Park(signal) => signal.notified().await,
+            }
+            self.held_delete_completed.store(true, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
+const WAIT: Duration = Duration::from_secs(20);
+
+/// A tick deleting many expired keys, with deletes that never yield, stops at the next key
+/// once the `TtlStorage` is dropped, and releases the adapter: an abort alone takes effect
+/// only at the task's next yield, after the whole tick.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ttl_storage_dropped_mid_tick_stops_at_the_next_key_and_releases_the_adapter() {
+    const KEYS: usize = 1000;
+    let (go_tx, go_rx) = std::sync::mpsc::channel();
+    let (storage, first_delete, dropped) =
+        GatedDeletes::new(Hold::Block(std::sync::Mutex::new(go_rx)));
+    let mut ttl = TtlStorage::new(storage.clone());
+    for i in 0..KEYS {
+        ttl.put_with_ttl(format!("k{i}").as_bytes(), b"v", Duration::ZERO)
+            .await
+            .unwrap();
+    }
+    ttl.start_cleanup(Duration::from_millis(1));
+    tokio::time::timeout(WAIT, first_delete)
+        .await
+        .expect("the tick reaches its first delete")
+        .unwrap();
+
+    let deletes = storage.deletes.clone();
+    drop(ttl);
+    drop(storage);
+    go_tx.send(()).unwrap();
+    tokio::time::timeout(WAIT, dropped)
+        .await
+        .expect("the adapter is released after the drop")
+        .unwrap();
+    // The held delete and its key's metadata delete, no more.
+    let deletes = deletes.load(Ordering::SeqCst);
+    assert!(
+        deletes <= 2,
+        "{deletes} of {} deletes ran after the TtlStorage was dropped",
+        2 * KEYS
+    );
+}
+
+/// Dropped while the tick is parked in a delete that never completes: the adapter is
+/// released without that delete completing. `Drop` cannot join the task; it stops it, and
+/// the runtime drops the parked delete (and the adapter it holds) when it next runs the
+/// cancelled task.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ttl_storage_dropped_during_a_parked_delete_releases_the_adapter() {
+    let signal = Arc::new(tokio::sync::Notify::new());
+    let (storage, first_delete, dropped) = GatedDeletes::new(Hold::Park(signal.clone()));
+    let mut ttl = TtlStorage::new(storage.clone());
+    ttl.put_with_ttl(b"k", b"v", Duration::ZERO).await.unwrap();
+    ttl.start_cleanup(Duration::from_millis(1));
+    tokio::time::timeout(WAIT, first_delete)
+        .await
+        .expect("the tick reaches its first delete")
+        .unwrap();
+
+    let completed = storage.held_delete_completed.clone();
+    drop(ttl);
+    drop(storage);
+    tokio::time::timeout(WAIT, dropped)
+        .await
+        .expect("the adapter is released after the drop")
+        .unwrap();
+    assert!(
+        !completed.load(Ordering::SeqCst),
+        "the held delete never completed"
+    );
+    drop(signal);
 }
