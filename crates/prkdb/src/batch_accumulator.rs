@@ -27,7 +27,16 @@
 //! # When the worker stops
 //!
 //! When the last handle is dropped the worker executes what is left and logs, with
-//! `tracing::error!`, every failure no flush reported. If the worker panics (the executor
+//! `tracing::error!`, every failure no flush reported.
+//!
+//! The executor usually holds the database (`CollectionHandle::with_batching` gives it a
+//! `PrkDb`), and the worker drops it only when it notices the closed channel, on a runtime
+//! thread, some time later. So when nothing is left to execute (every item added has been
+//! executed to completion, which a `flush` that returned guarantees for the items before
+//! it), dropping the last handle takes the executor out of the worker and drops it right
+//! there: the database it held is released before the drop returns (STO-12). Dropping the
+//! last handle with items still unexecuted leaves the executor to the worker, which needs
+//! it to write them; flush first for a prompt release. If the worker panics (the executor
 //! panicked), later `add_put` and `flush` calls fail with "batch accumulator worker stopped"
 //! and the panic message is not carried over. If the runtime shuts down before the worker
 //! has drained the channel, the queued items are lost without a log line.
@@ -38,6 +47,7 @@ use prkdb_types::error::StorageError;
 use serde::Serialize;
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::time::{Duration, Instant};
@@ -123,6 +133,21 @@ pub struct BatchAccumulator<C: Collection> {
     /// Permits in `budget`: the most one item may be charged.
     max_permits: usize,
     flushes: Arc<Flushes>,
+    /// Items added and not yet executed to completion (the executor's future for their
+    /// batch has finished and been dropped).
+    unexecuted: Arc<AtomicU64>,
+    /// Takes the executor out of the worker and drops it (see the module docs).
+    release_executor: Box<dyn Fn() + Send + Sync>,
+}
+
+impl<C: Collection> Drop for BatchAccumulator<C> {
+    fn drop(&mut self) {
+        // The last handle: no item can be added after this. If every one added has been
+        // executed, the worker will never call the executor again.
+        if self.unexecuted.load(Ordering::Acquire) == 0 {
+            (self.release_executor)();
+        }
+    }
 }
 
 fn stopped() -> StorageError {
@@ -140,8 +165,13 @@ impl<C: Collection> BatchAccumulator<C> {
         // `acquire_many_owned` takes a u32 and a zero budget would admit nothing.
         let max_permits = config.max_buffer_bytes.clamp(1, u32::MAX as usize);
         let flushes = Arc::new(Flushes::default());
+        let unexecuted = Arc::new(AtomicU64::new(0));
+        let executor = Arc::new(parking_lot::Mutex::new(Some(executor)));
+        let slot = Arc::clone(&executor);
+        let release_executor = Box::new(move || drop(slot.lock().take()));
         let worker = Worker {
             executor,
+            unexecuted: Arc::clone(&unexecuted),
             linger: Duration::from_millis(config.linger_ms),
             max_batch_size: config.max_batch_size.max(1),
             batch: Vec::new(),
@@ -154,6 +184,8 @@ impl<C: Collection> BatchAccumulator<C> {
             budget: Arc::new(Semaphore::new(max_permits)),
             max_permits,
             flushes,
+            unexecuted,
+            release_executor,
         }
     }
 
@@ -169,7 +201,12 @@ impl<C: Collection> BatchAccumulator<C> {
                 .await
                 .map_err(|_| StorageError::Internal("batch accumulator buffer closed".into()))?,
         };
-        self.tx.send(Msg::Item(item, permit)).map_err(|_| stopped())
+        // Counted before it is sent, so the worker never executes an uncounted item.
+        self.unexecuted.fetch_add(1, Ordering::AcqRel);
+        self.tx.send(Msg::Item(item, permit)).map_err(|_| {
+            self.unexecuted.fetch_sub(1, Ordering::AcqRel);
+            stopped()
+        })
     }
 
     /// Execute every PUT buffered before this call and wait for it. Fails if a batch
@@ -192,7 +229,9 @@ impl<C: Collection> BatchAccumulator<C> {
 }
 
 struct Worker<C, F> {
-    executor: F,
+    /// `None` once the last handle released it (nothing was left to execute).
+    executor: Arc<parking_lot::Mutex<Option<F>>>,
+    unexecuted: Arc<AtomicU64>,
     linger: Duration,
     max_batch_size: usize,
     batch: Vec<C>,
@@ -269,7 +308,21 @@ where
             return;
         }
         let batch = std::mem::take(&mut self.batch);
-        if let Err(err) = (self.executor)(batch).await {
+        let items = batch.len() as u64;
+        // The lock is held only to start the future, never across the await.
+        let started = self
+            .executor
+            .lock()
+            .as_ref()
+            .map(|executor| executor(batch));
+        let result = match started {
+            Some(future) => future.await,
+            // Unreachable: the executor is released only when no item is unexecuted.
+            None => Err(stopped()),
+        };
+        // After the future (and whatever it held) is dropped.
+        self.unexecuted.fetch_sub(items, Ordering::AcqRel);
+        if let Err(err) = result {
             self.flushes.lock().failures.push_back((self.received, err));
         }
     }
