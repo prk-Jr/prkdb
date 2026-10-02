@@ -936,14 +936,19 @@ impl Wal {
     /// opens no earlier segment (Task 2.15b.1); frames below `from` in that segment are
     /// still decoded and skipped.
     ///
-    /// M3: a frame on the *active* segment past `cap` is never visited, and ends the scan
-    /// (frames are in LSN order). Earlier (sealed) segments are always fully durable by
-    /// construction (`roll_segment` syncs the old segment before switching), so the cap
-    /// applies only to the last one. A scan fault on an earlier segment is corruption and
-    /// returns `CorruptSegment`; a fault on the active segment's tail is expected (a write
-    /// in flight, or a crash not yet recovered from) and is silently bounded by `cap`
-    /// regardless of whether `scan_segment` itself reports a fault. A CRC-valid frame of an
-    /// unknown kind is `UnsupportedFormat` in any segment (STO-11).
+    /// M3: a frame past `cap` is never visited, and ends the scan (frames are in LSN
+    /// order). The cap is checked in every segment, not only the last one listed: `cap`
+    /// is sampled before the segments are listed, and a roll in between seals the segment
+    /// it was sampled against (STO-14). It costs the same one comparison per frame.
+    ///
+    /// Every segment but the last one listed is sealed, and a sealed segment is whole: a
+    /// scan fault in it, or an end short of the LSN the next segment starts at (a
+    /// segment cut exactly between two frames scans without a fault, STO-13), is
+    /// `CorruptSegment`. That end check runs once per segment the scan reads to its end.
+    /// A fault on the last segment's tail is expected (a write in flight, or a crash not
+    /// yet recovered from) and is silently bounded by `cap` regardless of whether
+    /// `scan_segment` itself reports a fault. A CRC-valid frame of an unknown kind is
+    /// `UnsupportedFormat` in any segment (STO-11).
     fn scan_from_capped(
         &self,
         from: Lsn,
@@ -961,16 +966,16 @@ impl Wal {
                 .map(|(k, v)| (*k, v.file.clone()))
                 .collect()
         };
-        let last_idx = segments.len().saturating_sub(1);
         for (idx, (first_lsn, file)) in segments.iter().enumerate() {
-            let is_last = idx == last_idx;
             let path = self.shared.dir.join(segment_file_name(*first_lsn));
             let mut visitor_broke = false;
+            let mut capped = false;
             let scan = scan_segment_flow(&**file, &path, *first_lsn, &mut |loc, kind, payload| {
                 if loc.lsn < from {
                     return Ok(ControlFlow::Continue(()));
                 }
-                if is_last && loc.lsn > cap {
+                if loc.lsn > cap {
+                    capped = true;
                     return Ok(ControlFlow::Break(()));
                 }
                 let flow = visit(loc, kind, payload)?;
@@ -980,14 +985,12 @@ impl Wal {
             if visitor_broke {
                 return Ok(ControlFlow::Break(()));
             }
-            if let Some((offset, fault)) = scan.stopped {
-                if !is_last {
-                    return Err(WalError::CorruptSegment {
-                        path: path.clone(),
-                        offset,
-                        reason: format!("{fault:?}"),
-                    });
-                }
+            if capped {
+                // Every later frame is past the cap too.
+                break;
+            }
+            if let Some((next_first, _)) = segments.get(idx + 1) {
+                check_whole(&path, &scan, *next_first)?;
             }
         }
         Ok(ControlFlow::Continue(()))
