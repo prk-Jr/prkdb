@@ -787,8 +787,12 @@ regression_tests = ["script:scripts/wal_fast_rule.py", "script:scripts/check_per
 # ignored rep counts, and nothing enforced the compaction p99 the bench claimed was gated
 # (K = 50, uncalibrated until a probe runs the compaction cells); 5c83909 the full gate
 # run never ran these self-tests; 8474c33 any added perf_note waived every regression;
-# 5b0ac78 no mutation job covered prkdb-core's WAL.
-changes = ["72d1c75", "a7a4c8c", "5c83909", "8474c33", "5b0ac78"]
+# 5b0ac78 no mutation job covered prkdb-core's WAL. a1c13d6 closes a further
+# inventory hole: missing/malformed instruction summaries cannot silently mark an
+# existing benchmark new. extract --self-test covers empty and partial inventories.
+# Enabling mutation CI exposed 106 core survivors on d8248e5; its checks are working,
+# but those behavioral coverage gaps remain required work before Task 2.25's gate.
+changes = ["72d1c75", "a7a4c8c", "5c83909", "8474c33", "5b0ac78", "a1c13d6"]
 
 [[finding]]
 id = "TST-13"
@@ -884,8 +888,8 @@ evidence = [
   "crates/prkdb/src/batch_accumulator.rs:151",
   "crates/prkdb/src/ttl.rs:180-184",
 ]
-regression_tests = ["test:crates/prkdb-core/src/vfs/std_vfs.rs::dropping_the_guard_releases_the_lock_while_a_duplicate_descriptor_is_open", "test:crates/prkdb/tests/reopen_after_drop.rs::a_wal_adapter_reopens_right_after_its_drop_with_compaction_running", "test:crates/prkdb/tests/reopen_after_drop.rs::a_prkdb_reopens_right_after_its_drop", "test:crates/prkdb/tests/reopen_after_drop.rs::a_flushed_batching_handle_releases_the_directory_when_dropped", "test:crates/prkdb/tests/reopen_after_drop.rs::ttl_storage_releases_the_directory_when_dropped", "test:crates/prkdb/tests/reopen_after_drop.rs::ttl_storage_dropped_mid_tick_stops_at_the_next_key_and_releases_the_adapter", "test:crates/prkdb/tests/reopen_after_drop.rs::ttl_storage_dropped_during_a_parked_delete_releases_the_adapter", "test:crates/prkdb-cli/tests/backup_restore.rs::backup_then_restore_preserves_every_value", "test:crates/prkdb-core/src/vfs/std_vfs.rs::a_reused_file_identity_is_not_refused_while_the_old_guard_retires"]
-changes = ["c6a93e5", "8bf7c25", "0d3bfbe", "3307b28", "704cea9", "9b7bbdb", "bdb707c"]
+regression_tests = ["test:crates/prkdb-core/src/vfs/std_vfs.rs::dropping_the_guard_releases_the_lock_while_a_duplicate_descriptor_is_open", "test:crates/prkdb/tests/reopen_after_drop.rs::a_wal_adapter_reopens_right_after_its_drop_with_compaction_running", "test:crates/prkdb/tests/reopen_after_drop.rs::a_prkdb_reopens_right_after_its_drop", "test:crates/prkdb/tests/reopen_after_drop.rs::a_flushed_batching_handle_releases_the_directory_when_dropped", "test:crates/prkdb/tests/reopen_after_drop.rs::ttl_storage_releases_the_directory_when_dropped", "test:crates/prkdb/tests/reopen_after_drop.rs::ttl_storage_dropped_mid_tick_stops_at_the_next_key_and_releases_the_adapter", "test:crates/prkdb/tests/reopen_after_drop.rs::ttl_storage_dropped_during_a_parked_delete_releases_the_adapter", "test:crates/prkdb-cli/tests/backup_restore.rs::backup_then_restore_preserves_every_value", "test:crates/prkdb-core/src/vfs/std_vfs.rs::a_reused_file_identity_is_not_refused_while_the_old_guard_retires", "test:crates/prkdb/src/indexed_storage.rs::the_test_directory_outlives_its_open_adapter"]
+changes = ["c6a93e5", "8bf7c25", "0d3bfbe", "3307b28", "704cea9", "9b7bbdb", "bdb707c", "dc4588f"]
 
 [[finding]]
 id = "STO-14"

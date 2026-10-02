@@ -6959,6 +6959,18 @@ exit "$fail"
 
 ### Task 2.25: Phase 2 durable baseline and gate
 
+**Carried over from the d8248e5 Linux CI review:** run 37029506251's ten WAL-core
+mutation shards reported 106 surviving mutations (77 log, 18 segment, 5 compression,
+3 batch, 2 log-state, 1 frame). Fix actual defects and add deterministic tests for
+shutdown durability, admission/poison accounting, short reads and scan boundaries,
+metadata/recovery helpers, health/watch notifications and codec bounds. Acceptance:
+the corresponding exact mutation replays are caught and the unchanged CI mutation
+gate passes on the assembled branch. Equivalence requires an individual proof;
+blanket exclusions, weaker thresholds and timeouts are not substitutes for coverage.
+The short-read reproduction is assigned to `wip-wal-short-read` (STO-19 reserved);
+shutdown durability to `wip-wal-shutdown-tests`. Remaining slices must be completed
+before the phase gate. Fixing commit/status: open until the individual work lands.
+
 - [ ] **Step 1: Baseline, both modes, without an environment variable.** Spec §6.1 wants every metric in Durable and Fast. Each §6.1 bench builds its own `WalConfig`, so the mode is chosen in the bench source, per benchmark id, and one run captures both:
 
 | §6.1 bench | Storage it builds today | Durable vs Fast |
