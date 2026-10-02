@@ -22,91 +22,68 @@
 //! # }
 //! ```
 
-use std::collections::{HashMap, VecDeque};
+use hashlink::LinkedHashMap;
 use std::hash::Hash;
-use std::sync::RwLock;
+use std::sync::Mutex;
 
-/// Simple LRU cache with configurable capacity
+/// LRU cache with configurable capacity.
+///
+/// Reads and writes both count as use; the least recently used entry is evicted when a new
+/// key would exceed the capacity. Every operation is O(1). A capacity of 0 behaves as 1.
 pub struct LruCache<K, V> {
     /// Maximum number of entries
     capacity: usize,
-    /// Cached items
-    cache: RwLock<LruCacheInner<K, V>>,
-}
-
-struct LruCacheInner<K, V> {
-    /// Key -> Value mapping
-    map: HashMap<K, V>,
-    /// Access order (most recent at back)
-    order: VecDeque<K>,
+    /// Cached items, least recently used first
+    cache: Mutex<LinkedHashMap<K, V>>,
 }
 
 impl<K: Eq + Hash + Clone, V: Clone> LruCache<K, V> {
     /// Create a new cache with the given capacity
     pub fn new(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
         Self {
             capacity,
-            cache: RwLock::new(LruCacheInner {
-                map: HashMap::with_capacity(capacity),
-                order: VecDeque::with_capacity(capacity),
-            }),
+            cache: Mutex::new(LinkedHashMap::with_capacity(capacity)),
         }
     }
 
-    /// Get a value from the cache
-    ///
-    /// Returns None if not cached. Does not update access order
-    /// (would require write lock, prefer simplicity).
+    fn lock(&self) -> std::sync::MutexGuard<'_, LinkedHashMap<K, V>> {
+        // A panic while holding the lock leaves the map structurally valid.
+        self.cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Get a value from the cache, marking it most recently used
     pub fn get(&self, key: &K) -> Option<V> {
-        let cache = self.cache.read().unwrap();
-        cache.map.get(key).cloned()
+        self.lock().to_back(key).map(|value| value.clone())
     }
 
-    /// Check if key is in cache
+    /// Check if key is in cache (does not change recency)
     pub fn contains(&self, key: &K) -> bool {
-        let cache = self.cache.read().unwrap();
-        cache.map.contains_key(key)
+        self.lock().contains_key(key)
     }
 
-    /// Put a value in the cache
+    /// Put a value in the cache, marking it most recently used
     pub fn put(&self, key: K, value: V) {
-        let mut cache = self.cache.write().unwrap();
-
-        // Remove old entry if exists
-        if cache.map.contains_key(&key) {
-            cache.order.retain(|k| k != &key);
+        let mut cache = self.lock();
+        let replaced = cache.insert(key, value);
+        if replaced.is_none() && cache.len() > self.capacity {
+            cache.pop_front();
         }
-
-        // Evict if at capacity
-        while cache.order.len() >= self.capacity {
-            if let Some(old_key) = cache.order.pop_front() {
-                cache.map.remove(&old_key);
-            }
-        }
-
-        // Insert new entry
-        cache.map.insert(key.clone(), value);
-        cache.order.push_back(key);
     }
 
     /// Remove a value from the cache
     pub fn remove(&self, key: &K) {
-        let mut cache = self.cache.write().unwrap();
-        cache.map.remove(key);
-        cache.order.retain(|k| k != key);
+        self.lock().remove(key);
     }
 
     /// Clear the cache
     pub fn clear(&self) {
-        let mut cache = self.cache.write().unwrap();
-        cache.map.clear();
-        cache.order.clear();
+        self.lock().clear();
     }
 
     /// Current number of cached items
     pub fn len(&self) -> usize {
-        let cache = self.cache.read().unwrap();
-        cache.map.len()
+        self.lock().len()
     }
 
     /// Check if cache is empty
@@ -121,9 +98,8 @@ impl<K: Eq + Hash + Clone, V: Clone> LruCache<K, V> {
 
     /// Get cache stats
     pub fn stats(&self) -> CacheStats {
-        let cache = self.cache.read().unwrap();
         CacheStats {
-            size: cache.map.len(),
+            size: self.len(),
             capacity: self.capacity,
         }
     }
@@ -240,6 +216,45 @@ mod tests {
         assert_eq!(cache.get(&1), None);
         assert_eq!(cache.get(&2), Some("two".to_string()));
         assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn a_zero_capacity_cache_holds_one_entry_instead_of_hanging() {
+        let cache = LruCache::<u64, String>::new(0);
+
+        cache.put(1, "one".to_string());
+        cache.put(2, "two".to_string());
+
+        assert_eq!(cache.get(&1), None);
+        assert_eq!(cache.get(&2), Some("two".to_string()));
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn a_read_makes_an_entry_most_recently_used() {
+        let cache = LruCache::<u64, String>::new(2);
+
+        cache.put(1, "one".to_string());
+        cache.put(2, "two".to_string());
+        cache.get(&1); // 2 is now the least recently used
+        cache.put(3, "three".to_string());
+
+        assert_eq!(cache.get(&1), Some("one".to_string()));
+        assert_eq!(cache.get(&2), None);
+        assert_eq!(cache.get(&3), Some("three".to_string()));
+    }
+
+    #[test]
+    fn an_overwrite_at_capacity_evicts_nothing() {
+        let cache = LruCache::<u64, String>::new(2);
+
+        cache.put(1, "one".to_string());
+        cache.put(2, "two".to_string());
+        cache.put(1, "ONE".to_string());
+
+        assert_eq!(cache.get(&1), Some("ONE".to_string()));
+        assert_eq!(cache.get(&2), Some("two".to_string()));
+        assert_eq!(cache.len(), 2);
     }
 
     #[test]
