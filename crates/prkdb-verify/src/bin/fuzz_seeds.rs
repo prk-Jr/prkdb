@@ -19,7 +19,7 @@ use prkdb::keys::{collection_prefix, encode_id, encode_key, encode_record_key, C
 use prkdb::raft::command::Command;
 use prkdb::raft::state_machine::{parse_snapshot, PrkDbStateMachine, StateMachine};
 use prkdb::storage::checkpoint::{checkpoint_dir, decode_checkpoint, encode_checkpoint};
-use prkdb::storage::format::{ensure_format, FORMAT_FILE};
+use prkdb::storage::format::{ensure_format, Kind, FORMAT_FILE};
 use prkdb::storage::snapshot::{
     CompressionType as SnapshotCompression, SnapshotHeader, SnapshotReader, SnapshotWriter,
     SNAPSHOT_VERSION,
@@ -423,7 +423,7 @@ fn key_seeds() -> Result<Vec<Vec<u8>>> {
 /// The marker this build writes, plus the variants the parser must accept.
 fn format_seeds() -> Result<Vec<Vec<u8>>> {
     let dir = tempfile::tempdir()?;
-    ensure_format(&StdVfs, dir.path())?;
+    ensure_format(&StdVfs, dir.path(), Kind::Kv)?;
     let current = std::fs::read(dir.path().join(FORMAT_FILE))?;
     Ok(vec![
         current,
