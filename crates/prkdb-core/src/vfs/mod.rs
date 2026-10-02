@@ -74,9 +74,29 @@ pub trait Vfs: Send + Sync {
 /// Holds a [`Vfs::lock_exclusive`] lock; dropping it releases the lock.
 pub trait LockGuard: Send + Sync {}
 
-/// Creates `dir` and its missing ancestors durably.
+/// Creates `dir` and every missing ancestor, one level at a time from the outermost, and
+/// syncs the parent of each directory it creates, so all the new directory entries are
+/// durable when this returns (STO-15). `create_dir_all` followed by a sync of `dir`'s
+/// parent alone leaves the entries of the outer new directories unsynced: a power cut
+/// can remove them, and everything written under them. Creates and syncs nothing when
+/// `dir` exists.
 pub fn create_dir_all_durable(vfs: &dyn Vfs, dir: &Path) -> io::Result<()> {
-    vfs.create_dir_all(dir)
+    let mut missing = Vec::new();
+    let mut current = Some(dir);
+    while let Some(d) = current.filter(|d| !d.as_os_str().is_empty()) {
+        if vfs.exists(d)? {
+            break;
+        }
+        missing.push(d);
+        current = d.parent();
+    }
+    for created in missing.into_iter().rev() {
+        vfs.create_dir_all(created)?;
+        if let Some(parent) = created.parent().filter(|p| !p.as_os_str().is_empty()) {
+            vfs.sync_dir(parent)?;
+        }
+    }
+    Ok(())
 }
 
 /// Shared conformance tests; every `Vfs` implementation must pass them.

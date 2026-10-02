@@ -211,17 +211,13 @@ pub fn check_format(vfs: &dyn Vfs, dir: &Path) -> Result<(), StorageError> {
 /// opens; anything else is refused before a single byte is written.
 ///
 /// "Empty" means [`holds_data`] is false: nothing but ignorable entries and a stale
-/// `FORMAT.tmp` from a crash during creation (removed first). The parent is synced before
-/// the marker is written, as `Wal::open` does, so the marker cannot outlive its own
+/// `FORMAT.tmp` from a crash during creation (removed first). An absent directory is
+/// created with its missing ancestors by `create_dir_all_durable`, as `Wal::open` does; an
+/// existing empty one has its parent synced. Either way the marker cannot outlive its own
 /// directory entry.
 pub fn ensure_format(vfs: &dyn Vfs, dir: &Path) -> Result<FormatMarker, StorageError> {
     if !vfs.exists(dir).map_err(|e| io_err(dir, e))? {
-        vfs.create_dir_all(dir).map_err(|e| io_err(dir, e))?;
-        if let Some(parent) = dir.parent() {
-            if vfs.exists(parent).map_err(|e| io_err(parent, e))? {
-                vfs.sync_dir(parent).map_err(|e| io_err(parent, e))?;
-            }
-        }
+        prkdb_core::vfs::create_dir_all_durable(vfs, dir).map_err(|e| io_err(dir, e))?;
         return write_format(vfs, dir);
     }
 

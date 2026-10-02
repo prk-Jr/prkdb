@@ -430,7 +430,9 @@ struct ActiveSegment {
 impl Wal {
     /// Opens and recovers.
     ///
-    /// Directory: if `dir` is absent, `create_dir_all(dir)` then `sync_dir` of its parent.
+    /// Directory: `dir` and any missing ancestors are created with
+    /// [`create_dir_all_durable`](crate::vfs::create_dir_all_durable), which syncs the
+    /// parent of every directory it creates (STO-15).
     /// Recovery: lists `*.wal`, sorts by first LSN, checks each segment's first LSN equals
     /// the previous segment's `next_lsn`, scans every segment, and calls `replay` for every
     /// frame with lsn >= `replay_from` in LSN order.
@@ -467,14 +469,7 @@ impl Wal {
         replay_from: Lsn,
         replay: &mut ScanVisitor<'_>,
     ) -> Result<(Wal, RecoveryReport), WalError> {
-        if !vfs.exists(dir)? {
-            vfs.create_dir_all(dir)?;
-            if let Some(parent) = dir.parent() {
-                if vfs.exists(parent)? {
-                    vfs.sync_dir(parent)?;
-                }
-            }
-        }
+        crate::vfs::create_dir_all_durable(&*vfs, dir)?;
 
         let mut segment_lsns: Vec<Lsn> = vfs
             .read_dir(dir)?

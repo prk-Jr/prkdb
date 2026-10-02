@@ -681,12 +681,11 @@ impl WalStorageAdapter {
 
         // The data-directory lock (STO-10), before anything else reads or writes the
         // directory, held until the last clone of this adapter drops (a refused open drops
-        // it on return). The directory must exist to hold `LOCK`; `ensure_format` syncs
-        // its parent before it writes `FORMAT` into a new one.
-        if !vfs.exists(&log_dir).map_err(|e| dir_err(&log_dir, e))? {
-            vfs.create_dir_all(&log_dir)
-                .map_err(|e| dir_err(&log_dir, e))?;
-        }
+        // it on return). The directory must exist to hold `LOCK`. It and every missing
+        // ancestor are created durably (the parent of each synced), so nothing written
+        // under them can be lost with an unsynced directory entry (STO-15).
+        prkdb_core::vfs::create_dir_all_durable(vfs.as_ref(), &log_dir)
+            .map_err(|e| dir_err(&log_dir, e))?;
         let lock = super::lock::lock_data_dir(vfs.as_ref(), &log_dir)?;
 
         // The open rules (spec 2b, D3): before `Wal::open`, so `FORMAT` exists before the
