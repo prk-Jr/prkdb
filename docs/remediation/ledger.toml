@@ -737,8 +737,11 @@ phase = 2
 status = "fixed"
 sources = ["pr-80-perf-gate-first-run"]
 evidence = ["crates/prkdb/benches/iai_hot_paths.rs", "https://github.com/prk-Jr/prkdb/actions/runs/35961505566", "https://github.com/prk-Jr/prkdb/actions/runs/36029778339", "https://github.com/prk-Jr/prkdb/actions/runs/36072484141", "https://github.com/prk-Jr/prkdb/actions/runs/36074847032"]
-regression_tests = ["script:scripts/check_perf_gate_floors.sh", "ci-job:perf-gate.yml/instruction-count-gate"]
-changes = ["ac19322", "b4cc02c", "77b5e3f", "fef4ebc"]
+regression_tests = ["script:scripts/check_perf_gate_floors.sh", "ci-job:perf-gate.yml/instruction-count-gate", "ci-job:ci.yml/perf-gate-floors"]
+# fb44332: the three bench_encode_record_key_* floors were 0.005x (29 Ir, printed "0.0x")
+# and could never fail; floors under 0.01x are now refused, and the floors check runs in
+# CI and pre-push instead of nowhere.
+changes = ["ac19322", "b4cc02c", "77b5e3f", "fef4ebc", "fb44332"]
 
 [[finding]]
 id = "TST-10"
@@ -749,6 +752,48 @@ phase = 4
 status = "open"
 sources = ["scheduled-ci-2026-09-25"]
 evidence = ["crates/prkdb/tests/peer_mtls.rs:438", "https://github.com/prk-Jr/prkdb/actions/runs/36118013335"]
+
+[[finding]]
+id = "TST-11"
+title = "Perf and CI gates pass vacuously: WAL bench rule fails open, compaction tail unenforced, blanket perf_note override, WAL core never mutated"
+area = "tests"
+severity = "high"
+phase = 2
+status = "fixed"
+sources = ["external-review-2026-10-02"]
+evidence = [
+  "scripts/wal_fast_rule.py:65",
+  "crates/prkdb/benches/wal_write_path.rs:14",
+  ".github/workflows/perf-gate.yml:223",
+  ".github/workflows/ci.yml:995",
+  ".github/workflows/ci.yml:208",
+  ".github/workflows/ci.yml:353",
+]
+regression_tests = ["script:scripts/wal_fast_rule.py", "script:scripts/check_perf_gate_floors.sh", "ci-job:ci.yml/perf-gate-floors", "ci-job:remediation-gate.yml/probe-wal-bench", "ci-job:ci.yml/mutants-core"]
+# 72d1c75 benchmark job built examples deleted in Task 2.9; a7a4c8c wal_fast_rule.py
+# compared only cells present on both sides, passed a zero reference as ratio inf and
+# ignored rep counts, and nothing enforced the compaction p99 the bench claimed was gated
+# (K = 50, uncalibrated until a probe runs the compaction cells); 5c83909 the full gate
+# run never ran these self-tests; 8474c33 any added perf_note waived every regression;
+# 5b0ac78 no mutation job covered prkdb-core's WAL.
+changes = ["72d1c75", "a7a4c8c", "5c83909", "8474c33", "5b0ac78"]
+
+[[finding]]
+id = "TST-12"
+title = "Wall-clock TTL and timeout tests flake when durable I/O or scheduling is slow"
+area = "tests"
+severity = "medium"
+phase = 2
+status = "fixed"
+sources = ["ci-2026-10-02"]
+evidence = ["crates/prkdb/src/ttl.rs:436", "https://github.com/prk-Jr/prkdb/actions/runs/36982178554"]
+regression_tests = [
+  "test:crates/prkdb/src/ttl.rs::test_ttl_expiration",
+  "test:crates/prkdb/src/ttl.rs::expiry_survives_a_fresh_wrapper_via_persisted_metadata",
+  "test:crates/prkdb/src/rate_limit.rs::test_rate_limiter_refill",
+  "test:crates/prkdb-core/src/batching/accumulator.rs::test_accumulator_flush_on_timeout",
+]
+changes = ["78263e2"]
 
 [[finding]]
 id = "STO-10"
