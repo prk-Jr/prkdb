@@ -14,16 +14,18 @@
 use prkdb_core::vfs::Vfs;
 use prkdb_core::wal::batch::Batch;
 use prkdb_core::wal::frame::{decode_frame, Decoded, FrameKind, FRAME_HEADER_LEN};
+use prkdb_core::wal::records::RecordBatch;
 use prkdb_core::wal::segment::{
     scan_segment, segment_file_name, write_segment_header, SEGMENT_HEADER_LEN,
 };
+use prkdb_core::wal::{CompressionConfig, CompressionType};
 use std::path::Path;
 
 /// A fuzz entry point: takes any bytes, must never panic.
 pub type EntryPoint = fn(&[u8]);
 
 /// Every entry point, by the name of its cargo-fuzz target and seed-corpus directory.
-pub const TARGETS: [(&str, EntryPoint); 10] = [
+pub const TARGETS: [(&str, EntryPoint); 11] = [
     ("frame_decode", frame_decode),
     ("batch_decode", batch_decode),
     ("segment_scan", segment_scan),
@@ -34,7 +36,22 @@ pub const TARGETS: [(&str, EntryPoint); 10] = [
     ("snapshot_restore", snapshot_restore),
     ("file_decode", file_decode),
     ("snapshot_entries", snapshot_entries),
+    ("records_decode", records_decode),
 ];
+
+/// Decodes a frame's payload as its kind says, as recovery (`Batch`) and a stream
+/// reader (`Records`) do.
+fn decode_payload(kind: FrameKind, payload: &[u8]) {
+    match kind {
+        FrameKind::Batch => {
+            let _ = Batch::decode(payload);
+        }
+        FrameKind::Records => {
+            let _ = RecordBatch::decode(payload);
+        }
+        FrameKind::Elided => {}
+    }
+}
 
 /// Recomputes the CRC of every frame in `buf` whose claimed length fits, walking frames
 /// by their length fields. A frame's CRC covers `lsn | kind | payload`, which are the
@@ -74,7 +91,7 @@ fn with_fixed(data: &[u8], fix: fn(&mut [u8]), run: impl Fn(&[u8])) {
 }
 
 /// Decodes consecutive frames from the start of `data` until one faults, and each good
-/// `Batch` frame's payload, as recovery does.
+/// frame's payload by its kind, as recovery and a stream reader do.
 pub fn frame_decode(data: &[u8]) {
     with_fixed(data, fix_frame_crcs, |buf| {
         let mut rest = buf;
@@ -85,9 +102,7 @@ pub fn frame_decode(data: &[u8]) {
             ..
         } = decode_frame(rest)
         {
-            if kind == FrameKind::Batch {
-                let _ = Batch::decode(payload);
-            }
+            decode_payload(kind, payload);
             rest = &rest[frame_len..];
         }
     });
@@ -100,7 +115,8 @@ pub fn batch_decode(data: &[u8]) {
 
 /// Scans `data` as a segment twice on an in-memory filesystem: once written after a
 /// valid header for segment 1 (the frame path), once as the whole file (the header path).
-/// The visitor decodes every `Batch` payload, as recovery's replay does.
+/// The visitor decodes every `Batch` and `Records` payload, as recovery's replay and a
+/// stream reader do.
 pub fn segment_scan(data: &[u8]) {
     with_fixed(data, fix_frame_crcs, |body| {
         scan_file(body, true);
@@ -125,9 +141,7 @@ fn scan_file(data: &[u8], header: bool) {
         file.write_at(body_at, data).expect("in-memory write");
     }
     let _ = scan_segment(file.as_ref(), &path, 1, &mut |_, kind, payload| {
-        if kind == FrameKind::Batch {
-            let _ = Batch::decode(payload);
-        }
+        decode_payload(kind, payload);
         Ok(())
     });
 }
@@ -210,4 +224,36 @@ pub fn snapshot_entries(data: &[u8]) {
         return;
     };
     while let Ok(Some(_)) = reader.next_entry() {}
+}
+
+/// `RecordBatch::decode` (Task 2.15b.2): a stream frame's record batch, including every
+/// decompressor. A batch that decodes must also agree with `peek_header`, and re-encode
+/// to itself: byte for byte when it was stored uncompressed (the encoding is canonical),
+/// and to a batch that decodes the same otherwise. A failed check panics, which is the
+/// crash libFuzzer reports.
+pub fn records_decode(data: &[u8]) {
+    let peeked = RecordBatch::peek_header(data);
+    let Ok(batch) = RecordBatch::decode(data) else {
+        return;
+    };
+    let count = batch.records.len() as u32;
+    assert_eq!(
+        peeked.ok(),
+        Some((batch.append_time_ms, count)),
+        "peek_header disagrees with decode"
+    );
+    let again = batch
+        .encode(&CompressionConfig::none())
+        .expect("a decoded batch re-encodes");
+    if data[1] == CompressionType::None as u8 {
+        assert_eq!(
+            again, data,
+            "an uncompressed batch re-encodes to other bytes"
+        );
+    }
+    assert_eq!(
+        RecordBatch::decode(&again).ok().as_ref(),
+        Some(&batch),
+        "a re-encoded batch decodes differently"
+    );
 }
