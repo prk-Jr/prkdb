@@ -81,6 +81,8 @@ metrics = []
 chaos = []
 
 [dev-dependencies]
+# Reuse the durability-model filesystem for stream retention crash tests.
+prkdb-verify = { path = "../prkdb-verify" }
 prkdb-orm-macros = { workspace = true }
 prkdb-storage-sled = { workspace = true }
 prkdb-storage-sql = { workspace = true }

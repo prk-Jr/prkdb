@@ -1,4 +1,5 @@
 use super::index::SparseIndex;
+use super::retention::RetentionTask;
 use super::{
     AppendAck, EventSeq, ReadBatch, ReadLimits, Record, StartAt, StoredRecord, StreamConfig,
     STREAM_LSN_LIMIT,
@@ -17,20 +18,23 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
-struct Inner {
+pub(super) struct Inner {
     // Field order matters: Wal's drop joins the writer before the lock is released.
-    wal: Wal,
-    index: Arc<RwLock<SparseIndex>>,
-    cfg: StreamConfig,
+    pub(super) wal: Wal,
+    pub(super) index: Arc<RwLock<SparseIndex>>,
+    pub(super) cfg: StreamConfig,
+    pub(super) retention_lock: RwLock<()>,
     _lock: Box<dyn LockGuard>,
 }
 
 /// A single append-only stream, holding its directory lock until all reads finish.
 pub struct StreamLog {
-    inner: Arc<Inner>,
+    // Stop scheduling before releasing the public handle's ownership of the WAL.
+    retention_task: RetentionTask,
+    pub(super) inner: Arc<Inner>,
 }
 
-fn position(lsn: u64) -> EventSeq {
+pub(super) fn position(lsn: u64) -> EventSeq {
     EventSeq::try_from_wal(lsn, 0).expect("stream recovery and writer enforce a representable end")
 }
 
@@ -87,17 +91,20 @@ impl StreamLog {
                 Ok(())
             })
             .map_err(open_error)?;
-            Ok(Self {
-                inner: Arc::new(Inner {
-                    wal,
-                    index,
-                    cfg,
-                    _lock: lock,
-                }),
-            })
+            Ok(Arc::new(Inner {
+                wal,
+                index,
+                cfg,
+                retention_lock: RwLock::new(()),
+                _lock: lock,
+            }))
         })
         .await
         .map_err(|e| StorageError::Internal(format!("stream open task: {e}")))?
+        .map(|inner| Self {
+            retention_task: RetentionTask::start(&inner),
+            inner,
+        })
     }
 
     /// Append one frame of 1..=65,536 records, with the default caller time bound.
@@ -249,6 +256,18 @@ impl StreamLog {
             });
         }
         tokio::task::spawn_blocking(move || {
+            // Retention can advance while this scan is queued. Revalidate before
+            // capturing the WAL handles, then protect the bounded scan. Shared
+            // guards permit concurrent scans and do not block appends.
+            let _retained = inner.retention_lock.read();
+            let current_floor = position(inner.wal.log_state().log_start);
+            if requested < current_floor {
+                return Err(StorageError::OffsetOutOfRange {
+                    requested: requested.raw(),
+                    floor: current_floor.raw(),
+                    end: position(inner.wal.acked_lsn() + 1).raw(),
+                });
+            }
             let mut records = Vec::new();
             let mut bytes = 0usize;
             let mut next = requested;
@@ -379,6 +398,7 @@ impl StreamLog {
     /// A cancelled blocking read keeps the writer and directory lock alive until it
     /// finishes, but queued writes are synced before this method returns successfully.
     pub fn close(self) -> Result<(), StorageError> {
+        self.retention_task.stop();
         match Arc::try_unwrap(self.inner) {
             Ok(inner) => {
                 let Inner { wal, _lock, .. } = inner;

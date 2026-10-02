@@ -9,6 +9,7 @@ const STRIDE: u64 = 64 * 1024;
 struct SegmentIndex {
     entries: Vec<(RecordLoc, i64)>,
     max_time: i64,
+    min_time: i64,
     previous_max_time: Option<i64>,
     last_lsn: Lsn,
 }
@@ -26,6 +27,7 @@ impl SparseIndex {
             .or_insert_with(|| SegmentIndex {
                 entries: Vec::new(),
                 max_time: time,
+                min_time: time,
                 previous_max_time: None,
                 last_lsn: 0,
             });
@@ -33,6 +35,7 @@ impl SparseIndex {
             segment.previous_max_time = Some(segment.max_time);
         }
         segment.max_time = segment.max_time.max(time);
+        segment.min_time = segment.min_time.min(time);
         segment.last_lsn = loc.lsn;
         if segment
             .entries
@@ -41,6 +44,18 @@ impl SparseIndex {
         {
             segment.entries.push((loc, time));
         }
+    }
+
+    pub fn max_time(&self, segment: Lsn) -> Option<i64> {
+        self.segments.get(&segment).map(|s| s.max_time)
+    }
+
+    pub fn min_time(&self, segment: Lsn) -> Option<i64> {
+        self.segments.get(&segment).map(|s| s.min_time)
+    }
+
+    pub fn remove_before(&mut self, floor: Lsn) {
+        self.segments = self.segments.split_off(&floor);
     }
 
     pub fn seek(&self, lsn: Lsn) -> Option<RecordLoc> {
