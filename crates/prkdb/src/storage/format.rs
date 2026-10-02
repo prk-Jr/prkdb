@@ -235,9 +235,9 @@ pub fn ensure_format(vfs: &dyn Vfs, dir: &Path) -> Result<FormatMarker, StorageE
     if vfs.exists(&tmp).map_err(|e| io_err(&tmp, e))? {
         vfs.remove(&tmp).map_err(|e| io_err(&tmp, e))?;
     }
-    // The directory may itself be new and unsynced (`PartitionManager` creates partition
-    // directories with plain `create_dir_all`): sync its parent so the marker cannot
-    // outlive its own directory entry.
+    // The directory may itself be new and unsynced (a caller may have created it with a
+    // plain `create_dir_all`): sync its parent so the marker cannot outlive its own
+    // directory entry.
     if let Some(parent) = dir.parent() {
         if vfs.exists(parent).map_err(|e| io_err(parent, e))? {
             vfs.sync_dir(parent).map_err(|e| io_err(parent, e))?;
