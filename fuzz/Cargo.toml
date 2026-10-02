@@ -1,0 +1,102 @@
+# cargo-fuzz targets (TST-07). Each target is one line calling an entry point in
+# `prkdb_verify::fuzz_entry`, where the logic lives so it also runs on stable:
+# `crates/prkdb-verify/tests/fuzz_corpus.rs` runs every seed in `corpus/<target>/` through
+# it in every CI run, and the nightly `fuzz` job in ci.yml mutates them under libFuzzer.
+#
+# Excluded from the root workspace (cargo-fuzz needs nightly; the workspace is pinned to
+# stable). Run locally with a scratch corpus first, so libFuzzer writes the inputs it
+# finds there rather than into the committed seeds:
+#
+#   cargo +nightly fuzz run frame_decode /tmp/frame_decode fuzz/corpus/frame_decode
+#
+# Seeds are regenerated with `cargo run -p prkdb-verify --bin fuzz_seeds`. A crash found
+# here becomes a new seed plus a ledger finding.
+
+[package]
+name = "prkdb-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+prkdb-verify = { path = "../crates/prkdb-verify" }
+
+# Its own workspace, so the root workspace never builds it.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "frame_decode"
+path = "fuzz_targets/frame_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "batch_decode"
+path = "fuzz_targets/batch_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "segment_scan"
+path = "fuzz_targets/segment_scan.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "checkpoint_load"
+path = "fuzz_targets/checkpoint_load.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proto_decode"
+path = "fuzz_targets/proto_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "key_decode"
+path = "fuzz_targets/key_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "format_parse"
+path = "fuzz_targets/format_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "snapshot_restore"
+path = "fuzz_targets/snapshot_restore.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "file_decode"
+path = "fuzz_targets/file_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "snapshot_entries"
+path = "fuzz_targets/snapshot_entries.rs"
+test = false
+doc = false
+bench = false

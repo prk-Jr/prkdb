@@ -18,6 +18,8 @@ members = [
     "crates/prkdb-types",
     "crates/prkdb-verify",
 ]
+# cargo-fuzz targets (TST-07): nightly-only, with their own workspace and lockfile.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.6.0"

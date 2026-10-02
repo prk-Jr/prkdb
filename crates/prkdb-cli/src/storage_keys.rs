@@ -6,7 +6,7 @@
 //! multi-raft node still stores `name:id` keys, because the catalog is per node and not
 //! replicated yet (Phase 4), so its collection listing parses them here.
 
-use bincode::{config, serde::decode_from_slice};
+use prkdb_types::codec::decode_serde;
 
 pub const INTERNAL_METADATA_PREFIX: &str = "__prkdb_metadata:";
 pub const COLLECTION_METADATA_PREFIX: &str = "meta:col:";
@@ -112,7 +112,7 @@ fn try_decode_common_id<T>(id_bytes: &[u8]) -> Option<String>
 where
     T: serde::de::DeserializeOwned + ToString,
 {
-    decode_from_slice::<T, _>(id_bytes, config::standard())
+    decode_serde::<T>(id_bytes)
         .ok()
         .map(|(value, _)| value.to_string())
 }

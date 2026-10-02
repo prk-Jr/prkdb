@@ -7,11 +7,9 @@ use crate::db::PrkDb;
 use crate::outbox::{OutboxEnvelope, OutboxRecord};
 use crate::partitioning::{AssignmentStrategy, PartitionCoordinator, PartitionId};
 use async_trait::async_trait;
-use bincode::{
-    config,
-    serde::{decode_from_slice, encode_to_vec},
-};
+use bincode::{config, serde::encode_to_vec};
 use dashmap::DashMap;
+use prkdb_types::codec::decode_serde;
 use prkdb_types::collection::Collection;
 use prkdb_types::consumer::{
     AutoOffsetReset, CommitResult, Consumer, ConsumerConfig, ConsumerGroupId, ConsumerRecord,
@@ -60,7 +58,7 @@ impl OffsetStore for StorageOffsetStore {
         let key = Self::offset_key(group_id, collection_name, partition);
         match self.storage.get(&key).await? {
             Some(bytes) => {
-                let (offset, _): (Offset, _) = decode_from_slice(&bytes, config::standard())
+                let (offset, _): (Offset, _) = decode_serde(&bytes)
                     .map_err(|e| StorageError::Deserialization(e.to_string()))?;
                 Ok(Some(offset))
             }
@@ -109,8 +107,8 @@ impl OffsetStore for StorageOffsetStore {
         let offsets = DashMap::new();
         for (key, value) in entries {
             if let Ok(key_str) = String::from_utf8(key) {
-                let (offset, _): (Offset, _) = decode_from_slice(&value, config::standard())
-                    .map_err(|e| Error::Deserialization(e.to_string()))?;
+                let (offset, _): (Offset, _) =
+                    decode_serde(&value).map_err(|e| Error::Deserialization(e.to_string()))?;
                 offsets.insert(key_str, offset);
             }
         }
@@ -328,22 +326,17 @@ where
 
             for (id, bytes, seq) in matching.into_iter().take(limit) {
                 // Outbox payloads may be stored either as raw OutboxRecord<C> or wrapped in OutboxEnvelope<C>.
-                let (maybe_record, ts_millis): (Option<OutboxRecord<C>>, i64) =
-                    match decode_from_slice::<OutboxRecord<C>, _>(&bytes, config::standard()) {
-                        Ok((rec, _)) => (Some(rec), 0),
-                        Err(_) => {
-                            match decode_from_slice::<OutboxEnvelope<C>, _>(
-                                &bytes,
-                                config::standard(),
-                            ) {
-                                Ok((env, _)) => (Some(env.event), env.ts_millis),
-                                Err(e) => {
-                                    warn!(error = %e, id = %id, "Failed to deserialize outbox record or envelope");
-                                    (None, 0)
-                                }
-                            }
+                let as_record: Result<(OutboxRecord<C>, usize), _> = decode_serde(&bytes);
+                let (maybe_record, ts_millis): (Option<OutboxRecord<C>>, i64) = match as_record {
+                    Ok((rec, _)) => (Some(rec), 0),
+                    Err(_) => match decode_serde::<OutboxEnvelope<C>>(&bytes) {
+                        Ok((env, _)) => (Some(env.event), env.ts_millis),
+                        Err(e) => {
+                            warn!(error = %e, id = %id, "Failed to deserialize outbox record or envelope");
+                            (None, 0)
                         }
-                    };
+                    },
+                };
 
                 if let Some(rec) = maybe_record {
                     match rec {

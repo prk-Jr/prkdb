@@ -167,7 +167,11 @@ impl StateMachine for PrkDbStateMachine {
                 }
             }
         } else {
-            tracing::warn!("Failed to deserialize command in state machine");
+            tracing::warn!(
+                entry_bytes = data.len(),
+                "Raft entry is not a command (malformed, or a declared length over the \
+                 record limit); refusing to apply it"
+            );
             return Err(StateMachineError::Serialization(
                 "Failed to deserialize".to_string(),
             ));
@@ -217,72 +221,12 @@ impl StateMachine for PrkDbStateMachine {
     }
 
     async fn restore(&self, snapshot: &[u8]) -> Result<(), StateMachineError> {
-        if snapshot.len() < 8 {
-            return Err(StateMachineError::Serialization(
-                "Snapshot too small".to_string(),
-            ));
-        }
-
-        // Read number of entries
-        let mut offset = 0;
-        let count = u64::from_le_bytes(
-            snapshot[offset..offset + 8]
-                .try_into()
-                .map_err(|e| StateMachineError::Serialization(format!("Invalid count: {}", e)))?,
-        );
-        offset += 8;
-
+        // Parsed whole before anything is written: the bytes come from a peer's
+        // InstallSnapshot, and a malformed snapshot must change nothing.
+        let entries = parse_snapshot(snapshot)?;
+        let count = entries.len();
         tracing::info!("Restoring snapshot with {} entries", count);
-
-        // Read and restore all key-value pairs
-        for i in 0..count {
-            // Read key length
-            if offset + 8 > snapshot.len() {
-                return Err(StateMachineError::Serialization(format!(
-                    "Unexpected end of snapshot at entry {}",
-                    i
-                )));
-            }
-            let key_len =
-                u64::from_le_bytes(snapshot[offset..offset + 8].try_into().map_err(|e| {
-                    StateMachineError::Serialization(format!("Invalid key length: {}", e))
-                })?) as usize;
-            offset += 8;
-
-            // Read key
-            if offset + key_len > snapshot.len() {
-                return Err(StateMachineError::Serialization(format!(
-                    "Unexpected end of snapshot reading key at entry {}",
-                    i
-                )));
-            }
-            let key = &snapshot[offset..offset + key_len];
-            offset += key_len;
-
-            // Read value length
-            if offset + 8 > snapshot.len() {
-                return Err(StateMachineError::Serialization(format!(
-                    "Unexpected end of snapshot at entry {}",
-                    i
-                )));
-            }
-            let value_len =
-                u64::from_le_bytes(snapshot[offset..offset + 8].try_into().map_err(|e| {
-                    StateMachineError::Serialization(format!("Invalid value length: {}", e))
-                })?) as usize;
-            offset += 8;
-
-            // Read value
-            if offset + value_len > snapshot.len() {
-                return Err(StateMachineError::Serialization(format!(
-                    "Unexpected end of snapshot reading value at entry {}",
-                    i
-                )));
-            }
-            let value = &snapshot[offset..offset + value_len];
-            offset += value_len;
-
-            // Write to storage
+        for (key, value) in entries {
             self.storage
                 .put(key, value)
                 .await
@@ -291,5 +235,128 @@ impl StateMachine for PrkDbStateMachine {
 
         tracing::info!("Restored {} entries from snapshot", count);
         Ok(())
+    }
+}
+
+/// One snapshot entry, borrowed from the snapshot's bytes.
+pub type SnapshotEntry<'a> = (&'a [u8], &'a [u8]);
+
+/// Smallest encoded entry: two `u64` lengths and empty key and value.
+const MIN_SNAPSHOT_ENTRY_LEN: usize = 16;
+
+fn malformed(reason: String) -> StateMachineError {
+    StateMachineError::Serialization(format!("malformed snapshot: {reason}"))
+}
+
+fn take_u64(rest: &mut &[u8], what: &str) -> Result<u64, StateMachineError> {
+    let (head, tail) = rest
+        .split_first_chunk::<8>()
+        .ok_or_else(|| malformed(format!("truncated {what}")))?;
+    *rest = tail;
+    Ok(u64::from_le_bytes(*head))
+}
+
+fn take_prefixed<'a>(rest: &mut &'a [u8], what: &str) -> Result<&'a [u8], StateMachineError> {
+    let declared = take_u64(rest, what)?;
+    let len = usize::try_from(declared)
+        .ok()
+        .filter(|&len| len <= rest.len())
+        .ok_or_else(|| {
+            malformed(format!(
+                "{what} declares {declared} bytes, {} remain",
+                rest.len()
+            ))
+        })?;
+    let (bytes, tail) = rest.split_at(len);
+    *rest = tail;
+    Ok(bytes)
+}
+
+/// Parses the format [`PrkDbStateMachine::snapshot`] writes:
+/// `[u64 count][count x (u64 key_len, key, u64 value_len, value)]`, little-endian, with no
+/// trailing bytes. Never panics, and allocates at most one slot per 16 input bytes,
+/// whatever the input: the bytes arrive from a peer (`InstallSnapshot`), so every length
+/// is checked against what is actually there (RFT-11). Fuzzed by `snapshot_restore`.
+pub fn parse_snapshot(snapshot: &[u8]) -> Result<Vec<SnapshotEntry<'_>>, StateMachineError> {
+    let mut rest = snapshot;
+    let count = take_u64(&mut rest, "entry count")?;
+    let room = rest.len() / MIN_SNAPSHOT_ENTRY_LEN;
+    if count > room as u64 {
+        return Err(malformed(format!(
+            "{count} entries cannot fit in {} bytes",
+            rest.len()
+        )));
+    }
+    let mut entries = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let key = take_prefixed(&mut rest, &format!("entry {i} key"))?;
+        let value = take_prefixed(&mut rest, &format!("entry {i} value"))?;
+        entries.push((key, value));
+    }
+    if !rest.is_empty() {
+        return Err(malformed(format!(
+            "{} trailing bytes after {count} entries",
+            rest.len()
+        )));
+    }
+    Ok(entries)
+}
+
+#[cfg(test)]
+mod snapshot_parse_tests {
+    use super::*;
+
+    fn entry(key: &[u8], value: &[u8]) -> Vec<u8> {
+        let mut out = (key.len() as u64).to_le_bytes().to_vec();
+        out.extend_from_slice(key);
+        out.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        out.extend_from_slice(value);
+        out
+    }
+
+    fn snapshot(count: u64, body: &[u8]) -> Vec<u8> {
+        let mut out = count.to_le_bytes().to_vec();
+        out.extend_from_slice(body);
+        out
+    }
+
+    #[test]
+    fn a_valid_snapshot_parses() {
+        let mut body = entry(b"a", b"1");
+        body.extend(entry(b"", b""));
+        let bytes = snapshot(2, &body);
+        let parsed = parse_snapshot(&bytes).unwrap();
+        assert_eq!(parsed, vec![(&b"a"[..], &b"1"[..]), (&b""[..], &b""[..])]);
+        assert!(parse_snapshot(&snapshot(0, &[])).unwrap().is_empty());
+    }
+
+    /// RFT-11: `[count = 1][key_len = u64::MAX]` overflowed `offset + key_len` (a panic
+    /// in debug builds; in release a wrapped bounds check, then an out-of-range slice).
+    /// The parser does no unchecked arithmetic, so both build profiles take the same path.
+    #[test]
+    fn rft11_a_snapshot_length_of_u64_max_is_an_error() {
+        let mut key_max = u64::MAX.to_le_bytes().to_vec();
+        key_max.extend_from_slice(&[0; 8]);
+        assert!(parse_snapshot(&snapshot(1, &key_max)).is_err());
+        let mut value_max = 0u64.to_le_bytes().to_vec();
+        value_max.extend_from_slice(&u64::MAX.to_le_bytes());
+        assert!(parse_snapshot(&snapshot(1, &value_max)).is_err());
+    }
+
+    #[test]
+    fn rft11_truncated_and_overcounted_snapshots_are_errors() {
+        let whole = entry(b"key", b"value");
+        for cut in 0..whole.len() {
+            assert!(
+                parse_snapshot(&snapshot(1, &whole[..cut])).is_err(),
+                "cut {cut}"
+            );
+        }
+        assert!(parse_snapshot(&snapshot(2, &whole)).is_err());
+        assert!(parse_snapshot(&snapshot(u64::MAX, &whole)).is_err());
+        assert!(parse_snapshot(&[1, 2, 3]).is_err());
+        let mut trailing = snapshot(1, &whole);
+        trailing.push(0);
+        assert!(parse_snapshot(&trailing).is_err());
     }
 }

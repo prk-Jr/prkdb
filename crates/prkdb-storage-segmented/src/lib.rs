@@ -140,10 +140,10 @@ impl SegmentedLogAdapter {
         let checkpoint_path = dir.join("index.snapshot");
         if checkpoint_path.exists() {
             if let Ok(bytes) = fs::read(&checkpoint_path) {
-                if let Ok((map, _)) = bincode::serde::decode_from_slice::<
+                // The whole index: the decode limit scales with the file.
+                if let Ok((map, _)) = prkdb_types::codec::decode_serde_file::<
                     HashMap<Vec<u8>, Option<Vec<u8>>>,
-                    _,
-                >(&bytes, bincode::config::standard())
+                >(&bytes)
                 {
                     // determine next_id from segments present
                     let mut max_id = 0usize;
@@ -509,6 +509,29 @@ mod tests {
     use super::*;
     use rand::Rng;
     use tempfile::tempdir;
+
+    /// RFT-11: an index snapshot declaring a 2^62-byte key is refused by the bounded
+    /// decode, and the index is rebuilt from the segments instead.
+    #[tokio::test]
+    async fn rft11_an_oversized_index_snapshot_falls_back_to_replay() {
+        let dir = tempdir().unwrap();
+        {
+            let adapter = SegmentedLogAdapter::new(dir.path(), 1024, None, 100)
+                .await
+                .unwrap();
+            adapter.put(b"k1", b"v1").await.unwrap();
+            adapter.flush().await.unwrap();
+        }
+        // One map entry whose key declares 2^62 bytes.
+        let mut hostile = vec![1u8, 0xFD];
+        hostile.extend_from_slice(&(1u64 << 62).to_le_bytes());
+        std::fs::write(dir.path().join("index.snapshot"), &hostile).unwrap();
+
+        let adapter = SegmentedLogAdapter::new(dir.path(), 1024, None, 100)
+            .await
+            .unwrap();
+        assert_eq!(adapter.get(b"k1").await.unwrap(), Some(b"v1".to_vec()));
+    }
 
     #[tokio::test]
     async fn put_get_delete_round_trip() {

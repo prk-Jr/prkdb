@@ -527,6 +527,50 @@ jobs:
       # `permissions: contents: write` on this job for the auto-push to bench-data.
       # Skipped for now: the benches this plan (spec §6.1) refers to don't exist yet.
 
+  fuzz:
+    name: Fuzz (nightly)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # TST-07. cargo-fuzz needs a nightly compiler, so this is the one job that does not
+    # honour rust-toolchain.toml; it builds only the `fuzz/` crate (excluded from the
+    # workspace), never the gated workspace. The same entry points run on the pinned
+    # toolchain in every PR through `prkdb-verify`'s `fuzz_corpus` test, over the same
+    # seeds. Ten targets x 3 minutes plus a cold sanitizer build fits inside 60.
+    timeout-minutes: 60
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --locked
+      # libFuzzer writes the inputs it finds into the first corpus directory, so a
+      # scratch directory goes first and the committed seeds are only read. A crash
+      # becomes a new seed (cargo run -p prkdb-verify --bin fuzz_seeds, or the artifact
+      # copied into fuzz/corpus/<target>/) plus a ledger finding.
+      - name: Run each target for 3 minutes
+        run: |
+          set -euo pipefail
+          for t in frame_decode batch_decode segment_scan checkpoint_load proto_decode key_decode format_parse snapshot_restore file_decode snapshot_entries; do
+            mkdir -p "$RUNNER_TEMP/corpus/$t"
+            cargo +nightly fuzz run "$t" "$RUNNER_TEMP/corpus/$t" "fuzz/corpus/$t" -- -max_total_time=180
+          done
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+
   security-audit:
     name: Security Audit
     runs-on: ubuntu-latest

@@ -3748,7 +3748,7 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
         let indexes = match tokio::fs::read(index_path.as_ref()).await {
             Ok(data) => {
                 let (persisted, _): (PersistedIndexes, _) =
-                    bincode::serde::decode_from_slice(&data, bincode::config::standard())
+                    prkdb_types::codec::decode_serde_file(&data)
                         .map_err(|e| StorageError::Deserialization(format!("Index file: {}", e)))?;
                 persisted.collections
             }
@@ -4052,12 +4052,9 @@ impl<S: StorageAdapter + 'static> IndexedStorage<S> {
             .await
             .map_err(|e| StorageError::BackendError(format!("Failed to read index file: {}", e)))?;
 
-        let persisted: PersistedIndexes =
-            bincode::serde::decode_from_slice(&data, bincode::config::standard())
-                .map_err(|e| {
-                    StorageError::Deserialization(format!("Index deserialization: {}", e))
-                })?
-                .0;
+        let persisted: PersistedIndexes = prkdb_types::codec::decode_serde_file(&data)
+            .map_err(|e| StorageError::Deserialization(format!("Index deserialization: {}", e)))?
+            .0;
 
         // 1. Restore legacy indexes
         let mut indexes_lock = self.indexes.write().await;

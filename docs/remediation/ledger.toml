@@ -494,7 +494,9 @@ title = "No fuzzing of WAL record, segment, snapshot, and proto decoding"
 area = "tests"
 severity = "low"
 phase = 2
-status = "open"
+status = "fixed"
+regression_tests = ["test:crates/prkdb-verify/tests/fuzz_corpus.rs::fuzz_entries_accept_their_seed_corpus", "ci-job:ci.yml/fuzz"]
+changes = ["62f6ef9"]
 
 # ---------------------------------------------------------------------------
 # 3.8 Documentation (DOC)
@@ -637,6 +639,35 @@ phase = 4
 status = "open"
 sources = ["batch-e-review-2026-09-23"]
 evidence = ["crates/prkdb/src/bin/prkdb-server.rs:366"]
+
+[[finding]]
+id = "RFT-11"
+title = "Peer- or disk-supplied lengths trusted: unbounded bincode decodes, InstallSnapshot length overflow, unbounded snapshot entries"
+area = "raft"
+severity = "high"
+phase = 2
+status = "fixed"
+security = true
+sources = ["task-2.23-fuzz-2026-10-01"]
+evidence = [
+  "crates/prkdb/src/raft/command.rs:51-55",
+  "crates/prkdb/src/raft/state_machine.rs:65",
+  "crates/prkdb/src/raft/node.rs:252-255",
+  "crates/prkdb/src/storage/snapshot.rs:96-106,124-137",
+  "crates/prkdb-core/src/wal/log_record.rs:311-313",
+  "crates/prkdb/src/indexed_storage.rs:3751,4056",
+  "crates/prkdb-storage-segmented/src/lib.rs:143-146",
+  "crates/prkdb/src/collection_handle.rs:502,688,714,737",
+  "crates/prkdb/src/consumer.rs:63,112,332,335",
+  "crates/prkdb/src/outbox.rs:188,192,311,372,452,576",
+  "crates/prkdb/src/retention.rs:88",
+  "crates/prkdb-cli/src/storage_keys.rs:115",
+  "crates/prkdb-cli/src/commands/collection.rs:919",
+  "crates/prkdb/src/raft/state_machine.rs:233-285",
+  "crates/prkdb/src/raft/node.rs:1078",
+]
+regression_tests = ["test:crates/prkdb/tests/bounded_decode.rs::rft11_command_declaring_a_u64_max_length_is_rejected", "test:crates/prkdb/tests/bounded_decode.rs::rft11_command_declaring_a_2_pow_62_length_is_rejected", "test:crates/prkdb/tests/bounded_decode.rs::rft11_snapshot_header_declaring_an_oversized_length_is_refused", "test:crates/prkdb/tests/bounded_decode.rs::rft11_snapshot_entry_declaring_an_oversized_length_is_refused", "test:crates/prkdb-core/src/wal/log_record.rs::rft11_a_payload_declaring_an_oversized_length_is_an_error", "test:crates/prkdb-storage-segmented/src/lib.rs::rft11_an_oversized_index_snapshot_falls_back_to_replay", "test:crates/prkdb-types/src/codec.rs::an_oversized_declared_length_is_an_error_not_an_allocation", "test:crates/prkdb-types/src/codec.rs::claims_are_in_memory_size_and_the_scaled_limit_covers_them", "test:crates/prkdb/src/raft/state_machine.rs::rft11_a_snapshot_length_of_u64_max_is_an_error", "test:crates/prkdb/src/raft/state_machine.rs::rft11_truncated_and_overcounted_snapshots_are_errors", "test:crates/prkdb/src/raft/node.rs::rft11_install_snapshot_at_u64_max_is_refused", "test:crates/prkdb/tests/bounded_decode.rs::rft11_gzip_snapshot_entry_declaring_u32_max_is_refused", "test:crates/prkdb/tests/bounded_decode.rs::rft11_snapshot_with_more_entries_than_declared_is_refused", "test:crates/prkdb-verify/tests/fuzz_corpus.rs::fuzz_entries_accept_their_seed_corpus"]
+changes = ["0ecfe43", "3ab84c7", "6135090", "03260bd", "1fe1423"]
 
 [[finding]]
 id = "TST-08"
