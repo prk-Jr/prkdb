@@ -10,7 +10,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 |---|---|---|---|
 | 0 | Honesty and tracking | gate_passed | 6/6 |
 | 1 | Harness and baseline | gate_passed | 2/2 |
-| 2 | Format v2 and single-node root fixes | not_started | 0/26 |
+| 2 | Format v2 and single-node root fixes | not_started | 0/27 |
 | 3 | Semantics | not_started | 0/9 |
 | 4 | Raft | not_started | 0/15 |
 | 5 | Documentation and release | not_started | 0/9 |
@@ -67,6 +67,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | STO-03 | medium | 2 | fixed | WAL append outside publish_barrier can leave the live index pointing at a stale offset |
 | STO-04 | medium | 2 | fixed | scan_mmap skips CRC on open; torn records become invisible; directories never fsynced |
 | STO-05 | medium | 2 | fixed | WAL routing uses unstable DefaultHasher; replay ordered by segment id, not global order |
+| STO-18 | medium | 2 | fixed | RecordBatch has no aggregate decoded-header limit: a 64 MiB body can allocate about 535 MB of empty header tuples |
 | TST-02 | medium | 4 | open | Linearizability workloads use 1 writer, 1 reader, ~25 ops; failed reads dropped |
 | TST-05 | medium | 2 | fixed | No power-loss (unsynced-data) testing; needs the WAL routed through Vfs |
 | TST-06 | medium | 4 | open | No deterministic simulation of the cluster |

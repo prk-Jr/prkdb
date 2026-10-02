@@ -851,6 +851,25 @@ evidence = [
 regression_tests = ["test:crates/prkdb/tests/batch_size_limit.rs::sto12_a_batch_over_the_limit_is_refused_at_write_even_when_it_compresses_small", "test:crates/prkdb/tests/batch_size_limit.rs::sto12_a_batch_of_exactly_the_limit_round_trips_through_reopen", "test:crates/prkdb-core/src/wal/batch.rs::encode_refuses_a_raw_batch_the_decoder_would_refuse", "test:crates/prkdb-core/src/wal/batch.rs::a_raw_batch_of_exactly_the_limit_round_trips"]
 changes = ["7d823db"]
 
+[[finding]]
+id = "STO-18"
+title = "RecordBatch has no aggregate decoded-header limit: a 64 MiB body can allocate about 535 MB of empty header tuples"
+area = "storage"
+severity = "medium"
+phase = 2
+status = "fixed"
+sources = ["task-2.15b.2-review-carried-into-2.15b.3-2026-10-02"]
+evidence = [
+  "crates/prkdb-core/src/wal/records.rs",
+  "docs/superpowers/specs/2026-10-02-streaming-log-design.md",
+]
+regression_tests = [
+  "test:crates/prkdb-core/src/wal/records.rs::a_batch_over_the_header_budget_is_refused_at_encode_and_decode",
+  "test:crates/prkdb-core/src/wal/records.rs::compressed_batches_cannot_bypass_the_header_budget",
+  "test:crates/prkdb-core/src/wal/records.rs::an_exhausted_header_budget_is_checked_before_header_body_parsing",
+]
+changes = ["7330fc890f67279b8d446ada1649a77e808ac5b2"]
+
 [[phase]]
 id = 0
 title = "Honesty and tracking"

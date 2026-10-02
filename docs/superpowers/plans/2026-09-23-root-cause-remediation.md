@@ -5810,7 +5810,7 @@ Note §3, §4.3, §6, §9, §10.
       debug-asserts the general packing limit; use checked `try_from_wal` and enforce
       the stricter stream bound on the writer before allocation/roll/write, including
       concurrent queued requests and recovered offsets);
-    - a `Records` frame whose decoded headers would exceed a per-batch budget is refused
+    - a `Records` frame whose decoded headers would exceed a per-batch budget (STO-18) is refused
       at encode and at decode. A 64 MiB body can hold ~11M minimum-size headers, ~0.5–1 GB
       decoded. Pick the budget from measurement and record it in the design note;
     - `WalError::InvalidRecords` maps to `StorageError::Validation` in `wal_err`, not
