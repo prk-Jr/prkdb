@@ -240,7 +240,9 @@ async fn background_task_releases_inner_when_last_handle_drops() {
 
 use parking_lot::Mutex;
 use prkdb_core::vfs::{LockGuard, OpenMode, Vfs, VfsFile};
-use prkdb_verify::faultfs::{FaultFs, Tear};
+#[path = "../../prkdb-verify/src/faultfs.rs"]
+mod faultfs;
+use faultfs::{FaultFs, Tear};
 use rand::SeedableRng;
 use std::io;
 use std::path::PathBuf;

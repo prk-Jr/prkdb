@@ -74,8 +74,10 @@ fn apply(inner: &Inner, stopped: &dyn Fn() -> bool) -> Result<RetentionReport, S
     if !pending.is_empty() {
         report.segments_removed += inner.wal.remove_leading_segments(floor).map_err(wal_err)?;
         report.bytes_removed += pending.iter().map(|s| s.len).sum::<u64>();
-        inner.index.write().remove_before(floor);
     }
+    // A removal can succeed while its directory sync fails. The WAL has already
+    // dropped that handle, so no pending file remains to trigger index cleanup.
+    inner.index.write().remove_before(floor);
     if stopped() {
         return Ok(report);
     }
@@ -198,5 +200,116 @@ impl RetentionTask {
 impl Drop for RetentionTask {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(test)]
+#[path = "../../../prkdb-verify/src/faultfs.rs"]
+mod faultfs;
+
+#[cfg(test)]
+mod tests {
+    use super::faultfs::FaultFs;
+    use super::*;
+    use crate::stream_log::{ReadLimits, Record, StartAt, StreamConfig};
+    use prkdb_core::vfs::{LockGuard, OpenMode, Vfs, VfsFile};
+    use prkdb_core::wal::CompressionConfig;
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    // Use the harness filesystem, failing only a removal's directory sync.
+    // Unlike remove failure, the WAL has already dropped the segment handle.
+    #[derive(Default)]
+    struct RemovalSyncFs {
+        fs: FaultFs,
+        fail_sync: AtomicBool,
+        removed: AtomicBool,
+    }
+    impl Vfs for RemovalSyncFs {
+        fn open(&self, p: &Path, m: OpenMode) -> io::Result<Arc<dyn VfsFile>> {
+            self.fs.open(p, m)
+        }
+        fn create(&self, p: &Path) -> io::Result<Arc<dyn VfsFile>> {
+            self.fs.create(p)
+        }
+        fn rename(&self, a: &Path, b: &Path) -> io::Result<()> {
+            self.fs.rename(a, b)
+        }
+        fn create_dir_all(&self, p: &Path) -> io::Result<()> {
+            self.fs.create_dir_all(p)
+        }
+        fn read_dir(&self, p: &Path) -> io::Result<Vec<PathBuf>> {
+            self.fs.read_dir(p)
+        }
+        fn exists(&self, p: &Path) -> io::Result<bool> {
+            self.fs.exists(p)
+        }
+        fn lock_exclusive(&self, p: &Path) -> io::Result<Box<dyn LockGuard>> {
+            self.fs.lock_exclusive(p)
+        }
+        fn remove(&self, p: &Path) -> io::Result<()> {
+            self.fs.remove(p)?;
+            self.removed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        fn sync_dir(&self, p: &Path) -> io::Result<()> {
+            if self.removed.swap(false, Ordering::SeqCst)
+                && self.fail_sync.swap(false, Ordering::SeqCst)
+            {
+                return Err(io::Error::other("injected removal directory sync failure"));
+            }
+            self.fs.sync_dir(p)
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_dir_failure_after_last_remove_prunes_released_index_on_next_pass() {
+        let fs = Arc::new(RemovalSyncFs::default());
+        let path = Path::new("/retention-index");
+        fs.fs.mkdir_durable(path).unwrap();
+        let mut cfg = StreamConfig::new(path);
+        cfg.wal.segment_bytes = 4096;
+        cfg.wal.compression = CompressionConfig::none();
+        cfg.retention.max_bytes = Some(0);
+        cfg.retention_interval = Duration::ZERO;
+        let log = StreamLog::open_with_vfs(fs.clone(), cfg).await.unwrap();
+        let record = || {
+            vec![Record {
+                key: None,
+                value: vec![1; 3000],
+                headers: Vec::new(),
+            }]
+        };
+        let a = log.append(record()).await.unwrap();
+        let b = log.append(record()).await.unwrap();
+        fs.fail_sync.store(true, Ordering::SeqCst);
+        assert!(log
+            .apply_retention()
+            .unwrap_err()
+            .to_string()
+            .contains("injected removal directory sync failure"));
+        assert_eq!(log.earliest(), b.first());
+        assert!(matches!(log.health(), WalHealth::Healthy));
+        assert_eq!(log.inner.wal.segments(), vec![b.lsn]);
+        // The removed segment no longer appears in WAL metadata, so this pass
+        // has no pending file to remove. It must still release its cached index.
+        let report = log.apply_retention().unwrap();
+        assert_eq!(report.segments_removed, 0);
+        assert_eq!(report.earliest_before, b.first());
+        assert_eq!(report.earliest_after, b.first());
+        assert!(
+            log.inner.index.read().seek(a.lsn).is_none(),
+            "released segment index survived a successful cleanup pass"
+        );
+        assert_eq!(
+            log.read_from(StartAt::Earliest, ReadLimits::default())
+                .await
+                .unwrap()
+                .records[0]
+                .offset,
+            b.first()
+        );
+        assert!(matches!(log.health(), WalHealth::Healthy));
+        log.close().unwrap();
     }
 }
