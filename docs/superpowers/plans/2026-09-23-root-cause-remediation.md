@@ -5798,6 +5798,14 @@ Note §3, §4.3, §6, §9, §10.
     directory → `ReplayFailed`.
   - `STREAM` manifest: encode/decode round trip, bit flips refused, an unknown version
     refused.
+  - Carried over from the 2.15b.2 review:
+    - an append whose LSN is `>= 2^48` is refused (`EventSeq::from_wal` only
+      debug-asserts it; add a checked `try_from_wal` and use it on the append path);
+    - a `Records` frame whose decoded headers would exceed a per-batch budget is refused
+      at encode and at decode. A 64 MiB body can hold ~11M minimum-size headers, ~0.5–1 GB
+      decoded. Pick the budget from measurement and record it in the design note;
+    - `WalError::InvalidRecords` maps to `StorageError::Validation` in `wal_err`, not
+      `Internal`.
 - [ ] **Step 2: Implement.**
   - `StreamLog` over `Wal` with `front_release = Retention` and a 128 MiB default segment
     size.
