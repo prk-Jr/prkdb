@@ -2,9 +2,10 @@
 
 use prkdb::storage::compaction::CompactionStep;
 use prkdb::storage::config::StorageConfig;
-use prkdb::storage::WalStorageAdapter;
+use prkdb::storage::{CompactionConfig, WalStorageAdapter};
 use prkdb_core::vfs::{OpenMode, Vfs};
 use prkdb_core::wal::{SyncMode, WalConfig};
+use prkdb_types::error::StorageError;
 use prkdb_types::storage::StorageAdapter;
 use prkdb_verify::faultfs::{FaultFs, Tear};
 use rand::SeedableRng;
@@ -22,6 +23,11 @@ fn config(mode: SyncMode) -> StorageConfig {
             sync_interval_ms: 3_600_000, // Fast syncs only when asked: deterministic window
             segment_bytes: 16 * 1024,
             ..WalConfig::test_config()
+        },
+        // Compaction drops every delete it may, so the crash tests cover dropping them.
+        compaction: CompactionConfig {
+            tombstone_retention_lsns: 0,
+            ..CompactionConfig::default()
         },
         ..StorageConfig::new(dir)
     }
@@ -199,6 +205,7 @@ async fn compaction_is_crash_safe_at_every_step() {
         let db = open(&fs, mode);
         compaction_workload(&db).await;
         let expected = contents(&db).await;
+        let stream = db.get_changes_since(1).await.unwrap();
         let steps: Steps = Arc::default();
         let record = steps.clone();
         db.compact_with_hook(move |step| {
@@ -213,9 +220,11 @@ async fn compaction_is_crash_safe_at_every_step() {
         for kind in [
             "CompactFileWritten",
             "LogSynced",
+            "FloorRaised",
             "CheckpointsDeleted",
             "SegmentReplaced",
-            "SegmentRemoved",
+            "LogStartRaised",
+            "SegmentsRemoved",
             "SegmentsDone",
             "CheckpointWritten",
         ] {
@@ -255,6 +264,15 @@ async fn compaction_is_crash_safe_at_every_step() {
                 let db = open(&fs, mode);
                 let ctx = format!("{mode:?}, power cut after {at:?} (step {cut}), {tear:?}");
                 assert_eq!(contents(&db).await, expected, "{ctx}");
+                // Never a silent subset: a lagging cursor gets the whole original stream or
+                // is told it is below the compaction floor.
+                match db.get_changes_since(1).await {
+                    Ok(changes) => assert_eq!(changes, stream, "{ctx}: an incomplete stream"),
+                    Err(StorageError::CompactedCursor { floor, .. }) => {
+                        assert_eq!(floor, db.compaction_floor(), "{ctx}")
+                    }
+                    Err(e) => panic!("{ctx}: {e}"),
+                }
                 let report = db.compact().await.unwrap_or_else(|e| panic!("{ctx}: {e}"));
                 assert_eq!(contents(&db).await, expected, "{ctx}: then {report:?}");
                 drop(db);
@@ -267,7 +285,11 @@ async fn compaction_is_crash_safe_at_every_step() {
 
 /// Fast mode: `k = old` and `gone` are durable in a sealed segment; then, unsynced in the
 /// active segment, `k = new`, a marker, and a delete of `gone`.
-async fn unsynced_replacements(db: &WalStorageAdapter) {
+///
+/// `with_delete: false` leaves only the overwrite, whose replacement LSN compaction knows
+/// exactly (the conservative bound a dropped put of a deleted key forces would otherwise
+/// cover it too).
+async fn unsynced_replacements(db: &WalStorageAdapter, with_delete: bool) {
     db.put(b"k", b"old").await.unwrap();
     db.put(b"gone", b"durable").await.unwrap();
     for i in 0..100u32 {
@@ -278,7 +300,9 @@ async fn unsynced_replacements(db: &WalStorageAdapter) {
     db.flush().await.unwrap(); // `old` and `gone` are durable
     db.put(b"k", b"new").await.unwrap(); // unsynced (no periodic sync for an hour)
     db.put(b"marker", b"before the delete").await.unwrap();
-    db.delete(b"gone").await.unwrap(); // unsynced
+    if with_delete {
+        db.delete(b"gone").await.unwrap(); // unsynced
+    }
 }
 
 /// The case compaction's log sync exists for (Fast mode): an overwrite or a delete that
@@ -289,9 +313,15 @@ async fn unsynced_replacements(db: &WalStorageAdapter) {
 /// notice a missing sync), with every tear.
 #[tokio::test(flavor = "multi_thread")]
 async fn compaction_never_drops_a_record_whose_replacement_is_unsynced() {
+    for with_delete in [false, true] {
+        unsynced_replacements_survive(with_delete).await;
+    }
+}
+
+async fn unsynced_replacements_survive(with_delete: bool) {
     let fs = fresh();
     let db = open(&fs, SyncMode::Fast);
-    unsynced_replacements(&db).await;
+    unsynced_replacements(&db, with_delete).await;
     let steps: Steps = Arc::default();
     let record = steps.clone();
     let report = db
@@ -309,7 +339,7 @@ async fn compaction_never_drops_a_record_whose_replacement_is_unsynced() {
         for tear in [Tear::None, Tear::Prefix, Tear::ZeroTail, Tear::Garbage] {
             let fs = fresh();
             let db = open(&fs, SyncMode::Fast);
-            unsynced_replacements(&db).await;
+            unsynced_replacements(&db, with_delete).await;
             let mut seen = 0usize;
             let power = fs.clone();
             let _ = db
@@ -325,7 +355,8 @@ async fn compaction_never_drops_a_record_whose_replacement_is_unsynced() {
             drop(db);
 
             let db = open(&fs, SyncMode::Fast);
-            let ctx = format!("power cut after {at:?} (step {cut}), {tear:?}");
+            let ctx =
+                format!("with_delete {with_delete}: power cut after {at:?} (step {cut}), {tear:?}");
             let k = db.get(b"k").await.unwrap();
             assert!(
                 k.as_deref() == Some(&b"old"[..]) || k.as_deref() == Some(&b"new"[..]),
@@ -341,4 +372,31 @@ async fn compaction_never_drops_a_record_whose_replacement_is_unsynced() {
             }
         }
     }
+}
+
+/// `LOG_STATE` records where the log starts: once compaction has removed leading
+/// segments, losing the (new) first segment is refused by name instead of opening a log
+/// that silently starts later.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_first_segment_is_refused_after_compaction() {
+    let fs = fresh();
+    let db = open(&fs, SyncMode::Durable);
+    compaction_workload(&db).await;
+    let report = db.compact().await.unwrap();
+    assert!(report.segments_removed > 0, "{report:?}");
+    drop(db);
+    let dir = Path::new("/db/wal");
+    let mut segments: Vec<PathBuf> = fs
+        .read_dir(dir)
+        .unwrap()
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "wal"))
+        .collect();
+    segments.sort();
+    fs.remove(&segments[0]).unwrap();
+    fs.sync_dir(dir).unwrap();
+    let err = WalStorageAdapter::open_with_vfs(config(SyncMode::Durable), Arc::new(fs.clone()))
+        .err()
+        .expect("a lost first segment must refuse to open");
+    assert!(err.to_string().contains("missing"), "{err}");
 }

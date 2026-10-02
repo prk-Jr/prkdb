@@ -14,11 +14,11 @@
 use crate::vfs::{OpenMode, Vfs, VfsFile};
 use crate::wal::config::{SyncMode, WalConfig};
 use crate::wal::frame::{encode_frame, FrameKind, Lsn, MAX_PAYLOAD_LEN};
+use crate::wal::log_state::LogState;
 use crate::wal::segment::{
     read_frame, scan_segment, segment_file_name, write_segment_header, RecordLoc, ScanVisitor,
     SegmentScan, SEGMENT_HEADER_LEN,
 };
-use crate::wal::log_state::LogState;
 use crate::wal::WalError;
 use std::collections::BTreeMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -1014,7 +1014,11 @@ impl Wal {
 
     /// The durable log state: where the log starts and the compaction floor.
     pub fn log_state(&self) -> LogState {
-        *self.shared.log_state.lock().expect("log state lock poisoned")
+        *self
+            .shared
+            .log_state
+            .lock()
+            .expect("log state lock poisoned")
     }
 
     /// The compaction floor: the highest LSN of any frame compaction rewrote or removed
@@ -1027,7 +1031,11 @@ impl Wal {
     /// in `LOG_STATE`. Compaction calls it before the renames that drop anything at or
     /// below `lsn`; the in-memory floor rises before the file is written.
     pub fn raise_compacted_through(&self, lsn: Lsn) -> Result<(), WalError> {
-        let mut state = self.shared.log_state.lock().expect("log state lock poisoned");
+        let mut state = self
+            .shared
+            .log_state
+            .lock()
+            .expect("log state lock poisoned");
         if lsn <= state.compacted_through {
             return Ok(());
         }
@@ -1048,7 +1056,11 @@ impl Wal {
     /// [`Wal::remove_leading_segments`], so a crash in between leaves segments `open`
     /// recognises as released and removes.
     pub fn set_log_start(&self, upto: Lsn) -> Result<(), WalError> {
-        let mut state = self.shared.log_state.lock().expect("log state lock poisoned");
+        let mut state = self
+            .shared
+            .log_state
+            .lock()
+            .expect("log state lock poisoned");
         if upto <= state.log_start {
             return Ok(());
         }
@@ -1096,7 +1108,12 @@ impl Wal {
     /// otherwise), and each segment is checked fully elided again. Each removal is
     /// `remove` + `sync_dir` before the next. Returns how many segments were removed.
     pub fn remove_leading_segments(&self, upto: Lsn) -> Result<usize, WalError> {
-        let log_start = self.shared.log_state.lock().expect("log state lock poisoned").log_start;
+        let log_start = self
+            .shared
+            .log_state
+            .lock()
+            .expect("log state lock poisoned")
+            .log_start;
         if upto > log_start {
             return Err(WalError::CompactionRefused(format!(
                 "segments before LSN {upto} are not released: the durable log start is \

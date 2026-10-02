@@ -4,8 +4,8 @@ pub mod compression;
 pub mod config;
 pub mod frame;
 pub mod log;
-pub mod log_state;
 pub mod log_record;
+pub mod log_state;
 pub mod segment;
 
 pub use compression::{

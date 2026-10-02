@@ -176,7 +176,7 @@ async fn a_compacted_delete_does_not_resurrect_an_older_put() {
         sync_mode: SyncMode::Fast,
         ..WalConfig::test_config()
     };
-    let db = WalStorageAdapter::new(cfg()).unwrap();
+    let db = WalStorageAdapter::new_with_config(no_retention(cfg())).unwrap();
     db.put(b"victim", &[1u8; 512]).await.unwrap();
     for i in 0..64u32 {
         db.put(format!("filler{i}").as_bytes(), &[2u8; 512])
@@ -190,18 +190,17 @@ async fn a_compacted_delete_does_not_resurrect_an_older_put() {
             .unwrap(); // seal the delete's segment
     }
     db.flush().await.unwrap();
+    let floor_before = db.compaction_floor();
     db.compact().await.unwrap();
+    assert!(db.compaction_floor() > floor_before);
     assert_eq!(db.get(b"victim").await.unwrap(), None);
     drop(db);
-    assert_eq!(
-        WalStorageAdapter::open_async(cfg())
-            .await
-            .unwrap()
-            .get(b"victim")
-            .await
-            .unwrap(),
-        None
-    );
+    let db = WalStorageAdapter::new_with_config(no_retention(cfg())).unwrap();
+    assert_eq!(db.get(b"victim").await.unwrap(), None);
+    // The delete itself was dropped (no retention): nothing in the log mentions the key.
+    assert!(db.get_changes_since(0).await.unwrap().iter().all(
+        |c| !matches!(c, prkdb_types::replication::Change::Delete { key, .. } if key == b"victim")
+    ));
 }
 
 /// Writers keep writing while compaction runs; nothing they wrote is lost or reverted.
@@ -252,6 +251,30 @@ async fn compaction_races_writers_safely() {
             db.get(format!("k{k}").as_bytes()).await.unwrap(),
             Some(last.to_le_bytes().to_vec())
         );
+    }
+}
+
+/// A storage config over `wal` whose compaction drops every delete it may (no tombstone
+/// retention), so tests exercise the dropping path.
+fn no_retention(wal: prkdb_core::wal::WalConfig) -> prkdb::storage::config::StorageConfig {
+    prkdb::storage::config::StorageConfig {
+        compaction: prkdb::storage::CompactionConfig {
+            tombstone_retention_lsns: 0,
+            ..Default::default()
+        },
+        ..prkdb::storage::config::StorageConfig::new(wal.log_dir.clone())
+    }
+    .with_wal(wal)
+}
+
+trait WithWal {
+    fn with_wal(self, wal: prkdb_core::wal::WalConfig) -> Self;
+}
+
+impl WithWal for prkdb::storage::config::StorageConfig {
+    fn with_wal(mut self, wal: prkdb_core::wal::WalConfig) -> Self {
+        self.wal = wal;
+        self
     }
 }
 
@@ -458,16 +481,18 @@ async fn readers_racing_compaction_never_see_a_wrong_value() {
 }
 
 /// What a change-stream consumer sees after compaction (documented in
-/// `prkdb::storage::compaction`): surviving ops keep their LSNs, dropped ops are gone, and
-/// replaying the stream from 0 still rebuilds the current state exactly. LSNs are never
-/// reused, even after leading segments are removed and the log reopened.
+/// `prkdb::storage::compaction`): surviving ops keep their LSNs; a cursor at or above the
+/// compaction floor gets the complete stream after it; a lagging cursor below the floor
+/// gets `CompactedCursor`, never a silent subset; replaying from 0 rebuilds the current
+/// state exactly. The floor survives reopen, and LSNs are never reused.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_change_stream_after_compaction_keeps_versions_and_rebuilds_the_state() {
+async fn the_change_stream_refuses_a_cursor_below_the_compaction_floor() {
+    use prkdb_types::error::StorageError;
     use prkdb_types::replication::Change;
     use std::collections::BTreeMap;
     let dir = tempfile::tempdir().unwrap();
-    let cfg = || compaction_cfg(dir.path(), 4 * 1024);
-    let db = WalStorageAdapter::new(cfg()).unwrap();
+    let cfg = || no_retention(compaction_cfg(dir.path(), 4 * 1024));
+    let db = WalStorageAdapter::new_with_config(cfg()).unwrap();
     for round in 0..30u32 {
         for k in 0..10u32 {
             db.put(format!("k{k}").as_bytes(), &[round as u8; 200])
@@ -476,6 +501,7 @@ async fn the_change_stream_after_compaction_keeps_versions_and_rebuilds_the_stat
         }
     }
     db.delete(b"k4").await.unwrap();
+    let lagging = 12; // a consumer that has applied the first 12 changes
     for k in 0..30u32 {
         db.put(format!("tail{k}").as_bytes(), &[7u8; 200])
             .await
@@ -484,33 +510,42 @@ async fn the_change_stream_after_compaction_keeps_versions_and_rebuilds_the_stat
     db.flush().await.unwrap();
     let before = db.get_changes_since(0).await.unwrap();
     let last_lsn = db.max_offset();
+    assert_eq!(db.compaction_floor(), 0);
     let report = db.compact().await.unwrap();
     assert!(report.segments_removed > 0, "{report:?}");
-    let after = db.get_changes_since(0).await.unwrap();
-    assert!(after.len() < before.len());
-    assert!(
-        !after
-            .iter()
-            .any(|c| matches!(c, Change::Delete { key, .. } if key == b"k4")),
-        "a dropped delete is not reported"
-    );
+    let floor = db.compaction_floor();
+    assert!(floor > lagging && floor < last_lsn, "floor {floor}");
 
+    // The lagging consumer is told to resynchronise, not handed a stream without the delete.
+    match db.get_changes_since(lagging).await {
+        Err(StorageError::CompactedCursor { cursor, floor: f }) => {
+            assert_eq!((cursor, f), (lagging, floor));
+        }
+        other => panic!("a cursor below the floor must be refused, got {other:?}"),
+    }
+    // At the floor and above: exactly the original changes after the cursor.
     let version = |c: &Change| match c {
         Change::Put { version, .. } | Change::Delete { version, .. } => *version,
     };
-    // Every surviving change is one of the originals, unchanged, at its original version.
+    for cursor in [floor, floor + 3] {
+        let tail = db.get_changes_since(cursor).await.unwrap();
+        let want: Vec<Change> = before
+            .iter()
+            .filter(|c| version(c) > cursor)
+            .cloned()
+            .collect();
+        assert_eq!(tail, want, "cursor {cursor}");
+    }
+
+    // From 0 (an empty consumer): the compacted stream rebuilds the current state.
+    let after = db.get_changes_since(0).await.unwrap();
+    assert!(after.len() < before.len());
     for change in &after {
         assert!(
             before.contains(change),
             "{change:?} was not in the log before"
         );
     }
-    let versions: Vec<u64> = after.iter().map(version).collect();
-    assert!(
-        versions.windows(2).all(|w| w[0] <= w[1]),
-        "still in LSN order"
-    );
-
     let replay = |changes: &[Change]| {
         let mut state = BTreeMap::new();
         for c in changes {
@@ -529,7 +564,12 @@ async fn the_change_stream_after_compaction_keeps_versions_and_rebuilds_the_stat
     assert_eq!(replay(&after), contents(&db).await);
 
     drop(db);
-    let db = WalStorageAdapter::open_async(cfg()).await.unwrap();
+    let db = WalStorageAdapter::new_with_config(cfg()).unwrap();
+    assert_eq!(db.compaction_floor(), floor, "the floor is durable");
+    assert!(matches!(
+        db.get_changes_since(lagging).await,
+        Err(StorageError::CompactedCursor { .. })
+    ));
     assert_eq!(
         db.max_offset(),
         last_lsn,
@@ -539,10 +579,154 @@ async fn the_change_stream_after_compaction_keeps_versions_and_rebuilds_the_stat
     let next = db.get_changes_since(last_lsn).await.unwrap();
     assert_eq!(next.len(), 1);
     assert_eq!(version(&next[0]), last_lsn + 1, "LSNs are never reused");
-    assert_eq!(
-        replay(&db.get_changes_since(0).await.unwrap()),
-        contents(&db).await
+}
+
+/// A delete within the tombstone retention survives compaction (and stays in the change
+/// stream); the puts it deleted are still dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_within_the_retention_survives_compaction() {
+    use prkdb::storage::config::StorageConfig;
+    use prkdb::storage::CompactionConfig;
+    use prkdb_types::replication::Change;
+    let dir = tempfile::tempdir().unwrap();
+    let config = || StorageConfig {
+        wal: compaction_cfg(dir.path(), 4 * 1024),
+        compaction: CompactionConfig {
+            tombstone_retention_lsns: 1_000,
+            ..CompactionConfig::default()
+        },
+        ..StorageConfig::new(dir.path().to_path_buf())
+    };
+    let db = WalStorageAdapter::new_with_config(config()).unwrap();
+    for round in 0..10u32 {
+        db.put(b"gone", &[round as u8; 200]).await.unwrap();
+        db.put(b"kept", &[round as u8; 200]).await.unwrap();
+    }
+    db.delete(b"gone").await.unwrap();
+    for i in 0..40u32 {
+        db.put(format!("f{}", i % 5).as_bytes(), &[1u8; 200])
+            .await
+            .unwrap();
+    }
+    let report = db.compact().await.unwrap();
+    assert!(report.segments_rewritten > 0, "{report:?}");
+    let changes = db.get_changes_since(0).await.unwrap();
+    let mentions = |key: &[u8]| {
+        changes
+            .iter()
+            .filter(|c| match c {
+                Change::Put { key: k, .. } | Change::Delete { key: k, .. } => k == key,
+            })
+            .count()
+    };
+    assert!(
+        changes
+            .iter()
+            .any(|c| matches!(c, Change::Delete { key, .. } if key == b"gone")),
+        "the delete is retained"
     );
+    assert_eq!(
+        mentions(b"gone"),
+        1,
+        "the deleted puts are dropped, the delete kept"
+    );
+    assert_eq!(mentions(b"kept"), 1);
+    drop(db);
+    let db = WalStorageAdapter::new_with_config(config()).unwrap();
+    assert_eq!(db.get(b"gone").await.unwrap(), None);
+}
+
+/// A `save_checkpoint` while a compaction run is in progress fails at once, naming why,
+/// instead of waiting for the run.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_checkpoint_during_a_compaction_run_fails_fast() {
+    use prkdb::storage::compaction::CompactionStep;
+    let dir = tempfile::tempdir().unwrap();
+    let db = WalStorageAdapter::new(compaction_cfg(dir.path(), 4 * 1024)).unwrap();
+    for round in 0..10u32 {
+        for k in 0..20u32 {
+            db.put(format!("k{k}").as_bytes(), &[round as u8; 100])
+                .await
+                .unwrap();
+        }
+    }
+    let other = db.clone();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let record = seen.clone();
+    db.compact_with_hook(move |step| {
+        if matches!(step, CompactionStep::LogSynced) && record.lock().unwrap().is_none() {
+            let started = std::time::Instant::now();
+            let outcome = other.save_checkpoint();
+            *record.lock().unwrap() = Some((outcome, started.elapsed()));
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let (outcome, took) = seen.lock().unwrap().take().expect("the hook ran");
+    let err = outcome.expect_err("refused while the run is in progress");
+    assert!(
+        err.to_string().contains("compaction run is in progress"),
+        "{err}"
+    );
+    assert!(took < std::time::Duration::from_secs(1), "{took:?}");
+    db.save_checkpoint()
+        .expect("allowed again once the run is over");
+}
+
+/// Dropping the last handle while a background compaction is running stops it within a
+/// frame and releases the directory: a reopen right after the drop succeeds (no
+/// `Locked`), and the unfinished rewrite is gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_the_adapter_stops_a_background_run_and_frees_the_directory() {
+    use prkdb::storage::config::StorageConfig;
+    use prkdb::storage::CompactionConfig;
+    use std::time::{Duration, Instant};
+    let dir = tempfile::tempdir().unwrap();
+    let config = || StorageConfig {
+        wal: compaction_cfg(dir.path(), 256 * 1024),
+        compaction: CompactionConfig {
+            min_wal_size_bytes: 1,
+            min_interval: Duration::from_millis(20),
+            min_dead_ratio: 0.1,
+            // Slow enough that the run is still going when the adapter drops.
+            max_bytes_per_sec: Some(256 * 1024),
+            ..CompactionConfig::default()
+        },
+        ..StorageConfig::new(dir.path().to_path_buf())
+    };
+    let db = WalStorageAdapter::new_with_config(config()).unwrap();
+    for round in 0..16u32 {
+        db.put_batch(
+            (0..200u32)
+                .map(|k| (format!("k{k}").into_bytes(), vec![round as u8; 300]))
+                .collect(),
+        )
+        .await
+        .unwrap();
+    }
+    let expected = contents(&db).await;
+    let rewriting = || {
+        std::fs::read_dir(dir.path()).unwrap().any(|e| {
+            e.unwrap()
+                .file_name()
+                .to_str()
+                .is_some_and(|n| n.ends_with(".wal.compact"))
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !rewriting() {
+        assert!(Instant::now() < deadline, "no background run started");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let started = Instant::now();
+    drop(db);
+    let dropped_in = started.elapsed();
+    let db = WalStorageAdapter::new_with_config(config()).expect("reopen right after the drop");
+    println!("drop during a background run returned in {dropped_in:?}");
+    assert!(dropped_in < Duration::from_millis(200), "{dropped_in:?}");
+    assert!(!rewriting(), "the unfinished rewrite was removed");
+    assert_eq!(contents(&db).await, expected);
 }
 
 /// Compacting twice with nothing new to drop rewrites nothing the second time.
@@ -579,6 +763,7 @@ async fn the_background_task_compacts_when_the_thresholds_are_met() {
             min_wal_size_bytes: 64 * 1024,
             min_interval: Duration::from_millis(50),
             min_dead_ratio: 0.5,
+            ..CompactionConfig::default()
         },
         ..StorageConfig::new(dir.path().to_path_buf())
     };
@@ -640,6 +825,7 @@ async fn the_background_task_waits_for_its_thresholds() {
             min_wal_size_bytes: 64 * 1024,
             min_interval: Duration::from_millis(20),
             min_dead_ratio: 0.5,
+            ..CompactionConfig::default()
         },
         ..StorageConfig::new(dir.path().to_path_buf())
     };

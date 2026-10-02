@@ -224,13 +224,18 @@ impl Throttle {
         }
     }
 
-    fn charge(&mut self, bytes: u64) {
+    /// Accounts for `bytes` and sleeps while the run is ahead of its rate, in slices of
+    /// at most 10 ms so that a stop request is noticed promptly.
+    fn charge(&mut self, bytes: u64, stop: &dyn Fn() -> bool) {
         let Some(rate) = self.rate else { return };
         self.bytes += bytes;
         let due = Duration::from_secs_f64(self.bytes as f64 / rate as f64);
-        let ahead = due.saturating_sub(self.started.elapsed());
-        if ahead >= Duration::from_millis(2) {
-            std::thread::sleep(ahead);
+        loop {
+            let ahead = due.saturating_sub(self.started.elapsed());
+            if ahead < Duration::from_millis(2) || stop() {
+                return;
+            }
+            std::thread::sleep(ahead.min(Duration::from_millis(10)));
         }
     }
 }
@@ -327,83 +332,84 @@ fn plan_segment(
     let mut max_changed: Lsn = 0;
     let index = ctx.index.pin();
 
-    ctx.wal.scan_sealed(seg.first_lsn, &mut |loc, kind, payload| {
-        if (ctx.stop)() {
-            return Err(WalError::CompactionRefused(STOPPED.to_string()));
-        }
-        throttle.charge((FRAME_HEADER_LEN + payload.len()) as u64);
-        if kind == FrameKind::Elided {
-            return sink.frame(loc.lsn, FrameKind::Elided, &[]);
-        }
-        let ops = Batch::decode(payload)?.ops;
-        // Walking backwards: the first put of a key seen is the frame's last one for it,
-        // the only one replay leaves in effect. A delete marks its key seen (an earlier
-        // put of that key in the frame is superseded inside the frame, durably).
-        let mut seen: HashSet<&[u8]> = HashSet::new();
-        let mut keep = vec![false; ops.len()];
-        for (i, op) in ops.iter().enumerate().rev() {
-            match op {
-                BatchOp::Put { key, .. } => {
-                    if !seen.insert(key.as_slice()) {
-                        continue;
+    ctx.wal
+        .scan_sealed(seg.first_lsn, &mut |loc, kind, payload| {
+            if (ctx.stop)() {
+                return Err(WalError::CompactionRefused(STOPPED.to_string()));
+            }
+            throttle.charge((FRAME_HEADER_LEN + payload.len()) as u64, ctx.stop);
+            if kind == FrameKind::Elided {
+                return sink.frame(loc.lsn, FrameKind::Elided, &[]);
+            }
+            let ops = Batch::decode(payload)?.ops;
+            // Walking backwards: the first put of a key seen is the frame's last one for it,
+            // the only one replay leaves in effect. A delete marks its key seen (an earlier
+            // put of that key in the frame is superseded inside the frame, durably).
+            let mut seen: HashSet<&[u8]> = HashSet::new();
+            let mut keep = vec![false; ops.len()];
+            for (i, op) in ops.iter().enumerate().rev() {
+                match op {
+                    BatchOp::Put { key, .. } => {
+                        if !seen.insert(key.as_slice()) {
+                            continue;
+                        }
+                        match index.get(key) {
+                            Some(at) if at.lsn == loc.lsn => keep[i] = true,
+                            // Superseded by exactly this later put.
+                            Some(at) => durable_needed = durable_needed.max(at.lsn),
+                            // Superseded by a delete whose LSN is not known here.
+                            None => superseded_by_delete = true,
+                        }
                     }
-                    match index.get(key) {
-                        Some(at) if at.lsn == loc.lsn => keep[i] = true,
-                        // Superseded by exactly this later put.
-                        Some(at) => durable_needed = durable_needed.max(at.lsn),
-                        // Superseded by a delete whose LSN is not known here.
-                        None => superseded_by_delete = true,
+                    BatchOp::Delete { key } => {
+                        seen.insert(key.as_slice());
+                        keep[i] = loc.lsn >= horizon;
                     }
                 }
-                BatchOp::Delete { key } => {
-                    seen.insert(key.as_slice());
-                    keep[i] = loc.lsn >= horizon;
+            }
+            let kept = keep.iter().filter(|k| **k).count();
+            if kept == 0 {
+                changed = true;
+                max_changed = max_changed.max(loc.lsn);
+                return sink.frame(loc.lsn, FrameKind::Elided, &[]);
+            }
+            all_elided = false;
+            let offset = sink.offset();
+            let rewritten;
+            let new_payload: &[u8] = if kept == ops.len() {
+                payload
+            } else {
+                changed = true;
+                max_changed = max_changed.max(loc.lsn);
+                let live: Vec<BatchOp> = ops
+                    .iter()
+                    .zip(&keep)
+                    .filter(|(_, k)| **k)
+                    .map(|(op, _)| op.clone())
+                    .collect();
+                rewritten = Batch { ops: live }.encode(ctx.compression)?;
+                &rewritten
+            };
+            let to = RecordLoc {
+                lsn: loc.lsn,
+                segment: seg.first_lsn,
+                offset,
+                payload_len: new_payload.len() as u32,
+            };
+            for (op, k) in ops.iter().zip(&keep) {
+                if let (BatchOp::Put { key, .. }, true) = (op, *k) {
+                    relocations.push(Relocation {
+                        key: key.clone(),
+                        lsn: loc.lsn,
+                        to,
+                    });
                 }
             }
-        }
-        let kept = keep.iter().filter(|k| **k).count();
-        if kept == 0 {
-            changed = true;
-            max_changed = max_changed.max(loc.lsn);
-            return sink.frame(loc.lsn, FrameKind::Elided, &[]);
-        }
-        all_elided = false;
-        let offset = sink.offset();
-        let rewritten;
-        let new_payload: &[u8] = if kept == ops.len() {
-            payload
-        } else {
-            changed = true;
-            max_changed = max_changed.max(loc.lsn);
-            let live: Vec<BatchOp> = ops
-                .iter()
-                .zip(&keep)
-                .filter(|(_, k)| **k)
-                .map(|(op, _)| op.clone())
-                .collect();
-            rewritten = Batch { ops: live }.encode(ctx.compression)?;
-            &rewritten
-        };
-        let to = RecordLoc {
-            lsn: loc.lsn,
-            segment: seg.first_lsn,
-            offset,
-            payload_len: new_payload.len() as u32,
-        };
-        for (op, k) in ops.iter().zip(&keep) {
-            if let (BatchOp::Put { key, .. }, true) = (op, *k) {
-                relocations.push(Relocation {
-                    key: key.clone(),
-                    lsn: loc.lsn,
-                    to,
-                });
+            if sink.file.is_some() {
+                throttle.charge((FRAME_HEADER_LEN + new_payload.len()) as u64, ctx.stop);
             }
-        }
-        if sink.file.is_some() {
-            throttle.charge((FRAME_HEADER_LEN + new_payload.len()) as u64);
-        }
-        sink.frame(loc.lsn, FrameKind::Batch, new_payload)
-    })?;
+            sink.frame(loc.lsn, FrameKind::Batch, new_payload)
+        })?;
     sink.flush()?;
     if superseded_by_delete {
         // The delete was published before this load: a hook runs only after `next_lsn`
@@ -495,7 +501,9 @@ fn delete_checkpoints(ctx: &Ctx<'_>) -> Result<(), StorageError> {
 
 fn step(hook: &mut StepHook<'_>, at: CompactionStep) -> Result<(), StorageError> {
     hook(at).map_err(|why| {
-        StorageError::Internal(format!("compaction aborted by its test hook at {at:?}: {why}"))
+        StorageError::Internal(format!(
+            "compaction aborted by its test hook at {at:?}: {why}"
+        ))
     })
 }
 

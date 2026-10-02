@@ -143,7 +143,7 @@ fn fully_elided_leading_segments_are_removed_and_the_log_starts_later() {
     let sealed = wal.sealed_segments().unwrap();
     let (first, second) = (sealed[0], sealed[1]);
 
-    let refused = wal.remove_leading_segments(first.next_lsn);
+    let refused = wal.set_log_start(first.next_lsn);
     assert!(
         matches!(refused, Err(WalError::CompactionRefused(_))),
         "a segment with live frames: {refused:?}"
@@ -153,6 +153,13 @@ fn fully_elided_leading_segments_are_removed_and_the_log_starts_later() {
         let path = rewrite(&wal, &seg, |_| false);
         wal.replace_segment(seg.first_lsn, &path, || {}).unwrap();
     }
+    let early = wal.remove_leading_segments(second.next_lsn);
+    assert!(
+        matches!(early, Err(WalError::CompactionRefused(_))),
+        "removal needs the durable log start moved first: {early:?}"
+    );
+    wal.set_log_start(second.next_lsn).unwrap();
+    assert_eq!(wal.log_state().log_start, second.next_lsn);
     assert_eq!(wal.remove_leading_segments(second.next_lsn).unwrap(), 2);
     assert_eq!(wal.segments()[0], second.next_lsn);
     assert!(!wal.segment_path(first.first_lsn).exists());
@@ -161,7 +168,7 @@ fn fully_elided_leading_segments_are_removed_and_the_log_starts_later() {
         "a location in a removed segment is stale"
     );
     let active = *wal.segments().last().unwrap();
-    let refused = wal.remove_leading_segments(active + 1);
+    let refused = wal.set_log_start(active + 1);
     assert!(
         matches!(refused, Err(WalError::CompactionRefused(_))),
         "the active segment is never removed: {refused:?}"
@@ -226,4 +233,50 @@ fn a_gap_after_the_first_segment_is_still_corruption() {
         matches!(err, WalError::CorruptSegment { ref reason, .. } if reason.contains("does not continue")),
         "{err}"
     );
+}
+
+/// A crash between moving the log start and removing the released segments leaves them on
+/// disk: the next open recognises them (fully elided, before the log start), removes them,
+/// and opens.
+#[test]
+fn released_segments_left_by_a_crash_are_removed_on_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let (wal, _) = filled(dir.path(), 40);
+    let first = wal.sealed_segments().unwrap()[0];
+    let path = rewrite(&wal, &first, |_| false);
+    wal.replace_segment(first.first_lsn, &path, || {}).unwrap();
+    wal.set_log_start(first.next_lsn).unwrap();
+    wal.close().unwrap(); // "crash" before remove_leading_segments
+    assert!(wal_path(dir.path(), first.first_lsn).exists());
+
+    let (wal, seen) = open(dir.path());
+    assert!(!wal_path(dir.path(), first.first_lsn).exists());
+    assert_eq!(seen.first().unwrap().0.lsn, first.next_lsn);
+    assert_eq!(wal.log_state().log_start, first.next_lsn);
+}
+
+/// A segment before the log start that still holds a live frame is not something
+/// compaction released: corruption, refused.
+#[test]
+fn a_live_segment_before_the_log_start_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (wal, _) = filled(dir.path(), 40);
+    let second = wal.sealed_segments().unwrap()[1];
+    wal.close().unwrap();
+    prkdb_core::wal::LogState {
+        log_start: second.first_lsn,
+        compacted_through: 0,
+    }
+    .write(&StdVfs, dir.path())
+    .unwrap();
+    let err = Wal::open(Arc::new(StdVfs), dir.path(), opts(), 1, &mut |_, _, _| {
+        Ok(())
+    })
+    .err()
+    .expect("refused");
+    assert!(matches!(err, WalError::CorruptSegment { .. }), "{err}");
+}
+
+fn wal_path(dir: &Path, first: Lsn) -> PathBuf {
+    dir.join(format!("{first:020}.wal"))
 }
