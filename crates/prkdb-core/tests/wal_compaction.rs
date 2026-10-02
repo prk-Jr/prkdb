@@ -21,6 +21,8 @@ fn opts() -> WalOptions {
         max_batch_bytes: 1 << 20,
         max_queued_bytes: 8 << 20,
         front_release: FrontRelease::ElidedOnly,
+        append_kind: prkdb_core::wal::frame::FrameKind::Batch,
+        lsn_limit: None,
     }
 }
 

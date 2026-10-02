@@ -21,6 +21,8 @@ fn opts(mode: SyncMode, segment_bytes: u64) -> WalOptions {
         max_batch_bytes: 1 << 20,
         max_queued_bytes: 8 << 20,
         front_release: FrontRelease::ElidedOnly,
+        append_kind: prkdb_core::wal::frame::FrameKind::Batch,
+        lsn_limit: None,
     }
 }
 
@@ -374,6 +376,8 @@ async fn fast_mode_keeps_syncing_under_saturation() {
         max_batch_bytes: 2048,
         max_queued_bytes: 16 << 20,
         front_release: FrontRelease::ElidedOnly,
+        append_kind: prkdb_core::wal::frame::FrameKind::Batch,
+        lsn_limit: None,
     };
     let (wal, _) = open(Arc::new(StdVfs), dir.path(), o);
     let wal = Arc::new(wal);
@@ -639,6 +643,8 @@ async fn scan_from_sees_fast_acked_writes_scan_durable_from_waits_for_sync() {
         max_batch_bytes: 1 << 20,
         max_queued_bytes: 8 << 20,
         front_release: FrontRelease::ElidedOnly,
+        append_kind: prkdb_core::wal::frame::FrameKind::Batch,
+        lsn_limit: None,
     };
     let (wal, _) = open(Arc::new(StdVfs), dir.path(), o);
 
@@ -706,6 +712,8 @@ async fn a_segment_roll_advances_durable_lsn_for_the_old_segment_in_fast_mode() 
         max_batch_bytes: 1 << 20,
         max_queued_bytes: 8 << 20,
         front_release: FrontRelease::ElidedOnly,
+        append_kind: prkdb_core::wal::frame::FrameKind::Batch,
+        lsn_limit: None,
     };
     let (wal, _) = open(Arc::new(StdVfs), dir.path(), o);
 

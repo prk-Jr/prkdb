@@ -16,8 +16,8 @@ use crate::wal::config::{FrontRelease, SyncMode, WalConfig};
 use crate::wal::frame::{encode_frame, FrameKind, Lsn, MAX_PAYLOAD_LEN};
 use crate::wal::log_state::LogState;
 use crate::wal::segment::{
-    read_frame, scan_segment, scan_segment_flow, segment_file_name, write_segment_header,
-    RecordLoc, ScanFlowVisitor, ScanVisitor, SegmentScan, SEGMENT_HEADER_LEN,
+    read_frame, scan_segment, scan_segment_flow, scan_segment_from, segment_file_name,
+    write_segment_header, RecordLoc, ScanFlowVisitor, ScanVisitor, SegmentScan, SEGMENT_HEADER_LEN,
 };
 use crate::wal::WalError;
 use std::collections::BTreeMap;
@@ -44,6 +44,11 @@ pub struct WalOptions {
     /// What may release segments from the front of the log; fixed at open. Keyed
     /// directories keep the default, [`FrontRelease::ElidedOnly`].
     pub front_release: FrontRelease,
+    /// Frame kind assigned to every append. Keyed writers retain `Batch`.
+    pub append_kind: FrameKind,
+    /// Exclusive bound on allocated LSNs. Streams reserve their final offset block
+    /// for the next cursor; `None` preserves the keyed writer's unrestricted range.
+    pub lsn_limit: Option<Lsn>,
 }
 
 impl WalOptions {
@@ -55,6 +60,8 @@ impl WalOptions {
             max_batch_bytes: c.max_batch_bytes,
             max_queued_bytes: c.max_queued_bytes,
             front_release: FrontRelease::ElidedOnly,
+            append_kind: FrameKind::Batch,
+            lsn_limit: None,
         }
     }
 }
@@ -488,6 +495,42 @@ impl Wal {
         segment_lsns.sort_unstable();
 
         let log_state = LogState::read(&*vfs, dir)?;
+        // Stream offsets reserve the final LSN block for their terminal cursor.
+        // Reject exhausted input before recovery can remove retention leftovers,
+        // truncate a torn tail, or create a new active segment. Far from the bound,
+        // the tail's byte length proves it cannot contain enough frames to reach it,
+        // so the normal recovery scan remains the only frame scan.
+        if let Some(limit) = opts.lsn_limit {
+            let exhausted = || {
+                WalError::InvalidRecords(format!(
+                    "offset-limit {limit} exceeded by the recovered WAL"
+                ))
+            };
+            if log_state.log_start > limit {
+                return Err(exhausted());
+            }
+            if let Some(&first) = segment_lsns.last() {
+                if first > limit {
+                    return Err(exhausted());
+                }
+                let path = dir.join(segment_file_name(first));
+                let file = vfs.open(&path, OpenMode::Read)?;
+                let max_frames = file.len()?.saturating_sub(SEGMENT_HEADER_LEN)
+                    / crate::wal::frame::FRAME_HEADER_LEN as u64;
+                if max_frames > limit.saturating_sub(first) {
+                    let scan = scan_segment(&*file, &path, first, &mut |loc, _, _| {
+                        if loc.lsn >= limit {
+                            Err(exhausted())
+                        } else {
+                            Ok(())
+                        }
+                    })?;
+                    if scan.next_lsn > limit {
+                        return Err(exhausted());
+                    }
+                }
+            }
+        }
         let segment_lsns =
             remove_leftovers_before(&*vfs, dir, segment_lsns, log_state, opts.front_release)?;
         if let Some(&first) = segment_lsns.first() {
@@ -931,63 +974,95 @@ impl Wal {
         self.scan_from_capped(from, self.durable_lsn(), visit)
     }
 
-    /// Starts at the segment holding `from` (the last one whose first LSN is `<= from`,
-    /// or the oldest if `from` precedes them all), so a read near the tail of a long log
-    /// opens no earlier segment (Task 2.15b.1); frames below `from` in that segment are
-    /// still decoded and skipped.
-    ///
-    /// M3: a frame on the *active* segment past `cap` is never visited, and ends the scan
-    /// (frames are in LSN order). Earlier (sealed) segments are always fully durable by
-    /// construction (`roll_segment` syncs the old segment before switching), so the cap
-    /// applies only to the last one. A scan fault on an earlier segment is corruption and
-    /// returns `CorruptSegment`; a fault on the active segment's tail is expected (a write
-    /// in flight, or a crash not yet recovered from) and is silently bounded by `cap`
-    /// regardless of whether `scan_segment` itself reports a fault. A CRC-valid frame of an
-    /// unknown kind is `UnsupportedFormat` in any segment (STO-11).
     fn scan_from_capped(
         &self,
         from: Lsn,
         cap: Lsn,
         visit: &mut ScanFlowVisitor<'_>,
     ) -> Result<ControlFlow<()>, WalError> {
+        self.scan_from_loc_capped(from, cap, None, visit)
+    }
+
+    /// Visits frames from `from` through `min(cap, acked_lsn)`, inclusive. A durable
+    /// reader supplies `durable_lsn` as its cap. The cap applies to every segment.
+    ///
+    /// A sparse index may supply a frame location at or before `from` in the selected
+    /// starting segment. A stale, unrelated, or invalid hint falls back to scanning
+    /// that segment from its header. Handles are cloned under the segments lock, so
+    /// retention or a roll cannot change this scan's segment snapshot.
+    pub fn scan_from_loc_capped(
+        &self,
+        from: Lsn,
+        cap: Lsn,
+        start: Option<RecordLoc>,
+        visit: &mut ScanFlowVisitor<'_>,
+    ) -> Result<ControlFlow<()>, WalError> {
+        let cap = cap.min(self.acked_lsn());
         let segments: Vec<(Lsn, Arc<dyn VfsFile>)> = {
             let segments = self.shared.segments.read().expect("segments lock poisoned");
-            let start = segments
+            let first = segments
                 .range(..=from)
                 .next_back()
                 .map_or(0, |(first, _)| *first);
             segments
-                .range(start..)
+                .range(first..)
                 .map(|(k, v)| (*k, v.file.clone()))
                 .collect()
         };
         let last_idx = segments.len().saturating_sub(1);
         for (idx, (first_lsn, file)) in segments.iter().enumerate() {
+            if *first_lsn > cap {
+                break;
+            }
             let is_last = idx == last_idx;
             let path = self.shared.dir.join(segment_file_name(*first_lsn));
+            let hint = start.filter(|loc| {
+                idx == 0
+                    && loc.segment == *first_lsn
+                    && loc.lsn >= *first_lsn
+                    && loc.lsn <= from
+                    && loc.offset >= SEGMENT_HEADER_LEN
+                    && read_frame(&**file, &path, *loc).is_ok()
+            });
             let mut visitor_broke = false;
-            let scan = scan_segment_flow(&**file, &path, *first_lsn, &mut |loc, kind, payload| {
-                if loc.lsn < from {
-                    return Ok(ControlFlow::Continue(()));
-                }
-                if is_last && loc.lsn > cap {
+            let mut cap_reached = false;
+            let mut capped_visit = |loc: RecordLoc, kind, payload: &[u8]| {
+                if loc.lsn > cap {
+                    cap_reached = true;
                     return Ok(ControlFlow::Break(()));
                 }
-                let flow = visit(loc, kind, payload)?;
-                visitor_broke = flow.is_break();
-                Ok(flow)
-            })?;
+                if loc.lsn >= from {
+                    let flow = visit(loc, kind, payload)?;
+                    if flow.is_break() {
+                        visitor_broke = true;
+                        return Ok(flow);
+                    }
+                }
+                // Stop at the cap itself: do not decode even the following frame.
+                if loc.lsn == cap {
+                    cap_reached = true;
+                    return Ok(ControlFlow::Break(()));
+                }
+                Ok(ControlFlow::Continue(()))
+            };
+            let scan = match hint {
+                Some(loc) => scan_segment_from(
+                    &**file,
+                    &path,
+                    *first_lsn,
+                    (loc.lsn, loc.offset),
+                    &mut capped_visit,
+                )?,
+                None => scan_segment_flow(&**file, &path, *first_lsn, &mut capped_visit)?,
+            };
             if visitor_broke {
                 return Ok(ControlFlow::Break(()));
             }
-            if let Some((offset, fault)) = scan.stopped {
-                if !is_last {
-                    return Err(WalError::CorruptSegment {
-                        path: path.clone(),
-                        offset,
-                        reason: format!("{fault:?}"),
-                    });
-                }
+            if cap_reached {
+                break;
+            }
+            if !is_last {
+                check_whole(&path, &scan, segments[idx + 1].0)?;
             }
         }
         Ok(ControlFlow::Continue(()))
@@ -1840,10 +1915,27 @@ fn commit_batch(
     opts: &WalOptions,
     dir: &Path,
     vfs: &Arc<dyn Vfs>,
-    items: Vec<DrainedAppend>,
+    mut items: Vec<DrainedAppend>,
     last_written_lsn: &mut Lsn,
     unsynced_since: &mut Option<Instant>,
 ) {
+    // Allocate only the legal prefix before doing any I/O, including a roll. The
+    // writer alone owns allocation, so concurrent producers need no extra mutex.
+    let start_lsn = shared.next_lsn.load(Ordering::Acquire);
+    if let Some(limit) = opts.lsn_limit {
+        let allowed = limit.saturating_sub(start_lsn).min(items.len() as u64) as usize;
+        for item in items.split_off(allowed) {
+            shared
+                .queued_bytes
+                .fetch_sub(item.permit_len, Ordering::AcqRel);
+            item.reply.answer(Err(WalError::InvalidRecords(format!(
+                "offset-limit {limit} exhausted: append LSN must be below the exclusive bound"
+            ))));
+        }
+        if items.is_empty() {
+            return;
+        }
+    }
     let total_queued: usize = items.iter().map(|i| i.permit_len).sum();
 
     // Roll first if this batch would push a non-empty active segment past `segment_bytes`.
@@ -1865,12 +1957,11 @@ fn commit_batch(
 
     let mut buf = Vec::with_capacity(frame_bytes);
     let mut locs = Vec::with_capacity(items.len());
-    let start_lsn = shared.next_lsn.load(Ordering::Acquire);
     let mut lsn = start_lsn;
     let base_offset = active.write_pos;
     for item in &items {
         let offset = base_offset + buf.len() as u64;
-        encode_frame(&mut buf, lsn, FrameKind::Batch, &item.payload);
+        encode_frame(&mut buf, lsn, opts.append_kind, &item.payload);
         locs.push(RecordLoc {
             lsn,
             segment: active.first_lsn,
@@ -2035,6 +2126,8 @@ mod tests {
             max_batch_bytes: 1 << 20,
             max_queued_bytes: 4096,
             front_release: crate::wal::config::FrontRelease::ElidedOnly,
+            append_kind: FrameKind::Batch,
+            lsn_limit: None,
         }
     }
 
