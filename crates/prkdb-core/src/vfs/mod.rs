@@ -74,6 +74,11 @@ pub trait Vfs: Send + Sync {
 /// Holds a [`Vfs::lock_exclusive`] lock; dropping it releases the lock.
 pub trait LockGuard: Send + Sync {}
 
+/// Creates `dir` and its missing ancestors durably.
+pub fn create_dir_all_durable(vfs: &dyn Vfs, dir: &Path) -> io::Result<()> {
+    vfs.create_dir_all(dir)
+}
+
 /// Shared conformance tests; every `Vfs` implementation must pass them.
 ///
 /// The crate denies `clippy::unwrap_used` outside `cfg(test)`, but this module is
