@@ -12,24 +12,25 @@
 //! recovery and the writer-liveness probe (decision record §6 risk 5).
 
 use crate::vfs::{OpenMode, Vfs, VfsFile};
-use crate::wal::config::{SyncMode, WalConfig};
+use crate::wal::config::{FrontRelease, SyncMode, WalConfig};
 use crate::wal::frame::{encode_frame, FrameKind, Lsn, MAX_PAYLOAD_LEN};
 use crate::wal::log_state::LogState;
 use crate::wal::segment::{
-    read_frame, scan_segment, segment_file_name, write_segment_header, RecordLoc, ScanVisitor,
-    SegmentScan, SEGMENT_HEADER_LEN,
+    read_frame, scan_segment, scan_segment_flow, segment_file_name, write_segment_header,
+    RecordLoc, ScanFlowVisitor, ScanVisitor, SegmentScan, SEGMENT_HEADER_LEN,
 };
 use crate::wal::WalError;
 use std::collections::BTreeMap;
+use std::ops::ControlFlow;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{fence, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, RwLock};
 use std::task::{Context as TaskContext, Poll};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{oneshot, watch, OwnedSemaphorePermit, Semaphore};
 
 /// Options the writer thread runs under. Constructed from [`WalConfig`] with
 /// [`WalOptions::from_config`].
@@ -40,6 +41,9 @@ pub struct WalOptions {
     pub segment_bytes: u64,
     pub max_batch_bytes: usize,
     pub max_queued_bytes: usize,
+    /// What may release segments from the front of the log; fixed at open. Keyed
+    /// directories keep the default, [`FrontRelease::ElidedOnly`].
+    pub front_release: FrontRelease,
 }
 
 impl WalOptions {
@@ -50,6 +54,7 @@ impl WalOptions {
             segment_bytes: c.segment_bytes,
             max_batch_bytes: c.max_batch_bytes,
             max_queued_bytes: c.max_queued_bytes,
+            front_release: FrontRelease::ElidedOnly,
         }
     }
 }
@@ -115,13 +120,18 @@ impl SegmentHandle {
 }
 
 /// `Wal::open`'s log-start rule: removes, oldest first, every segment that ends at or
-/// before `state.log_start` (each must be fully elided: a crash between `LOG_STATE`'s
-/// write and their removal leaves them), and returns the segments that remain.
+/// before `state.log_start`, and returns the segments that remain. A crash between
+/// `LOG_STATE`'s write and their removal leaves them. Every one is checked before any is
+/// removed, so a refusal changes nothing: each must end at or before the log start, and
+/// under [`FrontRelease::ElidedOnly`] be whole and fully elided (compaction released
+/// it). Under [`FrontRelease::Retention`] its frames are not read: retention released it
+/// with whatever it held.
 fn remove_leftovers_before(
     vfs: &dyn Vfs,
     dir: &Path,
     segment_lsns: Vec<Lsn>,
     state: LogState,
+    front_release: FrontRelease,
 ) -> Result<Vec<Lsn>, WalError> {
     let leftovers = segment_lsns
         .iter()
@@ -142,6 +152,9 @@ fn remove_leftovers_before(
                 ),
             });
         }
+        if front_release == FrontRelease::Retention {
+            continue;
+        }
         let file = vfs.open(&path, OpenMode::Read)?;
         let scan = scan_segment(&*file, &path, first, &mut |loc, kind, _| {
             if kind == FrameKind::Elided {
@@ -159,8 +172,14 @@ fn remove_leftovers_before(
             }
         })?;
         check_whole(&path, &scan, next.expect("checked above"))?;
-        drop(file);
-        tracing::info!(path = %path.display(), "removing a segment compaction had already released");
+    }
+    for &first in &segment_lsns[..leftovers] {
+        let path = dir.join(segment_file_name(first));
+        tracing::info!(
+            path = %path.display(),
+            ?front_release,
+            "removing a segment already released below the log start"
+        );
         vfs.remove(&path)?;
         vfs.sync_dir(dir)?;
     }
@@ -209,6 +228,12 @@ struct Shared {
     /// the same batch) never raises this watermark, even though its frame may already be
     /// physically written — "acked" means the caller was told `Ok`, nothing else.
     acked_lsn: AtomicU64,
+    /// `acked_lsn`, published once per batch for readers waiting on new data
+    /// ([`Wal::subscribe_acked`]). The writer skips it while no receiver exists, so a log
+    /// nobody watches pays one fence and one atomic load per batch.
+    acked_tx: watch::Sender<Lsn>,
+    /// Fixed at open (see [`WalOptions::front_release`]).
+    front_release: FrontRelease,
     health: RwLock<InternalHealth>,
     /// Read handles for `read`/`scan_from`, keyed by each segment's first LSN. Written by
     /// the writer thread (a roll adds the new active segment) and by compaction (a
@@ -245,6 +270,33 @@ enum InternalHealth {
 }
 
 impl Shared {
+    /// Raises the published `acked_lsn` to the current one, if any receiver exists. The
+    /// `SeqCst` fence pairs with the one in [`Wal::subscribe_acked`]: either this load of
+    /// the receiver count sees the new subscriber, or the subscriber's load of
+    /// `acked_lsn` sees every ack raised before this call. So no subscriber misses a
+    /// wake-up for an ack it did not see.
+    fn publish_acked(&self) {
+        fence(Ordering::SeqCst);
+        if self.acked_tx.receiver_count() == 0 {
+            return;
+        }
+        self.refresh_acked();
+    }
+
+    /// Raises the published value to `acked_lsn` (monotonic: never lowers it), waking
+    /// receivers only if it rose.
+    fn refresh_acked(&self) {
+        let acked = self.acked_lsn.load(Ordering::Acquire);
+        self.acked_tx.send_if_modified(|published| {
+            if acked > *published {
+                *published = acked;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
     fn health_snapshot(&self) -> WalHealth {
         match &*self.health.read().expect("health lock poisoned") {
             InternalHealth::Poisoned(reason) => return WalHealth::Poisoned(reason.clone()),
@@ -335,6 +387,10 @@ enum Request {
     Sync {
         reply: oneshot::Sender<Result<Lsn, WalError>>,
     },
+    /// Seal the active segment if it holds a frame (see [`Wal::roll`]).
+    Roll {
+        reply: oneshot::Sender<Result<Option<Lsn>, WalError>>,
+    },
     Close {
         reply: oneshot::Sender<Result<(), WalError>>,
     },
@@ -382,8 +438,11 @@ impl Wal {
     /// Log start (Task 2.15): `LOG_STATE` (see [`LogState`]) records the first LSN of the
     /// log, which compaction moves forward when it removes fully elided segments from the
     /// front. Segments that start before it are what a crash between writing `LOG_STATE`
-    /// and removing them leaves: each must be entirely elided, and is removed here
-    /// (`remove` + `sync_dir`); one that is not is `CorruptSegment`. A first segment that
+    /// and removing them leaves: each must end at or before the log start and, under
+    /// [`FrontRelease::ElidedOnly`], be entirely elided; all are checked, then removed
+    /// here (`remove` + `sync_dir`); one that fails a check is `CorruptSegment` and
+    /// nothing is removed. Under [`FrontRelease::Retention`] (streams, Task 2.15b) their
+    /// frames are not checked: retention released them live. A first segment that
     /// starts *after* the log start means segments are missing: `CorruptSegment` naming the
     /// missing LSN range. Last segment: a torn tail is logged,
     /// truncated (`set_len` + `sync_data`) and reported. Earlier segment: any fault is
@@ -429,7 +488,8 @@ impl Wal {
         segment_lsns.sort_unstable();
 
         let log_state = LogState::read(&*vfs, dir)?;
-        let segment_lsns = remove_leftovers_before(&*vfs, dir, segment_lsns, log_state)?;
+        let segment_lsns =
+            remove_leftovers_before(&*vfs, dir, segment_lsns, log_state, opts.front_release)?;
         if let Some(&first) = segment_lsns.first() {
             if first != log_state.log_start {
                 return Err(WalError::CorruptSegment {
@@ -576,6 +636,8 @@ impl Wal {
             // Recovery: everything replayed was just made durable by the sync above, and
             // was reported to `replay` as if committed, so it counts as acked too.
             acked_lsn: AtomicU64::new(next_lsn.saturating_sub(1)),
+            acked_tx: watch::Sender::new(next_lsn.saturating_sub(1)),
+            front_release: opts.front_release,
             health: RwLock::new(InternalHealth::Running),
             segments: RwLock::new(segments),
             removed_below: AtomicU64::new(0),
@@ -729,6 +791,45 @@ impl Wal {
         block_on_unbudgeted(self.sync())
     }
 
+    /// Seals the active segment if it holds at least one frame, exactly as a roll on size
+    /// does: `sync_data` of the old segment, then the next segment created, its header
+    /// synced, and the directory synced. Returns the new active segment's first LSN, or
+    /// `None` (nothing done) when the active segment is empty. For a stream's retention,
+    /// which can only remove sealed segments (Task 2.15b.1, design note §8.2). A failure
+    /// poisons the log, like any writer I/O error.
+    pub async fn roll(&self) -> Result<Option<Lsn>, WalError> {
+        let sender = self.sender.as_ref().ok_or(WalError::Closed)?;
+        let (tx, rx) = oneshot::channel();
+        sender
+            .send(Request::Roll { reply: tx })
+            .map_err(|_| WalError::Closed)?;
+        rx.await.unwrap_or(Err(WalError::Closed))
+    }
+
+    /// `roll` for non-async callers; waits with [`block_on_unbudgeted`] (see
+    /// `append_blocking`).
+    pub fn roll_blocking(&self) -> Result<Option<Lsn>, WalError> {
+        block_on_unbudgeted(self.roll())
+    }
+
+    /// A receiver of `acked_lsn` (see [`Wal::acked_lsn`]), updated once per group-commit
+    /// batch after every frame in it is acked, so a reader woken by
+    /// [`watch::Receiver::changed`] finds those frames within [`Wal::scan_from`]'s cap.
+    /// The receiver starts at the current value, already marked seen: the pattern is
+    /// "scan, then wait for `changed`, then scan again", and no ack after the subscription
+    /// is missed. When the log is poisoned, `changed` fires once more with the value
+    /// unchanged, so a waiter can see [`Wal::health`]; it errors once the `Wal` is closed
+    /// and dropped. Commit hooks are
+    /// no substitute: they run before `acked_lsn` moves.
+    pub fn subscribe_acked(&self) -> watch::Receiver<Lsn> {
+        let mut rx = self.shared.acked_tx.subscribe();
+        // Pairs with the fence in `Shared::publish_acked`; see there.
+        fence(Ordering::SeqCst);
+        self.shared.refresh_acked();
+        rx.borrow_and_update();
+        rx
+    }
+
     /// Reads the payload of the frame at `loc`, verifying that it is that frame (CRC, LSN,
     /// payload length; see [`read_frame`]).
     ///
@@ -788,6 +889,20 @@ impl Wal {
     /// must never see anything that could still be lost to a crash (compaction, a
     /// checkpoint) wants [`Wal::scan_durable_from`] instead.
     pub fn scan_from(&self, from: Lsn, visit: &mut ScanVisitor<'_>) -> Result<(), WalError> {
+        self.scan_from_capped(from, self.acked_lsn(), &mut |loc, kind, payload| {
+            visit(loc, kind, payload).map(|()| ControlFlow::Continue(()))
+        })
+        .map(|_| ())
+    }
+
+    /// [`Wal::scan_from`] with a visitor that can stop the scan: `ControlFlow::Break`
+    /// ends it after that frame, and is returned. A bounded read uses it so it never
+    /// decodes the rest of the log (Task 2.15b.1).
+    pub fn scan_from_flow(
+        &self,
+        from: Lsn,
+        visit: &mut ScanFlowVisitor<'_>,
+    ) -> Result<ControlFlow<()>, WalError> {
         self.scan_from_capped(from, self.acked_lsn(), visit)
     }
 
@@ -800,43 +915,71 @@ impl Wal {
         from: Lsn,
         visit: &mut ScanVisitor<'_>,
     ) -> Result<(), WalError> {
+        self.scan_from_capped(from, self.durable_lsn(), &mut |loc, kind, payload| {
+            visit(loc, kind, payload).map(|()| ControlFlow::Continue(()))
+        })
+        .map(|_| ())
+    }
+
+    /// [`Wal::scan_durable_from`] with a visitor that can stop the scan (see
+    /// [`Wal::scan_from_flow`]).
+    pub fn scan_durable_from_flow(
+        &self,
+        from: Lsn,
+        visit: &mut ScanFlowVisitor<'_>,
+    ) -> Result<ControlFlow<()>, WalError> {
         self.scan_from_capped(from, self.durable_lsn(), visit)
     }
 
-    /// M3: a frame on the *active* segment past `cap` is skipped, never visited. Earlier
-    /// (sealed) segments are always fully durable by construction (`roll_segment` syncs
-    /// the old segment before switching), so the cap applies only to the last one. A scan
-    /// fault on an earlier segment is corruption and returns `CorruptSegment`; a fault on
-    /// the active segment's tail is expected (a write in flight, or a crash not yet
-    /// recovered from) and is silently bounded by `cap` regardless of whether
-    /// `scan_segment` itself reports a fault.
+    /// Starts at the segment holding `from` (the last one whose first LSN is `<= from`,
+    /// or the oldest if `from` precedes them all), so a read near the tail of a long log
+    /// opens no earlier segment (Task 2.15b.1); frames below `from` in that segment are
+    /// still decoded and skipped.
+    ///
+    /// M3: a frame on the *active* segment past `cap` is never visited, and ends the scan
+    /// (frames are in LSN order). Earlier (sealed) segments are always fully durable by
+    /// construction (`roll_segment` syncs the old segment before switching), so the cap
+    /// applies only to the last one. A scan fault on an earlier segment is corruption and
+    /// returns `CorruptSegment`; a fault on the active segment's tail is expected (a write
+    /// in flight, or a crash not yet recovered from) and is silently bounded by `cap`
+    /// regardless of whether `scan_segment` itself reports a fault. A CRC-valid frame of an
+    /// unknown kind is `UnsupportedFormat` in any segment (STO-11).
     fn scan_from_capped(
         &self,
         from: Lsn,
         cap: Lsn,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), WalError> {
-        let segments: Vec<(Lsn, Arc<dyn VfsFile>)> = self
-            .shared
-            .segments
-            .read()
-            .expect("segments lock poisoned")
-            .iter()
-            .map(|(k, v)| (*k, v.file.clone()))
-            .collect();
+        visit: &mut ScanFlowVisitor<'_>,
+    ) -> Result<ControlFlow<()>, WalError> {
+        let segments: Vec<(Lsn, Arc<dyn VfsFile>)> = {
+            let segments = self.shared.segments.read().expect("segments lock poisoned");
+            let start = segments
+                .range(..=from)
+                .next_back()
+                .map_or(0, |(first, _)| *first);
+            segments
+                .range(start..)
+                .map(|(k, v)| (*k, v.file.clone()))
+                .collect()
+        };
         let last_idx = segments.len().saturating_sub(1);
         for (idx, (first_lsn, file)) in segments.iter().enumerate() {
             let is_last = idx == last_idx;
             let path = self.shared.dir.join(segment_file_name(*first_lsn));
-            let scan = scan_segment(&**file, &path, *first_lsn, &mut |loc, kind, payload| {
+            let mut visitor_broke = false;
+            let scan = scan_segment_flow(&**file, &path, *first_lsn, &mut |loc, kind, payload| {
                 if loc.lsn < from {
-                    return Ok(());
+                    return Ok(ControlFlow::Continue(()));
                 }
                 if is_last && loc.lsn > cap {
-                    return Ok(());
+                    return Ok(ControlFlow::Break(()));
                 }
-                visit(loc, kind, payload)
+                let flow = visit(loc, kind, payload)?;
+                visitor_broke = flow.is_break();
+                Ok(flow)
             })?;
+            if visitor_broke {
+                return Ok(ControlFlow::Break(()));
+            }
             if let Some((offset, fault)) = scan.stopped {
                 if !is_last {
                     return Err(WalError::CorruptSegment {
@@ -847,7 +990,7 @@ impl Wal {
                 }
             }
         }
-        Ok(())
+        Ok(ControlFlow::Continue(()))
     }
 
     pub fn next_lsn(&self) -> Lsn {
@@ -866,6 +1009,11 @@ impl Wal {
 
     pub fn health(&self) -> WalHealth {
         self.shared.health_snapshot()
+    }
+
+    /// What may release segments from the front of this log (fixed at open).
+    pub fn front_release(&self) -> FrontRelease {
+        self.shared.front_release
     }
 
     /// First LSNs of the segments, oldest first (tests, compaction).
@@ -1085,8 +1233,10 @@ impl Wal {
         Ok(())
     }
 
-    /// Moves the durable log start to `upto` (the first LSN of a later segment) after
-    /// checking that every segment before it is sealed and fully elided. Called before
+    /// Moves the durable log start to `upto` (the first LSN of a later segment, so every
+    /// segment before it is sealed) after checking, under [`FrontRelease::ElidedOnly`],
+    /// that every segment before it is fully elided. Under [`FrontRelease::Retention`]
+    /// that check is skipped: retention releases live data on purpose. Called before
     /// [`Wal::remove_leading_segments`], so a crash in between leaves segments `open`
     /// recognises as released and removes.
     pub fn set_log_start(&self, upto: Lsn) -> Result<(), WalError> {
@@ -1107,8 +1257,10 @@ impl Wal {
             }
             segments.range(..upto).map(|(k, _)| *k).collect()
         };
-        for first in leading {
-            self.check_fully_elided(first)?;
+        if self.shared.front_release == FrontRelease::ElidedOnly {
+            for first in leading {
+                self.check_fully_elided(first)?;
+            }
         }
         let next = LogState {
             log_start: upto,
@@ -1139,8 +1291,9 @@ impl Wal {
 
     /// Removes, oldest first, every segment that starts before `upto`. `upto` must not be
     /// past the durable log start ([`Wal::set_log_start`] first; `CompactionRefused`
-    /// otherwise), and each segment is checked fully elided again. Each removal is
-    /// `remove` + `sync_dir` before the next. Returns how many segments were removed.
+    /// otherwise), each segment must be sealed, and under [`FrontRelease::ElidedOnly`]
+    /// each is checked fully elided again. Each removal is `remove` + `sync_dir` before
+    /// the next. Returns how many segments were removed.
     pub fn remove_leading_segments(&self, upto: Lsn) -> Result<usize, WalError> {
         let log_start = self
             .shared
@@ -1163,7 +1316,9 @@ impl Wal {
             let Some(first_lsn) = oldest.filter(|first| *first < upto) else {
                 return Ok(removed);
             };
-            self.check_fully_elided(first_lsn)?;
+            if self.shared.front_release == FrontRelease::ElidedOnly {
+                self.check_fully_elided(first_lsn)?;
+            }
             let (_, next_lsn) = self.sealed_handle(first_lsn)?;
             let path = self.segment_path(first_lsn);
             self.shared.vfs.remove(&path)?;
@@ -1273,9 +1428,18 @@ fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
 /// panicking while it answers requests after an I/O error) must not hide the one that
 /// explains it.
 fn poison(shared: &Arc<Shared>, reason: String) {
-    let mut health = shared.health.write().expect("health lock poisoned");
-    if *health == InternalHealth::Running {
-        *health = InternalHealth::Poisoned(reason);
+    let first = {
+        let mut health = shared.health.write().expect("health lock poisoned");
+        let first = *health == InternalHealth::Running;
+        if first {
+            *health = InternalHealth::Poisoned(reason);
+        }
+        first
+    };
+    if first {
+        // No ack will ever come again: wake every `subscribe_acked` waiter (the value is
+        // unchanged) so it finds `health()` poisoned instead of waiting forever.
+        shared.acked_tx.send_modify(|_| {});
     }
 }
 
@@ -1301,6 +1465,9 @@ fn answer_poisoned(shared: &Arc<Shared>, req: Request) {
             reply.answer(Err(WalError::Poisoned(reason)));
         }
         Request::Sync { reply } => {
+            let _ = reply.send(Err(WalError::Poisoned(reason)));
+        }
+        Request::Roll { reply } => {
             let _ = reply.send(Err(WalError::Poisoned(reason)));
         }
         Request::Close { reply } => {
@@ -1370,6 +1537,9 @@ fn writer_body(
                         // shutdown has started; answer it the same way a dropped sender
                         // would (see `Reply`'s drop guard for the Append case).
                         Request::Sync { reply } => {
+                            let _ = reply.send(Err(WalError::Closed));
+                        }
+                        Request::Roll { reply } => {
                             let _ = reply.send(Err(WalError::Closed));
                         }
                         Request::Close { reply } => {
@@ -1466,6 +1636,9 @@ fn writer_body(
                         Request::Sync { reply } => {
                             let _ = reply.send(Err(WalError::Closed));
                         }
+                        Request::Roll { reply } => {
+                            let _ = reply.send(Err(WalError::Closed));
+                        }
                         Request::Close { reply } => {
                             let _ = reply.send(Err(WalError::Closed));
                         }
@@ -1492,6 +1665,23 @@ fn writer_body(
                     }
                 }
                 let _ = reply.send(Ok(shared.durable_lsn.load(Ordering::Acquire)));
+            }
+            Request::Roll { reply } => {
+                if active.write_pos == SEGMENT_HEADER_LEN {
+                    let _ = reply.send(Ok(None));
+                    continue;
+                }
+                if let Err(e) = roll_segment(shared, active, dir, vfs) {
+                    let reason = format!("segment roll failed: {e}");
+                    poison(shared, reason.clone());
+                    let _ = reply.send(Err(WalError::Poisoned(reason)));
+                    drain_after_poison(shared, rx);
+                    return;
+                }
+                // The roll synced every frame written so far (all in the sealed segment)
+                // and raised `durable_lsn` over them: nothing is left unsynced.
+                unsynced_since = None;
+                let _ = reply.send(Ok(Some(active.first_lsn)));
             }
             Request::Append { .. } => {
                 let mut batch = vec![req];
@@ -1780,6 +1970,9 @@ fn commit_batch(
         shared.acked_lsn.fetch_max(loc.lsn, Ordering::Release);
         item.reply.answer(Ok(loc));
     }
+    // Once per batch, after every `Ok` above: a reader woken here finds the whole batch
+    // within `scan_from`'s cap (Task 2.15b.1).
+    shared.publish_acked();
 }
 
 fn fail_batch(shared: &Arc<Shared>, items: Vec<DrainedAppend>, reason: String) {
@@ -1841,6 +2034,7 @@ mod tests {
             segment_bytes: 1 << 20,
             max_batch_bytes: 1 << 20,
             max_queued_bytes: 4096,
+            front_release: crate::wal::config::FrontRelease::ElidedOnly,
         }
     }
 

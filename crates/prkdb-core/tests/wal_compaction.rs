@@ -6,7 +6,9 @@
 use prkdb_core::vfs::{StdVfs, Vfs};
 use prkdb_core::wal::frame::{encode_frame, FrameKind};
 use prkdb_core::wal::segment::{write_segment_header, SEGMENT_HEADER_LEN};
-use prkdb_core::wal::{Lsn, RecordLoc, SealedSegment, SyncMode, Wal, WalError, WalOptions};
+use prkdb_core::wal::{
+    FrontRelease, Lsn, RecordLoc, SealedSegment, SyncMode, Wal, WalError, WalOptions,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,6 +20,7 @@ fn opts() -> WalOptions {
         segment_bytes: 512,
         max_batch_bytes: 1 << 20,
         max_queued_bytes: 8 << 20,
+        front_release: FrontRelease::ElidedOnly,
     }
 }
 

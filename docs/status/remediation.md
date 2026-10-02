@@ -46,7 +46,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | STO-06 | high | 2 | fixed | Four WAL implementations in use; all data writes hash to one shard so fixes do not propagate |
 | STO-07 | high | 2 | fixed | BatchAccumulator::flush() sleeps and returns Ok while dropping executor errors |
 | STO-10 | high | 2 | fixed | No data-directory lock: two processes can open and corrupt the same WAL |
-| STO-11 | high | 2 | open | decode_frame checks the frame kind before the CRC: a valid frame of an unknown kind is treated as a torn tail and the active segment is truncated |
+| STO-11 | high | 2 | fixed | decode_frame checks the frame kind before the CRC: a valid frame of an unknown kind is treated as a torn tail and the active segment is truncated |
 | TST-01 | high | 4 | open | Chaos monkey tolerates 20% of acknowledged writes missing |
 | TST-09 | high | 2 | fixed | Perf gate WAL benches count ~500 instructions: the WAL work is outside the measured region |
 | TXN-01 | high | 3 | open | Commit writes puts then deletes in separate append_batch calls; crash between leaves a torn commit |

@@ -1,13 +1,15 @@
 //! `Wal` under simulated power loss (Task 2.6, STO-04). FaultFs rules: faultfs.rs module
 //! docs.
 
-use prkdb_core::vfs::{OpenMode, Vfs};
+use prkdb_core::vfs::{LockGuard, OpenMode, Vfs, VfsFile};
 use prkdb_core::wal::frame::FrameKind;
-use prkdb_core::wal::{Lsn, SyncMode, Wal, WalOptions};
+use prkdb_core::wal::{FrontRelease, Lsn, SyncMode, Wal, WalOptions};
 use prkdb_verify::faultfs::{FaultFs, Tear};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,6 +24,7 @@ fn opts(mode: SyncMode, segment_bytes: u64) -> WalOptions {
         segment_bytes,
         max_batch_bytes: 1 << 20,
         max_queued_bytes: 8 << 20,
+        front_release: FrontRelease::ElidedOnly,
     }
 }
 
@@ -32,17 +35,15 @@ fn fs() -> FaultFs {
 }
 
 fn recover(fs: &FaultFs, o: WalOptions) -> (Wal, Vec<(Lsn, Vec<u8>)>) {
+    recover_on(Arc::new(fs.clone()), o)
+}
+
+fn recover_on(vfs: Arc<dyn Vfs>, o: WalOptions) -> (Wal, Vec<(Lsn, Vec<u8>)>) {
     let mut seen = Vec::new();
-    let (wal, _) = Wal::open(
-        Arc::new(fs.clone()),
-        Path::new(DIR),
-        o,
-        1,
-        &mut |loc, _, p| {
-            seen.push((loc.lsn, p.to_vec()));
-            Ok(())
-        },
-    )
+    let (wal, _) = Wal::open(vfs, Path::new(DIR), o, 1, &mut |loc, _, p| {
+        seen.push((loc.lsn, p.to_vec()));
+        Ok(())
+    })
     .unwrap();
     (wal, seen)
 }
@@ -203,4 +204,146 @@ async fn corruption_in_a_sealed_segment_refuses_to_open() {
         },
     );
     assert!(r.is_err(), "sealed-segment corruption must refuse to open");
+}
+
+/// `Wal::roll` syncs the segment it seals: in `Fast` mode, with no sync since the appends,
+/// a power loss right after the roll keeps every record in the sealed segment.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_roll_makes_the_sealed_segment_durable_in_fast_mode() {
+    for tear in TEARS {
+        let fs = fs();
+        let (wal, _) = recover(&fs, opts(SyncMode::Fast, 1 << 20));
+        let mut acked = Vec::new();
+        for i in 0..10 {
+            acked.push((wal.append(payload(i), None).await.unwrap().lsn, payload(i)));
+        }
+        assert_eq!(wal.roll().await.unwrap(), Some(11));
+        wal.append(payload(10), None).await.unwrap(); // in the new segment, never synced
+        fs.power_loss(&mut ChaCha8Rng::seed_from_u64(5), tear);
+        drop(wal);
+        let (wal, replayed) = recover(&fs, opts(SyncMode::Fast, 1 << 20));
+        assert_eq!(&replayed[..10], &acked[..], "{tear:?}");
+        assert!(replayed.len() <= 11, "{tear:?}");
+        assert_eq!(wal.segments(), vec![1, 11], "{tear:?}");
+    }
+}
+
+/// FaultFs that loses power just before the `crash_at`-th `remove` or `sync_dir` once
+/// armed, and fails that call: the steps of `remove_leading_segments` are
+/// `remove, sync_dir` per segment.
+#[derive(Clone)]
+struct CrashingFs {
+    fs: FaultFs,
+    armed: Arc<AtomicBool>,
+    steps: Arc<AtomicUsize>,
+    crash_at: usize,
+    seed: u64,
+    tear: Tear,
+}
+
+impl CrashingFs {
+    fn step(&self) -> io::Result<()> {
+        if self.armed.load(Ordering::SeqCst)
+            && self.steps.fetch_add(1, Ordering::SeqCst) == self.crash_at
+        {
+            self.armed.store(false, Ordering::SeqCst);
+            self.fs
+                .power_loss(&mut ChaCha8Rng::seed_from_u64(self.seed), self.tear);
+            return Err(io::Error::other("power lost"));
+        }
+        Ok(())
+    }
+}
+
+impl Vfs for CrashingFs {
+    fn open(&self, p: &Path, m: OpenMode) -> io::Result<Arc<dyn VfsFile>> {
+        self.fs.open(p, m)
+    }
+    fn create(&self, p: &Path) -> io::Result<Arc<dyn VfsFile>> {
+        self.fs.create(p)
+    }
+    fn rename(&self, a: &Path, b: &Path) -> io::Result<()> {
+        self.fs.rename(a, b)
+    }
+    fn remove(&self, p: &Path) -> io::Result<()> {
+        self.step()?;
+        self.fs.remove(p)
+    }
+    fn create_dir_all(&self, p: &Path) -> io::Result<()> {
+        self.fs.create_dir_all(p)
+    }
+    fn read_dir(&self, p: &Path) -> io::Result<Vec<PathBuf>> {
+        self.fs.read_dir(p)
+    }
+    fn exists(&self, p: &Path) -> io::Result<bool> {
+        self.fs.exists(p)
+    }
+    fn sync_dir(&self, d: &Path) -> io::Result<()> {
+        self.step()?;
+        self.fs.sync_dir(d)
+    }
+    fn lock_exclusive(&self, p: &Path) -> io::Result<Box<dyn LockGuard>> {
+        self.fs.lock_exclusive(p)
+    }
+}
+
+fn segment_files(fs: &FaultFs) -> Vec<Lsn> {
+    let mut lsns: Vec<Lsn> = fs
+        .read_dir(Path::new(DIR))
+        .unwrap()
+        .iter()
+        .filter_map(|p| prkdb_core::wal::segment::parse_segment_file_name(p.file_name()?.to_str()?))
+        .collect();
+    lsns.sort_unstable();
+    lsns
+}
+
+/// (Task 2.15b.1 h) A retention release in `FrontRelease::Retention` mode loses power
+/// after `LOG_STATE` is written: before any `remove`, between each `remove` and its
+/// `sync_dir`, or after the last. Every reopen has the same log start, no segment left
+/// below it, and every record at or above it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retention_release_survives_power_loss_at_every_step() {
+    let mut o = opts(SyncMode::Durable, 512);
+    o.front_release = FrontRelease::Retention;
+    let released = 4;
+    for crash_at in 0..=2 * released {
+        for (seed, tear) in TEARS.into_iter().enumerate() {
+            let fs = fs();
+            let crashing = CrashingFs {
+                fs: fs.clone(),
+                armed: Arc::new(AtomicBool::new(false)),
+                steps: Arc::new(AtomicUsize::new(0)),
+                crash_at,
+                seed: seed as u64,
+                tear,
+            };
+            let (wal, _) = recover_on(Arc::new(crashing.clone()), o.clone());
+            let mut acked = Vec::new();
+            for i in 0..40 {
+                acked.push((wal.append(payload(i), None).await.unwrap().lsn, payload(i)));
+            }
+            let segments = wal.segments();
+            assert!(segments.len() > released + 1, "{segments:?}");
+            let upto = segments[released];
+
+            wal.set_log_start(upto).unwrap();
+            crashing.armed.store(true, Ordering::SeqCst);
+            let removed = wal.remove_leading_segments(upto);
+            if crash_at == 2 * released {
+                assert_eq!(removed.unwrap(), released);
+                fs.power_loss(&mut ChaCha8Rng::seed_from_u64(seed as u64), tear);
+            } else {
+                assert!(removed.is_err(), "crash_at {crash_at}: {removed:?}");
+            }
+            drop(wal);
+
+            let (wal, replayed) = recover(&fs, o.clone());
+            let at = format!("crash_at {crash_at} tear {tear:?}");
+            assert_eq!(wal.log_state().log_start, upto, "{at}");
+            assert_eq!(segment_files(&fs), segments[released..].to_vec(), "{at}");
+            let kept: Vec<_> = acked.iter().filter(|(l, _)| *l >= upto).cloned().collect();
+            assert_eq!(replayed, kept, "{at}");
+        }
+    }
 }

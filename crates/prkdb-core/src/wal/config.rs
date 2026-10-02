@@ -22,6 +22,21 @@ pub enum SyncMode {
     Fast,
 }
 
+/// What may release segments from the front of the log (Task 2.15b.1, streaming log
+/// design note §8.3). Fixed when the `Wal` opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FrontRelease {
+    /// Keyed directories: only segments compaction fully elided may be released, and
+    /// `Wal::open` refuses a segment below the log start that still holds a live frame.
+    #[default]
+    ElidedOnly,
+    /// Stream directories: retention releases sealed segments whatever they hold, and
+    /// `Wal::open` removes any whole segment left below the log start. The data in them
+    /// is deleted on purpose. Only the stream sets this; `WalOptions::from_config` never
+    /// does.
+    Retention,
+}
+
 impl SyncMode {
     /// The old name for [`SyncMode::Fast`].
     #[deprecated(note = "renamed to SyncMode::Fast")]

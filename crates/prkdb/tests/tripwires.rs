@@ -217,3 +217,53 @@ fn txn04_default_isolation_is_read_committed_tripwire() {
         "TXN-04 appears fixed: invert this tripwire"
     );
 }
+
+/// Appends three frames to a fresh log in `dir`, closes it, then writes one hand-encoded
+/// frame with kind 99 and a valid CRC after them, at the end of the only segment. Returns
+/// the segment's path and its length with the extra frame.
+fn log_ending_in_a_valid_frame_of_unknown_kind(dir: &std::path::Path) -> (std::path::PathBuf, u64) {
+    use prkdb_core::vfs::StdVfs;
+    use prkdb_core::wal::{segment::segment_file_name, Wal, WalOptions};
+    let opts = WalOptions::from_config(&wal_config(dir));
+    let (wal, _) = Wal::open(Arc::new(StdVfs), dir, opts, 1, &mut |_, _, _| Ok(())).unwrap();
+    for i in 0..3u8 {
+        wal.append_blocking(vec![i; 16], None).unwrap();
+    }
+    wal.close().unwrap();
+
+    let (lsn, kind, payload) = (4u64, 99u8, b"a later build's frame");
+    let mut crc_input = lsn.to_le_bytes().to_vec();
+    crc_input.push(kind);
+    crc_input.extend_from_slice(payload);
+    let mut frame = (payload.len() as u32).to_le_bytes().to_vec();
+    frame.extend_from_slice(&crc32fast::hash(&crc_input).to_le_bytes());
+    frame.extend_from_slice(&lsn.to_le_bytes());
+    frame.push(kind);
+    frame.extend_from_slice(payload);
+
+    let path = dir.join(segment_file_name(1));
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes.extend_from_slice(&frame);
+    std::fs::write(&path, &bytes).unwrap();
+    (path, bytes.len() as u64)
+}
+
+/// STO-11 regression (was the tripwire): a valid frame of a kind this build does not
+/// know, at the end of the last segment, refuses the open as `UnsupportedFormat` and is
+/// never truncated as a torn tail.
+#[test]
+fn sto11_valid_frame_of_unknown_kind_refuses_and_is_never_truncated() {
+    use prkdb_core::vfs::StdVfs;
+    use prkdb_core::wal::{Wal, WalError, WalOptions};
+    let dir = tempfile::tempdir().unwrap();
+    let (path, len) = log_ending_in_a_valid_frame_of_unknown_kind(dir.path());
+    let opts = WalOptions::from_config(&wal_config(dir.path()));
+    let err = Wal::open(Arc::new(StdVfs), dir.path(), opts, 1, &mut |_, _, _| Ok(()))
+        .err()
+        .expect("must refuse to open");
+    assert!(
+        matches!(err, WalError::UnsupportedFormat { path: ref p, .. } if *p == path),
+        "{err}"
+    );
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), len);
+}

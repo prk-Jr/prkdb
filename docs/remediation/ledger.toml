@@ -761,13 +761,15 @@ title = "decode_frame checks the frame kind before the CRC: a valid frame of an 
 area = "storage"
 severity = "high"
 phase = 2
-status = "open"
+status = "fixed"
 sources = ["task-2.15b-design-2026-10-02"]
 evidence = [
   "crates/prkdb-core/src/wal/frame.rs:132-135",
   "crates/prkdb-core/src/wal/log.rs:514-524",
   "docs/superpowers/specs/2026-10-02-streaming-log-design.md",
 ]
+regression_tests = ["test:crates/prkdb-core/tests/wal_log.rs::an_unknown_frame_kind_with_a_valid_crc_refuses_and_never_truncates", "test:crates/prkdb-core/tests/wal_log.rs::an_unknown_frame_kind_in_a_sealed_segment_is_unsupported_format", "test:crates/prkdb-core/tests/wal_log.rs::a_bad_crc_at_the_end_of_the_last_segment_is_still_a_torn_tail", "test:crates/prkdb-core/tests/wal_log.rs::scan_from_refuses_a_valid_frame_of_an_unknown_kind", "test:crates/prkdb/tests/tripwires.rs::sto11_valid_frame_of_unknown_kind_refuses_and_is_never_truncated", "test:crates/prkdb-core/src/wal/frame.rs::a_valid_frame_of_an_unknown_kind_is_unsupported_kind", "test:crates/prkdb-core/src/wal/frame.rs::an_unknown_kind_with_a_bad_crc_is_bad_crc"]
+changes = ["c4b2db5"]
 
 [[phase]]
 id = 0

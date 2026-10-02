@@ -5,6 +5,11 @@
 //! not `len`, so a torn write that truncates the payload is caught by the length check
 //! before the CRC is even computed.
 //!
+//! **The CRC is checked before the kind (STO-11).** A frame whose CRC is wrong is torn
+//! (`BadCrc`), whatever its kind byte says. A frame whose CRC is right but whose kind this
+//! build does not know was written whole by a build that knows more kinds:
+//! `UnsupportedKind`, which the log refuses and never truncates as a torn tail.
+//!
 //! **Deviation 1 (spec revision 11):** CRC-32 via `crc32fast` (already a `prkdb-core`
 //! dependency, hardware-accelerated) instead of CRC-32C, to add no new dependency. The
 //! frame header carries no algorithm field, so this choice is fixed for format 2.
@@ -22,7 +27,9 @@
 //! other byte, including the CRC, stays intact — a case decode_frame already catches via
 //! its own bounds and (for `Batch`) `BadLength(0)`.
 
-/// A frame's position in the log: its byte offset within its segment, once written.
+/// A frame's log sequence number: frames are numbered 1, 2, 3, ... in append order,
+/// contiguously across segments. (Not a byte offset: [`crate::wal::RecordLoc`] holds
+/// that.)
 pub type Lsn = u64;
 
 /// `len(4) + crc(4) + lsn(8) + kind(1)`.
@@ -35,7 +42,8 @@ pub const MAX_PAYLOAD_LEN: usize = 64 * 1024 * 1024;
 // value can be larger than the frame that carried it.
 const _: () = assert!(MAX_PAYLOAD_LEN == prkdb_types::codec::MAX_RECORD_BYTES);
 
-/// What a frame's `kind` byte means. Unknown kinds are faults (`FrameFault::UnknownKind`).
+/// What a frame's `kind` byte means. A CRC-valid frame of any other kind is
+/// `FrameFault::UnsupportedKind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FrameKind {
@@ -64,8 +72,11 @@ pub enum FrameFault {
     /// A header of all zeros: preallocated or never-written space. End of log.
     ZeroHeader,
     BadLength(u32),
+    /// The CRC does not match `lsn | kind | payload`: a torn or corrupted frame.
     BadCrc,
-    UnknownKind(u8),
+    /// The CRC matches, but the kind byte is not one this build knows: a whole frame
+    /// written by a later build (STO-11). Never a torn tail; the log refuses it.
+    UnsupportedKind(u8),
     LsnGap {
         expected: Lsn,
         found: Lsn,
@@ -110,6 +121,9 @@ pub fn encode_frame(out: &mut Vec<u8>, lsn: Lsn, kind: FrameKind, payload: &[u8]
 /// preallocated or never-written space looks like, and is not a length or CRC problem.
 /// An oversized claimed length is rejected (`BadLength`) before the length is used to
 /// slice the buffer, so a bogus `len` never causes an out-of-bounds read.
+///
+/// Then the CRC, and only then the kind (STO-11): `BadCrc` for any frame whose bytes do
+/// not match their CRC, `UnsupportedKind` for a CRC-valid frame of an unknown kind.
 pub fn decode_frame(buf: &[u8]) -> Decoded<'_> {
     if buf.len() < FRAME_HEADER_LEN {
         return Decoded::Fault(FrameFault::Truncated);
@@ -129,9 +143,23 @@ pub fn decode_frame(buf: &[u8]) -> Decoded<'_> {
         return Decoded::Fault(FrameFault::BadLength(len));
     }
 
-    let kind = match FrameKind::from_u8(kind_byte) {
-        Some(k) => k,
-        None => return Decoded::Fault(FrameFault::UnknownKind(kind_byte)),
+    let frame_len = FRAME_HEADER_LEN + len as usize;
+    if buf.len() < frame_len {
+        return Decoded::Fault(FrameFault::Truncated);
+    }
+    let payload = &buf[FRAME_HEADER_LEN..frame_len];
+
+    // `lsn | kind` are the header's bytes 8..17, contiguous, so the CRC input needs no
+    // copy.
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&header[8..FRAME_HEADER_LEN]);
+    hasher.update(payload);
+    if hasher.finalize() != crc {
+        return Decoded::Fault(FrameFault::BadCrc);
+    }
+
+    let Some(kind) = FrameKind::from_u8(kind_byte) else {
+        return Decoded::Fault(FrameFault::UnsupportedKind(kind_byte));
     };
 
     // A zero-length payload is only legitimate for `Elided` (a compacted-away record,
@@ -139,20 +167,6 @@ pub fn decode_frame(buf: &[u8]) -> Decoded<'_> {
     // zero length there is corruption, not a valid empty batch.
     if len == 0 && kind == FrameKind::Batch {
         return Decoded::Fault(FrameFault::BadLength(0));
-    }
-
-    let frame_len = FRAME_HEADER_LEN + len as usize;
-    if buf.len() < frame_len {
-        return Decoded::Fault(FrameFault::Truncated);
-    }
-    let payload = &buf[FRAME_HEADER_LEN..frame_len];
-
-    let mut crc_input = Vec::with_capacity(8 + 1 + payload.len());
-    crc_input.extend_from_slice(&lsn.to_le_bytes());
-    crc_input.push(kind_byte);
-    crc_input.extend_from_slice(payload);
-    if crc32fast::hash(&crc_input) != crc {
-        return Decoded::Fault(FrameFault::BadCrc);
     }
 
     Decoded::Frame {
@@ -196,15 +210,53 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unknown_kind_is_a_fault() {
+    /// A frame with kind byte `kind` and a CRC computed over it, as a later build that
+    /// knows `kind` would write it.
+    fn frame_of_kind(lsn: Lsn, kind: u8, payload: &[u8]) -> Vec<u8> {
         let mut buf = Vec::new();
-        encode_frame(&mut buf, 1, FrameKind::Batch, b"");
+        encode_frame(&mut buf, lsn, FrameKind::Batch, payload);
+        buf[16] = kind;
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&buf[8..]);
+        let crc = hasher.finalize();
+        buf[4..8].copy_from_slice(&crc.to_le_bytes());
+        buf
+    }
+
+    /// STO-11: a CRC-valid frame of an unknown kind is `UnsupportedKind`, not a torn
+    /// frame, even with an empty payload.
+    #[test]
+    fn a_valid_frame_of_an_unknown_kind_is_unsupported_kind() {
+        for payload in [&b""[..], b"from a later build"] {
+            assert_eq!(
+                decode_frame(&frame_of_kind(1, 99, payload)),
+                Decoded::Fault(FrameFault::UnsupportedKind(99))
+            );
+        }
+    }
+
+    /// STO-11: the CRC is checked first, so an unknown kind byte whose CRC does not
+    /// match (a known frame with its kind byte flipped, or a torn one) is `BadCrc`.
+    #[test]
+    fn an_unknown_kind_with_a_bad_crc_is_bad_crc() {
+        let mut buf = Vec::new();
+        encode_frame(&mut buf, 1, FrameKind::Batch, b"hello");
         buf[16] = 99;
-        assert_eq!(
-            decode_frame(&buf),
-            Decoded::Fault(FrameFault::UnknownKind(99))
-        );
+        assert_eq!(decode_frame(&buf), Decoded::Fault(FrameFault::BadCrc));
+
+        let mut buf = frame_of_kind(1, 99, b"hello");
+        let last = buf.len() - 1;
+        buf[last] ^= 0xFF;
+        assert_eq!(decode_frame(&buf), Decoded::Fault(FrameFault::BadCrc));
+    }
+
+    /// The CRC covers the kind byte: flipping `Batch` to `Elided` is `BadCrc`.
+    #[test]
+    fn a_known_kind_byte_flipped_to_another_known_kind_is_bad_crc() {
+        let mut buf = Vec::new();
+        encode_frame(&mut buf, 1, FrameKind::Batch, b"hello");
+        buf[16] = FrameKind::Elided as u8;
+        assert_eq!(decode_frame(&buf), Decoded::Fault(FrameFault::BadCrc));
     }
 
     #[test]
