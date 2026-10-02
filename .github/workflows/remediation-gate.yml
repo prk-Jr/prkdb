@@ -89,6 +89,14 @@ jobs:
         with:
           save-if: false
       - run: cargo xtask remediation check
+      # The perf gate's floors and the WAL bench rules are gate evidence from Phase 2 on
+      # (TST-09, TST-11); their self-tests prove they still fail closed at the gated
+      # commit. Phases 0 and 1 predate both scripts.
+      - name: Perf gate self-checks
+        if: ${{ !contains(fromJSON('["0","1"]'), inputs.phase) }}
+        run: |
+          bash scripts/check_perf_gate_floors.sh
+          python3 scripts/wal_fast_rule.py --self-test
       - run: cargo test --workspace --no-fail-fast
 
   harness:
