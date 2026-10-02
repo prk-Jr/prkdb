@@ -8,12 +8,14 @@ use prkdb_core::vfs::{OpenMode, StdVfs, Vfs, VfsFile};
 use prkdb_core::wal::frame::FrameFault;
 use prkdb_core::wal::segment::{scan_segment_from, segment_file_name};
 use prkdb_core::wal::{
-    FrontRelease, LogState, Lsn, RecordLoc, SyncMode, Wal, WalConfig, WalError, WalOptions,
+    FrontRelease, LogState, Lsn, RecordLoc, SyncMode, Wal, WalConfig, WalError, WalHealth,
+    WalOptions,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -68,15 +70,18 @@ fn scanned(wal: &Wal, from: Lsn) -> Vec<Lsn> {
     lsns
 }
 
-/// Counts `read_at` calls per file, to see which segments a scan touched.
+/// Counts `read_at` calls per file, to see which segments a scan touched, and fails
+/// every `sync_data` while `fail_syncs` is set.
 #[derive(Clone, Default)]
 struct CountingVfs {
     reads: Arc<Mutex<BTreeMap<PathBuf, u64>>>,
+    fail_syncs: Arc<AtomicBool>,
 }
 struct CountingFile {
     inner: Arc<dyn VfsFile>,
     path: PathBuf,
     reads: Arc<Mutex<BTreeMap<PathBuf, u64>>>,
+    fail_syncs: Arc<AtomicBool>,
 }
 impl VfsFile for CountingFile {
     fn write_at(&self, o: u64, b: &[u8]) -> io::Result<()> {
@@ -98,6 +103,9 @@ impl VfsFile for CountingFile {
         self.inner.len()
     }
     fn sync_data(&self) -> io::Result<()> {
+        if self.fail_syncs.load(Ordering::SeqCst) {
+            return Err(io::Error::other("injected fsync failure"));
+        }
         self.inner.sync_data()
     }
 }
@@ -107,6 +115,7 @@ impl CountingVfs {
             inner,
             path: path.to_path_buf(),
             reads: self.reads.clone(),
+            fail_syncs: self.fail_syncs.clone(),
         })
     }
     /// The first LSNs of the segments read since the last call.
@@ -348,6 +357,38 @@ async fn subscribe_acked_wakes_a_reader_whose_scan_then_sees_the_append() {
         Arc::try_unwrap(wal).ok().unwrap().close().unwrap();
         assert!(late.changed().await.is_err(), "{mode:?}");
     }
+}
+
+/// (d) A waiter is woken when the log is poisoned, with the value unchanged, so it can
+/// see `health()` instead of waiting for an ack that will never come.
+#[tokio::test(flavor = "multi_thread")]
+async fn subscribe_acked_wakes_a_waiter_when_the_log_is_poisoned() {
+    let dir = tempfile::tempdir().unwrap();
+    let vfs = CountingVfs::default();
+    let (wal, _) = open_with(
+        Arc::new(vfs.clone()),
+        dir.path(),
+        opts(SyncMode::Durable, FrontRelease::ElidedOnly),
+    );
+    let wal = Arc::new(wal);
+    fill(&wal, 2);
+    let mut rx = wal.subscribe_acked();
+    let waiter = {
+        let wal = wal.clone();
+        tokio::spawn(async move {
+            rx.changed().await.expect("the WAL is open");
+            (*rx.borrow_and_update(), wal.health())
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    vfs.fail_syncs.store(true, Ordering::SeqCst);
+    assert!(wal.append(record(3), None).await.is_err());
+    let (value, health) = tokio::time::timeout(Duration::from_secs(5), waiter)
+        .await
+        .expect("the waiter was never woken")
+        .unwrap();
+    assert_eq!(value, 2, "the failed append was never acked");
+    assert!(matches!(health, WalHealth::Poisoned(_)), "{health:?}");
 }
 
 /// (e) `roll` seals a non-empty active segment, synced, and opens the next one. On an

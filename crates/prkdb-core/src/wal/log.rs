@@ -817,7 +817,9 @@ impl Wal {
     /// [`watch::Receiver::changed`] finds those frames within [`Wal::scan_from`]'s cap.
     /// The receiver starts at the current value, already marked seen: the pattern is
     /// "scan, then wait for `changed`, then scan again", and no ack after the subscription
-    /// is missed. `changed` errors once the `Wal` is closed and dropped. Commit hooks are
+    /// is missed. When the log is poisoned, `changed` fires once more with the value
+    /// unchanged, so a waiter can see [`Wal::health`]; it errors once the `Wal` is closed
+    /// and dropped. Commit hooks are
     /// no substitute: they run before `acked_lsn` moves.
     pub fn subscribe_acked(&self) -> watch::Receiver<Lsn> {
         let mut rx = self.shared.acked_tx.subscribe();
@@ -1426,9 +1428,18 @@ fn panic_message(panic: &Box<dyn std::any::Any + Send>) -> String {
 /// panicking while it answers requests after an I/O error) must not hide the one that
 /// explains it.
 fn poison(shared: &Arc<Shared>, reason: String) {
-    let mut health = shared.health.write().expect("health lock poisoned");
-    if *health == InternalHealth::Running {
-        *health = InternalHealth::Poisoned(reason);
+    let first = {
+        let mut health = shared.health.write().expect("health lock poisoned");
+        let first = *health == InternalHealth::Running;
+        if first {
+            *health = InternalHealth::Poisoned(reason);
+        }
+        first
+    };
+    if first {
+        // No ack will ever come again: wake every `subscribe_acked` waiter (the value is
+        // unchanged) so it finds `health()` poisoned instead of waiting forever.
+        shared.acked_tx.send_modify(|_| {});
     }
 }
 
