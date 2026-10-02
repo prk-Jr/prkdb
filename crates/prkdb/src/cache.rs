@@ -49,7 +49,9 @@ impl<K: Eq + Hash + Clone, V: Clone> LruCache<K, V> {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, LinkedHashMap<K, V>> {
         // A panic while holding the lock leaves the map structurally valid.
-        self.cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Get a value from the cache, marking it most recently used
