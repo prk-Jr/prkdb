@@ -177,8 +177,13 @@ impl TtlStorage {
     /// Start background cleanup task
     ///
     /// Periodically removes expired records from storage.
+    ///
+    /// The task holds the storage only weakly, and strongly only while it deletes the keys
+    /// that expired at a tick: it never keeps the adapter (or its data-directory lock)
+    /// alive between ticks. Dropping the last handle while a tick is deleting releases the
+    /// adapter when those deletes finish (STO-12).
     pub fn start_cleanup(&mut self, interval: Duration) {
-        let storage = self.storage.clone();
+        let storage = Arc::downgrade(&self.storage);
         let index = self.index.clone();
 
         let handle = tokio::spawn(async move {
@@ -192,6 +197,12 @@ impl TtlStorage {
                     idx.cleanup_index()
                 };
 
+                if expired_keys.is_empty() {
+                    continue;
+                }
+                let Some(storage) = storage.upgrade() else {
+                    return;
+                };
                 // Delete expired keys from storage
                 for key in expired_keys {
                     let _ = storage.delete(&key).await;
