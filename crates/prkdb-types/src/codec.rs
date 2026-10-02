@@ -37,8 +37,11 @@
 //!   [`CLAIM_PER_INPUT_BYTE`] (8) times the input's length. A valid value always fits
 //!   when it claims at most 8 bytes per wire byte: every serde type without `u128`, and
 //!   every native type whose only containers are `Vec<u8>` and `String`. A hostile input
-//!   can make a decode claim at most `max(1 MiB, 64 x its length)`. The file and record
-//!   names are the same function; they say what the call site reads.
+//!   can make a decode claim at most `max(1 MiB, 64 x its length)`. The record decodes
+//!   also stop at an absolute ceiling, [`MAX_RECORD_CLAIM`] (512 MiB = 8 x
+//!   [`MAX_RECORD_BYTES`]): a record or Raft entry is never longer than a WAL frame
+//!   payload, so a valid one never needs more, and an input whose scaled limit would
+//!   exceed it is `LimitExceeded` without decoding. The file decodes have no ceiling.
 //!   Every production caller uses the serde path or a native type of that shape
 //!   (`(u64, u64, Vec<u8>)` for the Raft snapshot). The exception is
 //!   `LogRecord::deserialize` (native, `Vec<(Vec<u8>, Vec<u8>)>` batches), which has no
@@ -61,6 +64,17 @@ pub const MAX_HEADER_BYTES: usize = 64 * 1024;
 /// The most bytes a valid value claims per byte of its encoding (a one-byte varint
 /// decoded into a `u64` or `usize`); see the module docs.
 pub const CLAIM_PER_INPUT_BYTE: usize = 8;
+
+/// The most a record, Raft entry or message decode ([`decode`], [`decode_serde`]) may
+/// claim: 512 MiB, [`CLAIM_PER_INPUT_BYTE`] x [`MAX_RECORD_BYTES`].
+pub const MAX_RECORD_CLAIM: usize = CLAIM_PER_INPUT_BYTE * MAX_RECORD_BYTES;
+
+const _: () = assert!(MAX_RECORD_CLAIM == 1 << 29);
+
+/// Whether a record decode of `bytes` would need a limit over [`MAX_RECORD_CLAIM`].
+fn over_record_ceiling(bytes: &[u8]) -> bool {
+    bytes.len().saturating_mul(CLAIM_PER_INPUT_BYTE) > MAX_RECORD_CLAIM
+}
 
 /// `standard()` with a decode limit of `N` bytes. Same wire format as `standard()`.
 pub fn bounded<const N: usize>() -> Configuration<config::LittleEndian, config::Varint, Limit<N>> {
@@ -120,25 +134,33 @@ macro_rules! scaled {
 }
 
 /// Decodes one record's, Raft entry's or message's `bincode::Decode` value; the limit
-/// scales with the input (module docs).
+/// scales with the input, up to [`MAX_RECORD_CLAIM`] (module docs).
 pub fn decode<T: bincode::Decode<()>>(bytes: &[u8]) -> Result<(T, usize), DecodeError> {
+    if over_record_ceiling(bytes) {
+        return Err(DecodeError::LimitExceeded);
+    }
     scaled!(decode_with_limit, T, bytes)
 }
 
 /// Decodes one record's, Raft entry's or message's serde value; the limit scales with
-/// the input (module docs).
+/// the input, up to [`MAX_RECORD_CLAIM`] (module docs).
 pub fn decode_serde<T: DeserializeOwned>(bytes: &[u8]) -> Result<(T, usize), DecodeError> {
+    if over_record_ceiling(bytes) {
+        return Err(DecodeError::LimitExceeded);
+    }
     scaled!(decode_serde_with_limit, T, bytes)
 }
 
-/// Decodes a whole file's `bincode::Decode` value: [`decode`], named for the call site.
+/// Decodes a whole file's `bincode::Decode` value; the limit scales with the input, with
+/// no ceiling (module docs).
 pub fn decode_file<T: bincode::Decode<()>>(bytes: &[u8]) -> Result<(T, usize), DecodeError> {
-    decode(bytes)
+    scaled!(decode_with_limit, T, bytes)
 }
 
-/// Decodes a whole file's serde value: [`decode_serde`], named for the call site.
+/// Decodes a whole file's serde value; the limit scales with the input, with no ceiling
+/// (module docs).
 pub fn decode_serde_file<T: DeserializeOwned>(bytes: &[u8]) -> Result<(T, usize), DecodeError> {
-    decode_serde(bytes)
+    scaled!(decode_serde_with_limit, T, bytes)
 }
 
 #[cfg(test)]
@@ -234,6 +256,32 @@ mod tests {
         ));
         assert_eq!(decode::<Vec<u64>>(&bytes).unwrap().0, zeros);
         assert_eq!(decode_serde::<Vec<u64>>(&bytes).unwrap().0, zeros);
+    }
+
+    /// The record decodes stop at 512 MiB of claim: an input longer than a WAL frame
+    /// payload (whose scaled limit would be over the ceiling) is refused without being
+    /// decoded, while a valid record near the frame limit still decodes. The file decodes
+    /// take the same over-long input.
+    #[test]
+    fn record_decodes_stop_at_the_ceiling_and_file_decodes_do_not() {
+        let near = Shape::Bytes(vec![7; MAX_RECORD_BYTES - 64]);
+        let bytes = bincode::encode_to_vec(&near, config::standard()).unwrap();
+        assert!(bytes.len() <= MAX_RECORD_BYTES);
+        assert_eq!(decode::<Shape>(&bytes).unwrap().0, near);
+        assert_eq!(decode_serde::<Shape>(&bytes).unwrap().0, near);
+
+        let over = Shape::Bytes(vec![7; MAX_RECORD_BYTES]);
+        let bytes = bincode::encode_to_vec(&over, config::standard()).unwrap();
+        assert!(bytes.len() > MAX_RECORD_BYTES);
+        assert!(matches!(
+            decode::<Shape>(&bytes),
+            Err(DecodeError::LimitExceeded)
+        ));
+        assert!(matches!(
+            decode_serde::<Shape>(&bytes),
+            Err(DecodeError::LimitExceeded)
+        ));
+        assert_eq!(decode_file::<Shape>(&bytes).unwrap().0, over);
     }
 
     #[test]
