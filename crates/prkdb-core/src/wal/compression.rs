@@ -208,9 +208,27 @@ pub fn decompress_bounded(
             Ok(data.to_vec())
         }
         CompressionType::Lz4 => {
-            let decoder = lz4::Decoder::new(data)
+            let mut decoder = lz4::Decoder::new(data)
                 .map_err(|e| CompressionError::DecompressionFailed(e.to_string()))?;
-            read_bounded(decoder, max_len)
+            let out = read_bounded(&mut decoder, max_len)?;
+            // The lz4 reader reports EOF of a frame cut before its end mark as a clean
+            // end, returning whatever blocks it held: a cut that drops only the end mark
+            // and checksum yields all of the output. `finish` says whether the end mark
+            // was reached; the reader asks for exactly the frame's bytes, so anything
+            // left in `data` follows the frame.
+            let (rest, finished) = decoder.finish();
+            finished.map_err(|_| {
+                CompressionError::DecompressionFailed(
+                    "the LZ4 frame ends before its end mark".to_string(),
+                )
+            })?;
+            if !rest.is_empty() {
+                return Err(CompressionError::DecompressionFailed(format!(
+                    "{} bytes follow the LZ4 frame",
+                    rest.len()
+                )));
+            }
+            Ok(out)
         }
         CompressionType::Snappy => {
             let decoder = snap::read::FrameDecoder::new(data);
@@ -376,6 +394,41 @@ mod tests {
         let max_len = 4096;
         let err = decompress_bounded(&compressed, CompressionType::Lz4, max_len).unwrap_err();
         assert!(matches!(err, CompressionError::DecompressionFailed(_)));
+    }
+
+    /// An LZ4 frame cut anywhere before its end mark is refused, even when the cut only
+    /// drops the end mark and checksum, so every block (all of the output) is still there
+    /// (Task 2.15b.2: the lz4 reader alone returns that output as if complete).
+    #[test]
+    fn decompress_bounded_rejects_every_truncated_lz4_frame() {
+        let data = generate_test_data(4096);
+        let config = CompressionConfig {
+            compression_type: CompressionType::Lz4,
+            min_compress_bytes: 0,
+            compression_level: 3,
+        };
+        let compressed = compress(&data, &config).unwrap();
+        for len in 0..compressed.len() {
+            assert!(
+                decompress_bounded(&compressed[..len], CompressionType::Lz4, data.len()).is_err(),
+                "a prefix of {len} of {} bytes decompressed",
+                compressed.len()
+            );
+        }
+    }
+
+    /// Bytes after the end of the LZ4 frame are refused, not ignored.
+    #[test]
+    fn decompress_bounded_rejects_bytes_after_the_lz4_frame() {
+        let data = generate_test_data(1024);
+        let config = CompressionConfig {
+            compression_type: CompressionType::Lz4,
+            min_compress_bytes: 0,
+            compression_level: 3,
+        };
+        let mut compressed = compress(&data, &config).unwrap();
+        compressed.extend_from_slice(b"trailing");
+        assert!(decompress_bounded(&compressed, CompressionType::Lz4, data.len()).is_err());
     }
 
     #[test]
