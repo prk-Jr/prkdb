@@ -84,13 +84,15 @@ fn a_replaced_segment_reads_at_new_locations_and_old_ones_are_moved() {
         offset: SEGMENT_HEADER_LEN + 17 * (last_in_seg - seg.first_lsn),
         ..old
     };
-    let mut swapped = false;
-    wal.replace_segment(seg.first_lsn, &path, || swapped = true)
-        .unwrap();
-    assert!(swapped, "the swap callback runs");
+    wal.replace_segment(seg.first_lsn, &path).unwrap();
     assert!(!path.exists(), "the rewrite was renamed into place");
     assert_eq!(wal.segment_generation(seg.first_lsn), Some(1));
     assert_eq!(wal.read(new).unwrap(), vec![(last_in_seg - 1) as u8; 40]);
+    // Until the caller's index has moved, a location from before the swap reads the
+    // replaced file (the index update runs outside the segments lock).
+    assert_eq!(wal.read(old).unwrap(), vec![(last_in_seg - 1) as u8; 40]);
+    assert_eq!(wal.read(locs[0]).unwrap(), vec![0u8; 40]);
+    wal.release_replaced(seg.first_lsn);
     assert!(
         matches!(wal.read(old), Err(WalError::Moved { .. })),
         "{:?}",
@@ -151,7 +153,7 @@ fn fully_elided_leading_segments_are_removed_and_the_log_starts_later() {
 
     for seg in [first, second] {
         let path = rewrite(&wal, &seg, |_| false);
-        wal.replace_segment(seg.first_lsn, &path, || {}).unwrap();
+        wal.replace_segment(seg.first_lsn, &path).unwrap();
     }
     let early = wal.remove_leading_segments(second.next_lsn);
     assert!(
@@ -200,7 +202,7 @@ fn a_mismatched_replacement_is_refused() {
         encode_frame(&mut buf, lsn, FrameKind::Elided, &[]);
     }
     file.write_at(SEGMENT_HEADER_LEN, &buf).unwrap();
-    let refused = wal.replace_segment(seg.first_lsn, &path, || panic!("must not swap"));
+    let refused = wal.replace_segment(seg.first_lsn, &path);
     assert!(
         matches!(refused, Err(WalError::CompactionRefused(_))),
         "{refused:?}"
@@ -209,7 +211,7 @@ fn a_mismatched_replacement_is_refused() {
     assert_eq!(wal.read(locs[0]).unwrap(), vec![0u8; 40]);
 
     let active = *wal.segments().last().unwrap();
-    let refused = wal.replace_segment(active, &path, || panic!("must not swap"));
+    let refused = wal.replace_segment(active, &path);
     assert!(
         matches!(refused, Err(WalError::CompactionRefused(_))),
         "{refused:?}"
@@ -244,7 +246,7 @@ fn released_segments_left_by_a_crash_are_removed_on_open() {
     let (wal, _) = filled(dir.path(), 40);
     let first = wal.sealed_segments().unwrap()[0];
     let path = rewrite(&wal, &first, |_| false);
-    wal.replace_segment(first.first_lsn, &path, || {}).unwrap();
+    wal.replace_segment(first.first_lsn, &path).unwrap();
     wal.set_log_start(first.next_lsn).unwrap();
     wal.close().unwrap(); // "crash" before remove_leading_segments
     assert!(wal_path(dir.path(), first.first_lsn).exists());

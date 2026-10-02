@@ -916,7 +916,7 @@ async fn compaction_does_not_stall_writers() {
         println!(
             "{mode:?}: put latency p50/p99/max without compaction {:?}/{:?}/{:?}, during \
              {} compaction runs {:?}/{:?}/{:?}; first run reclaimed {} of {} bytes \
-             ({} segments rewritten, {} removed, {} log syncs, longest swap {:?})",
+             ({} segments rewritten, {} removed, {} log syncs, longest index update {:?})",
             baseline.0,
             baseline.1,
             baseline.2,
@@ -929,7 +929,7 @@ async fn compaction_does_not_stall_writers() {
             first.segments_rewritten,
             first.segments_removed,
             first.log_syncs,
-            runs.iter().map(|r| r.longest_swap).max().unwrap(),
+            runs.iter().map(|r| r.longest_index_update).max().unwrap(),
         );
         assert!(first.segments_rewritten > 0, "{first:?}");
         assert!(
@@ -945,13 +945,13 @@ async fn compaction_does_not_stall_writers() {
     }
 }
 
-/// How long a segment swap holds the WAL's segment table (the handle swap plus the index
-/// update for the segment's live keys), against the number of live keys in the segment.
-/// A segment roll on the writer thread waits for it, so it must stay small next to a
-/// write. Printed for the review record (`--no-capture`); the bound only catches a swap
-/// that does something per key far heavier than a map update.
+/// The index update after a segment swap (moving the segment's live keys to their new
+/// offsets) grows with the number of live keys, so it runs outside the WAL's segment table
+/// lock: a segment roll on the writer thread never waits for it. Measured against live
+/// keys for the review record (`--no-capture`); the bound only catches an update doing far
+/// more than a map update per key.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_segment_swap_holds_the_segment_table_briefly() {
+async fn the_index_update_after_a_swap_does_not_hold_up_writers() {
     use std::time::Duration;
     for (segment_bytes, keys) in [(64 * 1024, 500u32), (1 << 20, 8_000), (4 << 20, 32_000)] {
         let dir = tempfile::tempdir().unwrap();
@@ -976,12 +976,16 @@ async fn a_segment_swap_holds_the_segment_table_briefly() {
         }
         let report = db.compact().await.unwrap();
         println!(
-            "segment {} KiB, {keys} live keys: {} segments rewritten, longest swap {:?}",
+            "segment {} KiB, {keys} live keys: {} segments rewritten, longest index update \
+             {:?}",
             segment_bytes / 1024,
             report.segments_rewritten,
-            report.longest_swap
+            report.longest_index_update
         );
         assert!(report.segments_rewritten > 0, "{report:?}");
-        assert!(report.longest_swap < Duration::from_millis(500), "{report:?}");
+        assert!(
+            report.longest_index_update < Duration::from_secs(5),
+            "{report:?}"
+        );
     }
 }

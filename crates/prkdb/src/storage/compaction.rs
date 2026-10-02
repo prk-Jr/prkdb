@@ -110,9 +110,11 @@ pub struct CompactionReport {
     pub bytes_after: u64,
     /// Log syncs the run asked the WAL writer for (at most one per batch).
     pub log_syncs: usize,
-    /// The longest a segment swap held the WAL's segment table (handle swap plus index
-    /// update), during which a segment roll on the writer thread waits.
-    pub longest_swap: Duration,
+    /// The longest index update after a segment swap (moving the segment's live keys to
+    /// their new offsets). It runs outside the WAL's segment table lock, so writers and
+    /// segment rolls never wait for it; readers of a key it has not moved yet read the
+    /// replaced file.
+    pub longest_index_update: Duration,
     /// Whether the run stopped early because the adapter was closing.
     pub stopped_early: bool,
 }
@@ -507,6 +509,16 @@ fn step(hook: &mut StepHook<'_>, at: CompactionStep) -> Result<(), StorageError>
     })
 }
 
+/// Moves the index entries of a rewritten segment's live puts to their new offsets: only
+/// an entry whose LSN is still the frame's (a key overwritten meanwhile keeps its newer
+/// location).
+fn relocate(index: &Index, relocations: Vec<Relocation>) {
+    let pinned = index.pin();
+    for r in relocations {
+        pinned.update(r.key, |at| if at.lsn == r.lsn { r.to } else { *at });
+    }
+}
+
 /// Rewrites written but not yet renamed into place. Whatever is left when it drops (a
 /// stopped run, an error) is removed, best effort; the next run removes anything a crash
 /// left.
@@ -654,20 +666,22 @@ pub(crate) fn run(
             let seg = &sealed[i];
             let index = ctx.index;
             let relocations = plan.relocations;
-            let mut held = Duration::ZERO;
-            let swapped = ctx.wal.replace_segment(seg.first_lsn, &path, || {
-                let start = Instant::now();
-                let pinned = index.pin();
-                for r in relocations {
-                    pinned.update(r.key, |at| if at.lsn == r.lsn { r.to } else { *at });
-                }
-                held = start.elapsed();
-            });
-            if let Err(e) = swapped {
+            let generation = ctx.wal.segment_generation(seg.first_lsn);
+            if let Err(e) = ctx.wal.replace_segment(seg.first_lsn, &path) {
                 pending.rewrites = rest.collect();
+                // Swapped despite the error (a failed directory sync after the rename):
+                // move the index anyway, so reads never depend on the replaced file.
+                if ctx.wal.segment_generation(seg.first_lsn) != generation {
+                    relocate(index, relocations);
+                    ctx.wal.release_replaced(seg.first_lsn);
+                }
                 return Err(wal_storage_err(e));
             }
-            report.longest_swap = report.longest_swap.max(held);
+            let start = Instant::now();
+            relocate(index, relocations);
+            let held = start.elapsed();
+            ctx.wal.release_replaced(seg.first_lsn);
+            report.longest_index_update = report.longest_index_update.max(held);
             report.segments_rewritten += 1;
             lengths[i] = plan.new_len;
             elided[i] = plan.all_elided;
@@ -718,7 +732,7 @@ pub(crate) fn run(
         bytes_before = report.bytes_before,
         bytes_after = report.bytes_after,
         log_syncs = report.log_syncs,
-        longest_swap = ?report.longest_swap,
+        longest_index_update = ?report.longest_index_update,
         "WAL compaction run finished"
     );
     Ok(report)

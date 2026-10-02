@@ -98,6 +98,10 @@ pub struct SealedSegment {
 struct SegmentHandle {
     file: Arc<dyn VfsFile>,
     generation: u64,
+    /// The file this one replaced, kept readable from the swap until the caller has moved
+    /// its index to the new offsets ([`Wal::release_replaced`]): a location from before
+    /// the swap is read there, so the index update can run outside the segments lock.
+    previous: Option<Arc<dyn VfsFile>>,
 }
 
 impl SegmentHandle {
@@ -105,6 +109,7 @@ impl SegmentHandle {
         SegmentHandle {
             file,
             generation: 0,
+            previous: None,
         }
     }
 }
@@ -755,6 +760,13 @@ impl Wal {
             Err(WalError::CorruptSegment { .. } | WalError::RecordTooLarge { .. })
                 if handle.generation > 0 =>
             {
+                // A location from before a swap whose index update is still running: the
+                // replaced file still holds exactly that frame.
+                if let Some(previous) = &handle.previous {
+                    if let Ok(payload) = read_frame(&**previous, &path, loc) {
+                        return Ok(payload);
+                    }
+                }
                 Err(WalError::Moved {
                     path,
                     offset: loc.offset,
@@ -970,22 +982,20 @@ impl Wal {
     ///    nothing changes).
     /// 2. `rename(compacted, {first_lsn:020}.wal)`, then `sync_dir`. The rename is atomic:
     ///    a crash leaves the old file or the new one under the name, never neither.
-    /// 3. Under the segments lock: the read handle is swapped, the segment's generation is
-    ///    bumped, and `on_swap` runs (the caller moves its index entries to the new
-    ///    offsets). No read can take the new handle before `on_swap` returns, so a
-    ///    location resolved after a `Moved` is never stale against the current file;
-    ///    reads already holding the old handle keep reading the old file, which stays
-    ///    readable through it.
+    /// 3. Under the segments lock, in constant time: the read handle is swapped, the
+    ///    segment's generation bumped, and the replaced file kept as the segment's
+    ///    `previous` handle. A location from before the swap that does not match the new
+    ///    file is read from the replaced one, which still holds exactly that frame, so the
+    ///    caller moves its index to the new offsets *after* this returns, outside the lock
+    ///    (a segment roll on the writer thread never waits for it), and then calls
+    ///    [`Wal::release_replaced`]. After the release, a stale location is `Moved` and
+    ///    re-resolves to the moved index entry.
     ///
-    /// If the rename succeeded, the swap and `on_swap` happen even when the `sync_dir`
-    /// fails (the name already points at the new file), and the sync error is returned
-    /// afterwards so the caller stops: the rename is then not known to be durable.
-    pub fn replace_segment(
-        &self,
-        first_lsn: Lsn,
-        compacted: &Path,
-        on_swap: impl FnOnce(),
-    ) -> Result<(), WalError> {
+    /// If the rename succeeded, the swap happens even when the `sync_dir` fails (the name
+    /// already points at the new file), and the sync error is returned afterwards so the
+    /// caller stops: the rename is then not known to be durable. The caller still moves
+    /// its index and releases the replaced file.
+    pub fn replace_segment(&self, first_lsn: Lsn, compacted: &Path) -> Result<(), WalError> {
         let (_, next_lsn) = self.sealed_handle(first_lsn)?;
         let target = self.segment_path(first_lsn);
         let file = self.shared.vfs.open(compacted, OpenMode::Read)?;
@@ -1005,11 +1015,31 @@ impl Wal {
                 .segments
                 .write()
                 .expect("segments lock poisoned");
-            let generation = segments.get(&first_lsn).map_or(0, |h| h.generation) + 1;
-            segments.insert(first_lsn, SegmentHandle { file, generation });
-            on_swap();
+            let replaced = segments.get(&first_lsn).cloned();
+            let generation = replaced.as_ref().map_or(0, |h| h.generation) + 1;
+            segments.insert(
+                first_lsn,
+                SegmentHandle {
+                    file,
+                    generation,
+                    previous: replaced.map(|h| h.file),
+                },
+            );
         }
         synced.map_err(WalError::Io)
+    }
+
+    /// Drops the file a [`Wal::replace_segment`] replaced, once the caller's index points
+    /// at the new offsets. No-op if there is none.
+    pub fn release_replaced(&self, first_lsn: Lsn) {
+        let mut segments = self
+            .shared
+            .segments
+            .write()
+            .expect("segments lock poisoned");
+        if let Some(handle) = segments.get_mut(&first_lsn) {
+            handle.previous = None;
+        }
     }
 
     /// The durable log state: where the log starts and the compaction floor.
