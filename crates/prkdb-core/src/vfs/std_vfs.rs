@@ -206,35 +206,40 @@ impl Vfs for StdVfs {
         }
     }
     fn lock_exclusive(&self, path: &Path) -> io::Result<Box<dyn LockGuard>> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)?;
-        let key = LockKey::of(&file, path)?;
-        if !ProcessLocks::acquire(&key) {
-            return Err(held(path));
-        }
-        if let Err(e) = file.try_lock() {
-            ProcessLocks::release(&key);
-            return Err(match e {
-                fs::TryLockError::WouldBlock => held(path),
-                fs::TryLockError::Error(e) => e,
-            });
-        }
-        // Who holds it, for the refusal message only: best effort and never synced, so a
-        // failure here does not fail the lock, and a reader treats anything unparsable as
-        // "unknown".
-        let pid = format!("{}\n", std::process::id());
-        if file.set_len(0).is_ok() {
-            let _ = io::Write::write_all(&mut &file, pid.as_bytes());
-        }
-        Ok(Box::new(StdLock {
-            file: Some(file),
-            key,
-        }))
+        Ok(Box::new(lock_file(path)?))
     }
+}
+
+/// [`Vfs::lock_exclusive`] for [`StdVfs`], unboxed so the tests can reach the file.
+fn lock_file(path: &Path) -> io::Result<StdLock> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    let key = LockKey::of(&file, path)?;
+    if !ProcessLocks::acquire(&key) {
+        return Err(held(path));
+    }
+    if let Err(e) = file.try_lock() {
+        ProcessLocks::release(&key);
+        return Err(match e {
+            fs::TryLockError::WouldBlock => held(path),
+            fs::TryLockError::Error(e) => e,
+        });
+    }
+    // Who holds it, for the refusal message only: best effort and never synced, so a
+    // failure here does not fail the lock, and a reader treats anything unparsable as
+    // "unknown".
+    let pid = format!("{}\n", std::process::id());
+    if file.set_len(0).is_ok() {
+        let _ = io::Write::write_all(&mut &file, pid.as_bytes());
+    }
+    Ok(StdLock {
+        file: Some(file),
+        key,
+    })
 }
 
 #[cfg(test)]
@@ -269,5 +274,28 @@ mod tests {
         drop(guard);
         assert!(!ProcessLocks::holds(&key));
         drop(StdVfs.lock_exclusive(&path).unwrap());
+    }
+
+    /// Dropping the guard releases the lock even while another descriptor of the same
+    /// open file description is still open. That is what a child process spawned on
+    /// another thread holds between its fork and its exec: it inherits every descriptor,
+    /// `O_CLOEXEC` ones included until the exec, and a `flock` belongs to the open file
+    /// description, not the descriptor. Closing ours alone left the lock held until the
+    /// child exec'd, so a reopen right after a drop was refused as locked (STO-12).
+    #[test]
+    fn dropping_the_guard_releases_the_lock_while_a_duplicate_descriptor_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("LOCK");
+        let guard = lock_file(&path).unwrap();
+        // The child's inherited copy: the same open file description.
+        let inherited = guard.file.as_ref().unwrap().try_clone().unwrap();
+        drop(guard);
+        let reopened = StdVfs.lock_exclusive(&path);
+        drop(inherited);
+        assert!(
+            reopened.is_ok(),
+            "the lock outlived its guard: {:?}",
+            reopened.err()
+        );
     }
 }
