@@ -884,8 +884,8 @@ evidence = [
   "crates/prkdb/src/batch_accumulator.rs:151",
   "crates/prkdb/src/ttl.rs:180-184",
 ]
-regression_tests = ["test:crates/prkdb-core/src/vfs/std_vfs.rs::dropping_the_guard_releases_the_lock_while_a_duplicate_descriptor_is_open", "test:crates/prkdb/tests/reopen_after_drop.rs::a_wal_adapter_reopens_right_after_its_drop_with_compaction_running", "test:crates/prkdb/tests/reopen_after_drop.rs::a_prkdb_reopens_right_after_its_drop", "test:crates/prkdb/tests/reopen_after_drop.rs::a_flushed_batching_handle_releases_the_directory_when_dropped", "test:crates/prkdb/tests/reopen_after_drop.rs::ttl_storage_releases_the_directory_when_dropped", "test:crates/prkdb-cli/tests/backup_restore.rs::backup_then_restore_preserves_every_value"]
-changes = ["c6a93e5", "8bf7c25", "0d3bfbe", "3307b28"]
+regression_tests = ["test:crates/prkdb-core/src/vfs/std_vfs.rs::dropping_the_guard_releases_the_lock_while_a_duplicate_descriptor_is_open", "test:crates/prkdb/tests/reopen_after_drop.rs::a_wal_adapter_reopens_right_after_its_drop_with_compaction_running", "test:crates/prkdb/tests/reopen_after_drop.rs::a_prkdb_reopens_right_after_its_drop", "test:crates/prkdb/tests/reopen_after_drop.rs::a_flushed_batching_handle_releases_the_directory_when_dropped", "test:crates/prkdb/tests/reopen_after_drop.rs::ttl_storage_releases_the_directory_when_dropped", "test:crates/prkdb/tests/reopen_after_drop.rs::ttl_storage_dropped_mid_tick_stops_at_the_next_key_and_releases_the_adapter", "test:crates/prkdb/tests/reopen_after_drop.rs::ttl_storage_dropped_during_a_parked_delete_releases_the_adapter", "test:crates/prkdb-cli/tests/backup_restore.rs::backup_then_restore_preserves_every_value"]
+changes = ["c6a93e5", "8bf7c25", "0d3bfbe", "3307b28", "704cea9", "9b7bbdb"]
 
 [[finding]]
 id = "STO-14"
@@ -924,8 +924,8 @@ evidence = [
   "crates/prkdb/src/storage/wal_adapter.rs:686-688",
   "crates/prkdb/src/raft/partition_manager.rs:71",
 ]
-regression_tests = ["test:crates/prkdb-core/tests/wal_durable_dirs.rs::every_missing_ancestor_is_durable_before_the_first_durable_ack", "test:crates/prkdb-core/tests/wal_durable_dirs.rs::create_dir_all_durable_syncs_the_parent_of_every_directory_it_creates", "test:crates/prkdb/tests/durable_data_dir.rs::every_missing_ancestor_of_the_data_directory_is_durable"]
-changes = ["cd12b10", "6e7c9bf", "4d725cd"]
+regression_tests = ["test:crates/prkdb-core/tests/wal_durable_dirs.rs::every_missing_ancestor_is_durable_before_the_first_durable_ack", "test:crates/prkdb-core/tests/wal_durable_dirs.rs::create_dir_all_durable_syncs_the_parent_of_every_directory_it_creates", "test:crates/prkdb/tests/durable_data_dir.rs::every_missing_ancestor_of_the_data_directory_is_durable", "test:crates/prkdb-core/tests/wal_durable_dirs.rs::a_relative_path_syncs_the_working_directory_for_its_outermost_new_directory", "test:crates/prkdb-core/tests/wal_durable_dirs.rs::retry_after_parent_sync_failure_makes_existing_ancestors_durable", "test:crates/prkdb-core/tests/wal_durable_dirs.rs::another_open_under_an_unsynced_existing_ancestor_cannot_ack_durable", "test:crates/prkdb-core/tests/wal_durable_dirs.rs::std_vfs_empty_directory_sync_uses_the_working_directory_anchor", "test:crates/prkdb/tests/durable_data_dir.rs::every_missing_ancestor_of_a_durable_stream_is_durable"]
+changes = ["cd12b10", "6e7c9bf", "4d725cd", "041f991", "9b7bbdb"]
 
 [[finding]]
 id = "STO-17"
