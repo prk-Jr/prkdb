@@ -44,11 +44,22 @@ These have no exceptions unless the maintainer (Prakash) says so for a specific 
 - **Never weaken a check to get green.** Do not add `#[ignore]` (without a reason that
   `scripts/check_ignore_reasons.sh` accepts), lower a perf floor, raise a threshold,
   shrink a seed count, or delete a failing test.
-- **No performance regressions.** The maintainer's rule is "we can't compromise on
-  performance". Hot paths are `crates/prkdb-core/src/wal/`, `crates/prkdb/src/storage/`,
-  `indexed_storage.rs` and `transaction.rs`. When you touch them, run the relevant
-  Criterion bench before and after and put the delta in the commit body (plan,
-  "Perf note").
+- **Performance.** The maintainer's rule is "we can't compromise on performance". In
+  practice (spec §6.2):
+  - The Linux instruction-count gate fails a tracked benchmark that regresses more
+    than 5 %. The only exception is a cost that durability or correctness requires.
+    That needs a `perf_note` on the responsible ledger entry naming each regressed
+    benchmark and the reason, and the maintainer's agreement. Speed is never a reason
+    to weaken durability.
+  - Hot paths are `crates/prkdb-core/src/wal/`, `crates/prkdb/src/storage/`,
+    `indexed_storage.rs` and `transaction.rs`. When you touch them, run Criterion
+    before and after (plan, "Perf note") and put the delta in the commit body. Name
+    the bench, the baseline SHA and the durability mode (`Durable`/`Fast`).
+  - When a task's plan section names its own benchmark, target or threshold, that
+    wins.
+  - Wall-clock numbers are distorted by concurrent builds. Measure only when no other
+    agent is building (`pgrep -fl rustc` prints nothing), run before and after back to
+    back, and say in the report if you could not.
 - **If a tool is missing, ask the maintainer to install it.** Do not substitute a
   weaker check and call the step done. Name the tool and the install command.
 - **STOP steps are real.** When a plan step says STOP, or the work shows the plan is
@@ -59,9 +70,18 @@ These have no exceptions unless the maintainer (Prakash) says so for a specific 
 ## 3. Machine constraints
 
 - Disk is tight. Every worktree builds its own `target/` (7–20 GB).
-  - Build with `CARGO_INCREMENTAL=0`.
+  - In every shell, from the worktree root, set both variables explicitly. An inherited
+    `CARGO_TARGET_DIR` would otherwise build into, or clean, another worktree's
+    directory:
+
+    ```bash
+    export CARGO_INCREMENTAL=0
+    export CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/target"
+    ```
+
   - Never build in release mode unless a step requires it.
-  - When your task is finished and reported, run `cargo clean` in your worktree.
+  - When your task is reported and the integrator no longer needs your build, remove
+    that directory: `cargo clean --target-dir "$CARGO_TARGET_DIR"`.
 - The toolchain is pinned to 1.98.1 by `rust-toolchain.toml`. Fuzzing uses nightly
   (`cargo +nightly fuzz …`).
 - The instruction-count perf gate (iai/gungraun) needs Linux and Valgrind. It cannot
@@ -80,8 +100,16 @@ ls "$(git rev-parse --path-format=absolute --git-common-dir)/../.agents/handoff/
 
 A task is **taken** if a `wip-<task>` branch exists that is not yet merged into
 `remediation/phase-2` (`git branch --no-merged remediation/phase-2 --list 'wip-*'`) or
-a handoff note for it says `status: in-progress`. Take a different task, or continue
-that one only if its note says `status: paused` (see §6).
+a handoff note for it has any status other than `done`. You may take over a taken
+task only when all three hold:
+
+- its note says `status: paused` and `transferable: yes`. A `paused` task with
+  `transferable: no` is waiting on something (`waiting_on`), not abandoned;
+- the previous worker has stopped. Its `agent:` set the note to `paused` itself, or
+  the maintainer tells you it has stopped. An `in-progress` note that looks stale is
+  not proof: ask the maintainer;
+- your task does not edit any file listed under another open note's `files:`, unless
+  the maintainer agrees. Different task numbers can still touch the same files.
 
 Also check the task's ordering in the plan. Some tasks must land before others (for
 example, every task marked *before Task 2.24* lands before the format freeze; 2.18 and
@@ -116,7 +144,7 @@ Follow the task's steps in order. The usual shape is:
 5. **Verify.** All of these must pass before you report done:
 
    ```bash
-   export CARGO_INCREMENTAL=0
+   # with CARGO_INCREMENTAL and CARGO_TARGET_DIR set as in §3
    cargo fmt --all -- --check
    cargo clippy --workspace --all-targets -- -D warnings
    cargo nextest run --workspace          # or the crates/tests the task names, plus
@@ -177,33 +205,54 @@ Update the note **every time you commit**, and whenever you stop. Format:
 ```markdown
 # wip-2.15b.3: StreamLog core
 status: in-progress | paused | done | blocked
+transferable: yes | no
+waiting_on: <task or decision this waits for, or "nothing">
 agent: codex | claude
+integrator: claude | maintainer
 worktree: /Users/prk-jr/Desktop/opensource/prkdb/output/prkdb-worktrees/wip-2.15b.3
-base: <SHA of remediation/phase-2 the branch was cut from>
+base: <full SHA of remediation/phase-2 the branch was cut from>
+head: <full SHA of the branch's latest commit>
 updated: 2026-10-02 18:40 IST
+files:
+- <every file this task edits or will edit>
 
 ## Done
 - <commit SHA> <what it does>
 
-## In progress
-<what is half-written, which files, uncommitted or not>
+## Uncommitted
+<"none", or each changed file and what the change is. Prefer committing over this.>
 
 ## Next
-1. <the very next concrete step>
+1. <the very next concrete step, with the exact command where there is one>
 2. ...
 
 ## Findings and decisions
 <anything learned that is not in the plan: a finding ID you added, a spec revision
 number you used, a deviation from the plan and why, a STOP and its reason>
 
+## Follow-ups
+- <item> → destination: <task> · acceptance test: <test name> · fixed by: <SHA or
+  "open">
+
 ## Verification so far
-<which commands passed, with counts; which were not run and why>
+<each command run and its result with counts; which were not run and why>
+
+## Readiness
+<one of: implementing · local checks pass, review pending · local checks pass, Linux
+checks outstanding (<which>) · ready to merge>
 ```
 
 Set `status: paused` when you stop before the task is finished (for example, you are
-about to run out of budget): commit what you have first, even as a `wip:` commit on
-your own branch, and write the exact next step. Set `status: done` when you report.
-Set `status: blocked` when you need the maintainer.
+about to run out of budget). Commit what you have first, even as a `wip:` commit on
+your own branch, then fill `head`, `Uncommitted` and the exact next step. Set
+`transferable: no` and `waiting_on` when the task is waiting for another task or a
+decision rather than free for someone else to continue. Set `status: done` when you
+report, and `status: blocked` when you need the maintainer.
+
+**Follow-ups.** A review finding or problem you defer is not closed by writing it
+down. Give each one a destination task, the test that will prove it fixed, and later
+the fixing commit. When the destination is a plan task, add the item to that task's
+section in the plan too, as in Task 2.15b.3's "Carried over from the 2.15b.2 review".
 
 ### Continuing someone else's task
 
@@ -211,8 +260,8 @@ Set `status: blocked` when you need the maintainer.
 2. `cd` into its worktree. Run `git status`, and `git log --oneline <base>..HEAD`.
 3. Check the note against reality: uncommitted changes, the last commit, failing tests.
    Run the task's tests before changing anything, so you know the starting state.
-4. Set the note to `status: in-progress` and `agent:` to yourself, then continue
-   from "Next". Do not redo committed work, and do not discard uncommitted work you
+4. Confirm §4's takeover conditions hold. Then set the note to
+   `status: in-progress` and `agent:` to yourself, and continue from "Next". Do not redo committed work, and do not discard uncommitted work you
    did not write. Commit it as `wip:` first if it builds, or describe it in the note if
    it does not.
 
@@ -220,12 +269,18 @@ Set `status: blocked` when you need the maintainer.
 
 End every task, or every stop, with a report to the maintainer containing:
 
-- the branch, worktree and base SHA, and the commits (SHA and one line each);
+- **readiness**, as one of the states in the note's "Readiness" section. Keep
+  "implemented and local checks pass" separate from "ready to merge": review, Linux-only
+  checks (iai, wal-bench, the full remediation gate) and maintainer decisions may still
+  be outstanding;
+- the branch, worktree, base SHA and head SHA, and the commits (SHA and one line
+  each);
 - what changed and why, at the level of behaviour, not a file list;
 - verification: each command run and its result (counts), and what was not run and
   why;
 - perf: Criterion before/after for hot-path changes;
 - ledger: findings added or updated, spec revision numbers used;
+- follow-ups, each with its destination, acceptance test and status;
 - deviations from the plan, files touched outside scope, and anything left for a later
   task;
 - anything the maintainer must decide or install.
