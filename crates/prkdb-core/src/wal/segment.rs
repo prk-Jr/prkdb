@@ -95,7 +95,14 @@ fn read_header(file: &dyn VfsFile, path: &Path, first_lsn: Lsn) -> Result<(), Wa
     }
 
     let mut header = [0u8; SEGMENT_HEADER_LEN as usize];
-    file.read_at(0, &mut header)?;
+    let read = read_full(file, 0, &mut header)?;
+    if read < header.len() {
+        return Err(WalError::CorruptSegment {
+            path: path.to_path_buf(),
+            offset: 0,
+            reason: format!("only {read} bytes of segment header before the end of the file"),
+        });
+    }
 
     if header[0..8] != SEGMENT_MAGIC {
         return Err(WalError::CorruptSegment {
@@ -154,8 +161,11 @@ fn read_more(
     let to_read = std::cmp::min(SCAN_CHUNK as u64, file_len - have) as usize;
     let start = buf.len();
     buf.resize(start + to_read, 0);
-    file.read_at(have, &mut buf[start..])?;
-    Ok(true)
+    // A short read is progress, not a torn frame: fill the requested chunk before
+    // decoding it, and never expose the zero-filled suffix if the file ends early.
+    let read = read_full(file, have, &mut buf[start..])?;
+    buf.truncate(start + read);
+    Ok(read != 0)
 }
 
 /// Verifies the header (magic, format == `FORMAT_VERSION`, `first_lsn` == `first_lsn`),

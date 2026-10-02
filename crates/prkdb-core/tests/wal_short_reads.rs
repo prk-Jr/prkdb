@@ -245,3 +245,19 @@ fn completed_reads_do_not_issue_an_empty_follow_up_read() {
     assert_eq!(scan.stopped, None);
     assert_eq!(scan.next_lsn, 2);
 }
+
+#[test]
+fn premature_eof_reports_the_actual_segment_header_length() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(segment_file_name(1));
+    let (file, _) = seed(&path, &[b"first".to_vec()]);
+    assert!(file.len().unwrap() >= SEGMENT_HEADER_LEN);
+    let mut reader = short_file(file, 7);
+    reader.eof_at = Some(7);
+    let err = scan_segment(&reader, &path, 1, &mut |_, _, _| Ok(())).unwrap_err();
+    assert!(
+        matches!(err, WalError::CorruptSegment { path: ref found, offset: 0, ref reason }
+            if found == &path && reason.contains("only 7 bytes of segment header")),
+        "{err}"
+    );
+}
