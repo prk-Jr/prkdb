@@ -83,9 +83,21 @@ impl LockGuard for StdLock {}
 
 impl Drop for StdLock {
     fn drop(&mut self) {
-        // Close (release the OS lock) before the registry entry goes, so a thread that
-        // gets past the registry never meets this guard's still-open OS lock.
-        drop(self.file.take());
+        // Unlock explicitly, then close, then drop the registry entry, so a thread that
+        // gets past the registry never meets this guard's OS lock.
+        //
+        // Closing alone is not enough (STO-12). The OS lock belongs to the open file
+        // description, which every descriptor duplicated from ours shares, and a child
+        // process that another thread is spawning holds such a duplicate from its fork
+        // until its exec closes it (`O_CLOEXEC` takes effect only at the exec). Closing
+        // ours while a child is in that window left the lock held, and a reopen right
+        // after the drop was refused as `Locked`. An unlock releases the description's
+        // lock whichever descriptors are still open. If it fails, the close still
+        // releases it (eventually, once every duplicate is closed).
+        if let Some(file) = self.file.take() {
+            let _ = file.unlock();
+            drop(file);
+        }
         ProcessLocks::release(&self.key);
     }
 }
