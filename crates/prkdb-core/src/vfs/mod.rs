@@ -79,7 +79,8 @@ pub trait LockGuard: Send + Sync {}
 /// durable when this returns (STO-15). `create_dir_all` followed by a sync of `dir`'s
 /// parent alone leaves the entries of the outer new directories unsynced: a power cut
 /// can remove them, and everything written under them. Creates and syncs nothing when
-/// `dir` exists.
+/// `dir` exists. For a relative `dir` the outermost new directory is an entry in the
+/// working directory, which is synced as `.`.
 pub fn create_dir_all_durable(vfs: &dyn Vfs, dir: &Path) -> io::Result<()> {
     let mut missing = Vec::new();
     let mut current = Some(dir);
@@ -92,7 +93,13 @@ pub fn create_dir_all_durable(vfs: &dyn Vfs, dir: &Path) -> io::Result<()> {
     }
     for created in missing.into_iter().rev() {
         vfs.create_dir_all(created)?;
-        if let Some(parent) = created.parent().filter(|p| !p.as_os_str().is_empty()) {
+        if let Some(parent) = created.parent() {
+            // `Path::new("mydb").parent()` is `Some("")`: the working directory.
+            let parent = if parent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                parent
+            };
             vfs.sync_dir(parent)?;
         }
     }
