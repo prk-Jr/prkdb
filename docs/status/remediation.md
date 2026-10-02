@@ -10,7 +10,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 |---|---|---|---|
 | 0 | Honesty and tracking | gate_passed | 6/6 |
 | 1 | Harness and baseline | gate_passed | 2/2 |
-| 2 | Format v2 and single-node root fixes | not_started | 0/19 |
+| 2 | Format v2 and single-node root fixes | not_started | 0/20 |
 | 3 | Semantics | not_started | 0/9 |
 | 4 | Raft | not_started | 0/15 |
 | 5 | Documentation and release | not_started | 0/9 |
@@ -41,6 +41,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | RFT-06 | high | 4 | open | ReadIndex heartbeat sends prev_log_index:0 with leader_commit; no no-op on election lets a linearizable read miss an acked write |
 | RFT-07 | high | 4 | open | Failed InstallSnapshot counts toward commit; restore never clears old keys; stale snapshots accepted |
 | RFT-10 | high | 4 | open | CLUSTER_NODES rejects hostnames; 3-node compose cluster cannot start |
+| RFT-11 | high | 2 | fixed | Peer- or disk-supplied lengths trusted: unbounded bincode decodes, InstallSnapshot length overflow, unbounded snapshot entries |
 | SCH-02 | high | 2 | fixed | Schema reload accepts missing descriptors; non-atomic writes; concurrent registrations can reuse a version |
 | STO-06 | high | 2 | fixed | Four WAL implementations in use; all data writes hash to one shard so fixes do not propagate |
 | STO-07 | high | 2 | fixed | BatchAccumulator::flush() sleeps and returns Ok while dropping executor errors |
@@ -70,7 +71,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | DOC-10 | low | 5 | open | ignoreDeadLinks: true hides orphaned methodology/status pages |
 | STO-08 | low | 2 | fixed | WalConfig::segment_bytes ignored by the mmap WAL (segment size hardcoded to 64 MB) |
 | STO-09 | low | 2 | fixed | WalStorageAdapter::new_with_config ignores StorageConfig::cache_capacity (hard-coded 100,000 entries) |
-| TST-07 | low | 2 | open | No fuzzing of WAL record, segment, snapshot, and proto decoding |
+| TST-07 | low | 2 | fixed | No fuzzing of WAL record, segment, snapshot, and proto decoding |
 | DOC-01 | high | 0 | verified | Cluster docs and compose files misdescribe multi-node setup (env vars, peer auth, metrics auth) |
 | SCH-01 | high | 0 | verified | Schema collection name joined into a path allows writes outside the registry dir |
 | DOC-11 | medium | 0 | verified | Transactions page claims Serializable is the default; code defaults to ReadCommitted |

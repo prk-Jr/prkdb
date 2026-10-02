@@ -270,7 +270,13 @@ impl LogRecord {
         buffer.extend_from_slice(&bytes);
     }
 
-    /// Deserialize from bytes
+    /// Deserialize from bytes.
+    ///
+    /// Legacy record format with no production caller (the WAL stores `Batch` frames).
+    /// Bounded by `prkdb_types::codec::decode`, a native decode whose `PutBatch` items
+    /// claim 48 bytes per pair up front, more than the 8 per input byte the scaled limit
+    /// allows, so a batch of very many near-empty pairs can be refused; move it to the
+    /// serde path before reviving it.
     pub fn deserialize(bytes: &[u8]) -> Result<Self, WalError> {
         use crate::serialization::zerocopy::ZeroCopyLogHeader;
         use zerocopy::FromBytes;
@@ -308,8 +314,7 @@ impl LogRecord {
 
         let payload = &bytes[ZeroCopyLogHeader::SIZE..ZeroCopyLogHeader::SIZE + payload_len];
 
-        let config = bincode::config::standard();
-        let (operation, _): (LogOperation, usize) = bincode::decode_from_slice(payload, config)
+        let (operation, _): (LogOperation, usize) = prkdb_types::codec::decode(payload)
             .map_err(|e| WalError::Serialization(e.to_string()))?;
 
         // Verify checksum
@@ -361,6 +366,30 @@ fn current_timestamp_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RFT-11: a payload whose `collection` string declares 2^62 bytes is an error, not
+    /// an allocation (the payload is decoded before its checksum is checked).
+    #[test]
+    fn rft11_a_payload_declaring_an_oversized_length_is_an_error() {
+        use crate::serialization::zerocopy::ZeroCopyLogHeader;
+        use zerocopy::AsBytes;
+        for len in [u64::MAX, 1u64 << 62] {
+            // `LogOperation::Put` (variant 0), `collection` length `0xFD` + u64.
+            let mut payload = vec![0u8, 0xFD];
+            payload.extend_from_slice(&len.to_le_bytes());
+            let header = ZeroCopyLogHeader {
+                offset: 1,
+                timestamp: 0,
+                checksum: crc32fast::hash(&payload),
+                payload_len: payload.len() as u32,
+                compression_type: 0,
+                _padding: [0; 7],
+            };
+            let mut bytes = header.as_bytes().to_vec();
+            bytes.extend_from_slice(&payload);
+            assert!(LogRecord::deserialize(&bytes).is_err(), "{len:#x}");
+        }
+    }
 
     #[test]
     fn test_log_record_serialization() {

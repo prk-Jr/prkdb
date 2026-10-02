@@ -249,10 +249,14 @@ impl RaftNode {
         let snapshot_path = storage.get_log_dir().join("snapshot.bin");
         if snapshot_path.exists() {
             if let Ok(encoded) = std::fs::read(&snapshot_path) {
-                if let Ok((state, _)) = bincode::decode_from_slice::<(u64, u64, Vec<u8>), _>(
-                    &encoded,
-                    bincode::config::standard(),
-                ) {
+                // A whole snapshot can be far larger than one record, so the decode limit
+                // scales with the file (`prkdb_types::codec::decode_file`).
+                let decoded = prkdb_types::codec::decode_file::<(u64, u64, Vec<u8>)>(&encoded)
+                    .ok()
+                    // An index of u64::MAX leaves no next index: not a snapshot this node
+                    // could have written.
+                    .filter(|(state, _)| state.0 != u64::MAX);
+                if let Some((state, _)) = decoded {
                     tracing::info!(
                         "Loaded snapshot from disk: index {}, term {}",
                         state.0,
@@ -1014,6 +1018,15 @@ impl RaftNode {
             return (*current_term, false);
         }
 
+        // The log restarts at `last_included_index + 1`, which must exist (RFT-11: the
+        // index is peer-supplied).
+        let Some(next_log_index) = last_included_index.checked_add(1) else {
+            tracing::warn!(
+                "Rejected InstallSnapshot from {leader_id}: last_included_index is u64::MAX"
+            );
+            return (*current_term, false);
+        };
+
         // If RPC request or response contains term > currentTerm:
         // set currentTerm = term, convert to follower
         if term > *current_term {
@@ -1074,7 +1087,7 @@ impl RaftNode {
 
             // Discard all log entries before and including snapshot
             log.clear();
-            *log_start = last_included_index + 1;
+            *log_start = next_log_index;
 
             tracing::info!(
                 "Reset log after snapshot, new log_start_index: {}",
@@ -2248,6 +2261,20 @@ mod tests {
         ) -> Result<(), super::super::state_machine::StateMachineError> {
             Ok(())
         }
+    }
+
+    /// RFT-11: a peer-supplied `last_included_index` of u64::MAX is refused before the
+    /// state machine is touched, instead of overflowing `last_included_index + 1`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rft11_install_snapshot_at_u64_max_is_refused() {
+        let config = ClusterConfig::default();
+        let (storage, _temp) = create_test_storage();
+        let node = RaftNode::new(config, storage, Arc::new(MockStateMachine));
+        let (_, accepted) = node
+            .handle_install_snapshot(1, 2, u64::MAX, 1, 0u64.to_le_bytes().to_vec())
+            .await;
+        assert!(!accepted);
+        assert_eq!(*node.log_start_index.read().await, 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]

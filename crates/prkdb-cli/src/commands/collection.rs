@@ -916,7 +916,7 @@ fn decode_exact<T>(data: &[u8]) -> Option<T>
 where
     T: serde::de::DeserializeOwned,
 {
-    bincode::serde::decode_from_slice::<T, _>(data, bincode::config::standard())
+    prkdb_types::codec::decode_serde::<T>(data)
         .ok()
         .and_then(|(value, consumed)| (consumed == data.len()).then_some(value))
 }

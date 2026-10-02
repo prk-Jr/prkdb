@@ -1,8 +1,6 @@
 use crate::compute::{ComputeHandler, Context, StatefulCompute};
-use bincode::{
-    config,
-    serde::{decode_from_slice, encode_to_vec},
-};
+use bincode::{config, serde::encode_to_vec};
+use prkdb_types::codec::decode_serde;
 use prkdb_types::collection::{ChangeEvent, Collection};
 use prkdb_types::error::StorageError;
 use prkdb_types::storage::StorageAdapter;
@@ -184,16 +182,14 @@ where
     ours.sort_by(|a, b| a.0.cmp(&b.0));
 
     for (id, bytes) in ours {
-        let rec: OutboxRecord<C> =
-            match decode_from_slice::<OutboxRecord<C>, _>(&bytes, config::standard()) {
-                Ok((r, _)) => r,
-                Err(_) => {
-                    let (env, _): (OutboxEnvelope<C>, _) =
-                        decode_from_slice(&bytes, config::standard())
-                            .map_err(|e| StorageError::Deserialization(e.to_string()))?;
-                    env.event
-                }
-            };
+        let rec: OutboxRecord<C> = match decode_serde::<OutboxRecord<C>>(&bytes) {
+            Ok((r, _)) => r,
+            Err(_) => {
+                let (env, _): (OutboxEnvelope<C>, _) = decode_serde(&bytes)
+                    .map_err(|e| StorageError::Deserialization(e.to_string()))?;
+                env.event
+            }
+        };
 
         // Publish to event bus and trigger compute handlers, mirroring live behavior
         match rec.clone() {
@@ -308,8 +304,8 @@ where
     C: Collection,
 {
     if let Some(bytes) = db.storage.get(handler.state_key().as_bytes()).await? {
-        let (state, _): (H::State, _) = decode_from_slice(&bytes, config::standard())
-            .map_err(|e| StorageError::Deserialization(e.to_string()))?;
+        let (state, _): (H::State, _) =
+            decode_serde(&bytes).map_err(|e| StorageError::Deserialization(e.to_string()))?;
         Ok(state)
     } else {
         Ok(handler.init_state())
@@ -369,8 +365,8 @@ where
     let ctx = Context { db: db.clone() };
 
     for (_key, val) in ours {
-        let (record, _): (OutboxRecord<C>, _) = decode_from_slice(&val, config::standard())
-            .map_err(|e| StorageError::Deserialization(e.to_string()))?;
+        let (record, _): (OutboxRecord<C>, _) =
+            decode_serde(&val).map_err(|e| StorageError::Deserialization(e.to_string()))?;
 
         match record {
             OutboxRecord::Put(item) => {
@@ -449,8 +445,8 @@ where
     ours.sort_by(|a, b| a.0.cmp(&b.0));
 
     for (id, bytes) in ours {
-        let (env, _): (OutboxEnvelope<C>, _) = decode_from_slice(&bytes, config::standard())
-            .map_err(|e| StorageError::Deserialization(e.to_string()))?;
+        let (env, _): (OutboxEnvelope<C>, _) =
+            decode_serde(&bytes).map_err(|e| StorageError::Deserialization(e.to_string()))?;
         if env.ts_millis < since_millis {
             continue;
         }
@@ -573,8 +569,8 @@ where
     ours.sort_by(|a, b| a.0.cmp(&b.0));
 
     for (id, bytes) in ours {
-        let (mut rec, _): (DlqRecord<C>, _) = decode_from_slice(&bytes, config::standard())
-            .map_err(|e| StorageError::Deserialization(e.to_string()))?;
+        let (mut rec, _): (DlqRecord<C>, _) =
+            decode_serde(&bytes).map_err(|e| StorageError::Deserialization(e.to_string()))?;
         let ctx = Context { db: db.clone() };
         let res = match &rec.event {
             OutboxRecord::Put(item) => {

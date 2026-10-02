@@ -31,6 +31,10 @@ pub const FRAME_HEADER_LEN: usize = 17;
 /// Largest payload accepted on write and trusted on read (checked before allocating).
 pub const MAX_PAYLOAD_LEN: usize = 64 * 1024 * 1024;
 
+// Bounded decodes of stored records (`prkdb_types::codec`) use the same limit: no stored
+// value can be larger than the frame that carried it.
+const _: () = assert!(MAX_PAYLOAD_LEN == prkdb_types::codec::MAX_RECORD_BYTES);
+
 /// What a frame's `kind` byte means. Unknown kinds are faults (`FrameFault::UnknownKind`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

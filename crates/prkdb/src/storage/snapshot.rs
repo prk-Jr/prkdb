@@ -5,6 +5,7 @@
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use prkdb_types::codec::{decode_with_limit, MAX_HEADER_BYTES, MAX_RECORD_BYTES};
 use prkdb_types::error::StorageError;
 pub use prkdb_types::snapshot::{CompressionType, SnapshotHeader};
 use std::fs::File;
@@ -80,19 +81,31 @@ impl SnapshotWriter {
 pub struct SnapshotReader {
     reader: Box<dyn Read>,
     pub header: SnapshotHeader,
+    /// Entries returned so far; never more than `header.index_entries`.
+    entries_read: u64,
 }
 
 impl SnapshotReader {
     pub fn open(path: &Path) -> Result<Self, StorageError> {
         let file = File::open(path).map_err(|e| StorageError::BackendError(e.to_string()))?;
-        let mut buf_reader = BufReader::new(file);
+        Self::from_reader(BufReader::new(file))
+    }
 
+    /// Reads a snapshot from any byte stream (the file `open` reads, or bytes in memory).
+    pub fn from_reader(mut buf_reader: impl Read + 'static) -> Result<Self, StorageError> {
         // Read header length
         let mut len_bytes = [0u8; 4];
         buf_reader
             .read_exact(&mut len_bytes)
             .map_err(|e| StorageError::BackendError(e.to_string()))?;
         let len = u32::from_le_bytes(len_bytes) as usize;
+        // A header is a few fixed-size fields; a larger length is corruption, refused
+        // before it sizes an allocation.
+        if len > MAX_HEADER_BYTES {
+            return Err(StorageError::Corruption(format!(
+                "snapshot header of {len} bytes exceeds the {MAX_HEADER_BYTES}-byte limit"
+            )));
+        }
 
         // Read header
         let mut header_bytes = vec![0u8; len];
@@ -100,8 +113,7 @@ impl SnapshotReader {
             .read_exact(&mut header_bytes)
             .map_err(|e| StorageError::BackendError(e.to_string()))?;
 
-        let config = bincode::config::standard();
-        let header: SnapshotHeader = bincode::decode_from_slice(&header_bytes, config)
+        let header: SnapshotHeader = decode_with_limit::<_, MAX_HEADER_BYTES>(&header_bytes)
             .map_err(|e| StorageError::Internal(format!("Failed to deserialize header: {}", e)))?
             .0;
 
@@ -110,35 +122,73 @@ impl SnapshotReader {
             CompressionType::Gzip => Box::new(GzDecoder::new(buf_reader)),
         };
 
-        Ok(Self { reader, header })
+        Ok(Self {
+            reader,
+            header,
+            entries_read: 0,
+        })
     }
 
     /// Returns next entry as (key, value). Returns None on EOF.
+    ///
+    /// Bounded whatever the file says, including a small gzip stream that inflates without
+    /// limit: a key or value over [`MAX_RECORD_BYTES`] is refused before it is read, and
+    /// the stream may hold no more than the header's `index_entries` entries (the key count
+    /// the writer saw; deletes during the snapshot can only make it hold fewer). So reading
+    /// a whole snapshot decompresses at most `index_entries` x 2 x [`MAX_RECORD_BYTES`].
     pub fn next_entry(&mut self) -> Result<Option<SnapshotEntry>, StorageError> {
         let mut len_bytes = [0u8; 4];
+        if self.entries_read == self.header.index_entries {
+            let mut probe = [0u8; 1];
+            return match self.reader.read(&mut probe) {
+                Ok(0) => Ok(None),
+                Ok(_) => Err(StorageError::Corruption(format!(
+                    "snapshot holds more than the {} entries its header declares",
+                    self.header.index_entries
+                ))),
+                Err(e) => Err(StorageError::BackendError(e.to_string())),
+            };
+        }
         if let Err(e) = self.reader.read_exact(&mut len_bytes) {
             if e.kind() == std::io::ErrorKind::UnexpectedEof {
                 return Ok(None);
             }
             return Err(StorageError::BackendError(e.to_string()));
         }
-        let key_len = u32::from_le_bytes(len_bytes) as usize;
-        let mut key = vec![0u8; key_len];
-        self.reader
-            .read_exact(&mut key)
-            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        let key = read_prefixed(&mut self.reader, u32::from_le_bytes(len_bytes))?;
 
         self.reader
             .read_exact(&mut len_bytes)
             .map_err(|e| StorageError::BackendError(e.to_string()))?;
-        let val_len = u32::from_le_bytes(len_bytes) as usize;
-        let mut val = vec![0u8; val_len];
-        self.reader
-            .read_exact(&mut val)
-            .map_err(|e| StorageError::BackendError(e.to_string()))?;
+        let val = read_prefixed(&mut self.reader, u32::from_le_bytes(len_bytes))?;
 
+        self.entries_read += 1;
         Ok(Some((key, val)))
     }
+}
+
+/// Reads exactly `len` bytes, growing the buffer as bytes arrive rather than allocating
+/// the declared length up front, and refusing a length over [`MAX_RECORD_BYTES`] (no
+/// stored key or value is larger) before reading anything: a corrupt length, or a gzip
+/// stream that inflates without limit, cannot drive a 4 GiB entry.
+fn read_prefixed(reader: &mut dyn Read, len: u32) -> Result<Vec<u8>, StorageError> {
+    if len as usize > MAX_RECORD_BYTES {
+        return Err(StorageError::Corruption(format!(
+            "snapshot entry declares {len} bytes, over the {MAX_RECORD_BYTES}-byte record limit"
+        )));
+    }
+    let mut buf = Vec::new();
+    reader
+        .take(u64::from(len))
+        .read_to_end(&mut buf)
+        .map_err(|e| StorageError::BackendError(e.to_string()))?;
+    if buf.len() != len as usize {
+        return Err(StorageError::Corruption(format!(
+            "snapshot entry declares {len} bytes, file has {}",
+            buf.len()
+        )));
+    }
+    Ok(buf)
 }
 
 #[cfg(test)]
