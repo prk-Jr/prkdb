@@ -7,6 +7,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 python3 scripts/perf_gate_deltas.py floors --self-test
 python3 scripts/perf_gate_deltas.py extract --self-test
+# The per-benchmark perf_note override (perf-gate.yml) justifies only the regressions a
+# note names.
+python3 scripts/perf_gate_deltas.py justify --self-test
 # Every declared floor is usable: a reference, and a ratio of at least 0.01 (a lower
 # floor admits an empty measured region and can never fail).
 python3 scripts/perf_gate_deltas.py floors --validate scripts/perf_gate_floors.toml

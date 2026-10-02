@@ -1,6 +1,13 @@
 # Root-cause remediation finding ledger (spec §4.1).
 # Source of truth: docs/superpowers/specs/2026-09-23-root-cause-remediation-design.md §3.1-3.8, §7.
 # Generated status page: docs/status/remediation.md (via `cargo xtask remediation render`).
+#
+# perf_note (spec §6.2): justifies an instruction-count regression the perf gate flags,
+# per benchmark. It must name every benchmark it covers by its function name and give the
+# durability or correctness reason, e.g.
+#   perf_note = "bench_wal_put_100: one fsync bookkeeping record per put (STO-02)"
+# perf-gate.yml (`perf_gate_deltas.py justify`) accepts a regression only if a perf_note
+# the PR adds or changes names that benchmark; unnamed regressions still fail.
 
 # ---------------------------------------------------------------------------
 # 3.1 Storage and WAL (STO)

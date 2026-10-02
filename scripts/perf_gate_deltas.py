@@ -62,6 +62,7 @@ confirmed by a real Linux CI run of this workflow.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -332,6 +333,101 @@ def regressed(deltas_path: str) -> int:
         if r.get("regressed"):
             print(r["name"])
     return 0
+
+
+# A ledger line this PR adds or changes, in a unified diff of docs/remediation/ledger.toml:
+# `+perf_note = "..."` (a one-line TOML basic string; anything else is not an override).
+ADDED_PERF_NOTE = re.compile(r'^\+\s*perf_note\s*=\s*"(?P<text>(?:[^"\\]|\\.)*)"\s*(?:#.*)?$')
+# How much of a perf_note must be left once the benchmark ids are removed: a note that
+# only lists names gives no durability or correctness reason (spec §6.2).
+MIN_REASON_CHARS = 12
+
+
+def mentions(text: str, bench: str) -> bool:
+    """`bench` appears in `text` as a whole identifier (bench_x_100 is not bench_x_1000)."""
+    return re.search(rf"(?<![A-Za-z0-9_]){re.escape(bench)}(?![A-Za-z0-9_])", text) is not None
+
+
+def added_perf_notes(ledger_diff: str) -> list[str]:
+    return [m["text"] for line in ledger_diff.splitlines() if (m := ADDED_PERF_NOTE.match(line))]
+
+
+def justify(regressed_names: list[str], ledger_diff: str) -> tuple[list[str], list[str]]:
+    """Split regressed benchmarks into (justified, unjustified).
+
+    A regression is justified only by a perf_note this PR adds or changes that names that
+    benchmark (its bare function name, as `bench_short_name` gives it) and still carries a
+    reason once every benchmark name is stripped from it. One note may name several
+    benchmarks; a note naming none justifies nothing.
+    """
+    notes = added_perf_notes(ledger_diff)
+    justified, unjustified = [], []
+    for name in regressed_names:
+        short = bench_short_name(name)
+        ok = False
+        for note in notes:
+            if not mentions(note, short):
+                continue
+            reason = re.sub(r"(?<![A-Za-z0-9_])bench_[A-Za-z0-9_]+", "", note)
+            if len(re.sub(r"[\s,:;()/-]+", " ", reason).strip()) >= MIN_REASON_CHARS:
+                ok = True
+                break
+        (justified if ok else unjustified).append(short)
+    return justified, unjustified
+
+
+def justify_cmd(deltas_path: str, ledger_diff_path: str) -> int:
+    with open(deltas_path, encoding="utf-8") as f:
+        rows = json.load(f)
+    names = [r["name"] for r in rows if r.get("regressed")]
+    if not names:
+        print("perf_gate_deltas.py: gungraun reported a regression but deltas.json flags no "
+              "benchmark; cannot tell which perf_note would cover it", file=sys.stderr)
+        return 1
+    diff = Path(ledger_diff_path).read_text(encoding="utf-8")
+    justified, unjustified = justify(names, diff)
+    for name in justified:
+        print(f"{name}: justified by a ledger perf_note naming it")
+    for name in unjustified:
+        print(f"{name}: NOT justified — add or change a ledger perf_note that names "
+              f"`{name}` and gives the durability or correctness reason")
+    return 1 if unjustified else 0
+
+
+def justify_self_test() -> int:
+    problems = []
+    diff = "\n".join([
+        "--- a/docs/remediation/ledger.toml",
+        "+++ b/docs/remediation/ledger.toml",
+        '-perf_note = "bench_wal_get_one: old reason that was removed"',
+        '+perf_note = "bench_wal_put_100: one fsync bookkeeping record per put (STO-02)"',
+        '+perf_note = "bench_indexed_insert_one"',
+        '+perf_note = "bench_wal_batch_of_1000: unrelated, longer-named benchmark reason"',
+        ' perf_note = "bench_encode_record_key_u64: unchanged context line, not added"',
+    ])
+    cases = [
+        # (regressed, want justified, want unjustified)
+        (["iai_hot_paths::hot_paths::bench_wal_put_100"], ["bench_wal_put_100"], []),
+        # The old blanket rule: any added perf_note justified every regression.
+        (["bench_wal_put_100", "bench_encode_record_key_string"], ["bench_wal_put_100"], ["bench_encode_record_key_string"]),
+        # A removed note does not count, nor an unchanged context line.
+        (["bench_wal_get_one", "bench_encode_record_key_u64"], [], ["bench_wal_get_one", "bench_encode_record_key_u64"]),
+        # A note naming only the benchmark gives no reason.
+        (["bench_indexed_insert_one"], [], ["bench_indexed_insert_one"]),
+        # Whole-identifier match: bench_wal_batch_of_1000 does not cover bench_wal_batch_of_100.
+        (["bench_wal_batch_of_100"], [], ["bench_wal_batch_of_100"]),
+    ]
+    for regressed_names, want_ok, want_bad in cases:
+        got = justify(regressed_names, diff)
+        if got != (want_ok, want_bad):
+            problems.append(f"justify({regressed_names}): got {got}, want {(want_ok, want_bad)}")
+    if justify(["bench_wal_put_100"], "") != ([], ["bench_wal_put_100"]):
+        problems.append("a PR with no ledger change must justify nothing")
+    for p in problems:
+        print(f"justify self-test FAILED: {p}", file=sys.stderr)
+    if not problems:
+        print("perf_gate_deltas.py justify self-test: ok")
+    return 1 if problems else 0
 
 
 def ir_value(ir: dict) -> float | None:
@@ -667,6 +763,10 @@ def main() -> int:
         return regressed(sys.argv[2])
     if len(sys.argv) == 3 and sys.argv[1] == "list-names":
         return list_names(Path(sys.argv[2]))
+    if len(sys.argv) == 3 and sys.argv[1] == "justify" and sys.argv[2] == "--self-test":
+        return justify_self_test()
+    if len(sys.argv) == 4 and sys.argv[1] == "justify":
+        return justify_cmd(sys.argv[2], sys.argv[3])
     if len(sys.argv) == 3 and sys.argv[1] == "floors" and sys.argv[2] == "--self-test":
         return floors_self_test()
     if len(sys.argv) == 4 and sys.argv[1] == "floors" and sys.argv[2] == "--validate":
@@ -704,7 +804,9 @@ def main() -> int:
         "       perf_gate_deltas.py floors --self-test\n"
         "       perf_gate_deltas.py floors --validate <floors.toml>\n"
         "       perf_gate_deltas.py --summary <deltas.json>\n"
-        "       perf_gate_deltas.py --regressed <deltas.json>",
+        "       perf_gate_deltas.py --regressed <deltas.json>\n"
+        "       perf_gate_deltas.py justify <deltas.json> <ledger.diff>\n"
+        "       perf_gate_deltas.py justify --self-test",
         file=sys.stderr,
     )
     return 2
