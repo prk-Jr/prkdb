@@ -744,6 +744,18 @@ sources = ["scheduled-ci-2026-09-25"]
 evidence = ["crates/prkdb/tests/peer_mtls.rs:438", "https://github.com/prk-Jr/prkdb/actions/runs/36118013335"]
 
 [[finding]]
+id = "TST-11"
+title = "FaultFs::power_loss keeps the pre-crash synced baseline: a second power loss can resurrect data the first one lost"
+area = "tests"
+severity = "high"
+phase = 2
+status = "fixed"
+sources = ["external-review-2026-10-02"]
+evidence = ["crates/prkdb-verify/src/faultfs.rs:313-368"]
+regression_tests = ["test:crates/prkdb-verify/src/faultfs.rs::tst11_a_persisted_truncation_survives_a_second_power_loss", "test:crates/prkdb-verify/src/faultfs.rs::tst11_a_persisted_create_truncation_survives_a_second_power_loss", "test:crates/prkdb-verify/src/faultfs.rs::tst11_a_kept_overwrite_survives_a_second_power_loss", "test:crates/prkdb-verify/src/faultfs.rs::tst11_a_torn_tail_is_not_re_torn_by_a_second_power_loss", "test:crates/prkdb-verify/src/faultfs.rs::tst11_a_lost_subdirectory_does_not_resurrect_its_children", "test:crates/prkdb-verify/src/faultfs.rs::tst11_a_durably_removed_subdirectory_does_not_resurrect_its_children", "test:crates/prkdb-verify/src/faultfs.rs::tst11_unsynced_entry_changes_stay_resolved_across_a_second_power_loss", "test:crates/prkdb-verify/src/faultfs.rs::tst11_power_loss_is_idempotent_without_intervening_writes"]
+changes = ["38da2b8"]
+
+[[finding]]
 id = "STO-10"
 title = "No data-directory lock: two processes can open and corrupt the same WAL"
 area = "storage"
