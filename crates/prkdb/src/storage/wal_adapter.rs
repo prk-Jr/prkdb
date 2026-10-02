@@ -1279,25 +1279,42 @@ impl WalStorageAdapter {
     /// ([`CompactionStep`]); an `Err` from it aborts the run right there. For crash tests,
     /// which cut power at a chosen step.
     #[doc(hidden)]
-    pub async fn compact_with_hook<F>(&self, mut hook: F) -> Result<CompactionReport, StorageError>
+    pub async fn compact_with_hook<F>(&self, hook: F) -> Result<CompactionReport, StorageError>
     where
         F: FnMut(CompactionStep) -> Result<(), String> + Send + 'static,
     {
+        self.compact_with_hook_until(hook, Arc::new(AtomicBool::new(false)))
+            .await
+    }
+
+    /// [`Self::compact_with_hook`] that also stops early once `stop` is set, as a
+    /// background run does when the adapter closes. For tests of the stop path.
+    #[doc(hidden)]
+    pub async fn compact_with_hook_until<F>(
+        &self,
+        mut hook: F,
+        stop: Arc<AtomicBool>,
+    ) -> Result<CompactionReport, StorageError>
+    where
+        F: FnMut(CompactionStep) -> Result<(), String> + Send + 'static,
+    {
+        let stopped = move || stop.load(Ordering::Acquire);
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return self.compact_inner(&mut hook, &|| false);
+            return self.compact_inner(&mut hook, &stopped);
         };
         let this = self.clone();
         runtime
-            .spawn_blocking(move || this.compact_inner(&mut hook, &|| false))
+            .spawn_blocking(move || this.compact_inner(&mut hook, &stopped))
             .await
             .map_err(|e| StorageError::Internal(format!("compaction task failed: {e}")))?
     }
 
-    /// The compaction floor: the highest LSN of any frame compaction rewrote or removed
-    /// (0 = none). `get_changes_since` refuses a cursor below it
-    /// ([`StorageError::CompactedCursor`]).
+    /// The change-stream compaction floor: the highest LSN of a delete compaction dropped
+    /// (0 = none). `get_changes_since` refuses a non-zero cursor below it
+    /// ([`StorageError::CompactedCursor`]); see `get_changes_since` for what a consumer
+    /// does then.
     pub fn compaction_floor(&self) -> u64 {
-        self.inner.wal.compacted_through()
+        self.inner.wal.deletes_compacted_through()
     }
 
     fn compaction_ctx<'a>(&'a self, stop: &'a dyn Fn() -> bool) -> compaction::Ctx<'a> {
@@ -1703,13 +1720,25 @@ impl StorageAdapter for WalStorageAdapter {
     /// acknowledged frames (`Wal::scan_from`), so a Fast-mode write is visible to a
     /// consumer as soon as it is acknowledged.
     ///
-    /// A cursor other than 0 below the compaction floor ([`Self::compaction_floor`]) is
-    /// refused with [`StorageError::CompactedCursor`]: compaction dropped records after it,
-    /// so the stream would be incomplete. The floor is checked again after the scan, since
-    /// a compaction raises it before renaming anything it covers.
+    /// # Cursors and compaction (Task 2.15)
+    ///
+    /// - **Cursor 0 means "rebuild from an empty state".** After compaction the stream from
+    ///   0 lacks dropped ops; replayed onto nothing it yields exactly the current state, so
+    ///   it is always served. Applied on top of existing state it is *not* safe: a dropped
+    ///   delete would leave a deleted key behind.
+    /// - A cursor other than 0 below the compaction floor ([`Self::compaction_floor`], the
+    ///   highest LSN of a delete compaction dropped) is refused with
+    ///   [`StorageError::CompactedCursor`]: the stream after it misses that delete. A
+    ///   consumer resynchronising after it must **clear its local state** and replay from
+    ///   0, **or load a snapshot** and resume from the snapshot's offset (at or above the
+    ///   floor); it must never keep its state and continue from 0 or from the floor.
+    /// - A cursor at or above the floor gets a stream that converges: it may lack
+    ///   intermediate overwrites that compaction dropped, never a key's last write or a
+    ///   delete. The floor is checked again after the scan, since a compaction raises it
+    ///   before renaming anything it covers.
     async fn get_changes_since(&self, offset: u64) -> Result<Vec<Change>, StorageError> {
         let below_floor = |floor: u64| offset != 0 && offset < floor;
-        let floor = self.inner.wal.compacted_through();
+        let floor = self.inner.wal.deletes_compacted_through();
         if below_floor(floor) {
             return Err(StorageError::CompactedCursor {
                 cursor: offset,
@@ -1739,7 +1768,7 @@ impl StorageAdapter for WalStorageAdapter {
                 Ok(())
             })
             .map_err(wal_err)?;
-        let floor = self.inner.wal.compacted_through();
+        let floor = self.inner.wal.deletes_compacted_through();
         if below_floor(floor) {
             return Err(StorageError::CompactedCursor {
                 cursor: offset,

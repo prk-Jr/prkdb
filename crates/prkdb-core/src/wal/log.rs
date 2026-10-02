@@ -223,10 +223,11 @@ struct Shared {
     /// The durable `LOG_STATE` as last written (or read at open). The mutex serialises
     /// its rewrites.
     log_state: std::sync::Mutex<LogState>,
-    /// `log_state.compacted_through`, readable without the lock. Raised *before* the file
-    /// is written and before any rename it covers, so a reader that checks it after
-    /// scanning never misses a rewrite that could have dropped something it scanned past.
-    compacted_through: AtomicU64,
+    /// `log_state.deletes_compacted_through`, readable without the lock. Raised *before*
+    /// the file is written and before any rename it covers, so a reader that checks it
+    /// after scanning never misses a rewrite that could have dropped a delete it scanned
+    /// past.
+    deletes_compacted_through: AtomicU64,
     queued_bytes: AtomicUsize,
     last_progress_ms: AtomicU64,
     oldest_enqueued_ms: AtomicU64,
@@ -580,7 +581,7 @@ impl Wal {
             removed_below: AtomicU64::new(0),
             vfs: vfs.clone(),
             log_state: std::sync::Mutex::new(log_state),
-            compacted_through: AtomicU64::new(log_state.compacted_through),
+            deletes_compacted_through: AtomicU64::new(log_state.deletes_compacted_through),
             queued_bytes: AtomicUsize::new(0),
             last_progress_ms: AtomicU64::new(now_ms()),
             oldest_enqueued_ms: AtomicU64::new(0),
@@ -1051,29 +1052,32 @@ impl Wal {
             .expect("log state lock poisoned")
     }
 
-    /// The compaction floor: the highest LSN of any frame compaction rewrote or removed
-    /// (0 = none). A change-stream cursor below it may have missed dropped records.
-    pub fn compacted_through(&self) -> Lsn {
-        self.shared.compacted_through.load(Ordering::Acquire)
+    /// The change-stream compaction floor: the highest LSN of a `Delete` compaction dropped
+    /// (0 = none). A cursor below it may have missed that delete; a cursor at or above it
+    /// has missed only superseded puts, whose last write it still sees.
+    pub fn deletes_compacted_through(&self) -> Lsn {
+        self.shared
+            .deletes_compacted_through
+            .load(Ordering::Acquire)
     }
 
     /// Raises the compaction floor to `lsn` (no-op if already there) and makes it durable
-    /// in `LOG_STATE`. Compaction calls it before the renames that drop anything at or
-    /// below `lsn`; the in-memory floor rises before the file is written.
-    pub fn raise_compacted_through(&self, lsn: Lsn) -> Result<(), WalError> {
+    /// in `LOG_STATE`. Compaction calls it before the renames that drop a delete at `lsn`;
+    /// the in-memory floor rises before the file is written.
+    pub fn raise_deletes_compacted_through(&self, lsn: Lsn) -> Result<(), WalError> {
         let mut state = self
             .shared
             .log_state
             .lock()
             .expect("log state lock poisoned");
-        if lsn <= state.compacted_through {
+        if lsn <= state.deletes_compacted_through {
             return Ok(());
         }
         self.shared
-            .compacted_through
+            .deletes_compacted_through
             .fetch_max(lsn, Ordering::AcqRel);
         let next = LogState {
-            compacted_through: lsn,
+            deletes_compacted_through: lsn,
             ..*state
         };
         next.write(&*self.shared.vfs, &self.shared.dir)?;

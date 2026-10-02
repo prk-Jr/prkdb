@@ -480,64 +480,125 @@ async fn readers_racing_compaction_never_see_a_wrong_value() {
     assert!(rewritten > 0, "the race needs rewrites to race against");
 }
 
-/// What a change-stream consumer sees after compaction (documented in
-/// `prkdb::storage::compaction`): surviving ops keep their LSNs; a cursor at or above the
-/// compaction floor gets the complete stream after it; a lagging cursor below the floor
-/// gets `CompactedCursor`, never a silent subset; replaying from 0 rebuilds the current
-/// state exactly. The floor survives reopen, and LSNs are never reused.
-#[tokio::test(flavor = "multi_thread")]
-async fn the_change_stream_refuses_a_cursor_below_the_compaction_floor() {
-    use prkdb_types::error::StorageError;
+fn replay_changes(
+    mut state: std::collections::BTreeMap<Vec<u8>, Vec<u8>>,
+    changes: &[prkdb_types::replication::Change],
+) -> std::collections::BTreeMap<Vec<u8>, Vec<u8>> {
     use prkdb_types::replication::Change;
-    use std::collections::BTreeMap;
+    for c in changes {
+        match c {
+            Change::Put { key, value, .. } => {
+                state.insert(key.clone(), value.clone());
+            }
+            Change::Delete { key, .. } => {
+                state.remove(key);
+            }
+        }
+    }
+    state
+}
+
+fn change_version(c: &prkdb_types::replication::Change) -> u64 {
+    use prkdb_types::replication::Change;
+    match c {
+        Change::Put { version, .. } | Change::Delete { version, .. } => *version,
+    }
+}
+
+/// What a change-stream consumer sees after compaction (documented in
+/// `prkdb::storage::compaction`). The floor is the highest LSN of a dropped delete, not of
+/// every rewritten frame:
+/// - a consumer many segments behind, but past the last dropped delete, is served a stream
+///   that converges on the current state (though compaction dropped puts in its range);
+/// - a consumer behind a dropped delete gets `CompactedCursor`, never a stream that would
+///   leave the deleted key in its state;
+/// - cursor 0 rebuilds the current state from nothing.
+///
+/// The floor survives reopen, and LSNs are never reused.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_change_stream_refuses_only_cursors_behind_a_dropped_delete() {
+    use prkdb_types::error::StorageError;
     let dir = tempfile::tempdir().unwrap();
     let cfg = || no_retention(compaction_cfg(dir.path(), 4 * 1024));
     let db = WalStorageAdapter::new_with_config(cfg()).unwrap();
-    for round in 0..30u32 {
+    for round in 0..5u32 {
         for k in 0..10u32 {
             db.put(format!("k{k}").as_bytes(), &[round as u8; 200])
                 .await
                 .unwrap();
         }
     }
+    let behind_the_delete = 12; // a consumer that has applied the first 12 changes
     db.delete(b"k4").await.unwrap();
-    let lagging = 12; // a consumer that has applied the first 12 changes
+    let delete_lsn = db.max_offset();
+    // Many segments of overwrites after the delete: compaction drops most of them.
+    for round in 5..40u32 {
+        for k in 0..10u32 {
+            if k != 4 {
+                db.put(format!("k{k}").as_bytes(), &[round as u8; 200])
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+    let past_the_delete = delete_lsn + 3;
     for k in 0..30u32 {
         db.put(format!("tail{k}").as_bytes(), &[7u8; 200])
             .await
-            .unwrap(); // seal the delete's segment
+            .unwrap(); // seal the overwrites' segments
     }
     db.flush().await.unwrap();
     let before = db.get_changes_since(0).await.unwrap();
     let last_lsn = db.max_offset();
-    assert_eq!(db.compaction_floor(), 0);
-    let report = db.compact().await.unwrap();
-    assert!(report.segments_removed > 0, "{report:?}");
-    let floor = db.compaction_floor();
-    assert!(floor > lagging && floor < last_lsn, "floor {floor}");
-
-    // The lagging consumer is told to resynchronise, not handed a stream without the delete.
-    match db.get_changes_since(lagging).await {
-        Err(StorageError::CompactedCursor { cursor, floor: f }) => {
-            assert_eq!((cursor, f), (lagging, floor));
-        }
-        other => panic!("a cursor below the floor must be refused, got {other:?}"),
-    }
-    // At the floor and above: exactly the original changes after the cursor.
-    let version = |c: &Change| match c {
-        Change::Put { version, .. } | Change::Delete { version, .. } => *version,
-    };
-    for cursor in [floor, floor + 3] {
-        let tail = db.get_changes_since(cursor).await.unwrap();
-        let want: Vec<Change> = before
+    // A consumer's state at cursor `c`: the original changes up to it.
+    let state_at = |c: u64| {
+        let upto: Vec<_> = before
             .iter()
-            .filter(|c| version(c) > cursor)
+            .filter(|ch| change_version(ch) <= c)
             .cloned()
             .collect();
-        assert_eq!(tail, want, "cursor {cursor}");
-    }
+        replay_changes(Default::default(), &upto)
+    };
+    assert_eq!(db.compaction_floor(), 0);
+    let report = db.compact().await.unwrap();
+    assert!(report.segments_rewritten > 3, "{report:?}");
+    assert_eq!(
+        db.compaction_floor(),
+        delete_lsn,
+        "the floor is the dropped delete"
+    );
+    let current = contents(&db).await;
 
-    // From 0 (an empty consumer): the compacted stream rebuilds the current state.
+    // Behind the dropped delete: refused, naming the floor.
+    match db.get_changes_since(behind_the_delete).await {
+        Err(StorageError::CompactedCursor { cursor, floor }) => {
+            assert_eq!((cursor, floor), (behind_the_delete, delete_lsn));
+        }
+        other => panic!("a cursor behind a dropped delete must be refused, got {other:?}"),
+    }
+    // Past it, however many compacted segments behind: served, and converges.
+    for cursor in [delete_lsn, past_the_delete, past_the_delete + 100] {
+        let tail = db
+            .get_changes_since(cursor)
+            .await
+            .unwrap_or_else(|e| panic!("cursor {cursor}: {e}"));
+        assert!(tail.iter().all(|c| change_version(c) > cursor));
+        assert_eq!(
+            replay_changes(state_at(cursor), &tail),
+            current,
+            "cursor {cursor}: the stream must converge on the current state"
+        );
+    }
+    let skipped = before
+        .iter()
+        .filter(|c| change_version(c) > past_the_delete)
+        .count();
+    assert!(
+        db.get_changes_since(past_the_delete).await.unwrap().len() < skipped,
+        "the served range really was compacted"
+    );
+
+    // From 0: the compacted stream rebuilds the current state from nothing.
     let after = db.get_changes_since(0).await.unwrap();
     assert!(after.len() < before.len());
     for change in &after {
@@ -546,28 +607,13 @@ async fn the_change_stream_refuses_a_cursor_below_the_compaction_floor() {
             "{change:?} was not in the log before"
         );
     }
-    let replay = |changes: &[Change]| {
-        let mut state = BTreeMap::new();
-        for c in changes {
-            match c {
-                Change::Put { key, value, .. } => {
-                    state.insert(key.clone(), value.clone());
-                }
-                Change::Delete { key, .. } => {
-                    state.remove(key);
-                }
-            }
-        }
-        state
-    };
-    assert_eq!(replay(&after), replay(&before));
-    assert_eq!(replay(&after), contents(&db).await);
+    assert_eq!(replay_changes(Default::default(), &after), current);
 
     drop(db);
     let db = WalStorageAdapter::new_with_config(cfg()).unwrap();
-    assert_eq!(db.compaction_floor(), floor, "the floor is durable");
+    assert_eq!(db.compaction_floor(), delete_lsn, "the floor is durable");
     assert!(matches!(
-        db.get_changes_since(lagging).await,
+        db.get_changes_since(behind_the_delete).await,
         Err(StorageError::CompactedCursor { .. })
     ));
     assert_eq!(
@@ -578,7 +624,11 @@ async fn the_change_stream_refuses_a_cursor_below_the_compaction_floor() {
     db.put(b"next", b"n").await.unwrap();
     let next = db.get_changes_since(last_lsn).await.unwrap();
     assert_eq!(next.len(), 1);
-    assert_eq!(version(&next[0]), last_lsn + 1, "LSNs are never reused");
+    assert_eq!(
+        change_version(&next[0]),
+        last_lsn + 1,
+        "LSNs are never reused"
+    );
 }
 
 /// A delete within the tombstone retention survives compaction (and stays in the change
@@ -631,6 +681,15 @@ async fn a_delete_within_the_retention_survives_compaction() {
         "the deleted puts are dropped, the delete kept"
     );
     assert_eq!(mentions(b"kept"), 1);
+    // Nothing dropped a delete, so no cursor is refused, however far behind.
+    assert_eq!(db.compaction_floor(), 0);
+    let tail = db
+        .get_changes_since(1)
+        .await
+        .expect("no delete was dropped");
+    assert!(tail
+        .iter()
+        .any(|c| matches!(c, Change::Delete { key, .. } if key == b"gone")));
     drop(db);
     let db = WalStorageAdapter::new_with_config(config()).unwrap();
     assert_eq!(db.get(b"gone").await.unwrap(), None);
@@ -988,4 +1047,71 @@ async fn the_index_update_after_a_swap_does_not_hold_up_writers() {
             "{report:?}"
         );
     }
+}
+
+/// A stop request during the rename phase of a multi-segment batch: the run keeps the
+/// segments it already renamed, deletes the rewrites it has not, and returns at once; the
+/// directory reopens to the same contents.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_during_the_renames_keeps_the_renamed_prefix() {
+    use prkdb::storage::compaction::CompactionStep;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = || compaction_cfg(dir.path(), 4 * 1024);
+    let db = WalStorageAdapter::new(cfg()).unwrap();
+    for round in 0..20u32 {
+        for k in 0..20u32 {
+            db.put(format!("k{k}").as_bytes(), &[round as u8; 150])
+                .await
+                .unwrap();
+        }
+    }
+    db.flush().await.unwrap();
+    let expected = contents(&db).await;
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopped_at: Arc<Mutex<Option<Instant>>> = Arc::default();
+    let (flag, at) = (stop.clone(), stopped_at.clone());
+    let report = db
+        .compact_with_hook_until(
+            move |step| {
+                if matches!(step, CompactionStep::SegmentReplaced { .. })
+                    && !flag.swap(true, Ordering::AcqRel)
+                {
+                    *at.lock().unwrap() = Some(Instant::now());
+                }
+                Ok(())
+            },
+            stop,
+        )
+        .await
+        .unwrap();
+    let took = stopped_at
+        .lock()
+        .unwrap()
+        .expect("a segment was replaced")
+        .elapsed();
+    assert!(report.stopped_early, "{report:?}");
+    assert_eq!(
+        report.segments_rewritten, 1,
+        "only the renamed prefix: {report:?}"
+    );
+    assert!(took < std::time::Duration::from_millis(200), "{took:?}");
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.unwrap().file_name().into_string().ok())
+        .filter(|n| n.ends_with(".wal.compact"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "unrenamed rewrites were deleted: {leftovers:?}"
+    );
+    assert_eq!(contents(&db).await, expected);
+    drop(db);
+    let db = WalStorageAdapter::new(cfg()).unwrap();
+    assert_eq!(contents(&db).await, expected);
+    // A later run finishes the job.
+    assert!(db.compact().await.unwrap().segments_rewritten > 0);
+    assert_eq!(contents(&db).await, expected);
 }

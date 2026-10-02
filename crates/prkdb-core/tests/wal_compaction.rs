@@ -267,7 +267,7 @@ fn a_live_segment_before_the_log_start_is_refused() {
     wal.close().unwrap();
     prkdb_core::wal::LogState {
         log_start: second.first_lsn,
-        compacted_through: 0,
+        deletes_compacted_through: 0,
     }
     .write(&StdVfs, dir.path())
     .unwrap();

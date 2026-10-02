@@ -42,9 +42,10 @@
 //!    superseded by a delete whose LSN is unknown, bounded by the log's end after the
 //!    pass. The log is synced only if the highest such LSN is not yet durable. (In Durable
 //!    mode the index only publishes synced frames, so no sync is ever needed.)
-//! 3. **Raise the compaction floor** (`LOG_STATE.compacted_through`, made durable) to the
-//!    highest LSN of a frame the batch changes, before anything is renamed. A change-stream
-//!    cursor below it gets [`StorageError::CompactedCursor`] instead of a silent subset.
+//! 3. **Raise the change-stream floor** (`LOG_STATE.deletes_compacted_through`, made
+//!    durable) to the highest LSN of a `Delete` the batch drops, before anything is
+//!    renamed. A change-stream cursor below it gets [`StorageError::CompactedCursor`]
+//!    instead of a stream missing that delete.
 //! 4. Before the first rename of the run: **delete every index checkpoint** and sync
 //!    `checkpoints/`. A rewrite keeps the segment's first LSN and therefore its file name,
 //!    so a checkpoint taken before it would still pass recovery's check against the log
@@ -65,24 +66,36 @@
 //!
 //! A crash at any point leaves each segment either old or rewritten (rename is atomic, and
 //! a rewrite is synced before it is renamed), rewritten segments always a prefix of the
-//! sealed ones, the floor at or above every dropped frame, and no checkpoint that
+//! sealed ones, the floor at or above every dropped delete, and no checkpoint that
 //! predates a rewrite: recovery rebuilds exactly the pre-compaction state.
 //!
-//! A run polls its stop condition on every frame (the background task's: the last handle
-//! to the adapter dropped), deletes the rewrites it has not renamed yet, and returns, so
-//! closing the adapter never waits for more than a frame's work.
+//! A run polls its stop condition on every frame and before every rename (the background
+//! task's: the last handle to the adapter dropped), keeps the segments it has already
+//! renamed, deletes the rewrites it has not, and returns, so closing the adapter never
+//! waits for more than a frame's or a rename's work.
 //!
 //! # What change-stream consumers see
 //!
 //! `get_changes_since` reads what is on disk. Surviving ops keep their LSNs (versions),
-//! so cursors stay valid and LSNs are never reused; frames removed by compaction are gone.
-//! A cursor at or above the compaction floor ([`Wal::compacted_through`]) gets the
-//! complete stream after it. A cursor below it (other than 0) gets
-//! [`StorageError::CompactedCursor`]: the changes after it are incomplete (a dropped
-//! delete would leave the consumer holding a deleted key), so it must resynchronise from a
-//! snapshot and resume at or above the floor. Cursor 0 means "from nothing": replaying the
-//! compacted stream from an empty state rebuilds the current state exactly, so it is
-//! served.
+//! so cursors stay valid and LSNs are never reused; ops removed by compaction are gone.
+//!
+//! The change-stream floor ([`Wal::deletes_compacted_through`]) is the highest LSN of a
+//! dropped `Delete`, not of every changed frame: a consumer that applies the stream after
+//! cursor `c` on top of its state at `c` converges on the current state unless it missed
+//! a dropped delete. A dropped put `p > c` was superseded; follow its key's later writes to
+//! the last one: either it survives (the consumer sees it, after `p`) or it is a delete
+//! `d > p > c`, which is either kept (seen) or dropped (and then `floor >= d > c`). So:
+//!
+//! - a cursor at or above the floor gets a stream that converges (it may lack intermediate
+//!   overwrites, never a final value or a delete);
+//! - a cursor below it, other than 0, gets [`StorageError::CompactedCursor`]: the consumer
+//!   must clear its state or load a snapshot, and resume at or above the floor;
+//! - cursor 0 means "rebuild from an empty state": replaying the compacted stream onto
+//!   nothing yields the current state exactly, so it is always served.
+//!
+//! `CompactionConfig::tombstone_retention_lsns` keeps recent deletes, so a consumer less
+//! than that many LSNs behind never sees the error. Other streams built on the log
+//! (outbox, events; Tasks 2.19-2.20) keep their own floors if they offer cursors.
 
 use super::checkpoint;
 use papaya::HashMap as LockFreeHashMap;
@@ -130,7 +143,7 @@ pub enum CompactionStep {
     /// The batch's log sync is done (or was not needed): every write that superseded an
     /// op the batch drops is durable.
     LogSynced,
-    /// `LOG_STATE.compacted_through` covers every frame the batch changes.
+    /// `LOG_STATE.deletes_compacted_through` covers every delete the batch drops.
     FloorRaised { floor: Lsn },
     /// Every index checkpoint is deleted and `checkpoints/` synced (once per run, before
     /// the first rename).
@@ -260,8 +273,8 @@ struct Plan {
     relocations: Vec<Relocation>,
     /// The log must be durable to this LSN before the rewrite is renamed (0 = nothing).
     durable_needed: Lsn,
-    /// Highest LSN of a frame the rewrite changes (0 = none).
-    max_changed: Lsn,
+    /// Highest LSN of a `Delete` the rewrite drops (0 = none).
+    max_dropped_delete: Lsn,
 }
 
 /// Where a rewrite goes while it is being computed: nowhere (a dry pass), or a file.
@@ -331,7 +344,7 @@ fn plan_segment(
     let mut relocations = Vec::new();
     let mut durable_needed: Lsn = 0;
     let mut superseded_by_delete = false;
-    let mut max_changed: Lsn = 0;
+    let mut max_dropped_delete: Lsn = 0;
     let index = ctx.index.pin();
 
     ctx.wal
@@ -366,13 +379,15 @@ fn plan_segment(
                     BatchOp::Delete { key } => {
                         seen.insert(key.as_slice());
                         keep[i] = loc.lsn >= horizon;
+                        if !keep[i] {
+                            max_dropped_delete = max_dropped_delete.max(loc.lsn);
+                        }
                     }
                 }
             }
             let kept = keep.iter().filter(|k| **k).count();
             if kept == 0 {
                 changed = true;
-                max_changed = max_changed.max(loc.lsn);
                 return sink.frame(loc.lsn, FrameKind::Elided, &[]);
             }
             all_elided = false;
@@ -382,7 +397,6 @@ fn plan_segment(
                 payload
             } else {
                 changed = true;
-                max_changed = max_changed.max(loc.lsn);
                 let live: Vec<BatchOp> = ops
                     .iter()
                     .zip(&keep)
@@ -424,7 +438,7 @@ fn plan_segment(
         new_len: sink.offset(),
         relocations,
         durable_needed,
-        max_changed,
+        max_dropped_delete,
     })
 }
 
@@ -640,15 +654,15 @@ pub(crate) fn run(
         }
         step(hook, CompactionStep::LogSynced)?;
 
-        // 3. The floor covers every frame the batch changes, before any rename.
+        // 3. The change-stream floor covers every delete the batch drops, before any rename.
         let floor = pending
             .rewrites
             .iter()
-            .map(|(_, plan, _)| plan.max_changed)
+            .map(|(_, plan, _)| plan.max_dropped_delete)
             .max()
             .unwrap_or(0);
         ctx.wal
-            .raise_compacted_through(floor)
+            .raise_deletes_compacted_through(floor)
             .map_err(wal_storage_err)?;
         step(hook, CompactionStep::FloorRaised { floor })?;
 
@@ -663,6 +677,12 @@ pub(crate) fn run(
         let rewrites = std::mem::take(&mut pending.rewrites);
         let mut rest = rewrites.into_iter();
         while let Some((i, plan, path)) = rest.next() {
+            if (ctx.stop)() {
+                // The renamed prefix stays (each rename is complete and durable); the
+                // rest are deleted unrenamed when `pending` drops.
+                pending.rewrites = std::iter::once((i, plan, path)).chain(rest).collect();
+                return stopped(report, &lengths);
+            }
             let seg = &sealed[i];
             let index = ctx.index;
             let relocations = plan.relocations;

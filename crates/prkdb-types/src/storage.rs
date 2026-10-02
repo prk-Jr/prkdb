@@ -244,6 +244,11 @@ pub trait StorageAdapter: Send + Sync + 'static {
 
     /// Optional: get changes since a specific offset/version.
     /// Used for replication.
+    ///
+    /// Offset 0 means "rebuild from an empty state". An adapter whose log is compacted
+    /// may refuse a non-zero offset below its compaction floor with
+    /// [`StorageError::CompactedCursor`]; the consumer must then clear its local state or
+    /// load a snapshot before resuming, never continue on its current state.
     async fn get_changes_since(&self, _offset: u64) -> Result<Vec<Change>, StorageError> {
         Err(StorageError::BackendError(
             "get_changes_since not supported".into(),

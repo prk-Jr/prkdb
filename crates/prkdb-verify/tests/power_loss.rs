@@ -6,6 +6,7 @@ use prkdb::storage::{CompactionConfig, WalStorageAdapter};
 use prkdb_core::vfs::{OpenMode, Vfs};
 use prkdb_core::wal::{SyncMode, WalConfig};
 use prkdb_types::error::StorageError;
+use prkdb_types::replication::Change;
 use prkdb_types::storage::StorageAdapter;
 use prkdb_verify::faultfs::{FaultFs, Tear};
 use rand::SeedableRng;
@@ -134,6 +135,21 @@ async fn a_corrupt_sealed_segment_fails_the_open_by_name() {
 // Compaction under power loss (Task 2.15)
 // ---------------------------------------------------------------------------------------
 
+/// Applies a change stream on top of `state`, as a replicating consumer does.
+fn replay(mut state: BTreeMap<Vec<u8>, Vec<u8>>, changes: &[Change]) -> BTreeMap<Vec<u8>, Vec<u8>> {
+    for c in changes {
+        match c {
+            Change::Put { key, value, .. } => {
+                state.insert(key.clone(), value.clone());
+            }
+            Change::Delete { key, .. } => {
+                state.remove(key);
+            }
+        }
+    }
+    state
+}
+
 async fn contents(db: &WalStorageAdapter) -> BTreeMap<Vec<u8>, Vec<u8>> {
     let mut out = BTreeMap::new();
     for k in db.get_all_keys() {
@@ -205,7 +221,11 @@ async fn compaction_is_crash_safe_at_every_step() {
         let db = open(&fs, mode);
         compaction_workload(&db).await;
         let expected = contents(&db).await;
-        let stream = db.get_changes_since(1).await.unwrap();
+        // A lagging consumer's state: the first change applied.
+        let lagging_state = {
+            let first: Vec<Change> = db.get_changes_since(0).await.unwrap()[..1].to_vec();
+            replay(BTreeMap::new(), &first)
+        };
         let steps: Steps = Arc::default();
         let record = steps.clone();
         db.compact_with_hook(move |step| {
@@ -264,10 +284,14 @@ async fn compaction_is_crash_safe_at_every_step() {
                 let db = open(&fs, mode);
                 let ctx = format!("{mode:?}, power cut after {at:?} (step {cut}), {tear:?}");
                 assert_eq!(contents(&db).await, expected, "{ctx}");
-                // Never a silent subset: a lagging cursor gets the whole original stream or
-                // is told it is below the compaction floor.
+                // Never a silently divergent stream: a lagging consumer either converges on
+                // the recovered state or is told it is behind a dropped delete.
                 match db.get_changes_since(1).await {
-                    Ok(changes) => assert_eq!(changes, stream, "{ctx}: an incomplete stream"),
+                    Ok(changes) => assert_eq!(
+                        replay(lagging_state.clone(), &changes),
+                        expected,
+                        "{ctx}: the stream after cursor 1 does not converge"
+                    ),
                     Err(StorageError::CompactedCursor { floor, .. }) => {
                         assert_eq!(floor, db.compaction_floor(), "{ctx}")
                     }
