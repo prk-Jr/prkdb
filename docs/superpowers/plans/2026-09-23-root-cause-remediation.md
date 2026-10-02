@@ -5768,6 +5768,7 @@ Note §4.
 
 ### Task 2.15b.3: `StreamLog` core — *before Task 2.24*
 
+Locally integrated at `d8248e5`; required local checks and review passed. Linux phase-gate evidence remains outstanding.
 Note §3, §4.3, §6, §9, §10.
 
 **Files:** `crates/prkdb-core/src/wal/{log.rs,records.rs}`,
@@ -5778,7 +5779,7 @@ Note §3, §4.3, §6, §9, §10.
 `fuzz/Cargo.toml`, `.github/workflows/ci.yml` (new fuzz-target registration),
 `crates/prkdb/src/stream_log/{mod.rs,log.rs,index.rs,manifest.rs} (create)`, `crates/prkdb/src/lib.rs`, `crates/prkdb/src/storage/format.rs` (`kind`), `crates/prkdb-types/src/error.rs` (`OffsetOutOfRange`, `OffsetDiverged`), `crates/prkdb/tests/stream_log.rs (create)`, `crates/prkdb/tests/format_v2.rs`, `fuzz/fuzz_targets/stream_manifest_parse.rs (create)`
 
-- [ ] **Step 1: Failing tests (`stream_log.rs`, `format_v2.rs`).**
+- [x] **Step 1: Failing tests (`stream_log.rs`, `format_v2.rs`).**
   - `FORMAT` `kind`:
     - a new stream directory writes `kind = "stream"`;
     - `WalStorageAdapter` on it refuses, and `StreamLog` on a kv directory refuses, both
@@ -5816,7 +5817,7 @@ Note §3, §4.3, §6, §9, §10.
       decoded. Pick the budget from measurement and record it in the design note;
     - `WalError::InvalidRecords` maps to `StorageError::Validation` in `wal_err`, not
       `Internal`.
-- [ ] **Step 2: Implement.**
+- [x] **Step 2: Implement.**
   - `StreamLog` over `Wal` with `front_release = Retention` and a 128 MiB default segment
     size.
   - Extend the same WAL writer with an explicit frame kind and exclusive LSN limit;
@@ -5829,17 +5830,19 @@ Note §3, §4.3, §6, §9, §10.
     writer emits `kind` only for streams, so kv bytes are unchanged.
   - The manifest codec (tmp → `sync_data` → rename → `sync_dir`) is written by 2.15b.5.
   - `stream_manifest_parse` fuzz target.
-- [ ] **Step 3: Run** `cargo nextest run -p prkdb --test stream_log --test format_v2` → pass.
+- [x] **Step 3: Run** `cargo nextest run -p prkdb --test stream_log --test format_v2` → pass.
   Workspace → pass. Harness → green (kv unchanged).
-- [ ] **Step 4: Commit** `feat: add StreamLog, a record stream on the single WAL`.
+- [x] **Step 4: Commit** `feat: add StreamLog, a record stream on the single WAL`.
+
 
 ### Task 2.15b.4: Retention
 
+Locally integrated at `4c01928`; required local checks and review passed. Linux phase-gate evidence remains outstanding.
 Note §8.
 
 **Files:** `crates/prkdb/src/stream_log/retention.rs (create)`, `crates/prkdb/tests/stream_retention.rs (create)`
 
-- [ ] **Step 1: Failing tests**, with an injected `Clock`:
+- [x] **Step 1: Failing tests**, with an injected `Clock`:
   - age-only, size-only and both;
   - the active segment is never removed;
   - a quiet active segment older than `segment_max_age` is rolled and later removed;
@@ -5852,20 +5855,22 @@ Note §8.
     gives the same floor, every record at or above it, and no leftover;
   - the background task stops when the last handle drops.
   - The default policy (none) never removes anything.
-- [ ] **Step 2: Implement** `RetentionPolicy`, `Clock`, `apply_retention() ->
+- [x] **Step 2: Implement** `RetentionPolicy`, `Clock`, `apply_retention() ->
   RetentionReport`, and the background loop every `retention_interval` (60 s), holding a
   `Weak` handle like compaction's task.
-- [ ] **Step 3: Run** `cargo nextest run -p prkdb --test stream_retention --test stream_log`
+- [x] **Step 3: Run** `cargo nextest run -p prkdb --test stream_retention --test stream_log`
   → pass. Workspace → pass.
-- [ ] **Step 4: Commit** `feat: age and size retention for streams by whole-segment removal`.
+- [x] **Step 4: Commit** `feat: age and size retention for streams by whole-segment removal`.
+
 
 ### Task 2.15b.5: Partitioned streams
 
+Locally integrated at `53fe2e0`; required local checks and review passed. Linux phase-gate evidence remains outstanding.
 Note §3.2.
 
 **Files:** `crates/prkdb/src/stream_log/partitioned.rs (create)`, `crates/prkdb/tests/stream_partitions.rs (create)`
 
-- [ ] **Step 1: Failing tests.**
+- [x] **Step 1: Failing tests.**
   - `open(root, 3, cfg)` creates `partition_0..2/` (each with `FORMAT` `kind = "stream"`)
     and then `STREAM`. `root` has no `FORMAT`.
   - Reopening with 4 partitions refuses.
@@ -5874,9 +5879,10 @@ Note §3.2.
   - `Route::Key` matches Task 2.13's golden vectors. `RoundRobin` cycles.
     `Route::Partition(9)` on 3 partitions → `Validation`.
   - Stream names pass `catalog::validate_name`.
-- [ ] **Step 2: Implement.**
-- [ ] **Step 3: Run** → pass.
-- [ ] **Step 4: Commit** `feat: partitioned streams under a container root`.
+- [x] **Step 2: Implement.**
+- [x] **Step 3: Run** → pass.
+- [x] **Step 4: Commit** `feat: partitioned streams under a container root`.
+
 
 ### Task 2.15b.6: Stream consumers, and EVT-07 for streams
 
@@ -7017,7 +7023,7 @@ before the phase gate. Remaining coverage slices and the assembled Linux gate: o
 
 - 5.1 Compiled doc samples (DOC-03), credentialed clients and Python client (DOC-02), global `--credential` (DOC-04).
 - 5.2 Compose + 3-node smoke in CI (DOC-12); CLI reference from clap (DOC-05, DOC-07); new pages (DOC-08); strict dead links (DOC-10).
-- 5.3 Release packaging (REL-01).
+- 5.3 Release packaging (REL-01). Carried from Task 2.15b.4: repository retention crash tests reuse sibling `prkdb-verify` source through cfg(test) paths. Acceptance: unpack the `prkdb` source package and run its retention library tests without a sibling checkout; package the required test support or restructure it into an acyclic shared test crate. Fixing commit: open.
 - 5.4 Upgrade page (DOC-08) — **Phase 2 breaking changes checklist** (D3, D11, D12; Phase 2 tasks tick their lines as they land, and the page must cover every line):
   - [ ] Format 1 data directories are refused with a message naming the format; `prkdb-cli migrate --data-dir` explains what can be done (Task 2.11).
   - [x] A failed fsync poisons the WAL: every later write fails until the database is reopened (Tasks 2.6, 2.8a).
