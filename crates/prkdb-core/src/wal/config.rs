@@ -17,8 +17,16 @@ pub enum SyncMode {
     /// Ack after the group-commit batch containing the write is fsynced.
     #[default]
     Durable,
-    /// Ack after the write reaches the OS; synced at least every `sync_interval_ms`.
-    /// A power cut can lose up to `sync_interval_ms` of acknowledged writes.
+    /// Ack after the write reaches the OS. A sync starts once `sync_interval_ms` has
+    /// passed since the oldest unsynced write, at the writer's next batch boundary or
+    /// idle wake-up.
+    ///
+    /// `sync_interval_ms` is a target, not a bound on what a power cut can take: the sync
+    /// starts only when the writer gets to it and then takes as long as the disk takes,
+    /// so under load or on a slow device the unsynced window is longer. The guarantee is
+    /// `Wal::durable_lsn`: every write at or below it survives a power cut, and any
+    /// acknowledged write above it may be lost. `Wal::sync` (the storage adapter's
+    /// `flush`) makes every write acknowledged so far durable.
     Fast,
 }
 
@@ -81,7 +89,9 @@ pub struct WalConfig {
     /// Acknowledgement policy. Default `Durable` everywhere, including `test_config()`
     /// (controller decision: Durable is the default everywhere, spec §6.2).
     pub sync_mode: SyncMode,
-    /// Fast mode's sync bound (default 10).
+    /// Fast mode's sync target in milliseconds (default 10): how long after the oldest
+    /// unsynced write a sync is started. Not a bound on what a power cut can lose; see
+    /// [`SyncMode::Fast`].
     pub sync_interval_ms: u64,
     /// Largest group-commit write (default 16 MiB).
     pub max_batch_bytes: usize,

@@ -37,6 +37,8 @@ use tokio::sync::{oneshot, watch, OwnedSemaphorePermit, Semaphore};
 #[derive(Debug, Clone)]
 pub struct WalOptions {
     pub sync_mode: SyncMode,
+    /// Fast mode's sync target (see [`SyncMode::Fast`]): a target, not a bound on what a
+    /// power cut can lose. `durable_lsn` is the guarantee.
     pub sync_interval: Duration,
     pub segment_bytes: u64,
     pub max_batch_bytes: usize,
@@ -1895,7 +1897,8 @@ fn commit_batch(
     // H1: under saturation, batches keep draining via `try_recv` inside the Append arm and
     // the writer never reaches the idle `recv_timeout` branch that would otherwise run the
     // periodic Fast sync. Checking the interval here too means a continuously busy writer
-    // still syncs at least every `sync_interval`, whether it is ever idle or not.
+    // still starts a sync once `sync_interval` has passed, at the end of the batch that
+    // crosses it, whether it is ever idle or not.
     let mut poison_reason: Option<String> = None;
     match opts.sync_mode {
         SyncMode::Durable => {
