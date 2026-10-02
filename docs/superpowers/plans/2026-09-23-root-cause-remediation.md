@@ -5647,19 +5647,344 @@ Add a FaultFs test to `crates/prkdb-verify/tests/power_loss.rs`: `compaction_is_
 
 ### Task 2.15b: Streaming log API on the single `Wal` (D13)
 
-The streaming adapters deleted in Task 2.9 claimed "2x faster than Kafka" on the pre-remediation mmap WAL, which acknowledged writes it had not synced. This task rebuilds the capability on the single `Wal`, after Task 2.15 so it has retention and offsets with a settled meaning. Design first (a short design note under `docs/superpowers/specs/`, reviewed before code), then TDD.
+The streaming adapters deleted in Task 2.9 claimed "2x faster than Kafka" on the
+pre-remediation mmap WAL, which acknowledged writes it had not synced. This task rebuilds the
+capability on the single `Wal`, after Task 2.15, so that retention and offsets have a settled
+meaning.
 
-**Design questions the note must answer:**
-- **Layout:** a stream owns its own data directory (D11: one WAL per data directory); a partitioned stream is N data directories under a container root, each with its own `FORMAT` (Task 2.11's container rules apply).
-- **Records and offsets:** a record batch is one frame (new `FrameKind` or a `Batch` op tag — decide, and register the format change per D3/D4 if it lands after Task 2.24 freezes format 2); a record's offset is `EventSeq = lsn << 16 | idx` (the program's existing convention), so appends return per-record offsets without a per-record frame.
-- **Reads:** `read_from(offset, max)` over `Wal::scan_from` (acked) by default and `scan_durable_from` for consumers that must not see unsynced records; behaviour for an offset below the retention floor (error naming the floor, never silent skip).
-- **Retention:** by age and/or size via whole-segment removal from Task 2.15's machinery; the retention floor is durable and survives restart; offsets never move.
-- **Consumers:** how consumer offsets relate to the existing `consumer.rs` (reuse, don't duplicate).
-- **Durability:** Durable/Fast from `WalConfig`, same acknowledgement contract as the keyed path.
+**Design:** `docs/superpowers/specs/2026-10-02-streaming-log-design.md` (accepted
+2026-10-02). It covers layout, records and offsets, D3/D4, reads, retention, consumers,
+durability, backpressure, API, performance, tests, and the decisions in §13. The tasks below
+implement it. Read the note's section for each task before starting it. The note wins
+where this summary is shorter.
 
-**Note from Task 2.15 (retention floor).** Task 2.15 already has the pieces this needs: `LOG_STATE.log_start` is the durable retention floor (moved by `Wal::set_log_start` before `Wal::remove_leading_segments`, which only removes fully elided segments today; retention by age/size can release whole segments through the same two calls once they hold nothing a stream still serves), and `StorageError::CompactedCursor { cursor, floor }` is the typed "below the floor" error; `read_from(offset)` below `log_start` (or below a floor of its own, if a stream directory is ever compacted: `deletes_compacted_through` covers key/value deletes only) should return it rather than add a second error.
+**Order relative to the format freeze.** 2.15b.1, 2.15b.2, 2.15b.3, 2.15b.6 step 1 and
+2.15b.10 change bytes on disk. They land **before Task 2.24**, so format 2 as frozen
+already contains them (decided, note §13 Q2). The rest can land after 2.24.
 
-**Exit criteria:** crash/restart harness coverage for streams (PowerLoss in both modes, including across segment rolls and retention), the Linux `probe=wal-bench` gains `stream_append` cells (one and many writers, 1 KiB and 64 KiB) recorded in the decision record, an iai bench with a floor, docs that state measured numbers only.
+**Findings folded in.** STO-11 (frame kind checked before the CRC) is fixed in 2.15b.1.
+EVT-07 (`Fast` power loss reissues acked LSNs under committed cursors) is fixed for streams
+in 2.15b.6 and for the keyed change feed in 2.15b.10. Folding them in keeps each fix next
+to the code it needs: STO-11 is a `decode_frame` change in the same file 2.15b.1 already
+modifies, and EVT-07's two halves share `OffsetDiverged` with the stream consumer.
+
+**Exit criteria (whole task):**
+- Crash/restart harness coverage for streams: PowerLoss in both modes, across segment rolls
+  and retention.
+- The Linux `probe=wal-bench` has `stream_append` cells (one and many writers, 1 KiB and
+  64 KiB), recorded in a decision record with the T1–T5 verdicts.
+- An iai bench with a floor.
+- Docs state measured numbers only, with no Kafka comparison.
+- STO-11 and EVT-07 are `fixed`.
+
+---
+
+### Task 2.15b.1: `Wal` prerequisites for streams, and STO-11 — *before Task 2.24*
+
+Note §5.3, §6.2, §8.3.
+
+**Files:** `crates/prkdb-core/src/wal/{frame.rs,segment.rs,log.rs,config.rs}`, `crates/prkdb-core/tests/wal_log.rs`, `crates/prkdb-verify/tests/wal_power_loss.rs`, `crates/prkdb/tests/tripwires.rs`, `docs/remediation/ledger.toml`
+
+- [ ] **Step 1: STO-11 tripwire, then the failing test.**
+  - The test is `an_unknown_frame_kind_with_a_valid_crc_refuses_and_never_truncates` in
+    `wal_log.rs`. Append frames, then hand-encode a frame with kind 99 and a valid CRC at the
+    end of the last segment. `Wal::open` must return `UnsupportedFormat` naming the file,
+    and the file's length must be unchanged.
+  - Today it truncates. Add that as a tripwire in `tripwires.rs` and record it in STO-11's
+    `tripwire`.
+  - Keep `a_flipped_payload_bit_is_bad_crc` and the torn-tail tests passing.
+- [ ] **Step 2: STO-11 fix.**
+  - `decode_frame` verifies the CRC over `lsn | kind byte | payload` before it interprets
+    the kind.
+  - A CRC-valid unknown kind becomes a new `FrameFault::UnsupportedKind(u8)`, which
+    `scan_segment` reports and `Wal::open`/`scan_from_capped` map to
+    `WalError::UnsupportedFormat` in any segment, last or not. It is never truncated.
+  - `UnknownKind` remains only for CRC-invalid bytes, which are already `BadCrc` first.
+    Remove it if it becomes unreachable.
+  - Fix the stale `Lsn` doc comment ("byte offset").
+- [ ] **Step 3: failing tests for the stream prerequisites.**
+  - (a) Seek: `scan_from(from)` on a 64-segment log opens and scans only the segments at or
+    after `from`'s segment. Use a counting `Vfs` wrapper.
+  - (b) Early stop: a visitor that breaks after 10 frames stops the scan.
+  - (c) `scan_segment_from(file, path, first_lsn, (lsn, offset), visit)` starts mid-segment
+    and checks continuity from `lsn`.
+  - (d) `subscribe_acked()` wakes after an append is acked, and the woken reader's
+    `scan_from` includes it.
+  - (e) `Request::Roll` seals a non-empty active segment (synced) and opens the next. On an
+    empty active segment it is a no-op.
+  - (f) With `front_release = Retention`, `set_log_start` and `remove_leading_segments`
+    release sealed segments holding live frames, and `open` removes such leftovers below
+    `log_start`.
+  - (g) With `ElidedOnly` (the default), all of Task 2.15's refusals are unchanged.
+  - (h) FaultFs `PowerLoss` between `LOG_STATE` and each `remove`, in `Retention` mode:
+    reopen gives the same `log_start` and no leftover segment.
+- [ ] **Step 4: Implement.**
+  - `scan_from_capped` gets a start lookup through `segments.range(..=from)` and a
+    `ControlFlow` visitor (a new `ScanFlowVisitor`; keep `ScanVisitor` for existing callers
+    or migrate them).
+  - Add `scan_segment_from`, `subscribe_acked` (a `watch::Sender<Lsn>` sent after
+    `commit_batch`'s reply loop), and `Request::Roll`.
+  - `WalOptions::front_release: FrontRelease { ElidedOnly, Retention }`, defaulting to
+    `ElidedOnly`. `WalOptions::from_config` leaves it at the default. Only the stream sets
+    `Retention`.
+- [ ] **Step 5: Run.**
+  - `cargo nextest run -p prkdb-core`, `-p prkdb-verify --test wal_power_loss --test power_loss --test checkpoint`, and `-p prkdb --test compaction_test --test tripwires` → pass.
+  - Workspace → pass.
+  - Harness 200 seeds in both modes → green.
+  - `iai` WAL benches: no regression > 5 %.
+- [ ] **Step 6: Ledger + commits.**
+  - `fix: refuse a valid frame of an unknown kind instead of truncating it`: STO-11 `fixed`,
+    `regression_tests` = the step 1 test, clear `tripwire`.
+  - `feat: seek, wake, roll and retention release in the single WAL`.
+
+### Task 2.15b.2: `Records` frame and codec, `EventSeq` — *before Task 2.24*
+
+Note §4.
+
+**Files:** `crates/prkdb-core/src/wal/{frame.rs,records.rs (create),mod.rs}`, `crates/prkdb-types/src/{event.rs (create, if Task 2.20 has not),lib.rs}`, `fuzz/fuzz_targets/records_decode.rs (create)`, `fuzz/Cargo.toml`, `fuzz/corpus/{records_decode,frame_decode,segment_scan}/`, `crates/prkdb-verify/src/fuzz_entry.rs`, `crates/prkdb-verify/tests/fuzz_corpus.rs`
+
+- [ ] **Step 1: Failing tests in `records.rs`.**
+  - Round trip, with and without keys, headers and LZ4.
+  - Every bit flip and every truncation refused.
+  - Count 0 and 65,537 refused. Reserved flag bits refused. A `raw_len` above
+    `MAX_PAYLOAD_LEN` refused before decompression. Invalid UTF-8 header names refused.
+    Trailing bytes refused.
+  - `peek_header` returns `(append_time_ms, count)` without decompressing.
+  - In `frame.rs`: `FrameKind::Records = 3` round-trips, and a zero-length `Records`
+    payload is `BadLength(0)`, as for `Batch`.
+  - `EventSeq::from_wal(lsn, idx)` = `lsn << 16 | idx`, with `Ord` and 20-digit `Display`
+    (Task 2.20's spec).
+- [ ] **Step 2: Implement** per note §4.2. `EventSeq` goes in `prkdb_types::event` with
+  exactly Task 2.20's API. 2.20 then reuses it; amend 2.20's Files line when it starts.
+- [ ] **Step 3: Fuzz.**
+  - New target `records_decode` (via `fuzz_entry.rs`, as the other targets).
+  - Seed corpora with kind-3 frames for `frame_decode` and `segment_scan`.
+  - `fuzz_corpus.rs` replays the new corpus.
+- [ ] **Step 4: Run** `cargo nextest run -p prkdb-core --lib records frame`, `-p prkdb-types`
+  and `-p prkdb-verify --test fuzz_corpus` → pass. `cargo +nightly fuzz run records_decode
+  -- -max_total_time=60` locally → no crash.
+- [ ] **Step 5: Commit** `feat: add the Records frame kind and record batch codec`.
+
+### Task 2.15b.3: `StreamLog` core — *before Task 2.24*
+
+Note §3, §4.3, §6, §9, §10.
+
+**Files:** `crates/prkdb/src/stream_log/{mod.rs,log.rs,index.rs,manifest.rs} (create)`, `crates/prkdb/src/lib.rs`, `crates/prkdb/src/storage/format.rs` (`kind`), `crates/prkdb-types/src/error.rs` (`OffsetOutOfRange`, `OffsetDiverged`), `crates/prkdb/tests/stream_log.rs (create)`, `crates/prkdb/tests/format_v2.rs`, `fuzz/fuzz_targets/stream_manifest_parse.rs (create)`
+
+- [ ] **Step 1: Failing tests (`stream_log.rs`, `format_v2.rs`).**
+  - `FORMAT` `kind`:
+    - a new stream directory writes `kind = "stream"`;
+    - `WalStorageAdapter` on it refuses, and `StreamLog` on a kv directory refuses, both
+      with nothing written;
+    - a `FORMAT` without `kind` reads as `kv`;
+    - an unknown `kind` refuses.
+  - A second open is `Locked`.
+  - Appends:
+    - an append of 3 records returns `L<<16 | 0..2`;
+    - offsets continue across reopen;
+    - 0 records → `Validation`;
+    - 65,537 records → `Validation`;
+    - an encoded payload over `MAX_PAYLOAD_LEN` → `RecordTooLarge`.
+  - Reads:
+    - `read_from(Offset(last + 1))` gives the next frame, and `0xFFFF + 1` carries;
+    - `Offset(0)` and offsets `< earliest()` or `> next_offset()` → `OffsetOutOfRange
+      { requested, floor, end }`;
+    - `Earliest`, `Latest` and `Timestamp` (coarse, per segment) resolve as specified;
+    - `ReadLimits` always returns at least one record;
+    - in `Fast`, an acked-but-unsynced record is visible to `read_from` but not to
+      `read_durable_from`;
+    - `wait_for` returns when an append lands, and `false` on timeout.
+  - A `Batch` frame in a stream directory → `CorruptSegment`, and a `Records` frame in a kv
+    directory → `ReplayFailed`.
+  - `STREAM` manifest: encode/decode round trip, bit flips refused, an unknown version
+    refused.
+- [ ] **Step 2: Implement.**
+  - `StreamLog` over `Wal` with `front_release = Retention` and a 128 MiB default segment
+    size.
+  - A sparse index per segment (one entry per 64 KiB, plus max time), built by the replay
+    closure and the commit hook.
+  - Reads run in `spawn_blocking`.
+  - `ensure_format(vfs, dir, kind)`: existing callers pass `Kind::Kv`, and the `FORMAT`
+    writer emits `kind` only for streams, so kv bytes are unchanged.
+  - The manifest codec (tmp → `sync_data` → rename → `sync_dir`) is written by 2.15b.5.
+  - `stream_manifest_parse` fuzz target.
+- [ ] **Step 3: Run** `cargo nextest run -p prkdb --test stream_log --test format_v2` → pass.
+  Workspace → pass. Harness → green (kv unchanged).
+- [ ] **Step 4: Commit** `feat: add StreamLog, a record stream on the single WAL`.
+
+### Task 2.15b.4: Retention
+
+Note §8.
+
+**Files:** `crates/prkdb/src/stream_log/retention.rs (create)`, `crates/prkdb/tests/stream_retention.rs (create)`
+
+- [ ] **Step 1: Failing tests**, with an injected `Clock`:
+  - age-only, size-only and both;
+  - the active segment is never removed;
+  - a quiet active segment older than `segment_max_age` is rolled and later removed;
+  - `earliest()` rises and offsets above it are unchanged;
+  - a read below the floor → `OffsetOutOfRange`;
+  - the floor survives reopen;
+  - a removal error (a FaultFs `remove` failure) is returned by the run, does not poison the
+    stream, and is retried next interval;
+  - FaultFs crash after `set_log_start`, after each `remove`, and before `sync_dir`: reopen
+    gives the same floor, every record at or above it, and no leftover;
+  - the background task stops when the last handle drops.
+  - The default policy (none) never removes anything.
+- [ ] **Step 2: Implement** `RetentionPolicy`, `Clock`, `apply_retention() ->
+  RetentionReport`, and the background loop every `retention_interval` (60 s), holding a
+  `Weak` handle like compaction's task.
+- [ ] **Step 3: Run** `cargo nextest run -p prkdb --test stream_retention --test stream_log`
+  → pass. Workspace → pass.
+- [ ] **Step 4: Commit** `feat: age and size retention for streams by whole-segment removal`.
+
+### Task 2.15b.5: Partitioned streams
+
+Note §3.2.
+
+**Files:** `crates/prkdb/src/stream_log/partitioned.rs (create)`, `crates/prkdb/tests/stream_partitions.rs (create)`
+
+- [ ] **Step 1: Failing tests.**
+  - `open(root, 3, cfg)` creates `partition_0..2/` (each with `FORMAT` `kind = "stream"`)
+    and then `STREAM`. `root` has no `FORMAT`.
+  - Reopening with 4 partitions refuses.
+  - Creation cut before `STREAM`: all-empty partitions finish creation; a partition holding
+    frames refuses, naming it.
+  - `Route::Key` matches Task 2.13's golden vectors. `RoundRobin` cycles.
+    `Route::Partition(9)` on 3 partitions → `Validation`.
+  - Stream names pass `catalog::validate_name`.
+- [ ] **Step 2: Implement.**
+- [ ] **Step 3: Run** → pass.
+- [ ] **Step 4: Commit** `feat: partitioned streams under a container root`.
+
+### Task 2.15b.6: Stream consumers, and EVT-07 for streams
+
+Note §7.1–7.3.
+
+**Files:** `crates/prkdb/src/consumer.rs` (`StorageOffsetStore` record encoding), `crates/prkdb/src/stream_log/consumer.rs (create)`, `crates/prkdb/tests/{consumer_tests.rs,stream_consumer.rs (create)}`
+
+- [ ] **Step 1 (*before Task 2.24*): versioned offset record.**
+  - `StorageOffsetStore` writes `version u8 (=1) | offset u64 | check_kind u8 | check u32`.
+  - It reads that, and the old bincode `Offset`, as `check_kind = 0`.
+  - `OffsetStore` gains `get_position`/`save_position` with a `Position { offset, check:
+    Option<u32> }` default-implemented over the existing methods, so other stores keep
+    compiling.
+  - Tests: old-encoding values read back, and round trip.
+  - Commit `feat: store a divergence check with consumer offsets`.
+- [ ] **Step 2: Failing tests (`stream_consumer.rs`).**
+  - Commit and resume (committed = next to read).
+  - `auto_offset_reset` with no commit (`Earliest`, `Latest`, `None`).
+  - After retention passes the committed offset: `on_out_of_range = Error` returns
+    `OffsetOutOfRange`, and `ResetToEarliest` resumes at `earliest()`.
+  - **EVT-07 (streams):** in `Fast`, consume and commit, then FaultFs `PowerLoss` dropping
+    the consumed frames, then append enough to refill their LSNs, then resume →
+    `OffsetDiverged`. In `Durable` the same sequence resumes cleanly.
+  - Two group members get disjoint partitions through `ConsumerGroupCoordinator`.
+  - `default_offset_store()` creates `<root>/__offsets/` as a kv data directory.
+  - A caller-provided `OffsetStore` is used when given.
+- [ ] **Step 3: Implement** `StreamConsumer`.
+- [ ] **Step 4: Run** `cargo nextest run -p prkdb --test stream_consumer --test consumer_tests`
+  → pass.
+- [ ] **Step 5: Ledger + commit.** Add the EVT-07 stream test to EVT-07's
+  `regression_tests` (EVT-07 becomes `fixed` only after 2.15b.10). Commit
+  `feat: stream consumers on the existing offset store`.
+
+### Task 2.15b.7: Harness for streams
+
+Note §12.2.
+
+**Files:** `crates/prkdb-verify/src/{model.rs,ops.rs,sut.rs,checker.rs,runner.rs}`, `crates/prkdb-verify/src/stream_sut.rs (create)`, `crates/prkdb-verify/tests/harness.rs`, `xtask/src/verify.rs`
+
+- [ ] **Step 1: Failing tests.**
+  - `stream_profile_emits_every_op` covers `StreamAppend`, `StreamRead`, `Retain`,
+    `AdvanceClock`, `Roll`, `Reopen`, `Crash` and `PowerLoss`, each with a count > 0.
+  - Meta-tests:
+    - a stream SUT wrapper that drops every 10th acked append is caught in `Durable`;
+    - one that renumbers offsets after reopen is caught;
+    - one that skips the floor check is caught.
+  - A kv change-feed consumer op catches a SUT that hides EVT-07 (resumes without
+    `OffsetDiverged` after a lossy restart that refilled consumed LSNs).
+- [ ] **Step 2: Implement.**
+  - The stream model, ops and checker per note §12.2. Per-partition acceptable prefixes in
+    `Fast` (Task 2.10a's rule).
+  - `cargo xtask verify --profile stream`.
+- [ ] **Step 3: Run** `cargo xtask verify --profile stream --seeds 1000 --mode durable` and
+  `--mode fast` → green. Then promote the stream ops to the blocking profile.
+- [ ] **Step 4: Ledger + commit.** Ledger: append the harness test to EVT-07. Commit
+  `feat: streams in the crash/restart harness`.
+
+### Task 2.15b.8: Performance and docs
+
+Note §11.
+
+**Files:** `crates/prkdb/benches/{wal_write_path.rs,iai_hot_paths.rs}`, `scripts/check_perf_gate_floors.sh`, `docs/remediation/decisions/2026-10-xx-stream-append.md (create)`, `docs/guide/streams.md (create)`, `docs/.vitepress/config.mts`
+
+- [ ] **Step 1: Bench cells and gate.**
+  - Cells: `stream_append/{durable,fast}/{1,64}w/{1,64}k/b{1,100}`, `stream_read/{tail,cold}`,
+    `stream_append_retention/durable/64w/1k/b1`, and a `pread 1 MiB` ceiling row, with
+    records/s in the output. `wal_fast_rule.py` must still parse the old rows.
+  - `iai`: `bench_stream_append_100` and `bench_stream_read_100` with their floors in
+    `check_perf_gate_floors.sh`.
+- [ ] **Step 2: Probe and decision record.**
+  - Linux probe `probe=wal-bench` (maintainer-approved push per D10).
+  - Decision record with raw rows and the T1–T5 verdicts. A miss goes to the maintainer with
+    the cause and is not tuned away.
+- [ ] **Step 3: Docs.** `docs/guide/streams.md`:
+  - API, offsets (sparse, `Earliest`), retention (deletes data; default keep everything,
+    128 MiB segments), the consumer and `OffsetDiverged`, both durability modes in the
+    spec §6.2 wording, and Windows best-effort retention;
+  - measured numbers from the decision record only, with no Kafka comparison.
+- [ ] **Step 4: Commit** `bench: stream append and read cells with an instruction-count floor`
+  and `docs: streams guide with measured numbers`.
+
+### Task 2.15b.9: Golden stream fixture
+
+Folded into Task 2.24 if 2.24 has not run yet. Note §5.2.
+
+- [ ] Task 2.24's generator writes `out/stream/`:
+  - two partitions;
+  - keys, headers and LZ4;
+  - at least 3 segments (4 KiB segments);
+  - one retention run that moved `log_start`;
+  - a `STREAM` manifest;
+  - an `__offsets/` directory with one committed position carrying a check.
+- [ ] `expected-stream.json` lists `(partition, offset, key, value, headers)` and the
+  committed position.
+- [ ] `storage_compat.rs` reads it back through the public API and checks that regeneration
+  is byte-identical (the same rules as `data/`).
+- [ ] Commit with 2.24, or `test: golden stream fixture` if 2.24 already ran.
+
+### Task 2.15b.10: Divergence check for the keyed change feed (EVT-07) — *before Task 2.24*
+
+Note §7.4. **Mechanism pending the maintainer's confirmation** (note §13 Q8): a frame CRC
+gives false `OffsetDiverged` once compaction rewrites a cursor's frame, so the note proposes
+open boundaries instead. Do not start until the maintainer confirms.
+
+**Files:** `crates/prkdb-core/src/wal/{log_state.rs,log.rs}`, `crates/prkdb-types/src/{storage.rs,error.rs}`, `crates/prkdb/src/storage/{wal_adapter.rs,collection_partitioned_adapter.rs}`, `crates/prkdb/src/db.rs` (`changes_in_collection`), `crates/prkdb/tests/outbox_cdc_tests.rs`, `crates/prkdb-verify/tests/power_loss.rs`, `fuzz/fuzz_targets/` (`LOG_STATE` decode, if not yet a target)
+
+- [ ] **Step 1: Failing tests.**
+  - `LOG_STATE` version 2: round trip, bit flips refused, version 1 still read (no
+    boundaries, clean).
+  - **EVT-07 (keyed),** `fast_power_loss_under_a_committed_cursor_is_detected`: put
+    records, read them with `get_changes_since`, keep the returned cursor, FaultFs
+    `PowerLoss` dropping them, put enough to refill, then resume → `OffsetDiverged`.
+  - `compaction_under_a_committed_cursor_is_not_divergence`: same cursor, the frame
+    survives, compact so it is rewritten or elided, resume → no error.
+  - A clean close appends no boundary. `Durable` mode never appends one.
+- [ ] **Step 2: Implement.**
+  - `LOG_STATE` v2: the version-1 fields, then `clean_close_lsn u64`, then
+    `boundary_base u32 | count u32 | B[count] u64`, then the CRC, with a size cap.
+  - `Wal::open` appends a boundary when the previous session may have lost acked writes:
+    it ran in `Fast` and has no clean-close marker. Close writes the marker.
+  - `ChangeCursor { lsn, session }` on `get_changes_since`/`changes_in_collection`, as new
+    methods or a new parameter type; `u64` stays accepted as an unchecked cursor.
+  - Resume check per note §7.4.
+- [ ] **Step 3: Run** `cargo nextest run -p prkdb-core --lib log_state`, `-p prkdb --test
+  outbox_cdc_tests --test compaction_test`, `-p prkdb-verify --test power_loss` → pass.
+  Workspace → pass. Harness both modes → green.
+- [ ] **Step 4: Ledger + commit.** EVT-07 `fixed` with the 2.15b.6, 2.15b.7 and step 1
+  tests. Commit `fix: detect change-feed cursors past a Fast-mode power loss`, then
+  `docs: record EVT-07 as fixed`.
 
 ---
 
@@ -6421,6 +6746,8 @@ A crash found by the job becomes a new corpus seed plus a ledger finding.
 Freezes format 2 (D3): from this commit on, any change to the bytes a v2 build writes, or to what it reads back, fails CI unless it comes with `FORMAT_VERSION + 1` and a registered migration (D4). The check starts here rather than at 2b (spec revision 11), because the event and outbox ops only exist from Tasks 2.19–2.20, and a golden directory frozen earlier would have to be regenerated twice. It covers both on-disk paths a user can reach: `WalStorageAdapter` directly, and `PrkDb::builder().with_data_dir(..)`, which builds the optimized-storage `CollectionPartitionedAdapter` (Task 2.9b) with its own `WalConfig` (no compression, 512 MiB segments). The multi-raft `STORAGE_PATH` layout is not covered: its `raft/` store is frozen at the Phase 4 gate (Task 2.11). The test lives in `prkdb-verify` because the generator does, and `prkdb-verify` already depends on `prkdb` (a dev-dependency from `prkdb` back to `prkdb-verify` would link two copies of `prkdb`).
 
 **Note from Task 2.11.** Generate the golden directories only from a build that includes Task 2.11 (`feat: add format v2 marker, open rules and migrate command`): v2 directories written before it have segments but no `FORMAT`, and every later build correctly refuses them as format 1.
+
+**Note from Task 2.15b (decided 2026-10-02).** Run this task only after 2.15b.1, 2.15b.2, 2.15b.3, 2.15b.6 step 1 and 2.15b.10, which change on-disk bytes: the `Records` frame kind, `FORMAT` `kind`, the `STREAM` manifest, the versioned consumer-offset record, and `LOG_STATE` v2. The generator also writes the `out/stream/` fixture of Task 2.15b.9.
 
 **Files:** `crates/prkdb-verify/src/golden.rs` (generator library), `crates/prkdb-verify/src/bin/golden_v2.rs` (thin `main`), `crates/prkdb-verify/tests/fixtures/format-v2/{data/…,builder/…,expected.json,expected-builder.json}` (generated, committed), `crates/prkdb-verify/tests/fixtures/format-v2/README.md`, `crates/prkdb-verify/tests/storage_compat.rs`, `.gitattributes`, `scripts/pre-push-check.sh`
 
