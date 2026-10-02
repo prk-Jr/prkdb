@@ -2248,4 +2248,39 @@ mod tests {
             wal.close().unwrap();
         });
     }
+
+    /// STO-14: a scan samples its cap, then lists the segments. A roll in between turns
+    /// the segment the cap was taken against into a sealed one, and the cap used to be
+    /// applied to the last segment only, so the frames past it were visited. The race is
+    /// replayed deterministically by passing the cap a scan would have sampled before the
+    /// roll.
+    #[test]
+    fn a_cap_sampled_before_a_roll_still_bounds_the_rolled_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wal, _) = Wal::open(
+            Arc::new(StdVfs),
+            dir.path(),
+            opts(SyncMode::Durable),
+            1,
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        for i in 0..4u8 {
+            wal.append_blocking(vec![i; 8], None).unwrap();
+        }
+        let sampled_cap = 2;
+        assert_eq!(wal.roll_blocking().unwrap(), Some(5));
+        wal.append_blocking(vec![9; 8], None).unwrap();
+
+        let mut seen = Vec::new();
+        let flow = wal
+            .scan_from_capped(1, sampled_cap, &mut |loc, _, _| {
+                seen.push(loc.lsn);
+                Ok(ControlFlow::Continue(()))
+            })
+            .unwrap();
+        assert!(flow.is_continue(), "the cap is not the visitor stopping");
+        assert_eq!(seen, vec![1, 2], "no frame above the sampled cap");
+        wal.close().unwrap();
+    }
 }
