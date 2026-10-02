@@ -100,6 +100,8 @@ Sources: **A** = 2026-09-23 correctness audit (A#n), **R** = 2026-09-07 senior r
 | STO-16 | HIGH | Opening a data directory under several missing directories creates them with `create_dir_all` and syncs only the immediate parent (the adapter's open synced none): the entries of the outer new directories are not durable, so a power cut can remove them with everything under them, including an acknowledged `Durable` write; the reopen creates an empty database. Multi-raft partition directories had the same gap. | `wal/log.rs:470-476`, `storage/wal_adapter.rs:686-688`, `raft/partition_manager.rs:71` (external review, FaultFs repro, 2026-10-02) | Verified (repro) | 2 |
 | STO-17 | HIGH | The core `Wal` accepts an empty payload and writes a 0-length frame; recovery reads it as `BadLength(0)`, a torn tail, and truncates there, losing every acknowledged frame after it. | `wal/log.rs:688-697` (external review, 2026-10-02) | Verified (repro) | 2 |
 
+| STO-19 | HIGH | Segment header/refill reads discard the returned byte count. Valid short reads feed fabricated zero-filled bytes to validation; Durable recovery truncates acknowledged frames as a torn tail. A deterministic reproduction shrinks 97 bytes to the 24-byte header and loses two acknowledged writes. Counted reads and actual-byte buffer bounds fix the cause. | `wal/segment.rs:95,154`, `tests/wal_short_reads.rs` (CI mutation review, 2026-10-02) | Verified (RED/GREEN reproduction) | 2 |
+
 ### 3.2 Keys, indexes, partitioning (KEY)
 
 | ID | Sev | Finding | Evidence | Claim | Phase |
@@ -537,6 +539,7 @@ No unrelated refactoring.
 |---|---|---|
 | 1 | 2026-09-23 | Initial spec from the 2026-09-23 audits and the 2026-09-07 review; decisions D1–D9 (D9: publishing policy). |
 | 2 | 2026-09-23 | Spec review pass 1: `Vfs` seam defined in Phase 1, WAL routed through it in 2a; per-area `verified`; tripwires instead of expected-failure lists; single-phase IDs (DOC-11, DOC-12, TST-05..07 split out); harness op profiles per phase (§7.1); Fast mode from 2a; commit-based workflow with phase-PR CI sequence; private backup repo with Actions off; storage-compat timing; single globally ordered WAL; like-for-like Raft gate; madsim budget; DOC-11 interim wording. |
+| 28 | 2026-10-02 | Execution: STO-19 adds counted WAL header/refill reads after a deterministic short-read recovery data-loss reproduction; fixed by d688c82. TST-12 inventory validation and exact shutdown mutation coverage extended without weakening thresholds. |
 | 27 | 2026-10-02 | Storage review: STO-16 also covers existing ancestors left unsynced by failed opens, concurrent sibling creation and StreamLog precreation; directory barriers traverse existing ancestry. VFS empty directory sync denotes its working-directory anchor, normalized to `.` only by StdVfs. |
 | 26 | 2026-10-02 | Execution: STO-16 added (missing ancestors of a new data directory not made durable) and STO-17 added (an empty WAL record accepted, then truncated by recovery with every later frame), both from an external source review; §6 `Fast` wording: `sync_interval` is a target, `durable_lsn` the guarantee. |
 | 25 | 2026-10-02 | Execution: STO-14 (a sealed segment cut at a frame boundary scans as complete) and STO-15 (a roll between a scan's cap and its segment list lets it visit frames above the cap) added, from an external review of `scan_from_capped`. |

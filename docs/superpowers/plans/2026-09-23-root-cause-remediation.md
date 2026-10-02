@@ -6967,9 +6967,11 @@ metadata/recovery helpers, health/watch notifications and codec bounds. Acceptan
 the corresponding exact mutation replays are caught and the unchanged CI mutation
 gate passes on the assembled branch. Equivalence requires an individual proof;
 blanket exclusions, weaker thresholds and timeouts are not substitutes for coverage.
-The short-read reproduction is assigned to `wip-wal-short-read` (STO-19 reserved);
-shutdown durability to `wip-wal-shutdown-tests`. Remaining slices must be completed
-before the phase gate. Fixing commit/status: open until the individual work lands.
+The short-read reproduction is assigned to `wip-wal-short-read` (STO-19);
+shutdown durability to `wip-wal-shutdown-tests`. Shutdown slice fixed by 3443964
+(three exact historical survivors caught); short-read data loss fixed by d688c82
+(STO-19, seven deterministic regressions). Remaining slices must be completed
+before the phase gate. Remaining coverage slices and the assembled Linux gate: open.
 
 - [ ] **Step 1: Baseline, both modes, without an environment variable.** Spec §6.1 wants every metric in Durable and Fast. Each §6.1 bench builds its own `WalConfig`, so the mode is chosen in the bench source, per benchmark id, and one run captures both:
 

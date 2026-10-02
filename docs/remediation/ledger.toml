@@ -781,7 +781,7 @@ evidence = [
   ".github/workflows/ci.yml:208",
   ".github/workflows/ci.yml:353",
 ]
-regression_tests = ["script:scripts/wal_fast_rule.py", "script:scripts/check_perf_gate_floors.sh", "ci-job:ci.yml/perf-gate-floors", "ci-job:remediation-gate.yml/probe-wal-bench", "ci-job:ci.yml/mutants-core"]
+regression_tests = ["script:scripts/wal_fast_rule.py", "script:scripts/check_perf_gate_floors.sh", "ci-job:ci.yml/perf-gate-floors", "ci-job:remediation-gate.yml/probe-wal-bench", "ci-job:ci.yml/mutants-core", "test:crates/prkdb-core/tests/wal_shutdown.rs::close_syncs_acknowledged_fast_write_before_returning", "test:crates/prkdb-core/tests/wal_shutdown.rs::drop_waits_for_final_sync_of_acknowledged_fast_write", "test:crates/prkdb-core/tests/wal_shutdown.rs::close_returns_final_fast_sync_failure"]
 # 72d1c75 benchmark job built examples deleted in Task 2.9; a7a4c8c wal_fast_rule.py
 # compared only cells present on both sides, passed a zero reference as ratio inf and
 # ignored rep counts, and nothing enforced the compaction p99 the bench claimed was gated
@@ -792,7 +792,7 @@ regression_tests = ["script:scripts/wal_fast_rule.py", "script:scripts/check_per
 # existing benchmark new. extract --self-test covers empty and partial inventories.
 # Enabling mutation CI exposed 106 core survivors on d8248e5; its checks are working,
 # but those behavioral coverage gaps remain required work before Task 2.25's gate.
-changes = ["72d1c75", "a7a4c8c", "5c83909", "8474c33", "5b0ac78", "a1c13d6"]
+changes = ["72d1c75", "a7a4c8c", "5c83909", "8474c33", "5b0ac78", "a1c13d6", "3443964"]
 
 [[finding]]
 id = "TST-13"
@@ -942,6 +942,30 @@ sources = ["external-review-2026-10-02"]
 evidence = ["crates/prkdb-core/src/wal/log.rs:688-697"]
 regression_tests = ["test:crates/prkdb-core/tests/wal_log.rs::an_empty_record_is_refused_before_queueing_and_later_writes_survive_a_reopen"]
 changes = ["095a58b", "b746113"]
+
+
+[[finding]]
+id = "STO-19"
+title = "WAL short reads expose fabricated bytes and recovery truncates acknowledged Durable frames"
+area = "storage"
+severity = "high"
+phase = 2
+status = "fixed"
+sources = ["ci-mutation-review-2026-10-02"]
+evidence = ["crates/prkdb-core/src/wal/segment.rs:95", "crates/prkdb-core/src/wal/segment.rs:154", "https://github.com/prk-Jr/prkdb/actions/runs/37029506251"]
+# A valid seven-byte read sequence after full segment-header reads caused recovery
+# to truncate a 97-byte Durable WAL to its 24-byte header, losing two acknowledged
+# writes. Header reads also ignored the byte count and could falsely refuse opens.
+regression_tests = [
+  "test:crates/prkdb-core/tests/wal_short_reads.rs::seven_byte_reads_scan_every_frame_without_a_false_torn_tail",
+  "test:crates/prkdb-core/tests/wal_short_reads.rs::durable_recovery_through_short_reads_keeps_acknowledged_frames",
+  "test:crates/prkdb-core/tests/wal_short_reads.rs::short_reads_fill_a_frame_spanning_scan_chunks",
+  "test:crates/prkdb-core/tests/wal_short_reads.rs::short_reads_preserve_real_torn_tail_boundaries",
+  "test:crates/prkdb-core/tests/wal_short_reads.rs::a_failure_after_a_short_read_is_reported_as_io",
+  "test:crates/prkdb-core/tests/wal_short_reads.rs::completed_reads_do_not_issue_an_empty_follow_up_read",
+  "test:crates/prkdb-core/tests/wal_short_reads.rs::premature_eof_reports_the_actual_segment_header_length",
+]
+changes = ["d688c82c3bd06b3ee7d6ff97914375678c737b8e"]
 
 [[phase]]
 id = 0

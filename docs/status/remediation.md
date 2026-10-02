@@ -10,7 +10,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 |---|---|---|---|
 | 0 | Honesty and tracking | gate_passed | 6/6 |
 | 1 | Harness and baseline | gate_passed | 2/2 |
-| 2 | Format v2 and single-node root fixes | not_started | 0/32 |
+| 2 | Format v2 and single-node root fixes | not_started | 0/33 |
 | 3 | Semantics | not_started | 0/9 |
 | 4 | Raft | not_started | 0/15 |
 | 5 | Documentation and release | not_started | 0/9 |
@@ -51,6 +51,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | STO-13 | high | 2 | fixed | Dropping the last handle does not release the data-directory lock: a reopen right after the drop is refused as Locked |
 | STO-16 | high | 2 | fixed | Opening a data directory under several missing directories syncs only the immediate parent: a power cut can drop the ancestors and an acknowledged Durable write |
 | STO-17 | high | 2 | fixed | The WAL accepts an empty payload and writes a 0-length frame that recovery truncates together with every later acknowledged frame |
+| STO-19 | high | 2 | fixed | WAL short reads expose fabricated bytes and recovery truncates acknowledged Durable frames |
 | TST-01 | high | 4 | open | Chaos monkey tolerates 20% of acknowledged writes missing |
 | TST-09 | high | 2 | fixed | Perf gate WAL benches count ~500 instructions: the WAL work is outside the measured region |
 | TST-11 | high | 2 | fixed | FaultFs::power_loss keeps the pre-crash synced baseline: a second power loss can resurrect data the first one lost |
