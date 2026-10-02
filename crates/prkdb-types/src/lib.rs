@@ -21,6 +21,7 @@ pub mod codec; // Bounded bincode decoding of untrusted bytes
 pub mod collection;
 pub mod consumer;
 pub mod error;
+pub mod event; // `EventSeq`: event ids and stream offsets
 pub mod index;
 pub mod replication;
 pub mod schema;
@@ -37,6 +38,7 @@ pub use consumer::{
     Offset, OffsetStore,
 };
 pub use error::{ComputeError, ConsumerError, Error, StorageError};
+pub use event::EventSeq;
 pub use index::{IndexDef, Indexed, IndexedStorage};
 pub use replication::{AckLevel, Change, ReplicationConfig};
 pub use schema::{FieldDef, ProtoSchema, ProtoType};

@@ -6,6 +6,7 @@ pub mod frame;
 pub mod log;
 pub mod log_record;
 pub mod log_state;
+pub mod records;
 pub mod segment;
 
 pub use compression::{
@@ -21,12 +22,39 @@ pub use log_record::{LogOperation, LogRecord};
 pub use log_state::LogState;
 pub use segment::{RecordLoc, ScanFlowVisitor, ScanVisitor};
 
-fn frame_kind_note(frame_kind: &Option<(u64, u8)>) -> String {
+/// `UnsupportedFormat`'s message: the two format numbers for a segment of another
+/// version, or, for a CRC-valid frame of an unknown kind (whose segment format matches),
+/// the kind and where it is.
+fn unsupported_format_message(
+    path: &std::path::Path,
+    found: u32,
+    supported: u32,
+    frame_kind: &Option<(u64, u8)>,
+) -> String {
     match frame_kind {
-        Some((offset, kind)) => {
-            format!(": the frame at byte {offset} has kind {kind}, which this build does not know")
-        }
-        None => String::new(),
+        Some((offset, kind)) => format!(
+            "unsupported WAL frame kind {kind} in {} at byte {offset}: the frame is whole \
+             (its CRC is valid), so a newer build wrote it; this build does not know kind \
+             {kind}",
+            path.display()
+        ),
+        None => format!(
+            "unsupported WAL format {found} in {}; this build reads format {supported}",
+            path.display()
+        ),
+    }
+}
+
+/// `RecordTooLarge`'s message; an empty `path` means a codec refused the uncompressed
+/// payload before it reached a file.
+fn record_too_large_message(path: &std::path::Path, len: usize, max: usize) -> String {
+    if path.as_os_str().is_empty() {
+        format!("record of {len} uncompressed bytes exceeds the {max}-byte limit; split the write")
+    } else {
+        format!(
+            "record of {len} bytes in {} exceeds the {max}-byte limit",
+            path.display()
+        )
     }
 }
 
@@ -57,10 +85,7 @@ pub enum WalError {
     /// another format version (`found`), or `frame_kind` is set: the frame at that byte
     /// offset has a valid CRC but a kind this build does not know, so a later build wrote
     /// it whole (STO-11). `found` is then the segment's own format number.
-    #[error(
-        "unsupported WAL format {found} in {path}{}; this build reads format {supported}",
-        frame_kind_note(.frame_kind)
-    )]
+    #[error("{}", unsupported_format_message(.path, *.found, *.supported, .frame_kind))]
     UnsupportedFormat {
         path: std::path::PathBuf,
         found: u32,
@@ -90,7 +115,10 @@ pub enum WalError {
         source: Box<WalError>,
     },
 
-    #[error("record of {len} bytes in {path} exceeds the {max}-byte limit")]
+    /// A payload over `max` bytes. `path` names the log or segment involved; it is empty
+    /// when a payload codec refused before any file was touched (STO-12: `len` is then
+    /// the uncompressed size, which the decoder bounds by `MAX_PAYLOAD_LEN`).
+    #[error("{}", record_too_large_message(.path, *.len, *.max))]
     RecordTooLarge {
         path: std::path::PathBuf,
         len: usize,
@@ -122,4 +150,49 @@ pub enum WalError {
     /// segment to remove that still holds a live frame). Nothing was changed.
     #[error("compaction refused: {0}")]
     CompactionRefused(String),
+
+    /// A record batch the codec refuses to encode (`records.rs`, Task 2.15b.2): no
+    /// records or more than 65,536, or a header name or header list too long for its
+    /// length prefix (an oversized body is `RecordTooLarge`). Nothing was written; the
+    /// caller fixes or splits the batch.
+    #[error("invalid record batch: {0}")]
+    InvalidRecords(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A segment of another format version names both versions.
+    #[test]
+    fn a_format_mismatch_names_both_versions() {
+        let err = WalError::UnsupportedFormat {
+            path: "/d/seg.wal".into(),
+            found: 3,
+            supported: 2,
+            frame_kind: None,
+        };
+        assert_eq!(
+            err.to_string(),
+            "unsupported WAL format 3 in /d/seg.wal; this build reads format 2"
+        );
+    }
+
+    /// STO-11: a CRC-valid frame of an unknown kind is named by its kind and offset,
+    /// without the format numbers, which match (2.15b.1 review).
+    #[test]
+    fn an_unknown_frame_kind_is_named_by_kind() {
+        let err = WalError::UnsupportedFormat {
+            path: "/d/seg.wal".into(),
+            found: 2,
+            supported: 2,
+            frame_kind: Some((40, 99)),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with("unsupported WAL frame kind 99 in /d/seg.wal at byte 40"),
+            "{msg}"
+        );
+        assert!(!msg.contains("format"), "{msg}");
+    }
 }

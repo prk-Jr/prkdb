@@ -100,3 +100,10 @@ path = "fuzz_targets/snapshot_entries.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "records_decode"
+path = "fuzz_targets/records_decode.rs"
+test = false
+doc = false
+bench = false

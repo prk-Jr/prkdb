@@ -25,7 +25,12 @@
 //! not close this gap (a corrupted `len` still changes the CRC input consistently with
 //! itself) and would only protect against a `len` that is corrupted alone while every
 //! other byte, including the CRC, stays intact — a case decode_frame already catches via
-//! its own bounds and (for `Batch`) `BadLength(0)`.
+//! its own bounds and (for `Batch` and `Records`) `BadLength(0)`.
+//!
+//! **Kinds:** `1 Batch` (a keyed write batch, `batch.rs`), `2 Elided` (a compacted-away
+//! frame, empty payload), `3 Records` (one append of stream records, `records.rs`, Task
+//! 2.15b.2). Kind 3 joined format 2 before the format froze (Task 2.24), so it needed no
+//! `FORMAT_VERSION` bump.
 
 /// A frame's log sequence number: frames are numbered 1, 2, 3, ... in append order,
 /// contiguously across segments. (Not a byte offset: [`crate::wal::RecordLoc`] holds
@@ -52,6 +57,9 @@ pub enum FrameKind {
     /// A record removed by compaction: header only, empty payload, keeps LSNs
     /// contiguous (Task 2.15).
     Elided = 2,
+    /// One append of stream records (see `records.rs`, Task 2.15b.2). Only stream
+    /// directories hold these; a keyed directory never does.
+    Records = 3,
 }
 
 impl FrameKind {
@@ -59,6 +67,7 @@ impl FrameKind {
         match b {
             1 => Some(FrameKind::Batch),
             2 => Some(FrameKind::Elided),
+            3 => Some(FrameKind::Records),
             _ => None,
         }
     }
@@ -163,9 +172,10 @@ pub fn decode_frame(buf: &[u8]) -> Decoded<'_> {
     };
 
     // A zero-length payload is only legitimate for `Elided` (a compacted-away record,
-    // header only). A `Batch` frame always carries at least an encoded op count, so a
-    // zero length there is corruption, not a valid empty batch.
-    if len == 0 && kind == FrameKind::Batch {
+    // header only). A `Batch` frame always carries at least an encoded op count, and a
+    // `Records` frame its 18-byte header, so a zero length there is corruption, not a
+    // valid empty payload.
+    if len == 0 && kind != FrameKind::Elided {
         return Decoded::Fault(FrameFault::BadLength(0));
     }
 
@@ -275,6 +285,33 @@ mod tests {
     fn a_zero_length_batch_payload_is_bad_length() {
         let mut buf = Vec::new();
         encode_frame(&mut buf, 1, FrameKind::Batch, b"");
+        assert_eq!(decode_frame(&buf), Decoded::Fault(FrameFault::BadLength(0)));
+    }
+
+    /// Task 2.15b.2: a `Records` frame (kind 3) round-trips like a `Batch` frame.
+    #[test]
+    fn a_records_frame_round_trips_as_kind_3() {
+        assert_eq!(FrameKind::Records as u8, 3);
+        let mut buf = Vec::new();
+        encode_frame(&mut buf, 11, FrameKind::Records, b"records");
+        assert_eq!(buf[16], 3);
+        assert_eq!(
+            decode_frame(&buf),
+            Decoded::Frame {
+                lsn: 11,
+                kind: FrameKind::Records,
+                payload: b"records",
+                frame_len: FRAME_HEADER_LEN + 7,
+            }
+        );
+    }
+
+    /// A `Records` payload always holds its 18-byte header, so a zero length is
+    /// corruption, as for `Batch`.
+    #[test]
+    fn a_zero_length_records_payload_is_bad_length() {
+        let mut buf = Vec::new();
+        encode_frame(&mut buf, 1, FrameKind::Records, b"");
         assert_eq!(decode_frame(&buf), Decoded::Fault(FrameFault::BadLength(0)));
     }
 

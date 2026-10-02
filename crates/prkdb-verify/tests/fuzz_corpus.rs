@@ -42,3 +42,36 @@ fn every_corpus_directory_has_an_entry_point() {
         );
     }
 }
+
+/// Task 2.15b.2: the frame and segment corpora hold `Records` frames (kind 3) that decode,
+/// so mutations of them reach the record batch decoder through both entry points.
+#[test]
+fn the_frame_corpora_hold_records_frames() {
+    use prkdb_core::wal::frame::{decode_frame, Decoded, FrameKind};
+    use prkdb_core::wal::records::RecordBatch;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus");
+    for name in ["frame_decode", "segment_scan"] {
+        let dir = root.join(name);
+        let mut records_frames = 0;
+        for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+            let bytes = std::fs::read(entry.expect("corpus entry").path()).expect("corpus file");
+            let mut rest = &bytes[..];
+            while let Decoded::Frame {
+                kind,
+                payload,
+                frame_len,
+                ..
+            } = decode_frame(rest)
+            {
+                if kind == FrameKind::Records && RecordBatch::decode(payload).is_ok() {
+                    records_frames += 1;
+                }
+                rest = &rest[frame_len..];
+            }
+        }
+        assert!(
+            records_frames >= 2,
+            "{name} holds {records_frames} decodable Records frames"
+        );
+    }
+}

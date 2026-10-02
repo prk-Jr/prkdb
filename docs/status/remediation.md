@@ -10,7 +10,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 |---|---|---|---|
 | 0 | Honesty and tracking | gate_passed | 6/6 |
 | 1 | Harness and baseline | gate_passed | 2/2 |
-| 2 | Format v2 and single-node root fixes | not_started | 0/23 |
+| 2 | Format v2 and single-node root fixes | not_started | 0/24 |
 | 3 | Semantics | not_started | 0/9 |
 | 4 | Raft | not_started | 0/15 |
 | 5 | Documentation and release | not_started | 0/9 |
@@ -47,6 +47,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | STO-07 | high | 2 | fixed | BatchAccumulator::flush() sleeps and returns Ok while dropping executor errors |
 | STO-10 | high | 2 | fixed | No data-directory lock: two processes can open and corrupt the same WAL |
 | STO-11 | high | 2 | fixed | decode_frame checks the frame kind before the CRC: a valid frame of an unknown kind is treated as a torn tail and the active segment is truncated |
+| STO-12 | high | 2 | fixed | Batch::encode accepts an uncompressed batch over MAX_PAYLOAD_LEN when it compresses small; the write is acknowledged and the next open fails with ReplayFailed |
 | TST-01 | high | 4 | open | Chaos monkey tolerates 20% of acknowledged writes missing |
 | TST-09 | high | 2 | fixed | Perf gate WAL benches count ~500 instructions: the WAL work is outside the measured region |
 | TST-11 | high | 2 | fixed | FaultFs::power_loss keeps the pre-crash synced baseline: a second power loss can resurrect data the first one lost |

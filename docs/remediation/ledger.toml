@@ -783,6 +783,22 @@ evidence = [
 regression_tests = ["test:crates/prkdb-core/tests/wal_log.rs::an_unknown_frame_kind_with_a_valid_crc_refuses_and_never_truncates", "test:crates/prkdb-core/tests/wal_log.rs::an_unknown_frame_kind_in_a_sealed_segment_is_unsupported_format", "test:crates/prkdb-core/tests/wal_log.rs::a_bad_crc_at_the_end_of_the_last_segment_is_still_a_torn_tail", "test:crates/prkdb-core/tests/wal_log.rs::scan_from_refuses_a_valid_frame_of_an_unknown_kind", "test:crates/prkdb/tests/tripwires.rs::sto11_valid_frame_of_unknown_kind_refuses_and_is_never_truncated", "test:crates/prkdb-core/src/wal/frame.rs::a_valid_frame_of_an_unknown_kind_is_unsupported_kind", "test:crates/prkdb-core/src/wal/frame.rs::an_unknown_kind_with_a_bad_crc_is_bad_crc"]
 changes = ["c4b2db5"]
 
+[[finding]]
+id = "STO-12"
+title = "Batch::encode accepts an uncompressed batch over MAX_PAYLOAD_LEN when it compresses small; the write is acknowledged and the next open fails with ReplayFailed"
+area = "storage"
+severity = "high"
+phase = 2
+status = "fixed"
+sources = ["external-review-2026-10-02"]
+evidence = [
+  "crates/prkdb-core/src/wal/batch.rs:124-150",
+  "crates/prkdb-core/src/wal/batch.rs:172-176",
+  "crates/prkdb-core/src/wal/log.rs:688-695",
+]
+regression_tests = ["test:crates/prkdb/tests/batch_size_limit.rs::sto12_a_batch_over_the_limit_is_refused_at_write_even_when_it_compresses_small", "test:crates/prkdb/tests/batch_size_limit.rs::sto12_a_batch_of_exactly_the_limit_round_trips_through_reopen", "test:crates/prkdb-core/src/wal/batch.rs::encode_refuses_a_raw_batch_the_decoder_would_refuse", "test:crates/prkdb-core/src/wal/batch.rs::a_raw_batch_of_exactly_the_limit_round_trips"]
+changes = ["7d823db"]
+
 [[phase]]
 id = 0
 title = "Honesty and tracking"

@@ -28,6 +28,7 @@ use prkdb::storage::WalStorageAdapter;
 use prkdb_core::vfs::StdVfs;
 use prkdb_core::wal::batch::{Batch, BatchOp};
 use prkdb_core::wal::frame::{decode_frame, encode_frame, Decoded, FrameKind, Lsn};
+use prkdb_core::wal::records::{Record, RecordBatch};
 use prkdb_core::wal::segment::{segment_file_name, SEGMENT_HEADER_LEN};
 use prkdb_core::wal::{CompressionConfig, CompressionType, RecordLoc, WalConfig};
 use prkdb_proto::raft;
@@ -176,11 +177,19 @@ fn frame_seeds() -> Result<Vec<Vec<u8>>> {
     let lz4 = encode(&big_batch(), CompressionType::Lz4)?;
     let mut two = frame(1, FrameKind::Batch, &plain);
     two.extend(frame(2, FrameKind::Elided, &[]));
+    let records = encode_records(&small_records(), CompressionType::None)?;
+    let records_lz4 = encode_records(&big_records(), CompressionType::Lz4)?;
+    let mut two_records = frame(4, FrameKind::Records, &records);
+    two_records.extend(frame(5, FrameKind::Records, &records_lz4));
     Ok(vec![
         frame(1, FrameKind::Batch, &plain),
         frame(7, FrameKind::Elided, &[]),
         frame(3, FrameKind::Batch, &lz4),
         two,
+        // Task 2.15b.2: kind-3 frames, as a stream directory holds them.
+        frame(4, FrameKind::Records, &records),
+        frame(6, FrameKind::Records, &records_lz4),
+        two_records,
     ])
 }
 
@@ -206,12 +215,87 @@ fn segment_seeds(real: &RealFiles) -> Result<Vec<Vec<u8>>> {
     let mut torn = two_batches.clone();
     let third = frame(3, FrameKind::Batch, &plain);
     torn.extend_from_slice(&third[..third.len() / 2]);
+    // Task 2.15b.2: a stream segment's body, whole and with a torn last frame.
+    let records = encode_records(&small_records(), CompressionType::None)?;
+    let records_lz4 = encode_records(&big_records(), CompressionType::Lz4)?;
+    let mut stream = frame(1, FrameKind::Records, &records);
+    stream.extend(frame(2, FrameKind::Records, &records_lz4));
+    let mut stream_torn = stream.clone();
+    let third = frame(3, FrameKind::Records, &records);
+    stream_torn.extend_from_slice(&third[..third.len() / 2]);
     Ok(vec![
         two_batches,
         with_elided,
         torn,
         real.segment[SEGMENT_HEADER_LEN as usize..].to_vec(),
         real.segment.clone(),
+        stream,
+        stream_torn,
+    ])
+}
+
+fn record(key: Option<&str>, value: &str, headers: &[(&str, &str)]) -> Record {
+    Record {
+        key: key.map(|k| k.as_bytes().to_vec()),
+        value: value.as_bytes().to_vec(),
+        headers: headers
+            .iter()
+            .map(|(n, v)| (n.to_string(), v.as_bytes().to_vec()))
+            .collect(),
+    }
+}
+
+/// Every combination of key and headers. A fixed time keeps the seeds deterministic.
+fn small_records() -> RecordBatch {
+    RecordBatch {
+        append_time_ms: 1_700_000_000_000,
+        records: vec![
+            record(Some("user:1"), "alice", &[("trace", "t-1"), ("v", "2")]),
+            record(None, "no key, no headers", &[]),
+            record(Some("user:2"), "bob", &[]),
+            record(None, "headers only", &[("source", "web")]),
+            record(Some(""), "", &[]),
+        ],
+    }
+}
+
+/// Large and repetitive enough to clear any compressor's threshold and actually shrink.
+fn big_records() -> RecordBatch {
+    RecordBatch {
+        append_time_ms: 1_700_000_000_500,
+        records: (0..40)
+            .map(|i| {
+                record(
+                    Some(&format!("order:{i:04}")),
+                    &"pending ".repeat(8),
+                    &[("source", "checkout")],
+                )
+            })
+            .collect(),
+    }
+}
+
+fn encode_records(batch: &RecordBatch, codec: CompressionType) -> Result<Vec<u8>> {
+    let cfg = if codec == CompressionType::None {
+        CompressionConfig::none()
+    } else {
+        compressed(codec)
+    };
+    Ok(batch.encode(&cfg)?)
+}
+
+/// Record batches: every codec, and the smallest batch (one empty record).
+fn records_seeds() -> Result<Vec<Vec<u8>>> {
+    let minimal = RecordBatch {
+        append_time_ms: 0,
+        records: vec![Record::default()],
+    };
+    Ok(vec![
+        encode_records(&small_records(), CompressionType::None)?,
+        encode_records(&big_records(), CompressionType::Lz4)?,
+        encode_records(&big_records(), CompressionType::Snappy)?,
+        encode_records(&big_records(), CompressionType::Zstd)?,
+        encode_records(&minimal, CompressionType::None)?,
     ])
 }
 
@@ -356,6 +440,7 @@ fn check_valid(target: &str, seeds: &[Vec<u8>]) -> Result<()> {
         let ok = match target {
             "frame_decode" => matches!(decode_frame(seed), Decoded::Frame { .. }),
             "batch_decode" => Batch::decode(seed).is_ok(),
+            "records_decode" => RecordBatch::decode(seed).is_ok(),
             "checkpoint_load" => decode_checkpoint(seed).is_ok(),
             "snapshot_restore" => parse_snapshot(seed).is_ok(),
             "snapshot_entries" => {
@@ -458,6 +543,7 @@ async fn main() -> Result<()> {
             "snapshot_restore" => snapshot_restore_seeds(&real),
             "file_decode" => file_decode_seeds(&real)?,
             "snapshot_entries" => real.backups.clone(),
+            "records_decode" => records_seeds()?,
             other => bail!("no seed generator for fuzz target {other}"),
         };
         check_valid(target, &seeds)?;
