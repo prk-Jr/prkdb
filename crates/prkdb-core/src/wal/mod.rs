@@ -125,6 +125,12 @@ pub enum WalError {
         max: usize,
     },
 
+    /// An append of an empty payload, refused before admission (STO-16): a frame of
+    /// length 0 reads back as a torn tail, so recovery would truncate it and every frame
+    /// after it.
+    #[error("empty record refused in {path}: a WAL record must hold at least one byte")]
+    EmptyRecord { path: std::path::PathBuf },
+
     #[error("WAL is poisoned by an earlier I/O failure and accepts no more writes: {0}")]
     Poisoned(String),
 

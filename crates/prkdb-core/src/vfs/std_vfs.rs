@@ -83,10 +83,27 @@ impl LockGuard for StdLock {}
 
 impl Drop for StdLock {
     fn drop(&mut self) {
-        // Close (release the OS lock) before the registry entry goes, so a thread that
-        // gets past the registry never meets this guard's still-open OS lock.
-        drop(self.file.take());
-        ProcessLocks::release(&self.key);
+        // Unlock explicitly, then close, then drop the registry entry, so a thread that
+        // gets past the registry never meets this guard's OS lock.
+        //
+        // Closing alone is not enough (STO-13). The OS lock belongs to the open file
+        // description, which every descriptor duplicated from ours shares, and a child
+        // process that another thread is spawning holds such a duplicate from its fork
+        // until its exec closes it (`O_CLOEXEC` takes effect only at the exec). Closing
+        // ours while a child is in that window left the lock held, and a reopen right
+        // after the drop was refused as `Locked`. An unlock releases the description's
+        // lock whichever descriptors are still open. If it fails, the close still
+        // releases it (eventually, once every duplicate is closed).
+        let error = ProcessLocks::release_after(&self.key, || {
+            self.file.take().and_then(|file| {
+                let error = file.unlock().err();
+                drop(file);
+                error
+            })
+        });
+        if let Some(error) = error {
+            tracing::warn!(%error, "explicit directory unlock failed; close releases the lock after inherited descriptors close");
+        }
     }
 }
 
@@ -129,11 +146,55 @@ struct ProcessLocks;
 
 static PROCESS_LOCKS: Mutex<Option<HashSet<LockKey>>> = Mutex::new(None);
 
+#[cfg(test)]
+#[derive(Debug)]
+enum AcquireObservation {
+    Acquired,
+    Contended,
+}
+#[cfg(test)]
+thread_local! {
+    // Only the regression's contender observes acquisition. Other test threads
+    // and all production acquisitions retain the ordinary blocking lock path.
+    static ACQUIRE_OBSERVER: std::cell::RefCell<Option<std::sync::mpsc::Sender<AcquireObservation>>> = const { std::cell::RefCell::new(None) };
+}
+
 impl ProcessLocks {
+    fn table() -> std::sync::MutexGuard<'static, Option<HashSet<LockKey>>> {
+        #[cfg(test)]
+        if let Some(observer) = ACQUIRE_OBSERVER.with(|slot| slot.borrow().clone()) {
+            match PROCESS_LOCKS.try_lock() {
+                Ok(table) => {
+                    let _ = observer.send(AcquireObservation::Acquired);
+                    return table;
+                }
+                Err(std::sync::TryLockError::Poisoned(error)) => {
+                    let table = error.into_inner();
+                    let _ = observer.send(AcquireObservation::Acquired);
+                    return table;
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    let _ = observer.send(AcquireObservation::Contended);
+                }
+            }
+        }
+        PROCESS_LOCKS.lock().unwrap_or_else(|p| p.into_inner())
+    }
     /// `false` if this process already holds `key`.
     fn acquire(key: &LockKey) -> bool {
-        let mut set = PROCESS_LOCKS.lock().unwrap_or_else(|p| p.into_inner());
+        let mut set = Self::table();
         set.get_or_insert_with(HashSet::new).insert(key.clone())
+    }
+
+    fn release_after<T>(key: &LockKey, retire: impl FnOnce() -> T) -> T {
+        // The final close can make an unlinked inode available for reuse. Do not
+        // let a new owner inspect its identity until the old entry is removed.
+        let mut set = Self::table();
+        let result = retire();
+        if let Some(set) = set.as_mut() {
+            set.remove(key);
+        }
+        result
     }
 
     fn release(key: &LockKey) {
@@ -197,6 +258,11 @@ impl Vfs for StdVfs {
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
         #[cfg(unix)]
         {
+            let dir = if dir.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                dir
+            };
             File::open(dir)?.sync_all()
         }
         #[cfg(not(unix))]
@@ -206,35 +272,40 @@ impl Vfs for StdVfs {
         }
     }
     fn lock_exclusive(&self, path: &Path) -> io::Result<Box<dyn LockGuard>> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)?;
-        let key = LockKey::of(&file, path)?;
-        if !ProcessLocks::acquire(&key) {
-            return Err(held(path));
-        }
-        if let Err(e) = file.try_lock() {
-            ProcessLocks::release(&key);
-            return Err(match e {
-                fs::TryLockError::WouldBlock => held(path),
-                fs::TryLockError::Error(e) => e,
-            });
-        }
-        // Who holds it, for the refusal message only: best effort and never synced, so a
-        // failure here does not fail the lock, and a reader treats anything unparsable as
-        // "unknown".
-        let pid = format!("{}\n", std::process::id());
-        if file.set_len(0).is_ok() {
-            let _ = io::Write::write_all(&mut &file, pid.as_bytes());
-        }
-        Ok(Box::new(StdLock {
-            file: Some(file),
-            key,
-        }))
+        Ok(Box::new(lock_file(path)?))
     }
+}
+
+/// [`Vfs::lock_exclusive`] for [`StdVfs`], unboxed so the tests can reach the file.
+fn lock_file(path: &Path) -> io::Result<StdLock> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    let key = LockKey::of(&file, path)?;
+    if !ProcessLocks::acquire(&key) {
+        return Err(held(path));
+    }
+    if let Err(e) = file.try_lock() {
+        ProcessLocks::release(&key);
+        return Err(match e {
+            fs::TryLockError::WouldBlock => held(path),
+            fs::TryLockError::Error(e) => e,
+        });
+    }
+    // Who holds it, for the refusal message only: best effort and never synced, so a
+    // failure here does not fail the lock, and a reader treats anything unparsable as
+    // "unknown".
+    let pid = format!("{}\n", std::process::id());
+    if file.set_len(0).is_ok() {
+        let _ = io::Write::write_all(&mut &file, pid.as_bytes());
+    }
+    Ok(StdLock {
+        file: Some(file),
+        key,
+    })
 }
 
 #[cfg(test)]
@@ -269,5 +340,70 @@ mod tests {
         drop(guard);
         assert!(!ProcessLocks::holds(&key));
         drop(StdVfs.lock_exclusive(&path).unwrap());
+    }
+
+    /// Dropping the guard releases the lock even while another descriptor of the same
+    /// open file description is still open. That is what a child process spawned on
+    /// another thread holds between its fork and its exec: it inherits every descriptor,
+    /// `O_CLOEXEC` ones included until the exec, and a `flock` belongs to the open file
+    /// description, not the descriptor. Closing ours alone left the lock held until the
+    /// child exec'd, so a reopen right after a drop was refused as locked (STO-13).
+    #[test]
+    fn dropping_the_guard_releases_the_lock_while_a_duplicate_descriptor_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("LOCK");
+        let guard = lock_file(&path).unwrap();
+        // The child's inherited copy: the same open file description.
+        let inherited = guard.file.as_ref().unwrap().try_clone().unwrap();
+        drop(guard);
+        let reopened = StdVfs.lock_exclusive(&path);
+        drop(inherited);
+        assert!(
+            reopened.is_ok(),
+            "the lock outlived its guard: {:?}",
+            reopened.err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_reused_file_identity_is_not_refused_while_the_old_guard_retires() {
+        // Represent a new lock inode reusing a retired inode's identity. No filesystem
+        // allocation timing is involved; exercise the actual registry handoff.
+        let key = LockKey::Inode {
+            dev: u64::MAX,
+            ino: u64::MAX,
+        };
+        assert!(ProcessLocks::acquire(&key));
+        let (retiring_tx, retiring_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|threads| {
+            let retiring_key = key.clone();
+            let retiring = threads.spawn(move || {
+                ProcessLocks::release_after(&retiring_key, || {
+                    retiring_tx.send(()).unwrap();
+                    finish_rx.recv().unwrap();
+                });
+            });
+            retiring_rx.recv().unwrap();
+            let contender = threads.spawn(|| {
+                ACQUIRE_OBSERVER.with(|slot| *slot.borrow_mut() = Some(observed_tx));
+                let acquired = ProcessLocks::acquire(&key);
+                ACQUIRE_OBSERVER.with(|slot| *slot.borrow_mut() = None);
+                acquired
+            });
+            // Acquired carries a retained table guard; Contended precedes its blocking
+            // acquisition. Either marker fixes the schedule before retirement ends.
+            let observation = observed_rx.recv().unwrap();
+            finish_tx.send(()).unwrap();
+            retiring.join().unwrap();
+            let acquired = contender.join().unwrap();
+            ProcessLocks::release(&key);
+            assert!(
+                acquired,
+                "fresh lock identity spuriously refused during retirement: {observation:?}"
+            );
+        });
     }
 }

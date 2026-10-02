@@ -40,6 +40,7 @@ use crate::storage::WalStorageAdapter;
 use prkdb_types::error::StorageError;
 use prkdb_types::storage::StorageAdapter;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
@@ -160,32 +161,36 @@ impl TtlIndex {
 
 /// Storage wrapper that adds TTL support
 ///
-/// Wraps any `WalStorageAdapter` to add time-to-live functionality.
+/// Wraps a storage adapter (by default `WalStorageAdapter`) to add time-to-live
+/// functionality.
 /// TTL metadata is stored alongside the data, and expired records
 /// are automatically filtered on read.
-pub struct TtlStorage {
+pub struct TtlStorage<S: StorageAdapter + 'static = WalStorageAdapter> {
     /// Underlying storage
-    storage: Arc<WalStorageAdapter>,
+    storage: Arc<S>,
     /// TTL index (in-memory)
     index: Arc<RwLock<TtlIndex>>,
     /// Cleanup task handle
     cleanup_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Set to stop the cleanup task at its next key (see [`TtlStorage::start_cleanup`]).
+    cleanup_stop: Arc<AtomicBool>,
     /// Source of the current time for every expiry decision
     clock: Clock,
 }
 
-impl TtlStorage {
+impl<S: StorageAdapter + 'static> TtlStorage<S> {
     /// Create a new TTL-aware storage wrapper
-    pub fn new(storage: Arc<WalStorageAdapter>) -> Self {
+    pub fn new(storage: Arc<S>) -> Self {
         Self::with_clock(storage, system_clock())
     }
 
     /// Create a wrapper whose expiry decisions read `clock` instead of the system clock.
-    fn with_clock(storage: Arc<WalStorageAdapter>, clock: Clock) -> Self {
+    fn with_clock(storage: Arc<S>, clock: Clock) -> Self {
         Self {
             storage,
             index: Arc::new(RwLock::new(TtlIndex::new())),
             cleanup_handle: None,
+            cleanup_stop: Arc::default(),
             clock,
         }
     }
@@ -197,8 +202,23 @@ impl TtlStorage {
     /// Start background cleanup task
     ///
     /// Periodically removes expired records from storage.
+    ///
+    /// The task holds the storage only weakly, and strongly only for the two deletes of one
+    /// expired key (the record and its metadata): it never keeps the adapter (or its
+    /// data-directory lock) alive between keys or ticks (STO-13).
+    ///
+    /// [`Self::stop_cleanup`], and so dropping the `TtlStorage`, stops the task: it sets a
+    /// flag the task checks before every key, and aborts it. `Drop` cannot join the task
+    /// (it may run on a runtime thread, and the task needs one), so it does not wait: a
+    /// tick that is between keys, or whose deletes never yield, stops at the next key; one
+    /// parked in a delete has that delete dropped, unfinished, when the runtime next runs
+    /// the cancelled task. Either way the adapter is released then, without waiting for the
+    /// rest of the tick.
     pub fn start_cleanup(&mut self, interval: Duration) {
-        let storage = self.storage.clone();
+        self.stop_cleanup();
+        self.cleanup_stop = Arc::default();
+        let stop = self.cleanup_stop.clone();
+        let storage = Arc::downgrade(&self.storage);
         let index = self.index.clone();
         let clock = self.clock.clone();
 
@@ -213,8 +233,15 @@ impl TtlStorage {
                     idx.cleanup_index(clock())
                 };
 
-                // Delete expired keys from storage
+                // Delete expired keys from storage, holding the storage for one key at a
+                // time.
                 for key in expired_keys {
+                    if stop.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let Some(storage) = storage.upgrade() else {
+                        return;
+                    };
                     let _ = storage.delete(&key).await;
                     // Also delete TTL metadata
                     let meta_key = Self::ttl_meta_key(&key);
@@ -227,7 +254,11 @@ impl TtlStorage {
     }
 
     /// Stop background cleanup task
+    ///
+    /// Does not wait for the task; see [`Self::start_cleanup`] for when it lets go of the
+    /// storage.
     pub fn stop_cleanup(&mut self) {
+        self.cleanup_stop.store(true, Ordering::Release);
         if let Some(handle) = self.cleanup_handle.take() {
             handle.abort();
         }
@@ -404,12 +435,12 @@ impl TtlStorage {
     }
 
     /// Get underlying storage
-    pub fn inner(&self) -> &Arc<WalStorageAdapter> {
+    pub fn inner(&self) -> &Arc<S> {
         &self.storage
     }
 }
 
-impl Drop for TtlStorage {
+impl<S: StorageAdapter + 'static> Drop for TtlStorage<S> {
     fn drop(&mut self) {
         self.stop_cleanup();
     }

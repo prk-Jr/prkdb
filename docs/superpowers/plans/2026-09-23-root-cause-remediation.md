@@ -3556,8 +3556,9 @@ pub enum SyncMode {
     /// Ack after the group-commit batch containing the write is fsynced.
     #[default]
     Durable,
-    /// Ack after the write reaches the OS; synced at least every `sync_interval_ms`.
-    /// A power cut can lose up to `sync_interval_ms` of acknowledged writes.
+    /// Ack after the write reaches the OS; `sync_interval_ms` is a sync target.
+    /// A power cut may lose acknowledged writes above `durable_lsn`; the interval
+    /// is not a hard loss-window bound. A completed sync/flush persists the prefix.
     Fast,
 }
 ```
@@ -3699,7 +3700,7 @@ impl Wal {
 
 **Invariants the implementation must hold (each has a test below):**
 1. LSNs are assigned by the writer, contiguous from 1, one per `append`. Replay visits them in LSN order.
-2. Durable: the frame is `sync_data`ed before its hook runs and before the caller is answered. Fast: the frame is written before; it is synced within `sync_interval` even if no further writes arrive (the writer waits with `recv_timeout(remaining interval)` while it holds unsynced data) **and** even if writes never stop (after every Fast batch write the writer checks the interval and syncs inline when it has elapsed — a saturated writer never reaches the idle `recv_timeout` branch).
+2. Durable: the frame is `sync_data`ed before its hook runs and before the caller is answered. Fast: the frame is written before; a sync is attempted at the next writer opportunity after the `sync_interval` target even if no further writes arrive (the writer waits with `recv_timeout(remaining interval)` while it holds unsynced data) **and** even if writes never stop (after every Fast batch write the writer checks the interval and syncs inline when it has elapsed — a saturated writer never reaches the idle `recv_timeout` branch).
 3. Hooks run on the writer thread in LSN order.
 4. Any I/O error, or a panicking hook, **poisons** the log: the failing batch and every later append get `WalError::Poisoned` (each hook runs under its own `catch_unwind`; on a panic, that item and the rest of its batch are answered `Poisoned`, items answered before it keep `Ok`; a request held over in the writer's `pending` slot, or still unconsumed in a `Close`-triggered chunked drain, is answered `Poisoned`, never left to fall through to a bare `Closed` via `Reply`'s drop guard); a failed `fsync` is never retried (fsyncgate); `health()` reports `Poisoned`. The writer body runs under `catch_unwind` so a panic becomes poisoning, and remaining queued requests are answered, never dropped silently (each request's `oneshot` sender sits in a struct whose `Drop` sends `Err(Closed)`, mirroring today's `PendingWrite`).
 5. A batch never spans segments. Roll when the next batch would push the active segment past `segment_bytes` (a batch larger than `segment_bytes` gets a segment of its own): `sync_data` the old segment, `create` `{next_lsn:020}.wal`, write and `sync_data` its header, `sync_dir(dir)`, switch. The roll's sync of the old segment advances `durable_lsn` (`fetch_max`) to that segment's last LSN immediately, in every `SyncMode` — otherwise a Fast-mode `durable_lsn` reader would lag behind what a crash right now would actually still keep, until the next periodic or explicit sync.
@@ -6903,6 +6904,8 @@ Spec §8: "No `let _ =` on durability, commit, or offset paths. Enforced by a cl
 ```
 
 Inner attributes in `lib.rs` cover the library and its `#[cfg(test)]` modules, not `tests/`, `benches/` or `examples/` (70 `let _ =` in `crates/prkdb/{tests,benches,examples}` today are test scaffolding, out of scope). `let_underscore_must_use` is in clippy's restriction group and `let_underscore_future` warns by default; `deny` makes both errors under the existing `cargo clippy --workspace --all-targets -- -D warnings`.
+**Carried over from the storage review (L3):** `RecoveryManager::create_backup` still copies files with `std::fs` without durable file/directory barriers and bypasses its VFS. Task 2.8a intentionally left it unchanged. Audit this backup path here, before the phase gate: define a consistent source snapshot or refuse an unsupported live copy, route filesystem operations through the VFS, persist the backup and its ancestry before reporting success, and propagate failures. Acceptance: `test:crates/prkdb/tests/backup_durability.rs::a_completed_backup_survives_power_loss_after_source_removal` and `::a_backup_durability_failure_is_reported`; cover source compaction/write concurrency without presenting a mixed snapshot as a successful backup. Fixing commit: open.
+
 - [ ] **Step 3: Audit each site in the listed files.** For each `let _ = expr;` that clippy now rejects, one of:
   - **propagate** (`expr?`) — the default on durability, commit and offset paths;
   - **handle and log** — `if let Err(e) = expr { tracing::warn!/error!(…) }` where nobody can receive the error (e.g. `Drop`, a background task with no caller), naming the consequence;
@@ -7016,7 +7019,7 @@ exit "$fail"
   - [x] `CollectionPartitionedAdapter::collection_names` is async and returns a `Result` (it reads the catalog); `PrkDb` per-partition figures (`get_partitions`, `get_partition_metrics`, `get_partition_details`, `get_collection_latest_offset`) come from the outbox event ids `{name}:{partition}:{seq}`, i.e. events not yet drained, until Task 2.20 (Task 2.12).
   - [x] `IndexedStorage::all`/`filter`/`paginate`/`find_*`/aggregates read a collection with `StorageAdapter::scan_prefix`, and `count` with the new `count_prefix` (default: `scan_prefix().len()`): a third-party adapter that does not implement `scan_prefix` cannot list an `IndexedStorage` collection (Task 2.12, review M2).
   - [x] New gRPC `PutRecord` (collection, string id, value; `Write` permission) for name-addressed writes, used by `prkdb collection put` (Task 2.12, review H2).
-  - [ ] Fast mode: a power cut can lose up to `sync_interval` of acknowledged writes, and the sequence of an event lost that way may be reused by a later event; a consumer that read the lost event is ahead of the log (Task 2.21).
+  - [ ] Fast mode: `sync_interval` is a target; a power cut can lose acknowledged writes above `durable_lsn`, and the sequence of an event lost that way may be reused by a later event; a consumer that read the lost event is ahead of the log (Task 2.21).
   - [ ] A server whose schema registry cannot be loaded refuses to start instead of starting empty (Task 2.22).
 
 # Phase 6 — AI

@@ -114,10 +114,12 @@ impl Builder {
 
     /// When a write is acknowledged, for the WAL a `with_data_dir` or
     /// `with_optimized_storage` database builds. Default [`SyncMode::Durable`]; `Fast`
-    /// acknowledges once the write reaches the OS and can lose up to `sync_interval_ms` of
-    /// acknowledged writes to a power cut.
+    /// acknowledges once the write reaches the OS, and a power cut can lose any write
+    /// acknowledged since the last completed sync. Syncs start about every
+    /// `sync_interval_ms`, but that is a target, not a bound: see [`SyncMode::Fast`].
     ///
     /// [`SyncMode::Durable`]: prkdb_core::wal::SyncMode::Durable
+    /// [`SyncMode::Fast`]: prkdb_core::wal::SyncMode::Fast
     pub fn with_sync_mode(mut self, mode: prkdb_core::wal::SyncMode) -> Self {
         self.sync_mode = mode;
         self

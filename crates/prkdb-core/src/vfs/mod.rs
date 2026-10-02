@@ -54,7 +54,8 @@ pub trait Vfs: Send + Sync {
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>>;
     fn exists(&self, path: &Path) -> io::Result<bool>;
     /// Durably persists directory entry changes (creates, renames, removes) in
-    /// `dir`. Best-effort no-op on non-Unix platforms.
+    /// `dir`. An empty path denotes the VFS working directory (the parent of a
+    /// relative single-component path). Best-effort no-op on non-Unix platforms.
     fn sync_dir(&self, dir: &Path) -> io::Result<()>;
     /// Takes an exclusive advisory lock on `path`, creating the file if it is missing
     /// (its parent must exist), without blocking. The lock excludes every other
@@ -73,6 +74,31 @@ pub trait Vfs: Send + Sync {
 
 /// Holds a [`Vfs::lock_exclusive`] lock; dropping it releases the lock.
 pub trait LockGuard: Send + Sync {}
+
+/// Creates `dir` and missing ancestors, then persists every ancestor entry.
+///
+/// Existence is not proof of durability: an earlier open may have failed after mkdir
+/// but before its parent sync, or a concurrent opener may still be between those steps.
+/// Therefore existing entries need the same parent barriers as newly created ones
+/// (STO-16). Absolute paths are anchored at the filesystem root; relative paths at the
+/// VFS working directory, represented by the empty parent path. All errors propagate,
+/// including errors syncing an existing ancestor. This may require readable ancestors
+/// on `StdVfs`. No append is acknowledged by an opener before these barriers succeed.
+pub fn create_dir_all_durable(vfs: &dyn Vfs, dir: &Path) -> io::Result<()> {
+    let ancestors: Vec<_> = dir
+        .ancestors()
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect();
+    for entry in ancestors.into_iter().rev() {
+        if !vfs.exists(entry)? {
+            vfs.create_dir_all(entry)?;
+        }
+        if let Some(parent) = entry.parent() {
+            vfs.sync_dir(parent)?;
+        }
+    }
+    Ok(())
+}
 
 /// Shared conformance tests; every `Vfs` implementation must pass them.
 ///
