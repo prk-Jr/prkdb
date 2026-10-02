@@ -178,6 +178,11 @@ impl FaultSut {
                 sync_interval_ms,
                 ..WalConfig::test_config()
             },
+            // Compaction drops every delete it may, so `Compact` exercises dropping them.
+            compaction: prkdb::storage::CompactionConfig {
+                tombstone_retention_lsns: 0,
+                ..Default::default()
+            },
             ..StorageConfig::default()
         }
     }
