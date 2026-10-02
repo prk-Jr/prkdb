@@ -72,7 +72,7 @@ impl Kind {
 
 enum MarkerParseError {
     Invalid,
-    UnknownKind(String),
+    UnknownKind { kind: String, format: u32 },
 }
 
 /// The contents of a data directory's `FORMAT` file.
@@ -156,17 +156,21 @@ impl FormatMarker {
                         value
                     };
                     kind = Some(match value {
-                        "kv" => Kind::Kv,
-                        "stream" => Kind::Stream,
-                        unknown => return Err(MarkerParseError::UnknownKind(unknown.to_string())),
+                        "kv" => Ok(Kind::Kv),
+                        "stream" => Ok(Kind::Stream),
+                        unknown => Err(unknown.to_string()),
                     });
                 }
                 _ => {}
             }
         }
+        let format = format.ok_or(MarkerParseError::Invalid)?;
+        let kind = kind
+            .unwrap_or(Ok(Kind::Kv))
+            .map_err(|kind| MarkerParseError::UnknownKind { kind, format })?;
         Ok(Self {
-            format: format.ok_or(MarkerParseError::Invalid)?,
-            kind: kind.unwrap_or_default(),
+            format,
+            kind,
             created_by: created_by.unwrap_or_default(),
         })
     }
@@ -262,8 +266,11 @@ pub fn read_format_with(vfs: &dyn Vfs, dir: &Path) -> Result<Option<FormatMarker
         .map(Some)
         .map_err(|e| match e {
             MarkerParseError::Invalid => unreadable(),
-            MarkerParseError::UnknownKind(kind) => StorageError::UnsupportedFormat(format!(
-                "data directory {} has unsupported kind {kind:?}",
+            MarkerParseError::UnknownKind { format, .. } if format != FORMAT_VERSION => {
+                unsupported_format(dir, format)
+            }
+            MarkerParseError::UnknownKind { kind, .. } => StorageError::UnsupportedFormat(format!(
+                "data directory {} has unsupported kind {kind:?}; supported kinds are \"kv\" and \"stream\"",
                 dir.display()
             )),
         })
@@ -470,6 +477,21 @@ mod tests {
         ] {
             assert_eq!(FormatMarker::parse(text), None);
         }
+    }
+
+    #[test]
+    fn unknown_kind_errors_name_supported_kinds_and_prioritize_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FORMAT_FILE);
+        std::fs::write(&path, "format = 2\nkind = \"table\"\n").unwrap();
+        let error = read_format(dir.path()).unwrap_err().to_string();
+        assert!(
+            error.contains("kind \"table\"") && error.contains("kv") && error.contains("stream"),
+            "{error}"
+        );
+        std::fs::write(&path, "kind = \"table\"\nformat = 3\n").unwrap();
+        let error = read_format(dir.path()).unwrap_err().to_string();
+        assert!(error.contains("newer PrkDB (format 3)"), "{error}");
     }
 
     #[test]

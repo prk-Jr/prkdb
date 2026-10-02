@@ -619,7 +619,7 @@ jobs:
     # honour rust-toolchain.toml; it builds only the `fuzz/` crate (excluded from the
     # workspace), never the gated workspace. The same entry points run on the pinned
     # toolchain in every PR through `prkdb-verify`'s `fuzz_corpus` test, over the same
-    # seeds. Eleven targets x 3 minutes plus a cold sanitizer build fits inside 60.
+    # seeds. Twelve targets x 3 minutes plus a cold sanitizer build fits inside 60.
     timeout-minutes: 60
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
@@ -644,7 +644,7 @@ jobs:
       - name: Run each target for 3 minutes
         run: |
           set -euo pipefail
-          for t in frame_decode batch_decode segment_scan checkpoint_load proto_decode key_decode format_parse snapshot_restore file_decode snapshot_entries records_decode; do
+          for t in frame_decode batch_decode segment_scan checkpoint_load proto_decode key_decode format_parse snapshot_restore file_decode snapshot_entries records_decode stream_manifest_parse; do
             mkdir -p "$RUNNER_TEMP/corpus/$t"
             cargo +nightly fuzz run "$t" "$RUNNER_TEMP/corpus/$t" "fuzz/corpus/$t" -- -max_total_time=180
           done

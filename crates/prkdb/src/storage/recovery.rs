@@ -2,8 +2,8 @@
 //! backups for the single WAL.
 //!
 //! Recovery is [`open_and_recover`], which every constructor runs: load the newest valid
-//! index checkpoint, then `Wal::open` with `replay_from = covered + 1`. `Wal::open` still
-//! scans and CRC-checks every segment whether or not a checkpoint was loaded, so a torn
+//! index checkpoint, then `Wal::open` validating every frame kind and applying only
+//! frames above the checkpoint. It scans and CRC-checks every segment, so a torn
 //! tail on the last segment is truncated and corruption anywhere earlier refuses the open
 //! naming the file (STO-04), exactly as without a checkpoint. A checkpoint that turns out
 //! invalid is ignored with a warning naming the file, and recovery falls back to an older
@@ -51,6 +51,11 @@ fn apply_frame(
     kind: FrameKind,
     payload: &[u8],
 ) -> Result<(), WalError> {
+    if kind == FrameKind::Records {
+        return Err(WalError::Corruption(
+            "key/value directory contains a Records frame".into(),
+        ));
+    }
     if kind != FrameKind::Batch {
         return Ok(());
     }
@@ -97,8 +102,8 @@ fn load_into(index: &Index, checkpoint: Decoded, stats: &mut RecoveryStats) -> L
 /// 1. Checkpoints are listed newest first; the first one that reads and decodes (CRC,
 ///    magic, format, entry sanity, name matches contents) is loaded into the index. Ones
 ///    that do not are rejected.
-/// 2. `Wal::open(replay_from = covered + 1)` scans every segment and replays the frames
-///    after the checkpoint on top of it (`replay_from = 1` without one).
+/// 2. `Wal::open` scans every segment and validates every frame kind, including frames
+///    covered by the checkpoint. Only frames after it are applied to the index.
 /// 3. The loaded checkpoint's locations are checked against the opened log
 ///    ([`checkpoint::validate_against_log`]). If that fails, the index is cleared and
 ///    rebuilt from the next older checkpoint that passes, or from a full replay, by
@@ -138,16 +143,17 @@ pub(crate) fn open_and_recover(
     }
 
     let mut replayed = 0u64;
-    let (wal, report) = Wal::open(
-        vfs.clone(),
-        log_dir,
-        opts,
-        replay_from,
-        &mut |loc, kind, payload| {
-            replayed += 1;
-            apply_frame(index, loc, kind, payload)
-        },
-    )?;
+    let (wal, report) = Wal::open(vfs.clone(), log_dir, opts, 1, &mut |loc, kind, payload| {
+        // A checkpoint skips index application, never frame-kind validation.
+        // Records in a keyed log must refuse even when covered by the checkpoint.
+        if kind == FrameKind::Records || loc.lsn >= replay_from {
+            if loc.lsn >= replay_from {
+                replayed += 1;
+            }
+            apply_frame(index, loc, kind, payload)?;
+        }
+        Ok(())
+    })?;
     stats.frames_replayed = replayed;
     stats.frames_scanned = report.frames;
     stats.truncated = report

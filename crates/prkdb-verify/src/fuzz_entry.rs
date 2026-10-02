@@ -25,7 +25,7 @@ use std::path::Path;
 pub type EntryPoint = fn(&[u8]);
 
 /// Every entry point, by the name of its cargo-fuzz target and seed-corpus directory.
-pub const TARGETS: [(&str, EntryPoint); 11] = [
+pub const TARGETS: [(&str, EntryPoint); 12] = [
     ("frame_decode", frame_decode),
     ("batch_decode", batch_decode),
     ("segment_scan", segment_scan),
@@ -37,6 +37,7 @@ pub const TARGETS: [(&str, EntryPoint); 11] = [
     ("file_decode", file_decode),
     ("snapshot_entries", snapshot_entries),
     ("records_decode", records_decode),
+    ("stream_manifest_parse", stream_manifest_parse),
 ];
 
 /// Decodes a frame's payload as its kind says, as recovery (`Batch`) and a stream
@@ -256,4 +257,16 @@ pub fn records_decode(data: &[u8]) {
         Some(&batch),
         "a re-encoded batch decodes differently"
     );
+}
+
+/// STREAM manifest: mutate both the CRC and the checked fields behind it.
+pub fn stream_manifest_parse(data: &[u8]) {
+    with_fixed(data, fix_checkpoint_crc, |bytes| {
+        if let Ok(manifest) = prkdb::stream_log::manifest::StreamManifest::decode(bytes) {
+            assert_eq!(
+                manifest.encode().expect("a decoded manifest re-encodes"),
+                bytes
+            );
+        }
+    });
 }

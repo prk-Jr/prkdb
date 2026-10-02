@@ -330,7 +330,10 @@ pub(crate) mod fault_injection {
 
     #[cfg(test)]
     mod tests {
+        use super::super::{queued_wal_err, wal_err};
         use super::*;
+        use prkdb_core::wal::WalError;
+        use prkdb_types::error::StorageError;
 
         #[test]
         fn invalid_record_batches_are_validation_errors() {

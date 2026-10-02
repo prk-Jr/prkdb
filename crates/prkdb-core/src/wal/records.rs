@@ -75,6 +75,13 @@ pub const RECORDS_VERSION: u8 = 1;
 pub const MAX_RECORDS: usize = 1 << 16;
 /// `version(1) + codec(1) + raw_len(4) + append_time_ms(8) + count(4)`.
 pub const RECORDS_HEADER_LEN: usize = 18;
+/// The most headers one batch holds, over all its records: 2²⁰, 16 per record at 65,536
+/// records. It bounds what a batch decodes to: each header is a 48-byte `(String,
+/// Vec<u8>)` however small it is encoded (6 bytes), so without it a 64 MiB body of
+/// empty headers decodes to ~535 MB of tuple storage; at the budget that storage is
+/// ~50 MB on a 64-bit platform. Owned names/values, allocator overhead, records and
+/// decode buffers add memory. Measurements: streaming log design note §4.2.
+pub const MAX_HEADERS_PER_BATCH: usize = 1 << 20;
 
 const FLAG_HAS_KEY: u8 = 0b01;
 const FLAG_HAS_HEADERS: u8 = 0b10;
@@ -159,6 +166,8 @@ fn read_header(bytes: &[u8]) -> Result<Header, WalError> {
 struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
+    /// Headers still allowed in this batch (`MAX_HEADERS_PER_BATCH` at the start).
+    headers_left: usize,
 }
 
 impl<'a> Reader<'a> {
@@ -229,6 +238,12 @@ impl<'a> Reader<'a> {
                 "record {i}: has_headers with header_count 0"
             )));
         }
+        // Before any of them is allocated.
+        self.headers_left = self.headers_left.checked_sub(count).ok_or_else(|| {
+            malformed(format!(
+                "record {i}: more than {MAX_HEADERS_PER_BATCH} headers in the batch"
+            ))
+        })?;
         let mut headers = Vec::with_capacity(count.min(self.remaining() / MIN_HEADER_LEN));
         for _ in 0..count {
             let name_len = self.u16(i, "header name length")? as usize;
@@ -313,7 +328,15 @@ impl RecordBatch {
             )));
         }
         let mut len = 0usize;
+        let mut headers = 0usize;
         for (i, record) in self.records.iter().enumerate() {
+            headers = headers.saturating_add(record.headers.len());
+            if headers > MAX_HEADERS_PER_BATCH {
+                return Err(invalid(format!(
+                    "{headers} headers in the batch; a batch holds at most \
+                     {MAX_HEADERS_PER_BATCH}"
+                )));
+            }
             len = len.saturating_add(record.encoded_len(i)?);
             if len > MAX_PAYLOAD_LEN {
                 // What decode would refuse (STO-12), whatever it compresses to.
@@ -395,7 +418,11 @@ impl RecordBatch {
             )));
         }
 
-        let mut reader = Reader { buf: &raw, pos: 0 };
+        let mut reader = Reader {
+            buf: &raw,
+            pos: 0,
+            headers_left: MAX_HEADERS_PER_BATCH,
+        };
         let mut records = Vec::with_capacity(header.count.min(raw.len() / MIN_RECORD_LEN));
         for i in 0..header.count {
             records.push(reader.record(i)?);
@@ -881,6 +908,100 @@ mod tests {
         at_limit.records[0].headers.pop();
         let bytes = at_limit.encode(&none()).unwrap();
         assert_eq!(RecordBatch::decode(&bytes).unwrap(), at_limit);
+    }
+
+    /// A body of `records` records with no key and an empty value, record `i` carrying
+    /// `headers[i]` empty headers (6 bytes each): the cheapest way to encode many headers.
+    fn header_body(headers: &[usize]) -> Vec<u8> {
+        let mut body = Vec::new();
+        for &n in headers {
+            body.extend_from_slice(&[FLAG_HAS_HEADERS, 0, 0, 0, 0]);
+            body.extend_from_slice(&(n as u16).to_le_bytes());
+            body.extend(std::iter::repeat_n([0u8; MIN_HEADER_LEN], n).flatten());
+        }
+        body
+    }
+
+    /// `n` headers spread over records of at most 65,535 each.
+    fn header_counts(n: usize) -> Vec<usize> {
+        let mut counts = vec![u16::MAX as usize; n / u16::MAX as usize];
+        if !n.is_multiple_of(u16::MAX as usize) {
+            counts.push(n % u16::MAX as usize);
+        }
+        counts
+    }
+
+    /// 2.15b.2 review: a 64 MiB body holds ~11M minimum-size headers, which decode to
+    /// ~0.5 GB of `(String, Vec<u8>)`. A batch holds at most `MAX_HEADERS_PER_BATCH`
+    /// headers in all: `encode` refuses more, and so does `decode`, before it allocates
+    /// the header past the budget.
+    #[test]
+    fn a_batch_over_the_header_budget_is_refused_at_encode_and_decode() {
+        assert_eq!(MAX_HEADERS_PER_BATCH, 1 << 20);
+        let batch = |n: usize| RecordBatch {
+            append_time_ms: 0,
+            records: header_counts(n)
+                .into_iter()
+                .map(|count| Record {
+                    headers: vec![(String::new(), Vec::new()); count],
+                    ..Record::default()
+                })
+                .collect(),
+        };
+
+        let at = batch(MAX_HEADERS_PER_BATCH);
+        let bytes = at.encode(&none()).unwrap();
+        assert_eq!(RecordBatch::decode(&bytes).unwrap(), at);
+        drop(at);
+
+        let err = batch(MAX_HEADERS_PER_BATCH + 1)
+            .encode(&none())
+            .unwrap_err();
+        assert!(
+            matches!(&err, WalError::InvalidRecords(m) if m.contains("1048577 headers")),
+            "{err}"
+        );
+
+        let counts = header_counts(MAX_HEADERS_PER_BATCH + 1);
+        let body = header_body(&counts);
+        let err = decode_err(&plain(counts.len() as u32, &body));
+        assert!(err.contains("more than 1048576 headers"), "{err}");
+    }
+
+    #[test]
+    fn compressed_batches_cannot_bypass_the_header_budget() {
+        let counts = header_counts(MAX_HEADERS_PER_BATCH + 1);
+        let body = header_body(&counts);
+        let mut payload = Vec::new();
+        RecordBatch {
+            append_time_ms: 0,
+            records: Vec::new(),
+        }
+        .write_header(&mut payload, CompressionType::Lz4, body.len());
+        payload[14..18].copy_from_slice(&(counts.len() as u32).to_le_bytes());
+        payload.extend_from_slice(
+            &super::super::compression::compress(&body, &always(CompressionType::Lz4)).unwrap(),
+        );
+        let err = RecordBatch::decode(&payload).unwrap_err();
+        assert!(
+            err.to_string().contains("more than 1048576 headers"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_exhausted_header_budget_is_checked_before_header_body_parsing() {
+        let mut reader = Reader {
+            buf: &[1, 0],
+            pos: 0,
+            headers_left: 0,
+        };
+        let err = reader.headers(0).unwrap_err();
+        assert!(
+            err.to_string().contains("more than 1048576 headers"),
+            "{err}"
+        );
+        assert_eq!(reader.pos, 2);
     }
 
     /// The uncompressed body is what `decode` bounds by `MAX_PAYLOAD_LEN`, so `encode`

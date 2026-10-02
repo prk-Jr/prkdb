@@ -116,6 +116,13 @@ refusal has to be explicit, and why it must land before the format freezes (§5.
 
 - **The partition count is durable.** Key-hash routing depends on N, so `STREAM` records
   it. Opening with a different N is refused: repartitioning is not supported (§13 Q11).
+- **Manifest version 1 bytes (Task 2.15b.3):** 8-byte magic `PRKSTRM\0`,
+  little-endian `u32` version (1), `u32` nonzero partition count, `u32` length of
+  `created_by`, that many UTF-8 bytes, and a trailing little-endian CRC-32 of every
+  preceding byte. The total encoding is at most 4096 bytes. Decode requires exact length,
+  valid UTF-8, known magic/version, nonzero partitions and a valid CRC; no trailing bytes
+  are accepted. Golden-byte tests pin the layout before format 2 freezes. The codec is
+  introduced here; manifest creation/replacement remains Task 2.15b.5.
 - **Creation order:** create every `partition_<i>/` (each through `ensure_format`), then
   write `STREAM` atomically (tmp → `sync_data` → rename → `sync_dir(root)`).
   - On open, a root that has partition directories but no `STREAM` was cut off during
@@ -170,6 +177,29 @@ above `MAX_PAYLOAD_LEN` (checked before decompressing, as in `batch.rs`), set re
 flag bits, invalid UTF-8 header names, lengths that run past the end, and trailing bytes.
 It is a fuzz target (§10.4).
 
+**Decoded header budget (Task 2.15b.3).** A batch holds at most 2²⁰ headers over
+all records. Encode rejects more with `InvalidRecords`; decode subtracts each record's
+declared count from the remaining budget before allocating its header vector. The cap
+applies after decompression too. It allows 16 headers per record in a maximum-size batch.
+
+The interrupted worker measured allocations on this 64-bit macOS machine in a debug
+allocator harness (memory measurements, not throughput benchmarks):
+
+| Shape | Header count | Peak measured allocated bytes |
+|---|---:|---:|
+| Minimum-size empty headers, near 64 MiB encoded body | 11,140,950 | 534,777,840 |
+| Empty headers near the chosen budget | 1,048,560 | 50,332,032 |
+| One-byte names and values near the chosen budget | 1,048,560 | 52,429,152 |
+| 65,536 records ×16 headers, 8-byte names /16-byte values | 1,048,576 | 80,216,064 |
+
+Each `(String, Vec<u8>)` occupies 48 bytes on this platform: the cap limits tuple storage
+to 50,331,648 bytes (48 MiB). It does **not** limit total decoder memory to that amount.
+Owned name/value bytes remain bounded by the body limit and add memory, as do records,
+decompression buffers, allocator overhead and the caller's encoded input. The chosen
+cap removes the minimum-header expansion to roughly half a gigabyte without changing
+version-1 bytes for accepted batches. Revisit total peak memory using measured workloads;
+never describe tuple storage alone as the decoder's memory bound.
+
 **Headers are in version 1.** Format 2 freezes at Task 2.24, so adding them later would cost
 `FORMAT_VERSION + 1` and a migration (D3/D4). The `flags` byte costs one byte per record, and
 a record without headers carries nothing else. See §13 Q6.
@@ -183,6 +213,13 @@ resolves to the first offset of the oldest segment whose max time is ≥ `t`, so
 see records older than `t` from that segment. A finer seek through the sparse index (§6.3)
 can come later without a format change. There are no producer-supplied create times.
 
+The core sparse index stores frame locations and timestamps, plus per-segment timestamp
+maxima. Version one's seek contract uses segment maxima. The prior segment maximum
+is retained while the newest commit hook is ahead of its acknowledgement. Timestamp
+lookups sample the acknowledged watermark while holding the index lock, so a frame whose
+hook ran but whose acknowledgement has not been published cannot affect a seek.
+
+
 ### 4.3 Offsets: `EventSeq = lsn << 16 | idx`
 
 - An append of `n` records (1 ≤ `n` ≤ 65,536) is one frame at LSN `L`. Record `i` has
@@ -192,9 +229,16 @@ can come later without a format change. There are no producer-supplied create ti
   idx)`, `raw()`, `Ord`, a 20-digit `Display`). If 2.15b.2 lands before 2.20, it creates
   the type with exactly that spec and 2.20 reuses it, so there is one offset type across
   events and streams.
-- **Limits.** LSNs must be < 2⁴⁸. `append` refuses with `StorageError::Validation` when
-  `wal.next_lsn() >= 1 << 48`. That is unreachable in practice (2.8 × 10¹⁴ appends), but it
-  is checked rather than left to wrap.
+- **Limits.** `EventSeq` can represent LSNs < 2⁴⁸, but stream appends must use LSNs
+  **< 2⁴⁸ − 1**. The final LSN block is reserved for the exclusive end/resume position:
+  allowing a frame at 2⁴⁸ − 1 would make `(acked_lsn + 1) << 16` equal 2⁶⁴, which cannot
+  be represented by `EventSeq`. The maintainer approved this correction on 2026-10-02.
+  The writer checks the exclusive limit during ordered allocation, before a segment roll
+  or disk write; a caller-side `next_lsn()` check alone races queued appends. Excess
+  requests are validation refusals, consume no LSN and do not poison the WAL. The generic
+  `EventSeq::try_from_wal` packing limit remains < 2⁴⁸. Recovery refuses unrepresentable
+  stream boundaries before mutating files; an empty terminal log at the reserved block
+  is readable and refuses further appends.
 - **Sparse, never reused, never moved.** Offsets jump by 2¹⁶ between frames. Retention
   removes old segments but never renumbers, and LSNs continue across reopen from the
   recovered `next_lsn`. The one exception is `Fast` power loss, which can drop acked frames
@@ -331,8 +375,8 @@ pub async fn read_durable_from(&self, from: StartAt, limits: ReadLimits) -> Resu
 ### 6.3 Sparse offset index (memory only)
 
 Per segment, a `Vec<(Lsn, u64 /*byte offset*/, i64 /*append_time_ms*/)>` with one entry per
-64 KiB of frames, plus the segment's max append time. That is about 256 KiB of index per
-GiB of log. It is built during `Wal::open`'s replay (every frame is visited anyway to check
+64 KiB of frames, plus the segment's max append time. The current `(RecordLoc, timestamp)` entry is 40 bytes on this 64-bit platform,
+about 640 KiB of entries per GiB of frames at the 64 KiB stride (plus vector/map overhead). It is built during `Wal::open`'s replay (every frame is visited anyway to check
 its CRC, and the time sits in the uncompressed header) and extended by each append's commit
 hook, which receives the `RecordLoc`. The time is captured in the hook's closure. Nothing
 about the index is written to disk, and that is deliberate. Kafka's and Iggy's index files
@@ -526,8 +570,9 @@ interval, and the floor stays where step 2 put it. §13 Q14.
 
 - **Durability:** `WalConfig.sync_mode`, with the keyed path's exact contract (spec §6.2).
   In `Durable`, `append` resolves after the group-commit batch holding the frame is
-  `fdatasync`ed. In `Fast`, it resolves after the write reaches the OS, and a sync follows
-  within `sync_interval_ms`. An ack covers all `n` records of the append, because they are
+  `fdatasync`ed. In `Fast`, it resolves after the write reaches the OS, and the writer targets periodic syncs at
+  `sync_interval_ms`. Slow I/O or scheduling can exceed that target; `durable_lsn` is
+  the confirmed persistence watermark, not the elapsed interval. An ack covers all `n` records of the append, because they are
   one frame. `StreamLog::sync()` = `Wal::sync`, returning `durable_end()`. A failed fsync
   poisons the stream until reopen (D12). Docs say this in the same words as for the keyed
   path.

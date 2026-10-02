@@ -3,13 +3,18 @@
 
 use std::fmt;
 
+/// The first WAL LSN that has no [`EventSeq`]: 2⁴⁸, since the low 16 bits hold the
+/// item's index in its frame.
+pub const WAL_LSN_LIMIT: u64 = 1 << 48;
+
 /// An opaque, ordered sequence number: an event's id suffix in the outbox (Task 2.20) and
 /// a stream record's offset (Task 2.15b).
 ///
 /// On the single WAL it packs the frame's LSN and the item's index within the frame:
 /// `lsn << 16 | index` ([`EventSeq::from_wal`]). A frame carries at most 65,536 items,
-/// and LSNs must stay below 2⁴⁸; callers refuse an append past either limit before it
-/// is written. Other adapters assign their own values ([`EventSeq::from_raw`]), so code
+/// and LSNs must stay below 2⁴⁸ ([`WAL_LSN_LIMIT`]); callers refuse an append past either
+/// limit before it is written, with [`EventSeq::try_from_wal`]. Other adapters assign
+/// their own values ([`EventSeq::from_raw`]), so code
 /// outside an adapter treats the value as opaque: ordered, unique and stable, not dense.
 ///
 /// `Display` is the value as 20 zero-padded decimal digits (the width of `u64::MAX`), so
@@ -38,6 +43,17 @@ impl EventSeq {
         );
         EventSeq(lsn << 16 | index_in_frame as u64)
     }
+
+    /// [`EventSeq::from_wal`], or `None` when `lsn` is at or above [`WAL_LSN_LIMIT`] and
+    /// so has no sequence. The append paths use it to refuse such an append before it is
+    /// written (2.15b.2 review).
+    pub const fn try_from_wal(lsn: u64, index_in_frame: u16) -> Option<Self> {
+        if lsn >= WAL_LSN_LIMIT {
+            None
+        } else {
+            Some(EventSeq(lsn << 16 | index_in_frame as u64))
+        }
+    }
 }
 
 impl fmt::Display for EventSeq {
@@ -59,6 +75,22 @@ mod tests {
             u64::MAX,
             "the largest LSN and index fill the u64 exactly"
         );
+    }
+
+    /// The checked form refuses an LSN at or above 2⁴⁸ instead of shifting its top bits
+    /// away (2.15b.2 review); below it, it agrees with `from_wal`.
+    #[test]
+    fn try_from_wal_refuses_an_lsn_at_or_above_2_pow_48() {
+        assert_eq!(WAL_LSN_LIMIT, 1 << 48);
+        for (lsn, idx) in [(0, 0), (1, 2), ((1 << 48) - 1, u16::MAX)] {
+            assert_eq!(
+                EventSeq::try_from_wal(lsn, idx),
+                Some(EventSeq::from_wal(lsn, idx))
+            );
+        }
+        for lsn in [1 << 48, (1 << 48) + 1, u64::MAX] {
+            assert_eq!(EventSeq::try_from_wal(lsn, 0), None, "{lsn}");
+        }
     }
 
     #[test]

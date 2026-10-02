@@ -5769,7 +5769,13 @@ Note §4.
 
 Note §3, §4.3, §6, §9, §10.
 
-**Files:** `crates/prkdb/src/stream_log/{mod.rs,log.rs,index.rs,manifest.rs} (create)`, `crates/prkdb/src/lib.rs`, `crates/prkdb/src/storage/format.rs` (`kind`), `crates/prkdb-types/src/error.rs` (`OffsetOutOfRange`, `OffsetDiverged`), `crates/prkdb/tests/stream_log.rs (create)`, `crates/prkdb/tests/format_v2.rs`, `fuzz/fuzz_targets/stream_manifest_parse.rs (create)`
+**Files:** `crates/prkdb-core/src/wal/{log.rs,records.rs}`,
+`crates/prkdb-core/tests/{wal_stream_writer.rs,wal_log.rs,wal_compaction.rs,wal_stream_support.rs}`,
+`crates/prkdb-types/src/event.rs`, `crates/prkdb/src/storage/{recovery.rs,wal_adapter.rs}`, `crates/prkdb-verify/src/{fuzz_entry.rs,bin/fuzz_seeds.rs}`,
+`crates/prkdb-verify/tests/{wal_power_loss.rs,fuzz_corpus.rs}`,
+`crates/prkdb/{Cargo.toml,benches/stream_log.rs,benches/wal_write_path.rs}`,
+`fuzz/Cargo.toml`, `.github/workflows/ci.yml` (new fuzz-target registration),
+`crates/prkdb/src/stream_log/{mod.rs,log.rs,index.rs,manifest.rs} (create)`, `crates/prkdb/src/lib.rs`, `crates/prkdb/src/storage/format.rs` (`kind`), `crates/prkdb-types/src/error.rs` (`OffsetOutOfRange`, `OffsetDiverged`), `crates/prkdb/tests/stream_log.rs (create)`, `crates/prkdb/tests/format_v2.rs`, `fuzz/fuzz_targets/stream_manifest_parse.rs (create)`
 
 - [ ] **Step 1: Failing tests (`stream_log.rs`, `format_v2.rs`).**
   - `FORMAT` `kind`:
@@ -5799,8 +5805,11 @@ Note §3, §4.3, §6, §9, §10.
   - `STREAM` manifest: encode/decode round trip, bit flips refused, an unknown version
     refused.
   - Carried over from the 2.15b.2 review:
-    - an append whose LSN is `>= 2^48` is refused (`EventSeq::from_wal` only
-      debug-asserts it; add a checked `try_from_wal` and use it on the append path);
+    - an append whose LSN is `>= 2^48 - 1` is refused (maintainer-approved terminal
+      block reservation for a representable exclusive end) (`EventSeq::from_wal` only
+      debug-asserts the general packing limit; use checked `try_from_wal` and enforce
+      the stricter stream bound on the writer before allocation/roll/write, including
+      concurrent queued requests and recovered offsets);
     - a `Records` frame whose decoded headers would exceed a per-batch budget is refused
       at encode and at decode. A 64 MiB body can hold ~11M minimum-size headers, ~0.5–1 GB
       decoded. Pick the budget from measurement and record it in the design note;
@@ -5809,6 +5818,9 @@ Note §3, §4.3, §6, §9, §10.
 - [ ] **Step 2: Implement.**
   - `StreamLog` over `Wal` with `front_release = Retention` and a 128 MiB default segment
     size.
+  - Extend the same WAL writer with an explicit frame kind and exclusive LSN limit;
+    existing keyed callers retain Batch and unlimited LSN allocation. Add a capped scan
+    from a sparse RecordLoc hint, applying the cap to every cloned segment.
   - A sparse index per segment (one entry per 64 KiB, plus max time), built by the replay
     closure and the commit hook.
   - Reads run in `spawn_blocking`.

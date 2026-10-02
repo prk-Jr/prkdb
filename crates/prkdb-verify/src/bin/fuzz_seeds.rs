@@ -430,6 +430,8 @@ fn format_seeds() -> Result<Vec<Vec<u8>>> {
         b"format = 2\ncreated_by = \"1.0.0\"\nchecksum = \"abc\"\n".to_vec(),
         b"format = \"3\"\n".to_vec(),
         b"created_by = \"0.6.0\"\n".to_vec(),
+        b"format = 2\ncreated_by = \"0.6.0\"\nkind = \"stream\"\n".to_vec(),
+        b"format = 2\nkind = \"future\"\n".to_vec(),
     ])
 }
 
@@ -441,6 +443,9 @@ fn check_valid(target: &str, seeds: &[Vec<u8>]) -> Result<()> {
             "frame_decode" => matches!(decode_frame(seed), Decoded::Frame { .. }),
             "batch_decode" => Batch::decode(seed).is_ok(),
             "records_decode" => RecordBatch::decode(seed).is_ok(),
+            "stream_manifest_parse" => {
+                prkdb::stream_log::manifest::StreamManifest::decode(seed).is_ok()
+            }
             "checkpoint_load" => decode_checkpoint(seed).is_ok(),
             "snapshot_restore" => parse_snapshot(seed).is_ok(),
             "snapshot_entries" => {
@@ -544,6 +549,17 @@ async fn main() -> Result<()> {
             "file_decode" => file_decode_seeds(&real)?,
             "snapshot_entries" => real.backups.clone(),
             "records_decode" => records_seeds()?,
+            "stream_manifest_parse" => vec![
+                prkdb::stream_log::manifest::StreamManifest::current(1)
+                    .encode()
+                    .map_err(anyhow::Error::msg)?,
+                prkdb::stream_log::manifest::StreamManifest {
+                    partitions: 64,
+                    created_by: "fixture-UTF8-λ".into(),
+                }
+                .encode()
+                .map_err(anyhow::Error::msg)?,
+            ],
             other => bail!("no seed generator for fuzz target {other}"),
         };
         check_valid(target, &seeds)?;

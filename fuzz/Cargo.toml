@@ -107,3 +107,10 @@ path = "fuzz_targets/records_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "stream_manifest_parse"
+path = "fuzz_targets/stream_manifest_parse.rs"
+test = false
+doc = false
+bench = false

@@ -75,3 +75,19 @@ fn the_frame_corpora_hold_records_frames() {
         );
     }
 }
+
+/// STREAM mutations must start from actual version-one encodings, not only errors.
+#[test]
+fn the_stream_manifest_corpus_contains_decodable_manifest_shapes() {
+    let root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/stream_manifest_parse");
+    let mut partitions = Vec::new();
+    for entry in std::fs::read_dir(root).unwrap() {
+        let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+        let manifest = prkdb::stream_log::manifest::StreamManifest::decode(&bytes).unwrap();
+        assert_eq!(manifest.encode().unwrap(), bytes);
+        partitions.push(manifest.partitions);
+    }
+    partitions.sort_unstable();
+    assert_eq!(partitions, [1, 64]);
+}
