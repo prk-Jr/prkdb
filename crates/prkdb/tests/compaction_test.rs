@@ -916,7 +916,7 @@ async fn compaction_does_not_stall_writers() {
         println!(
             "{mode:?}: put latency p50/p99/max without compaction {:?}/{:?}/{:?}, during \
              {} compaction runs {:?}/{:?}/{:?}; first run reclaimed {} of {} bytes \
-             ({} segments rewritten, {} removed)",
+             ({} segments rewritten, {} removed, {} log syncs, longest swap {:?})",
             baseline.0,
             baseline.1,
             baseline.2,
@@ -928,6 +928,8 @@ async fn compaction_does_not_stall_writers() {
             first.bytes_before,
             first.segments_rewritten,
             first.segments_removed,
+            first.log_syncs,
+            runs.iter().map(|r| r.longest_swap).max().unwrap(),
         );
         assert!(first.segments_rewritten > 0, "{first:?}");
         assert!(
@@ -940,5 +942,46 @@ async fn compaction_does_not_stall_writers() {
             baseline.1,
             during.1
         );
+    }
+}
+
+/// How long a segment swap holds the WAL's segment table (the handle swap plus the index
+/// update for the segment's live keys), against the number of live keys in the segment.
+/// A segment roll on the writer thread waits for it, so it must stay small next to a
+/// write. Printed for the review record (`--no-capture`); the bound only catches a swap
+/// that does something per key far heavier than a map update.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_segment_swap_holds_the_segment_table_briefly() {
+    use std::time::Duration;
+    for (segment_bytes, keys) in [(64 * 1024, 500u32), (1 << 20, 8_000), (4 << 20, 32_000)] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = WalStorageAdapter::new(compaction_cfg(dir.path(), segment_bytes)).unwrap();
+        // One live put per key in the first segments, plus one dead frame per segment so
+        // each is rewritten (every live key relocated).
+        for chunk in (0..keys).collect::<Vec<_>>().chunks(256) {
+            db.put_batch(
+                chunk
+                    .iter()
+                    .map(|k| (format!("key{k:08}").into_bytes(), vec![1u8; 100]))
+                    .collect(),
+            )
+            .await
+            .unwrap();
+            db.put(b"churn", &[0u8; 100]).await.unwrap();
+        }
+        for i in 0..(segment_bytes / 1024) {
+            db.put(format!("seal{}", i % 7).as_bytes(), &[2u8; 1000])
+                .await
+                .unwrap();
+        }
+        let report = db.compact().await.unwrap();
+        println!(
+            "segment {} KiB, {keys} live keys: {} segments rewritten, longest swap {:?}",
+            segment_bytes / 1024,
+            report.segments_rewritten,
+            report.longest_swap
+        );
+        assert!(report.segments_rewritten > 0, "{report:?}");
+        assert!(report.longest_swap < Duration::from_millis(500), "{report:?}");
     }
 }
