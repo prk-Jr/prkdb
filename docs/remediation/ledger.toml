@@ -224,6 +224,21 @@ status = "open"
 sources = ["audit-2026-09-23#16"]
 evidence = ["crates/prkdb/src/consumer.rs:71,422,435,667"]
 
+[[finding]]
+id = "EVT-07"
+title = "Fast-mode power loss reissues acked LSNs; a change-feed consumer that committed past them silently skips the new records"
+area = "events"
+severity = "medium"
+phase = 2
+status = "open"
+sources = ["task-2.15b-design-2026-10-02"]
+evidence = [
+  "crates/prkdb/src/storage/wal_adapter.rs:1739-1741",
+  "crates/prkdb/src/storage/collection_partitioned_adapter.rs:457-460",
+  "crates/prkdb-core/src/wal/log.rs:790-792",
+  "docs/superpowers/specs/2026-10-02-streaming-log-design.md",
+]
+
 # ---------------------------------------------------------------------------
 # 3.4 Transactions and TTL (TXN, TTL)
 # ---------------------------------------------------------------------------
@@ -739,6 +754,20 @@ sources = ["task-2.12-review-2026-10-01"]
 evidence = ["crates/prkdb/src/storage/wal_adapter.rs"]
 regression_tests = ["test:crates/prkdb-verify/tests/data_dir_lock.rs::a_second_open_in_process_is_locked", "test:crates/prkdb-verify/tests/data_dir_lock.rs::a_second_open_from_a_child_process_is_locked", "test:crates/prkdb-verify/tests/data_dir_lock.rs::the_lock_is_released_on_drop", "test:crates/prkdb-verify/tests/data_dir_lock.rs::the_lock_is_released_when_the_holder_is_sigkilled", "test:crates/prkdb-verify/tests/data_dir_lock.rs::every_multi_raft_data_directory_is_locked_while_open", "test:crates/prkdb-verify/tests/data_dir_lock.rs::faultfs_models_the_lock", "test:crates/prkdb-cli/tests/migrate.rs::migrate_on_a_locked_directory_refuses", "test:crates/prkdb-cli/tests/migrate.rs::migrate_on_a_live_multi_raft_root_refuses_each_member"]
 changes = ["75db3d6"]
+
+[[finding]]
+id = "STO-11"
+title = "decode_frame checks the frame kind before the CRC: a valid frame of an unknown kind is treated as a torn tail and the active segment is truncated"
+area = "storage"
+severity = "high"
+phase = 2
+status = "open"
+sources = ["task-2.15b-design-2026-10-02"]
+evidence = [
+  "crates/prkdb-core/src/wal/frame.rs:132-135",
+  "crates/prkdb-core/src/wal/log.rs:514-524",
+  "docs/superpowers/specs/2026-10-02-streaming-log-design.md",
+]
 
 [[phase]]
 id = 0
