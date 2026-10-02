@@ -222,6 +222,64 @@ jobs:
           path: mutants.out/
           if-no-files-found: warn
 
+  # The single WAL and its codecs (prkdb-core), mutated nightly like `mutants` above.
+  #
+  # Phase 2 moved the write path into `prkdb_core::wal` — the ordered log and its writer
+  # (log.rs), the frame format (frame.rs), segments (segment.rs), the batch codec
+  # (batch.rs), compression (compression.rs) and the LOG_STATE record (log_state.rs) —
+  # and no mutation job covered any of it: the file set above stops at the adapter. That
+  # is the same gap `wal_adapter.rs` was added to close, one crate further down.
+  #
+  # A separate job, not more `--file`s on the one above: cargo-mutants tests each mutant
+  # against the tests of its own package, and prkdb-core's are cheap — 114 tests in ~4s
+  # and a ~5s incremental rebuild locally, against prkdb's 62 integration binaries — so
+  # these mutants would distort the other job's per-shard timing. 476 mutants (measured
+  # with `cargo mutants --list`). At an assumed ~40s each on a CI runner (3-4x the local
+  # build+test), that is ~5.3 hours; ten shards is ~32 minutes each against a 60-minute
+  # limit. Two at a time so the two mutation jobs together stay within the six-runner
+  # budget the `max-parallel: 4` note above is protecting. Recalibrate from the first
+  # run's timings.
+  #
+  # Survivors here are found gaps in prkdb-core's own tests (the adapter- and
+  # harness-level tests in prkdb and prkdb-verify do not run against these mutants); the
+  # fix is a test in prkdb-core, or an entry in .cargo/mutants.toml under its two rules.
+  mutants-core:
+    name: "🧬 Mutation Testing (WAL core)"
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      - uses: Swatinem/rust-cache@v2
+      - name: Mutate the single WAL and its codecs
+        run: |
+          cargo mutants --no-shuffle --timeout 300 \
+            --shard ${{ matrix.shard }}/10 \
+            --package prkdb-core \
+            --file 'crates/prkdb-core/src/wal/log.rs' \
+            --file 'crates/prkdb-core/src/wal/frame.rs' \
+            --file 'crates/prkdb-core/src/wal/segment.rs' \
+            --file 'crates/prkdb-core/src/wal/batch.rs' \
+            --file 'crates/prkdb-core/src/wal/compression.rs' \
+            --file 'crates/prkdb-core/src/wal/log_state.rs'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants-core-${{ github.run_number }}-shard-${{ matrix.shard }}
+          path: mutants.out/
+          if-no-files-found: warn
+
   # Mutation testing on the lines a pull request actually changed.
   #
   # # Why this exists
@@ -343,14 +401,19 @@ jobs:
           # feature and is not compiled either. That is what failed shard 2 of run
           # 35327050707 on `RpcClientPool::check_chaos`.
           #
-          # Package-qualified because two packages are selected and `prkdb-cli` declares
-          # no features; a bare `--features chaos` is rejected in that shape.
+          # Package-qualified because several packages are selected and only `prkdb`
+          # declares `chaos`; a bare `--features chaos` is rejected in that shape.
+          #
+          # `prkdb-core` since Phase 2: the single WAL, its frame/segment/batch codecs and
+          # compression live there, and a pull request touching them was mutated nowhere.
+          # Each mutant runs its own package's tests, and prkdb-core's are cheap, so a
+          # diff in it adds little to the shard time.
           cargo mutants --no-shuffle --timeout 300 \
             --test-tool nextest --jobs 2 \
             --features prkdb/chaos \
             --shard ${{ matrix.shard }}/8 \
             --in-diff /tmp/pr.diff \
-            --package prkdb --package prkdb-cli 2>&1 | tee /tmp/mutants.log
+            --package prkdb --package prkdb-cli --package prkdb-core 2>&1 | tee /tmp/mutants.log
           status=$?
 
           {
@@ -358,7 +421,7 @@ jobs:
             echo
             if grep -q "no Rust source files" /tmp/mutants.log; then
               echo "**No mutants generated.** The diff touches no mutable Rust in"
-              echo '`prkdb` or `prkdb-cli` — test code, comments, or another package.'
+              echo '`prkdb`, `prkdb-cli` or `prkdb-core` — test code, comments, or another package.'
               echo "Nothing was verified here, which is the correct outcome for this"
               echo "diff rather than a clean bill of health."
             elif grep -qE "[0-9]+ mutants? tested" /tmp/mutants.log; then
