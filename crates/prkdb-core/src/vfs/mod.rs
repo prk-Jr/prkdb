@@ -54,7 +54,8 @@ pub trait Vfs: Send + Sync {
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>>;
     fn exists(&self, path: &Path) -> io::Result<bool>;
     /// Durably persists directory entry changes (creates, renames, removes) in
-    /// `dir`. Best-effort no-op on non-Unix platforms.
+    /// `dir`. An empty path denotes the VFS working directory (the parent of a
+    /// relative single-component path). Best-effort no-op on non-Unix platforms.
     fn sync_dir(&self, dir: &Path) -> io::Result<()>;
     /// Takes an exclusive advisory lock on `path`, creating the file if it is missing
     /// (its parent must exist), without blocking. The lock excludes every other
@@ -74,32 +75,25 @@ pub trait Vfs: Send + Sync {
 /// Holds a [`Vfs::lock_exclusive`] lock; dropping it releases the lock.
 pub trait LockGuard: Send + Sync {}
 
-/// Creates `dir` and every missing ancestor, one level at a time from the outermost, and
-/// syncs the parent of each directory it creates, so all the new directory entries are
-/// durable when this returns (STO-15). `create_dir_all` followed by a sync of `dir`'s
-/// parent alone leaves the entries of the outer new directories unsynced: a power cut
-/// can remove them, and everything written under them. Creates and syncs nothing when
-/// `dir` exists. For a relative `dir` the outermost new directory is an entry in the
-/// working directory, which is synced as `.`.
+/// Creates `dir` and missing ancestors, then persists every ancestor entry.
+///
+/// Existence is not proof of durability: an earlier open may have failed after mkdir
+/// but before its parent sync, or a concurrent opener may still be between those steps.
+/// Therefore existing entries need the same parent barriers as newly created ones
+/// (STO-16). Absolute paths are anchored at the filesystem root; relative paths at the
+/// VFS working directory, represented by the empty parent path. All errors propagate,
+/// including errors syncing an existing ancestor. This may require readable ancestors
+/// on `StdVfs`. No append is acknowledged by an opener before these barriers succeed.
 pub fn create_dir_all_durable(vfs: &dyn Vfs, dir: &Path) -> io::Result<()> {
-    let mut missing = Vec::new();
-    let mut current = Some(dir);
-    while let Some(d) = current.filter(|d| !d.as_os_str().is_empty()) {
-        if vfs.exists(d)? {
-            break;
+    let ancestors: Vec<_> = dir
+        .ancestors()
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect();
+    for entry in ancestors.into_iter().rev() {
+        if !vfs.exists(entry)? {
+            vfs.create_dir_all(entry)?;
         }
-        missing.push(d);
-        current = d.parent();
-    }
-    for created in missing.into_iter().rev() {
-        vfs.create_dir_all(created)?;
-        if let Some(parent) = created.parent() {
-            // `Path::new("mydb").parent()` is `Some("")`: the working directory.
-            let parent = if parent.as_os_str().is_empty() {
-                Path::new(".")
-            } else {
-                parent
-            };
+        if let Some(parent) = entry.parent() {
             vfs.sync_dir(parent)?;
         }
     }

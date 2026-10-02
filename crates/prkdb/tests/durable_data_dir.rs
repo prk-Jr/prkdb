@@ -1,4 +1,4 @@
-//! STO-15 through the adapter: opening a data directory under several missing directories
+//! STO-16 through the adapter: opening a data directory under several missing directories
 //! makes every one of them durable before the first acknowledged write.
 //!
 //! `WalStorageAdapter`'s open created the directory with `create_dir_all` and synced no
@@ -107,4 +107,34 @@ async fn every_missing_ancestor_of_the_data_directory_is_durable() {
             "a power cut would remove {d:?}, and the acknowledged write with it"
         );
     }
+}
+
+#[tokio::test]
+async fn every_missing_ancestor_of_a_durable_stream_is_durable() {
+    use prkdb::stream_log::{Record, StreamConfig, StreamLog};
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("a/b/stream");
+    let vfs = RecordingVfs::default();
+    let mut config = StreamConfig::new(&dir);
+    config.wal.sync_mode = SyncMode::Durable;
+    let stream = StreamLog::open_with_vfs(Arc::new(vfs.clone()), config)
+        .await
+        .unwrap();
+    stream
+        .append(vec![Record {
+            key: None,
+            value: b"acked".to_vec(),
+            headers: vec![],
+        }])
+        .await
+        .unwrap();
+    let dirs = vfs.0.lock().unwrap();
+    for created in &dirs.created {
+        assert!(
+            dirs.durable.contains(created),
+            "Durable stream ack depends on an unsynced directory: {created:?}"
+        );
+    }
+    drop(dirs);
+    stream.close().unwrap();
 }

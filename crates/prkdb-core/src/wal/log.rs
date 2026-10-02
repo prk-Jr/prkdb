@@ -441,7 +441,7 @@ impl Wal {
     ///
     /// Directory: `dir` and any missing ancestors are created with
     /// [`create_dir_all_durable`](crate::vfs::create_dir_all_durable), which syncs the
-    /// parent of every directory it creates (STO-15).
+    /// parent of every ancestor entry, including existing ones (STO-16).
     /// Recovery: lists `*.wal`, sorts by first LSN, checks each segment's first LSN equals
     /// the previous segment's `next_lsn`, scans every segment, and calls `replay` for every
     /// frame with lsn >= `replay_from` in LSN order.
@@ -724,7 +724,7 @@ impl Wal {
 
     /// Waits for admission permits (`min(len, max_queued_bytes)` bytes). Refuses a `len`
     /// over `MAX_PAYLOAD_LEN` with `RecordTooLarge` and a `len` of 0 with `EmptyRecord`
-    /// (a frame of length 0 reads back as a torn tail, STO-16), and returns
+    /// (a frame of length 0 reads back as a torn tail, STO-17), and returns
     /// `Poisoned`/`Closed` without waiting when the log cannot accept writes.
     pub async fn reserve(&self, len: usize) -> Result<Reservation, WalError> {
         if len == 0 {
@@ -985,11 +985,11 @@ impl Wal {
     /// M3: a frame past `cap` is never visited, and ends the scan (frames are in LSN
     /// order). The cap is checked in every segment, not only the last one listed: `cap`
     /// is sampled before the segments are listed, and a roll in between seals the segment
-    /// it was sampled against (STO-14). It costs the same one comparison per frame.
+    /// it was sampled against (STO-15). It costs the same one comparison per frame.
     ///
     /// Every segment but the last one listed is sealed, and a sealed segment is whole: a
     /// scan fault in it, or an end short of the LSN the next segment starts at (a
-    /// segment cut exactly between two frames scans without a fault, STO-13), is
+    /// segment cut exactly between two frames scans without a fault, STO-14), is
     /// `CorruptSegment`. That end check runs once per segment the scan reads to its end.
     /// A fault on the last segment's tail is expected (a write in flight, or a crash not
     /// yet recovered from) and is silently bounded by `cap` regardless of whether
@@ -2003,8 +2003,9 @@ fn commit_batch(
     // H1: under saturation, batches keep draining via `try_recv` inside the Append arm and
     // the writer never reaches the idle `recv_timeout` branch that would otherwise run the
     // periodic Fast sync. Checking the interval here too means a continuously busy writer
-    // still starts a sync once `sync_interval` has passed, at the end of the batch that
-    // crosses it, whether it is ever idle or not.
+    // starts a sync at its next batch boundary after the `sync_interval` target passes
+    // since the first unsynced batch finished writing, whether idle or busy. The
+    // target does not bound fsync completion or the amount lost on a power cut.
     let mut poison_reason: Option<String> = None;
     match opts.sync_mode {
         SyncMode::Durable => {
@@ -2364,7 +2365,7 @@ mod tests {
         });
     }
 
-    /// STO-14: a scan samples its cap, then lists the segments. A roll in between turns
+    /// STO-15: a scan samples its cap, then lists the segments. A roll in between turns
     /// the segment the cap was taken against into a sealed one, and the cap used to be
     /// applied to the last segment only, so the frames past it were visited. The race is
     /// replayed deterministically by passing the cap a scan would have sampled before the

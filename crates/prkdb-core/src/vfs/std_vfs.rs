@@ -86,7 +86,7 @@ impl Drop for StdLock {
         // Unlock explicitly, then close, then drop the registry entry, so a thread that
         // gets past the registry never meets this guard's OS lock.
         //
-        // Closing alone is not enough (STO-12). The OS lock belongs to the open file
+        // Closing alone is not enough (STO-13). The OS lock belongs to the open file
         // description, which every descriptor duplicated from ours shares, and a child
         // process that another thread is spawning holds such a duplicate from its fork
         // until its exec closes it (`O_CLOEXEC` takes effect only at the exec). Closing
@@ -95,7 +95,9 @@ impl Drop for StdLock {
         // lock whichever descriptors are still open. If it fails, the close still
         // releases it (eventually, once every duplicate is closed).
         if let Some(file) = self.file.take() {
-            let _ = file.unlock();
+            if let Err(error) = file.unlock() {
+                tracing::warn!(%error, "explicit directory unlock failed; close releases the lock after inherited descriptors close");
+            }
             drop(file);
         }
         ProcessLocks::release(&self.key);
@@ -209,6 +211,11 @@ impl Vfs for StdVfs {
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
         #[cfg(unix)]
         {
+            let dir = if dir.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                dir
+            };
             File::open(dir)?.sync_all()
         }
         #[cfg(not(unix))]
@@ -293,7 +300,7 @@ mod tests {
     /// another thread holds between its fork and its exec: it inherits every descriptor,
     /// `O_CLOEXEC` ones included until the exec, and a `flock` belongs to the open file
     /// description, not the descriptor. Closing ours alone left the lock held until the
-    /// child exec'd, so a reopen right after a drop was refused as locked (STO-12).
+    /// child exec'd, so a reopen right after a drop was refused as locked (STO-13).
     #[test]
     fn dropping_the_guard_releases_the_lock_while_a_duplicate_descriptor_is_open() {
         let dir = tempfile::tempdir().unwrap();

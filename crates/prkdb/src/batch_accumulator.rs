@@ -34,7 +34,7 @@
 //! thread, some time later. So when nothing is left to execute (every item added has been
 //! executed to completion, which a `flush` that returned guarantees for the items before
 //! it), dropping the last handle takes the executor out of the worker and drops it right
-//! there: the database it held is released before the drop returns (STO-12). Dropping the
+//! there: the database it held is released before the drop returns (STO-13). Dropping the
 //! last handle with items still unexecuted leaves the executor to the worker, which needs
 //! it to write them; flush first for a prompt release. If the worker panics (the executor
 //! panicked), later `add_put` and `flush` calls fail with "batch accumulator worker stopped"
@@ -168,7 +168,12 @@ impl<C: Collection> BatchAccumulator<C> {
         let unexecuted = Arc::new(AtomicU64::new(0));
         let executor = Arc::new(parking_lot::Mutex::new(Some(executor)));
         let slot = Arc::clone(&executor);
-        let release_executor = Box::new(move || drop(slot.lock().take()));
+        let release_executor = Box::new(move || {
+            // User-owned executor captures may run arbitrary destructors. Release
+            // the worker slot before dropping them.
+            let executor = slot.lock().take();
+            drop(executor);
+        });
         let worker = Worker {
             executor,
             unexecuted: Arc::clone(&unexecuted),

@@ -1,4 +1,4 @@
-//! STO-15: opening a log under several missing directories makes every one of them
+//! STO-16: opening a log under several missing directories makes every one of them
 //! durable before the first acknowledged write.
 //!
 //! `Wal::open` created the directory with `create_dir_all` and synced only its immediate
@@ -24,6 +24,7 @@ struct Dirs {
     created: Vec<PathBuf>,
     /// Those of them whose parent was synced after they were created.
     durable: BTreeSet<PathBuf>,
+    fail_sync_once: Option<PathBuf>,
 }
 
 /// Records directory creation and syncs over `StdVfs`. With a `base`, relative paths are
@@ -37,13 +38,9 @@ struct RecordingVfs {
 }
 
 /// The directory whose sync makes `dir`'s entry durable: its parent, `.` for a
-/// single-component relative path.
+/// single-component relative path (the VFS working-directory anchor).
 fn parent_of(dir: &Path) -> &Path {
-    match dir.parent() {
-        Some(p) if p.as_os_str().is_empty() => Path::new("."),
-        Some(p) => p,
-        None => dir,
-    }
+    dir.parent().unwrap_or(dir)
 }
 
 impl RecordingVfs {
@@ -112,6 +109,13 @@ impl Vfs for RecordingVfs {
         StdVfs.exists(&self.real(p))
     }
     fn sync_dir(&self, d: &Path) -> io::Result<()> {
+        {
+            let mut dirs = self.dirs.lock().unwrap();
+            if dirs.fail_sync_once.as_deref() == Some(d) {
+                dirs.fail_sync_once = None;
+                return Err(io::Error::other("injected parent sync failure"));
+            }
+        }
         StdVfs.sync_dir(&self.real(d))?;
         let mut dirs = self.dirs.lock().unwrap();
         let children: Vec<PathBuf> = dirs
@@ -174,7 +178,7 @@ fn create_dir_all_durable_syncs_the_parent_of_every_directory_it_creates() {
     );
     assert_eq!(vfs.not_durable(), Vec::<PathBuf>::new());
 
-    // Nothing missing: nothing created, nothing synced.
+    // Existing directories still receive ancestor barriers; no new entries are created.
     let vfs = RecordingVfs::default();
     prkdb_core::vfs::create_dir_all_durable(&vfs, &root.path().join("x/y/z")).unwrap();
     assert!(vfs.created().is_empty());
@@ -182,7 +186,7 @@ fn create_dir_all_durable_syncs_the_parent_of_every_directory_it_creates() {
 
 /// A relative data directory: the outermost directory created is an entry in the working
 /// directory, which must be synced too (`.`), not skipped because its parent path is
-/// empty.
+/// empty. The empty path represents the VFS working-directory anchor.
 #[test]
 fn a_relative_path_syncs_the_working_directory_for_its_outermost_new_directory() {
     let cwd = tempfile::tempdir().unwrap();
@@ -194,4 +198,45 @@ fn a_relative_path_syncs_the_working_directory_for_its_outermost_new_directory()
     );
     assert_eq!(vfs.not_durable(), Vec::<PathBuf>::new());
     assert!(cwd.path().join("mydb/wal").is_dir());
+}
+
+#[test]
+fn retry_after_parent_sync_failure_makes_existing_ancestors_durable() {
+    let root = tempfile::tempdir().unwrap();
+    let vfs = RecordingVfs::default();
+    vfs.dirs.lock().unwrap().fail_sync_once = Some(root.path().to_path_buf());
+    let dir = root.path().join("a/b/wal");
+    assert!(prkdb_core::vfs::create_dir_all_durable(&vfs, &dir).is_err());
+    assert_eq!(vfs.not_durable(), vec![root.path().join("a")]);
+    prkdb_core::vfs::create_dir_all_durable(&vfs, &dir).unwrap();
+    assert!(
+        vfs.not_durable().is_empty(),
+        "retry acknowledged an undurable ancestor: {:?}",
+        vfs.not_durable()
+    );
+}
+
+#[test]
+fn another_open_under_an_unsynced_existing_ancestor_cannot_ack_durable() {
+    let root = tempfile::tempdir().unwrap();
+    let vfs = RecordingVfs::default();
+    // This is the intermediate state of another opener between mkdir and parent sync.
+    vfs.create_dir_all(&root.path().join("a")).unwrap();
+    let dir = root.path().join("a/other/wal");
+    let opts = WalOptions::from_config(&prkdb_core::wal::WalConfig::default());
+    let (wal, _) = Wal::open(Arc::new(vfs.clone()), &dir, opts, 1, &mut |_, _, _| Ok(())).unwrap();
+    wal.append_blocking(b"durable".to_vec(), None).unwrap();
+    assert!(
+        vfs.not_durable().is_empty(),
+        "Durable ack can be lost with an existing unsynced ancestor: {:?}",
+        vfs.not_durable()
+    );
+    wal.close().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn std_vfs_empty_directory_sync_uses_the_working_directory_anchor() {
+    // Path::parent for a relative single-component directory is the empty path.
+    StdVfs.sync_dir(Path::new("")).unwrap();
 }

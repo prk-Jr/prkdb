@@ -205,7 +205,7 @@ impl<S: StorageAdapter + 'static> TtlStorage<S> {
     ///
     /// The task holds the storage only weakly, and strongly only for the two deletes of one
     /// expired key (the record and its metadata): it never keeps the adapter (or its
-    /// data-directory lock) alive between keys or ticks (STO-12).
+    /// data-directory lock) alive between keys or ticks (STO-13).
     ///
     /// [`Self::stop_cleanup`], and so dropping the `TtlStorage`, stops the task: it sets a
     /// flag the task checks before every key, and aborts it. `Drop` cannot join the task
