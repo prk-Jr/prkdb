@@ -51,3 +51,6 @@ rand = "0.8"
 tempfile = "3"
 tokio = { version = "1.0", features = ["full"] }
 
+[[bench]]
+name = "frame_payload_codecs"
+harness = false
