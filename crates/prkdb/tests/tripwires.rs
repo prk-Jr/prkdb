@@ -248,18 +248,22 @@ fn log_ending_in_a_valid_frame_of_unknown_kind(dir: &std::path::Path) -> (std::p
     (path, bytes.len() as u64)
 }
 
-/// STO-11: `decode_frame` checks the kind before the CRC, so a valid frame of a kind this
-/// build does not know is a torn tail in the last segment, and `Wal::open` truncates it.
+/// STO-11 regression (was the tripwire): a valid frame of a kind this build does not
+/// know, at the end of the last segment, refuses the open as `UnsupportedFormat` and is
+/// never truncated as a torn tail.
 #[test]
-fn sto11_valid_frame_of_unknown_kind_is_truncated_as_a_torn_tail_tripwire() {
+fn sto11_valid_frame_of_unknown_kind_refuses_and_is_never_truncated() {
     use prkdb_core::vfs::StdVfs;
-    use prkdb_core::wal::{Wal, WalOptions};
+    use prkdb_core::wal::{Wal, WalError, WalOptions};
     let dir = tempfile::tempdir().unwrap();
     let (path, len) = log_ending_in_a_valid_frame_of_unknown_kind(dir.path());
     let opts = WalOptions::from_config(&wal_config(dir.path()));
-    let opened = Wal::open(Arc::new(StdVfs), dir.path(), opts, 1, &mut |_, _, _| Ok(()));
+    let err = Wal::open(Arc::new(StdVfs), dir.path(), opts, 1, &mut |_, _, _| Ok(()))
+        .err()
+        .expect("must refuse to open");
     assert!(
-        opened.is_ok() && std::fs::metadata(&path).unwrap().len() < len,
-        "STO-11 appears fixed: invert this tripwire"
+        matches!(err, WalError::UnsupportedFormat { path: ref p, .. } if *p == path),
+        "{err}"
     );
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), len);
 }

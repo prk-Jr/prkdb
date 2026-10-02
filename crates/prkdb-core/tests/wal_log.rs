@@ -802,3 +802,152 @@ fn blocking_waits_finish_on_a_task_with_no_tokio_budget_left() {
         });
     }
 }
+
+/// A frame with any kind byte, hand-encoded: `len | crc | lsn | kind | payload`. Its CRC
+/// is correct unless `valid_crc` is false.
+fn raw_frame(lsn: Lsn, kind: u8, payload: &[u8], valid_crc: bool) -> Vec<u8> {
+    let mut crc_input = lsn.to_le_bytes().to_vec();
+    crc_input.push(kind);
+    crc_input.extend_from_slice(payload);
+    let crc = crc32fast::hash(&crc_input) ^ if valid_crc { 0 } else { 1 };
+    let mut frame = (payload.len() as u32).to_le_bytes().to_vec();
+    frame.extend_from_slice(&crc.to_le_bytes());
+    frame.extend_from_slice(&lsn.to_le_bytes());
+    frame.push(kind);
+    frame.extend_from_slice(payload);
+    frame
+}
+
+fn append_to_file(path: &Path, bytes: &[u8]) -> u64 {
+    let mut all = std::fs::read(path).unwrap();
+    all.extend_from_slice(bytes);
+    std::fs::write(path, &all).unwrap();
+    all.len() as u64
+}
+
+fn try_open(dir: &Path, o: WalOptions) -> Result<Wal, WalError> {
+    Wal::open(Arc::new(StdVfs), dir, o, 1, &mut |_, _, _| Ok(())).map(|(wal, _)| wal)
+}
+
+/// STO-11: a frame whose CRC is valid but whose kind this build does not know was
+/// written by a later build, not torn by a crash. At the end of the last segment it
+/// refuses the open (`UnsupportedFormat`, naming the file) and is never truncated.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unknown_frame_kind_with_a_valid_crc_refuses_and_never_truncates() {
+    let dir = tempfile::tempdir().unwrap();
+    let o = opts(SyncMode::Durable, 1 << 20);
+    let (wal, _) = open(Arc::new(StdVfs), dir.path(), o.clone());
+    for i in 0..3u8 {
+        wal.append(vec![i; 16], None).await.unwrap();
+    }
+    wal.close().unwrap();
+    let path = dir
+        .path()
+        .join(prkdb_core::wal::segment::segment_file_name(1));
+    let len = append_to_file(&path, &raw_frame(4, 99, b"a later build's frame", true));
+
+    let err = try_open(dir.path(), o).err().expect("must refuse to open");
+    assert!(
+        matches!(err, WalError::UnsupportedFormat { path: ref p, .. } if *p == path),
+        "{err}"
+    );
+    assert!(err.to_string().contains("kind 99"), "{err}");
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        len,
+        "the segment must not be truncated"
+    );
+}
+
+/// STO-11: the same frame in a sealed segment is `UnsupportedFormat` too, not
+/// `CorruptSegment`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unknown_frame_kind_in_a_sealed_segment_is_unsupported_format() {
+    let dir = tempfile::tempdir().unwrap();
+    let o = opts(SyncMode::Durable, 1024);
+    let (wal, _) = open(Arc::new(StdVfs), dir.path(), o.clone());
+    let mut first = None;
+    for i in 0..200u32 {
+        let loc = wal.append(vec![7u8; 40], None).await.unwrap();
+        if i == 0 {
+            first = Some(loc);
+        }
+    }
+    assert!(wal.segments().len() >= 2);
+    wal.close().unwrap();
+    // Overwrite the first frame in place with one of the same length and LSN.
+    let first = first.unwrap();
+    let path = dir
+        .path()
+        .join(prkdb_core::wal::segment::segment_file_name(1));
+    let f = StdVfs.open(&path, OpenMode::ReadWrite).unwrap();
+    f.write_at(first.offset, &raw_frame(1, 99, &[7u8; 40], true))
+        .unwrap();
+    f.sync_data().unwrap();
+
+    let err = try_open(dir.path(), o).err().expect("must refuse to open");
+    assert!(
+        matches!(err, WalError::UnsupportedFormat { path: ref p, .. } if *p == path),
+        "{err}"
+    );
+}
+
+/// The torn-tail rule is unchanged: a frame whose CRC is wrong at the end of the last
+/// segment is truncated, whatever its kind byte says.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bad_crc_at_the_end_of_the_last_segment_is_still_a_torn_tail() {
+    for kind in [1u8, 99] {
+        let dir = tempfile::tempdir().unwrap();
+        let o = opts(SyncMode::Durable, 1 << 20);
+        let (wal, _) = open(Arc::new(StdVfs), dir.path(), o.clone());
+        for i in 0..3u8 {
+            wal.append(vec![i; 16], None).await.unwrap();
+        }
+        wal.close().unwrap();
+        let path = dir
+            .path()
+            .join(prkdb_core::wal::segment::segment_file_name(1));
+        let before = std::fs::metadata(&path).unwrap().len();
+        append_to_file(&path, &raw_frame(4, kind, b"torn", false));
+
+        let (wal, report) =
+            Wal::open(Arc::new(StdVfs), dir.path(), o, 1, &mut |_, _, _| Ok(())).unwrap();
+        let (_, offset, fault) = report.truncated.expect("truncated");
+        assert_eq!(offset, before, "kind {kind}");
+        assert_eq!(
+            fault,
+            prkdb_core::wal::frame::FrameFault::BadCrc,
+            "kind {kind}"
+        );
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), before);
+        assert_eq!(wal.next_lsn(), 4);
+    }
+}
+
+/// STO-11 for reads: `scan_from` refuses a valid frame of an unknown kind in the active
+/// segment as `UnsupportedFormat`; it is not a tail in flight.
+#[tokio::test(flavor = "multi_thread")]
+async fn scan_from_refuses_a_valid_frame_of_an_unknown_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    let (wal, _) = open(
+        Arc::new(StdVfs),
+        dir.path(),
+        opts(SyncMode::Durable, 1 << 20),
+    );
+    let mut locs = Vec::new();
+    for i in 0..3u8 {
+        locs.push(wal.append(vec![i; 16], None).await.unwrap());
+    }
+    let path = dir
+        .path()
+        .join(prkdb_core::wal::segment::segment_file_name(1));
+    let f = StdVfs.open(&path, OpenMode::ReadWrite).unwrap();
+    f.write_at(locs[1].offset, &raw_frame(2, 99, &[1u8; 16], true))
+        .unwrap();
+
+    let err = wal.scan_from(1, &mut |_, _, _| Ok(())).unwrap_err();
+    assert!(
+        matches!(err, WalError::UnsupportedFormat { path: ref p, .. } if *p == path),
+        "{err}"
+    );
+}

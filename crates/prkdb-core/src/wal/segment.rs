@@ -102,6 +102,7 @@ fn read_header(file: &dyn VfsFile, path: &Path, first_lsn: Lsn) -> Result<(), Wa
             path: path.to_path_buf(),
             found: format,
             supported: FORMAT_VERSION,
+            frame_kind: None,
         });
     }
 
@@ -117,6 +118,16 @@ fn read_header(file: &dyn VfsFile, path: &Path, first_lsn: Lsn) -> Result<(), Wa
     }
 
     Ok(())
+}
+
+/// The error for a CRC-valid frame of unknown `kind` at `offset` (STO-11).
+fn unsupported_kind(path: &Path, offset: u64, kind: u8) -> WalError {
+    WalError::UnsupportedFormat {
+        path: path.to_path_buf(),
+        found: FORMAT_VERSION,
+        supported: FORMAT_VERSION,
+        frame_kind: Some((offset, kind)),
+    }
 }
 
 /// Reads another chunk (up to `SCAN_CHUNK` bytes) onto the end of `buf`, if the file has
@@ -143,7 +154,10 @@ fn read_more(
 /// chunks is read whole after checking its length against `MAX_PAYLOAD_LEN` and the file
 /// length). Calls `visit` for each good frame. Header problems are errors:
 /// `UnsupportedFormat` for a different format number, `CorruptSegment` for bad magic or
-/// `first_lsn`. Frame problems are not errors: they end the scan and are reported in
+/// `first_lsn`. So is a CRC-valid frame of a kind this build does not know
+/// (`UnsupportedFormat` with `frame_kind` set, STO-11): a later build wrote it whole, so
+/// it is neither a torn tail nor corruption, and no caller may truncate it. Other frame
+/// problems are not errors: they end the scan and are reported in
 /// `SegmentScan::stopped`; the caller decides between "torn tail, truncate" (last
 /// segment) and "corruption, refuse" (earlier segment).
 pub fn scan_segment(
@@ -225,6 +239,9 @@ pub fn scan_segment(
                     buf_pos = cursor;
                 }
             }
+            Decoded::Fault(FrameFault::UnsupportedKind(kind)) => {
+                return Err(unsupported_kind(path, cursor, kind));
+            }
             Decoded::Fault(fault) => {
                 stopped = Some((cursor, fault));
                 break;
@@ -300,6 +317,9 @@ pub fn read_frame(file: &dyn VfsFile, path: &Path, loc: RecordLoc) -> Result<Vec
                 )));
             }
             Ok(payload.to_vec())
+        }
+        Decoded::Fault(FrameFault::UnsupportedKind(kind)) => {
+            Err(unsupported_kind(path, loc.offset, kind))
         }
         Decoded::Fault(fault) => Err(mismatch(format!("{fault:?}"))),
     }

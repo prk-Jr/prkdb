@@ -761,14 +761,13 @@ title = "decode_frame checks the frame kind before the CRC: a valid frame of an 
 area = "storage"
 severity = "high"
 phase = 2
-status = "open"
+status = "in_progress"
 sources = ["task-2.15b-design-2026-10-02"]
 evidence = [
   "crates/prkdb-core/src/wal/frame.rs:132-135",
   "crates/prkdb-core/src/wal/log.rs:514-524",
   "docs/superpowers/specs/2026-10-02-streaming-log-design.md",
 ]
-tripwire = "test:crates/prkdb/tests/tripwires.rs::sto11_valid_frame_of_unknown_kind_is_truncated_as_a_torn_tail_tripwire"
 
 [[phase]]
 id = 0

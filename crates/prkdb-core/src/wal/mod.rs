@@ -21,6 +21,15 @@ pub use log_record::{LogOperation, LogRecord};
 pub use log_state::LogState;
 pub use segment::RecordLoc;
 
+fn frame_kind_note(frame_kind: &Option<(u64, u8)>) -> String {
+    match frame_kind {
+        Some((offset, kind)) => {
+            format!(": the frame at byte {offset} has kind {kind}, which this build does not know")
+        }
+        None => String::new(),
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum WalError {
     #[error("IO error: {0}")]
@@ -44,11 +53,20 @@ pub enum WalError {
     #[error("Recovery failed: {0}")]
     Recovery(String),
 
-    #[error("unsupported WAL format {found} in {path}; this build reads format {supported}")]
+    /// A segment this build cannot read, refused and never modified: its header names
+    /// another format version (`found`), or `frame_kind` is set: the frame at that byte
+    /// offset has a valid CRC but a kind this build does not know, so a later build wrote
+    /// it whole (STO-11). `found` is then the segment's own format number.
+    #[error(
+        "unsupported WAL format {found} in {path}{}; this build reads format {supported}",
+        frame_kind_note(.frame_kind)
+    )]
     UnsupportedFormat {
         path: std::path::PathBuf,
         found: u32,
         supported: u32,
+        /// `(byte offset, kind)` of a CRC-valid frame of unknown kind.
+        frame_kind: Option<(u64, u8)>,
     },
 
     #[error("corrupt WAL: {path} at byte {offset}: {reason}")]
