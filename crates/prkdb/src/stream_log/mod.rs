@@ -22,6 +22,7 @@ pub mod partitioned;
 mod retention;
 
 pub use log::StreamLog;
+pub use partitioned::{PartitionedStream, Route};
 pub use prkdb_core::wal::records::Record;
 pub use prkdb_types::event::EventSeq;
 pub use retention::{RetentionPolicy, RetentionReport};

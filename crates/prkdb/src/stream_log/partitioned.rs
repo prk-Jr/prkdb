@@ -6,7 +6,7 @@ use crate::catalog::Catalog;
 use crate::partitioning::{DefaultPartitioner, Partitioner};
 use crate::storage::lock::lock_data_dir;
 use crate::storage::wal_adapter::wal_err;
-use prkdb_core::vfs::{LockGuard, OpenMode, StdVfs, Vfs};
+use prkdb_core::vfs::{create_dir_all_durable, LockGuard, OpenMode, StdVfs, Vfs};
 use prkdb_core::wal::segment::{parse_segment_file_name, scan_segment_flow};
 use prkdb_types::error::StorageError;
 use std::ops::ControlFlow;
@@ -140,12 +140,8 @@ impl PartitionedStream {
             let vfs = vfs.clone();
             let root = root.clone();
             tokio::task::spawn_blocking(move || {
-                if !vfs.exists(&root).map_err(|e| io_error(&root, e))? {
-                    vfs.create_dir_all(&root).map_err(|e| io_error(&root, e))?;
-                    if let Some(parent) = root.parent().filter(|p| !p.as_os_str().is_empty()) {
-                        vfs.sync_dir(parent).map_err(|e| io_error(parent, e))?;
-                    }
-                }
+                create_dir_all_durable(vfs.as_ref(), &root)
+                    .map_err(|e| io_error(&root, e))?;
                 let lock = lock_data_dir(vfs.as_ref(), &root)?;
                 let entries = vfs.read_dir(&root).map_err(|e| io_error(&root, e))?;
                 for path in &entries {
