@@ -1264,7 +1264,16 @@ jobs:
           
           KAFKA_SUST="${{ steps.kafka_sustained.outputs.kafka_sustained_mbps }}"
           PRKDB_SUST="${{ steps.prkdb_sustained.outputs.prkdb_sustained_mbps }}"
-          
+
+          # A key the bench stopped printing would otherwise become a 0 or invalid JSON
+          # here and publish as a result.
+          for v in PRKDB_PROD PRKDB_CONS PRKDB_LAT PRKDB_P50 PRKDB_P95 PRKDB_P99 PRKDB_MT PRKDB_SUST; do
+            if [ -z "${!v}" ]; then
+              echo "::error::$v is empty: throughput_bench no longer prints the key this job parses."
+              exit 1
+            fi
+          done
+
           # Generate JSON
           cat > benchmark_results/results.json << EOF
           {
