@@ -889,3 +889,6 @@ This explanation is unverified: no kernel tracing was done.
 | wal_fast_inwriter/64w/64k | 64 | 64 KiB | 6272 | 411.0 | 3553.9 | 54211.4 | 54720.9 |  |  |  |  |  |  | 1.84 2.03 1.67 |
 | wal_fast_syncer/64w/64k | 64 | 64 KiB | 6621 | 433.9 | 3395.0 | 391282.0 | 433605.4 |  |  |  |  |  |  | 1.85 2.03 1.67 |
 ```
+
+
+Correction (2026-10-02, storage review): the historical Fast loss-window claim above is superseded by the remediation spec. `sync_interval` is a sync target, not a hard bound. Acknowledged writes at or below `durable_lsn` are persisted; acknowledged writes above it may be lost on power failure. The original spike measurements and compiler records remain historical evidence.

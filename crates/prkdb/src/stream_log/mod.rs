@@ -19,15 +19,17 @@ mod index;
 mod log;
 pub mod manifest;
 pub mod partitioned;
+mod retention;
 
 pub use log::StreamLog;
 pub use prkdb_core::wal::records::Record;
 pub use prkdb_types::event::EventSeq;
+pub use retention::{RetentionPolicy, RetentionReport};
 
 use prkdb_core::wal::WalConfig;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Streams reserve the final LSN block for their exclusive end position.
 pub(crate) const STREAM_LSN_LIMIT: u64 = (1 << 48) - 1;
@@ -48,12 +50,17 @@ impl Clock for SystemClock {
     }
 }
 
-/// A stream has no retention by default. Retention policies are added by Task 2.15b.4.
+/// Stream settings. Retention defaults to keeping every record.
 #[derive(Clone)]
 pub struct StreamConfig {
     pub path: PathBuf,
     pub wal: WalConfig,
     pub clock: Arc<dyn Clock>,
+    pub retention: RetentionPolicy,
+    /// None derives a quarter of max_age, or disables age rolling without max_age.
+    pub segment_max_age: Option<Duration>,
+    /// Zero disables background runs; explicit apply_retention remains available.
+    pub retention_interval: Duration,
 }
 
 impl StreamConfig {
@@ -67,6 +74,9 @@ impl StreamConfig {
             },
             path,
             clock: Arc::new(SystemClock),
+            retention: RetentionPolicy::default(),
+            segment_max_age: None,
+            retention_interval: Duration::from_secs(60),
         }
     }
 }

@@ -52,9 +52,10 @@ LIMIT = 0.85
 # Compaction tail rule: p99 with compaction running back to back may be at most K times
 # the ordinary adapter put's p99 in the same run, per cell.
 #
-# NOT YET CALIBRATED. No Linux probe has run the compaction cells: the last wal-bench probe
-# (https://github.com/prk-Jr/prkdb/actions/runs/36956028167, at c7609dd) predates the cell
-# (7befbeb). K is therefore set from that probe's other rows, conservatively: the tightest
+# NOT YET CALIBRATED. Linux run 37029515695 measured the Fast compaction cells at
+# d8248e5 with three repetitions. All passed this provisional detector; that does
+# not establish an absolute latency budget or demonstrate Durable compaction progress.
+# K was originally set from the earlier probe's other rows, conservatively: the tightest
 # cell is adapter_put/1w/1k at p99 ~66 us, and a put there that waits behind one 1 MiB
 # segment rewrite and its sync_data (~2.6 ms at the 380 writes/s ceiling the same run
 # measured) plus the log sync compaction forces in Fast mode (~0.4 ms p99 for a small

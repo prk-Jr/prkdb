@@ -323,8 +323,9 @@ fn check_marker(dir: &Path, marker: &FormatMarker, expected: Kind) -> Result<(),
 /// opens only with the expected kind; anything else is refused before a single byte is written.
 ///
 /// "Empty" means [`holds_data`] is false: nothing but ignorable entries and a stale
-/// `FORMAT.tmp` from a crash during creation (removed first). The parent is synced before
-/// the marker is written, as `Wal::open` does, so the marker cannot outlive its own
+/// `FORMAT.tmp` from a crash during creation (removed first). An absent directory is
+/// created with its missing ancestors by `create_dir_all_durable`, as `Wal::open` does; an
+/// existing empty one has its parent synced. Either way the marker cannot outlive its own
 /// directory entry.
 pub fn ensure_format(
     vfs: &dyn Vfs,
@@ -332,12 +333,7 @@ pub fn ensure_format(
     expected: Kind,
 ) -> Result<FormatMarker, StorageError> {
     if !vfs.exists(dir).map_err(|e| io_err(dir, e))? {
-        vfs.create_dir_all(dir).map_err(|e| io_err(dir, e))?;
-        if let Some(parent) = dir.parent() {
-            if vfs.exists(parent).map_err(|e| io_err(parent, e))? {
-                vfs.sync_dir(parent).map_err(|e| io_err(parent, e))?;
-            }
-        }
+        prkdb_core::vfs::create_dir_all_durable(vfs, dir).map_err(|e| io_err(dir, e))?;
         return write_format(vfs, dir, expected);
     }
 
@@ -353,9 +349,9 @@ pub fn ensure_format(
     if vfs.exists(&tmp).map_err(|e| io_err(&tmp, e))? {
         vfs.remove(&tmp).map_err(|e| io_err(&tmp, e))?;
     }
-    // The directory may itself be new and unsynced (`PartitionManager` creates partition
-    // directories with plain `create_dir_all`): sync its parent so the marker cannot
-    // outlive its own directory entry.
+    // The directory may itself be new and unsynced (a caller may have created it with a
+    // plain `create_dir_all`): sync its parent so the marker cannot outlive its own
+    // directory entry.
     if let Some(parent) = dir.parent() {
         if vfs.exists(parent).map_err(|e| io_err(parent, e))? {
             vfs.sync_dir(parent).map_err(|e| io_err(parent, e))?;

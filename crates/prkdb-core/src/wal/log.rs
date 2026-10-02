@@ -37,6 +37,8 @@ use tokio::sync::{oneshot, watch, OwnedSemaphorePermit, Semaphore};
 #[derive(Debug, Clone)]
 pub struct WalOptions {
     pub sync_mode: SyncMode,
+    /// Fast mode's sync target (see [`SyncMode::Fast`]): a target, not a bound on what a
+    /// power cut can lose. `durable_lsn` is the guarantee.
     pub sync_interval: Duration,
     pub segment_bytes: u64,
     pub max_batch_bytes: usize,
@@ -437,7 +439,9 @@ struct ActiveSegment {
 impl Wal {
     /// Opens and recovers.
     ///
-    /// Directory: if `dir` is absent, `create_dir_all(dir)` then `sync_dir` of its parent.
+    /// Directory: `dir` and any missing ancestors are created with
+    /// [`create_dir_all_durable`](crate::vfs::create_dir_all_durable), which syncs the
+    /// parent of every ancestor entry, including existing ones (STO-16).
     /// Recovery: lists `*.wal`, sorts by first LSN, checks each segment's first LSN equals
     /// the previous segment's `next_lsn`, scans every segment, and calls `replay` for every
     /// frame with lsn >= `replay_from` in LSN order.
@@ -474,14 +478,7 @@ impl Wal {
         replay_from: Lsn,
         replay: &mut ScanVisitor<'_>,
     ) -> Result<(Wal, RecoveryReport), WalError> {
-        if !vfs.exists(dir)? {
-            vfs.create_dir_all(dir)?;
-            if let Some(parent) = dir.parent() {
-                if vfs.exists(parent)? {
-                    vfs.sync_dir(parent)?;
-                }
-            }
-        }
+        crate::vfs::create_dir_all_durable(&*vfs, dir)?;
 
         let mut segment_lsns: Vec<Lsn> = vfs
             .read_dir(dir)?
@@ -726,9 +723,15 @@ impl Wal {
     }
 
     /// Waits for admission permits (`min(len, max_queued_bytes)` bytes). Refuses a `len`
-    /// over `MAX_PAYLOAD_LEN` with `RecordTooLarge`, and returns `Poisoned`/`Closed` without
-    /// waiting when the log cannot accept writes.
+    /// over `MAX_PAYLOAD_LEN` with `RecordTooLarge` and a `len` of 0 with `EmptyRecord`
+    /// (a frame of length 0 reads back as a torn tail, STO-17), and returns
+    /// `Poisoned`/`Closed` without waiting when the log cannot accept writes.
     pub async fn reserve(&self, len: usize) -> Result<Reservation, WalError> {
+        if len == 0 {
+            return Err(WalError::EmptyRecord {
+                path: self.shared.dir.clone(),
+            });
+        }
         if len > MAX_PAYLOAD_LEN {
             return Err(WalError::RecordTooLarge {
                 path: self.shared.dir.clone(),
@@ -974,6 +977,24 @@ impl Wal {
         self.scan_from_capped(from, self.durable_lsn(), visit)
     }
 
+    /// Starts at the segment holding `from` (the last one whose first LSN is `<= from`,
+    /// or the oldest if `from` precedes them all), so a read near the tail of a long log
+    /// opens no earlier segment (Task 2.15b.1); frames below `from` in that segment are
+    /// still decoded and skipped.
+    ///
+    /// M3: a frame past `cap` is never visited, and ends the scan (frames are in LSN
+    /// order). The cap is checked in every segment, not only the last one listed: `cap`
+    /// is sampled before the segments are listed, and a roll in between seals the segment
+    /// it was sampled against (STO-15). It costs the same one comparison per frame.
+    ///
+    /// Every segment but the last one listed is sealed, and a sealed segment is whole: a
+    /// scan fault in it, or an end short of the LSN the next segment starts at (a
+    /// segment cut exactly between two frames scans without a fault, STO-14), is
+    /// `CorruptSegment`. That end check runs once per segment the scan reads to its end.
+    /// A fault on the last segment's tail is expected (a write in flight, or a crash not
+    /// yet recovered from) and is silently bounded by `cap` regardless of whether
+    /// `scan_segment` itself reports a fault. A CRC-valid frame of an unknown kind is
+    /// `UnsupportedFormat` in any segment (STO-11).
     fn scan_from_capped(
         &self,
         from: Lsn,
@@ -1982,7 +2003,9 @@ fn commit_batch(
     // H1: under saturation, batches keep draining via `try_recv` inside the Append arm and
     // the writer never reaches the idle `recv_timeout` branch that would otherwise run the
     // periodic Fast sync. Checking the interval here too means a continuously busy writer
-    // still syncs at least every `sync_interval`, whether it is ever idle or not.
+    // starts a sync at its next batch boundary after the `sync_interval` target passes
+    // since the first unsynced batch finished writing, whether idle or busy. The
+    // target does not bound fsync completion or the amount lost on a power cut.
     let mut poison_reason: Option<String> = None;
     match opts.sync_mode {
         SyncMode::Durable => {
@@ -2340,5 +2363,40 @@ mod tests {
             assert!(synced >= 1);
             wal.close().unwrap();
         });
+    }
+
+    /// STO-15: a scan samples its cap, then lists the segments. A roll in between turns
+    /// the segment the cap was taken against into a sealed one, and the cap used to be
+    /// applied to the last segment only, so the frames past it were visited. The race is
+    /// replayed deterministically by passing the cap a scan would have sampled before the
+    /// roll.
+    #[test]
+    fn a_cap_sampled_before_a_roll_still_bounds_the_rolled_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wal, _) = Wal::open(
+            Arc::new(StdVfs),
+            dir.path(),
+            opts(SyncMode::Durable),
+            1,
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap();
+        for i in 0..4u8 {
+            wal.append_blocking(vec![i; 8], None).unwrap();
+        }
+        let sampled_cap = 2;
+        assert_eq!(wal.roll_blocking().unwrap(), Some(5));
+        wal.append_blocking(vec![9; 8], None).unwrap();
+
+        let mut seen = Vec::new();
+        let flow = wal
+            .scan_from_capped(1, sampled_cap, &mut |loc, _, _| {
+                seen.push(loc.lsn);
+                Ok(ControlFlow::Continue(()))
+            })
+            .unwrap();
+        assert!(flow.is_continue(), "the cap is not the visitor stopping");
+        assert_eq!(seen, vec![1, 2], "no frame above the sampled cap");
+        wal.close().unwrap();
     }
 }

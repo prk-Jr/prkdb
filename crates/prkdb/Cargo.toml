@@ -81,6 +81,9 @@ metrics = []
 chaos = []
 
 [dev-dependencies]
+# Compile the harness FaultFs source in tests without a database dependency cycle.
+prkdb-core = { workspace = true, features = ["vfs-conformance"] }
+rand_chacha = "0.3"
 prkdb-orm-macros = { workspace = true }
 prkdb-storage-sled = { workspace = true }
 prkdb-storage-sql = { workspace = true }

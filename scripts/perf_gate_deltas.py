@@ -61,7 +61,10 @@ confirmed by a real Linux CI run of this workflow.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import math
 import re
 import sys
 import tempfile
@@ -218,7 +221,7 @@ def extract(root: Path, base_names: set[str] | None) -> tuple[list[dict], list[s
 
 
 def extract_self_test() -> int:
-    """Self-test for `extract`'s rename handling.
+    """Self-test for `extract`'s rename handling and fail-closed baseline inventories.
 
     perf-gate.yml review (HIGH-1 follow-up): a benchmark renamed between base and head
     (as Task 2.3 did for the WAL benches) must be reported as removed under its old name
@@ -278,6 +281,72 @@ def extract_self_test() -> int:
         if removed_row is None or not removed_row.get("removed"):
             problems.append(f"expected the old name to report as removed, got: {removed_row}")
 
+    # list-names is the gate's baseline inventory. Refusing only after printing a
+    # valid subset would still leave a misleading baseline file behind.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        summary_path = root / "summary.json"
+        valid = make_summary("iai_hot_paths::hot_paths::bench_valid", 1234)
+
+        def inventory_case(label: str, payload, expected: str | None, *, mixed=False):
+            summary_path.unlink(missing_ok=True)
+            other = root / "other"
+            if other.exists():
+                (other / "summary.json").unlink()
+                other.rmdir()
+            if payload is not None:
+                summary_path.write_text(payload if isinstance(payload, str) else json.dumps(payload))
+            if mixed:
+                other.mkdir()
+                (other / "summary.json").write_text(json.dumps(valid))
+            stdout, stderr = io.StringIO(), io.StringIO()
+            try:
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    code = list_names(root)
+            except (AttributeError, TypeError, ValueError, KeyError, IndexError, OverflowError) as error:
+                problems.append(f"{label}: uncaught invalid-summary error: {error}")
+                return
+            if expected is not None:
+                if code != 0 or stdout.getvalue() != expected + "\n" or stderr.getvalue():
+                    problems.append(f"{label}: valid inventory refused or changed: {code}, {stdout.getvalue()!r}, {stderr.getvalue()!r}")
+            elif code == 0 or stdout.getvalue() or not stderr.getvalue():
+                problems.append(f"{label}: expected refusal without names and with diagnostic, got {code}, {stdout.getvalue()!r}, {stderr.getvalue()!r}")
+
+        inventory_case("valid first-run summary", valid, valid["module_path"])
+        paired = make_summary(valid["module_path"], 1234)
+        paired["id"] = "case_1"
+        paired_ir = paired["profiles"][0]["summaries"]["total"]["summary"]["Callgrind"]["Ir"]
+        paired_ir["metrics"] = {"Both": [{"Int": 1234}, {"Int": 1200}]}
+        paired_ir["diffs"] = {"diff_pct": "2.833333", "factor": "1.028333"}
+        inventory_case("valid compared summary and id", paired, valid["module_path"] + "::case_1")
+        paired["id"] = "case 1"
+        inventory_case("valid id with internal space", paired, valid["module_path"] + "::case 1")
+        float_summary = make_summary(valid["module_path"], 1234)
+        float_summary["profiles"][0]["summaries"]["total"]["summary"]["Callgrind"]["Ir"]["metrics"] = {"Left": {"Float": 1234.5}}
+        inventory_case("valid Float metric", float_summary, valid["module_path"])
+        inventory_case("empty expected run", None, None)
+        inventory_case("malformed JSON mixed with valid summary", "{", None, mixed=True)
+        inventory_case("missing identity", make_summary("", 1234), None)
+        inventory_case("missing module_path", {"profiles": valid["profiles"]}, None)
+        inventory_case("newline in identity", make_summary("bench\nother", 1234), None)
+        bad_id = make_summary("bench", 1234)
+        bad_id["id"] = "case\nother"
+        inventory_case("newline in benchmark id", bad_id, None)
+        invalid_base = make_summary("bench", 1234)
+        invalid_base["profiles"][0]["summaries"]["total"]["summary"]["Callgrind"]["Ir"]["metrics"] = {"Both": [{"Int": 1234}, {"Int": 0}]}
+        inventory_case("invalid compared base metric", invalid_base, None)
+        inventory_case("wrong top-level schema", [], None)
+        inventory_case("missing instruction metric", {"module_path": "bench", "profiles": []}, None)
+        for metric in ({"Right": {"Int": 1234}}, {"Left": {"Int": "1234"}},
+                       {"Left": {"Int": True}}, {"Left": {"Int": 1.5}},
+                       {"Left": {"Int": 2**64}}, {"Left": {"Int": 0}},
+                       {"Left": {"Int": -1}}, {"Left": {"Float": float("nan")}},
+                       {"Left": {"Float": float("inf")}}, {"Left": {"Float": 2**1024}}):
+            invalid = make_summary("bench", 1234)
+            invalid["profiles"][0]["summaries"]["total"]["summary"]["Callgrind"]["Ir"]["metrics"] = metric
+            inventory_case(f"invalid instruction metric {metric}", invalid, None)
+        inventory_case("duplicate summary identity", valid, None, mixed=True)
+
     for p in problems:
         print(f"extract self-test FAILED: {p}", file=sys.stderr)
     if not problems:
@@ -286,11 +355,81 @@ def extract_self_test() -> int:
 
 
 def list_names(root: Path) -> int:
-    """Print one benchmark name per line, for capturing as a `--base-list` file."""
-    for path in find_summaries(root):
-        benchmark = load_benchmark(path)
-        if benchmark is not None:
-            print(benchmark_name(benchmark))
+    """Validate a completed run, then print its complete `--base-list` inventory.
+
+    Empty input here is an error. The workflow handles a base without the bench
+    explicitly, without invoking this command. Never print a partial inventory:
+    missing names would incorrectly exempt existing benchmarks as new at head.
+    """
+    paths = find_summaries(root)
+    names = []
+    seen: set[str] = set()
+    problems = []
+    if not paths:
+        problems.append(f"found zero benchmark summaries under {root}")
+    for path in paths:
+        try:
+            benchmark = load_benchmark(path)
+            if benchmark is None:
+                raise SummaryError("could not parse summary as JSON")
+            if not isinstance(benchmark, dict):
+                raise SummaryError("summary must be a JSON object")
+            module_path = benchmark.get("module_path")
+            if (
+                not isinstance(module_path, str)
+                or not module_path
+                or module_path.strip() != module_path
+                or module_path.splitlines() != [module_path]
+            ):
+                raise SummaryError("missing or invalid module_path")
+            bench_id = benchmark.get("id")
+            if bench_id is not None and (
+                not isinstance(bench_id, str)
+                or not bench_id
+                or bench_id.strip() != bench_id
+                or bench_id.splitlines() != [bench_id]
+            ):
+                raise SummaryError("invalid benchmark id")
+            name = benchmark_name(benchmark)
+            found = find_ir_total(benchmark)
+            if found is None:
+                raise SummaryError("no Callgrind Instructions (Ir) metric found")
+            ir, regressions = found
+            if not isinstance(regressions, list):
+                raise SummaryError("regressions must be an array")
+            metrics = ir["metrics"]
+            if not isinstance(metrics, dict):
+                raise SummaryError("invalid Instructions metrics")
+            if set(metrics) == {"Left"}:
+                values = [metrics["Left"]]
+            elif (
+                set(metrics) == {"Both"}
+                and isinstance(metrics["Both"], list)
+                and len(metrics["Both"]) == 2
+            ):
+                values = metrics["Both"]
+            else:
+                raise SummaryError("Instructions must contain a new Left or Both measurement")
+            for metric in values:
+                if not isinstance(metric, dict) or set(metric) not in ({"Int"}, {"Float"}):
+                    raise SummaryError("invalid Instructions Metric encoding")
+                value = metric_value(metric)
+                if "Int" in metric and (type(value) is not int or not 0 < value < 2**64):
+                    raise SummaryError("Instructions Int must be a positive u64")
+                if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+                    raise SummaryError("Instructions must be a positive finite number")
+            if name in seen:
+                raise SummaryError(f"duplicate benchmark name: {name}")
+            seen.add(name)
+            names.append(name)
+        except (SummaryError, AttributeError, TypeError, ValueError, KeyError, IndexError, OverflowError) as error:
+            problems.append(f"{path}: {error}")
+    if problems:
+        for problem in problems:
+            print(f"perf_gate_deltas.py: {problem}", file=sys.stderr)
+        return 1
+    for name in names:
+        print(name)
     return 0
 
 

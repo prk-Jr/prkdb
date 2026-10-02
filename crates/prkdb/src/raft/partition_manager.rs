@@ -68,7 +68,8 @@ impl PartitionManager {
 
             // Create isolated storage directory for this partition
             let partition_path = base_storage_path.join(format!("partition_{}", partition_id));
-            std::fs::create_dir_all(&partition_path)?;
+            // Durably, with any missing ancestor of the base path (STO-15).
+            prkdb_core::vfs::create_dir_all_durable(&prkdb_core::vfs::StdVfs, &partition_path)?;
 
             let wal_config = WalConfig {
                 log_dir: partition_path,

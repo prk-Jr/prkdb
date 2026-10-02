@@ -6986,20 +6986,37 @@ mod tests {
         pub email: String,
     }
 
-    async fn create_test_storage() -> Arc<WalStorageAdapter> {
+    async fn create_test_storage() -> (tempfile::TempDir, Arc<WalStorageAdapter>) {
         let dir = tempfile::tempdir().unwrap();
-        Arc::new(
+        let storage = Arc::new(
             WalStorageAdapter::new(WalConfig {
                 log_dir: dir.path().to_path_buf(),
                 ..WalConfig::test_config()
             })
             .unwrap(),
-        )
+        );
+        // Callers bind the directory before the adapter and keep it for the test's
+        // whole scope, so the WAL closes before TempDir removes its live files.
+        (dir, storage)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_test_directory_outlives_its_open_adapter() {
+        let (dir, storage) = create_test_storage().await;
+        let path = storage.get_log_dir();
+        assert!(path.is_dir(), "test helper removed a live WAL directory");
+        drop(storage);
+        assert!(
+            path.is_dir(),
+            "fixture directory must remain owned until cleanup"
+        );
+        drop(dir);
+        assert!(!path.exists(), "test fixture must clean up its directory");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_insert_and_query_by_index() {
-        let storage = create_test_storage().await;
+        let (_dir, storage) = create_test_storage().await;
         let indexed = IndexedWalStorage::new(storage);
 
         // Insert users
@@ -7041,7 +7058,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_query_unique() {
-        let storage = create_test_storage().await;
+        let (_dir, storage) = create_test_storage().await;
         let indexed = IndexedWalStorage::new(storage);
 
         indexed
@@ -7071,7 +7088,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_delete_updates_index() {
-        let storage = create_test_storage().await;
+        let (_dir, storage) = create_test_storage().await;
         let indexed = IndexedWalStorage::new(storage);
 
         let user = TestUser {
@@ -7107,7 +7124,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_filter() {
-        let storage = create_test_storage().await;
+        let (_dir, storage) = create_test_storage().await;
         let indexed = IndexedWalStorage::new(storage);
 
         // Insert people with various ages
@@ -7149,7 +7166,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_batch_operations() {
-        let storage = create_test_storage().await;
+        let (_dir, storage) = create_test_storage().await;
         let indexed = IndexedStorage::new(storage);
 
         let users = vec![
@@ -7189,7 +7206,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_pagination() {
-        let storage = create_test_storage().await;
+        let (_dir, storage) = create_test_storage().await;
         let indexed = IndexedStorage::new(storage);
 
         // Insert 10 people
@@ -7230,7 +7247,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_aggregations() {
-        let storage = create_test_storage().await;
+        let (_dir, storage) = create_test_storage().await;
         let indexed = IndexedStorage::new(storage);
 
         // Insert people with ages: 20, 25, 30, 35, 40
@@ -7272,7 +7289,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_insert_batch_basic() {
-        let storage = create_test_storage().await;
+        let (_dir, storage) = create_test_storage().await;
         let indexed = IndexedStorage::new(storage);
 
         // Create batch of users
@@ -7300,7 +7317,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_insert_batch_empty() {
-        let storage = create_test_storage().await;
+        let (_dir, storage) = create_test_storage().await;
         let indexed = IndexedStorage::new(storage);
 
         // Empty batch should return 0
@@ -7311,7 +7328,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_insert_batch_large() {
-        let storage = create_test_storage().await;
+        let (_dir, storage) = create_test_storage().await;
         let indexed = IndexedStorage::new(storage);
 
         // Create large batch (1000 records)
@@ -7339,7 +7356,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_concurrent_inserts() {
-        let storage = create_test_storage().await;
+        let (_dir, storage) = create_test_storage().await;
         let indexed = Arc::new(IndexedStorage::new(storage));
 
         // Spawn multiple concurrent writers
@@ -7381,7 +7398,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_upsert_batch() {
-        let storage = create_test_storage().await;
+        let (_dir, storage) = create_test_storage().await;
         let indexed = IndexedStorage::new(storage);
 
         // Insert some initial records
@@ -7421,7 +7438,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_delete_batch_bulk() {
-        let storage = create_test_storage().await;
+        let (_dir, storage) = create_test_storage().await;
         let indexed = IndexedStorage::new(storage);
 
         // Insert records
@@ -7461,7 +7478,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_concurrent_read_write() {
-        let storage = create_test_storage().await;
+        let (_dir, storage) = create_test_storage().await;
         let indexed = Arc::new(IndexedStorage::new(storage));
 
         // Insert initial data
@@ -7520,7 +7537,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_cursor_pagination() {
-        let storage = create_test_storage().await;
+        let (_dir, storage) = create_test_storage().await;
         let indexed = IndexedStorage::new(storage);
 
         // Insert 50 users with same role
@@ -7559,7 +7576,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_transaction_savepoints() {
-        let storage = create_test_storage().await;
+        let (_dir, storage) = create_test_storage().await;
         let db = IndexedStorage::new(storage);
 
         let user1 = TestUser {
