@@ -18,6 +18,7 @@
 mod index;
 mod log;
 pub mod manifest;
+pub mod partitioned;
 
 pub use log::StreamLog;
 pub use prkdb_core::wal::records::Record;
