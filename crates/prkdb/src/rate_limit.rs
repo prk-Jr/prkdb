@@ -83,10 +83,9 @@ impl RateLimiter {
         }
     }
 
-    /// Refill tokens based on elapsed time
-    async fn refill(&self) {
+    /// Refill tokens based on the time elapsed up to `now`
+    async fn refill(&self, now: Instant) {
         let mut last = self.last_refill.lock().await;
-        let now = Instant::now();
         let elapsed = now.duration_since(*last);
 
         if elapsed >= self.refill_interval {
@@ -104,7 +103,13 @@ impl RateLimiter {
     /// Try to acquire a token without waiting
     /// Returns true if acquired, false if rate limited
     pub async fn try_acquire(&self) -> bool {
-        self.refill().await;
+        self.try_acquire_at(Instant::now()).await
+    }
+
+    /// [`try_acquire`](Self::try_acquire) with an explicit "now", so the refill
+    /// decision does not depend on how long the caller took to get here.
+    async fn try_acquire_at(&self, now: Instant) -> bool {
+        self.refill(now).await;
 
         loop {
             let current = self.tokens.load(Ordering::Relaxed);
@@ -171,17 +176,21 @@ mod tests {
     #[tokio::test]
     async fn test_rate_limiter_refill() {
         let limiter = RateLimiter::new(5, Duration::from_millis(50));
+        // Drive the limiter with explicit instants rather than wall-clock sleeps:
+        // a slow runner must not refill the bucket mid-exhaustion.
+        let t0 = *limiter.last_refill.lock().await;
 
         // Exhaust tokens
         for _ in 0..5 {
-            assert!(limiter.try_acquire().await);
+            assert!(limiter.try_acquire_at(t0).await);
         }
-        assert!(!limiter.try_acquire().await);
+        assert!(!limiter.try_acquire_at(t0).await);
 
-        // Wait for refill
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        // Still empty one millisecond before the interval elapses
+        assert!(!limiter.try_acquire_at(t0 + Duration::from_millis(49)).await);
 
-        // Should have tokens again
-        assert!(limiter.try_acquire().await);
+        // Refilled once the interval has elapsed
+        assert!(limiter.try_acquire_at(t0 + Duration::from_millis(50)).await);
+        assert_eq!(limiter.available(), 4);
     }
 }
