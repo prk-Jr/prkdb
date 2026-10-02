@@ -45,6 +45,19 @@ fn unsupported_format_message(
     }
 }
 
+/// `RecordTooLarge`'s message; an empty `path` means a codec refused the uncompressed
+/// payload before it reached a file.
+fn record_too_large_message(path: &std::path::Path, len: usize, max: usize) -> String {
+    if path.as_os_str().is_empty() {
+        format!("record of {len} uncompressed bytes exceeds the {max}-byte limit; split the write")
+    } else {
+        format!(
+            "record of {len} bytes in {} exceeds the {max}-byte limit",
+            path.display()
+        )
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum WalError {
     #[error("IO error: {0}")]
@@ -102,7 +115,10 @@ pub enum WalError {
         source: Box<WalError>,
     },
 
-    #[error("record of {len} bytes in {path} exceeds the {max}-byte limit")]
+    /// A payload over `max` bytes. `path` names the log or segment involved; it is empty
+    /// when a payload codec refused before any file was touched (STO-12: `len` is then
+    /// the uncompressed size, which the decoder bounds by `MAX_PAYLOAD_LEN`).
+    #[error("{}", record_too_large_message(.path, *.len, *.max))]
     RecordTooLarge {
         path: std::path::PathBuf,
         len: usize,
@@ -136,9 +152,9 @@ pub enum WalError {
     CompactionRefused(String),
 
     /// A record batch the codec refuses to encode (`records.rs`, Task 2.15b.2): no
-    /// records or more than 65,536, a header name or header list too long for its
-    /// length prefix, or an uncompressed body over `MAX_PAYLOAD_LEN`. Nothing was
-    /// written; the caller fixes or splits the batch.
+    /// records or more than 65,536, or a header name or header list too long for its
+    /// length prefix (an oversized body is `RecordTooLarge`). Nothing was written; the
+    /// caller fixes or splits the batch.
     #[error("invalid record batch: {0}")]
     InvalidRecords(String),
 }

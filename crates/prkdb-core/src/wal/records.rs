@@ -47,9 +47,10 @@
 //! the caller's `CompressionConfig` names a codec and the body reaches its
 //! `min_compress_bytes`, as `batch.rs` does, and is then kept only if it came out
 //! smaller; `codec` records what was actually stored. `encode` refuses
-//! (`WalError::InvalidRecords`) 0 or more than 65,536 records, a header name over 65,535
-//! bytes, more than 65,535 headers on one record, and an uncompressed body over
-//! `MAX_PAYLOAD_LEN`, which `decode` would refuse.
+//! 0 or more than 65,536 records, a header name over 65,535 bytes and more than 65,535
+//! headers on one record (`WalError::InvalidRecords`), and an uncompressed body over
+//! `MAX_PAYLOAD_LEN`, which `decode` would refuse however small it compresses
+//! (`WalError::RecordTooLarge` with an empty path, as `Batch::encode`, STO-12).
 //!
 //! # Decoding untrusted bytes
 //!
@@ -315,10 +316,12 @@ impl RecordBatch {
         for (i, record) in self.records.iter().enumerate() {
             len = len.saturating_add(record.encoded_len(i)?);
             if len > MAX_PAYLOAD_LEN {
-                return Err(invalid(format!(
-                    "the uncompressed body exceeds the {MAX_PAYLOAD_LEN}-byte limit at \
-                     record {i}; split the batch"
-                )));
+                // What decode would refuse (STO-12), whatever it compresses to.
+                return Err(WalError::RecordTooLarge {
+                    path: std::path::PathBuf::new(),
+                    len,
+                    max: MAX_PAYLOAD_LEN,
+                });
             }
         }
         Ok(len)
@@ -891,7 +894,7 @@ mod tests {
         for codec in [CompressionType::None, CompressionType::Lz4] {
             let err = batch.encode(&always(codec)).unwrap_err();
             assert!(
-                matches!(err, WalError::InvalidRecords(_)),
+                matches!(err, WalError::RecordTooLarge { max, .. } if max == MAX_PAYLOAD_LEN),
                 "{codec:?}: {err}"
             );
             assert!(err.to_string().contains("limit"), "{err}");
