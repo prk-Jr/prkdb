@@ -10,7 +10,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 |---|---|---|---|
 | 0 | Honesty and tracking | gate_passed | 6/6 |
 | 1 | Harness and baseline | gate_passed | 2/2 |
-| 2 | Format v2 and single-node root fixes | not_started | 0/22 |
+| 2 | Format v2 and single-node root fixes | not_started | 0/27 |
 | 3 | Semantics | not_started | 0/9 |
 | 4 | Raft | not_started | 0/15 |
 | 5 | Documentation and release | not_started | 0/9 |
@@ -47,6 +47,9 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | STO-07 | high | 2 | fixed | BatchAccumulator::flush() sleeps and returns Ok while dropping executor errors |
 | STO-10 | high | 2 | fixed | No data-directory lock: two processes can open and corrupt the same WAL |
 | STO-11 | high | 2 | fixed | decode_frame checks the frame kind before the CRC: a valid frame of an unknown kind is treated as a torn tail and the active segment is truncated |
+| STO-12 | high | 2 | fixed | Dropping the last handle does not release the data-directory lock: a reopen right after the drop is refused as Locked |
+| STO-15 | high | 2 | fixed | Opening a data directory under several missing directories syncs only the immediate parent: a power cut can drop the ancestors and an acknowledged Durable write |
+| STO-16 | high | 2 | fixed | The WAL accepts an empty payload and writes a 0-length frame that recovery truncates together with every later acknowledged frame |
 | TST-01 | high | 4 | open | Chaos monkey tolerates 20% of acknowledged writes missing |
 | TST-09 | high | 2 | fixed | Perf gate WAL benches count ~500 instructions: the WAL work is outside the measured region |
 | TXN-01 | high | 3 | open | Commit writes puts then deletes in separate append_batch calls; crash between leaves a torn commit |
@@ -64,6 +67,8 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | STO-03 | medium | 2 | fixed | WAL append outside publish_barrier can leave the live index pointing at a stale offset |
 | STO-04 | medium | 2 | fixed | scan_mmap skips CRC on open; torn records become invisible; directories never fsynced |
 | STO-05 | medium | 2 | fixed | WAL routing uses unstable DefaultHasher; replay ordered by segment id, not global order |
+| STO-13 | medium | 2 | fixed | A runtime WAL scan silently skips the tail of a sealed segment cut exactly between two frames |
+| STO-14 | medium | 2 | fixed | A roll between sampling a scan's cap and listing the segments lets the scan visit frames above the cap |
 | TST-02 | medium | 4 | open | Linearizability workloads use 1 writer, 1 reader, ~25 ops; failed reads dropped |
 | TST-05 | medium | 2 | fixed | No power-loss (unsynced-data) testing; needs the WAL routed through Vfs |
 | TST-06 | medium | 4 | open | No deterministic simulation of the cluster |

@@ -771,6 +771,75 @@ evidence = [
 regression_tests = ["test:crates/prkdb-core/tests/wal_log.rs::an_unknown_frame_kind_with_a_valid_crc_refuses_and_never_truncates", "test:crates/prkdb-core/tests/wal_log.rs::an_unknown_frame_kind_in_a_sealed_segment_is_unsupported_format", "test:crates/prkdb-core/tests/wal_log.rs::a_bad_crc_at_the_end_of_the_last_segment_is_still_a_torn_tail", "test:crates/prkdb-core/tests/wal_log.rs::scan_from_refuses_a_valid_frame_of_an_unknown_kind", "test:crates/prkdb/tests/tripwires.rs::sto11_valid_frame_of_unknown_kind_refuses_and_is_never_truncated", "test:crates/prkdb-core/src/wal/frame.rs::a_valid_frame_of_an_unknown_kind_is_unsupported_kind", "test:crates/prkdb-core/src/wal/frame.rs::an_unknown_kind_with_a_bad_crc_is_bad_crc"]
 changes = ["c4b2db5"]
 
+[[finding]]
+id = "STO-12"
+title = "Dropping the last handle does not release the data-directory lock: a reopen right after the drop is refused as Locked"
+area = "storage"
+severity = "high"
+phase = 2
+status = "fixed"
+sources = ["remediation-gate-ci-2026-10-02"]
+evidence = [
+  "https://github.com/prk-Jr/prkdb/actions/runs/36982186870",
+  "crates/prkdb-core/src/vfs/std_vfs.rs:84-91",
+  "crates/prkdb/src/batch_accumulator.rs:151",
+  "crates/prkdb/src/ttl.rs:180-184",
+]
+regression_tests = ["test:crates/prkdb-core/src/vfs/std_vfs.rs::dropping_the_guard_releases_the_lock_while_a_duplicate_descriptor_is_open", "test:crates/prkdb/tests/reopen_after_drop.rs::a_wal_adapter_reopens_right_after_its_drop_with_compaction_running", "test:crates/prkdb/tests/reopen_after_drop.rs::a_prkdb_reopens_right_after_its_drop", "test:crates/prkdb/tests/reopen_after_drop.rs::a_flushed_batching_handle_releases_the_directory_when_dropped", "test:crates/prkdb/tests/reopen_after_drop.rs::ttl_storage_releases_the_directory_when_dropped", "test:crates/prkdb-cli/tests/backup_restore.rs::backup_then_restore_preserves_every_value"]
+changes = ["c6a93e5", "8bf7c25", "0d3bfbe", "3307b28"]
+
+[[finding]]
+id = "STO-13"
+title = "A runtime WAL scan silently skips the tail of a sealed segment cut exactly between two frames"
+area = "storage"
+severity = "medium"
+phase = 2
+status = "fixed"
+sources = ["external-review-2026-10-02"]
+evidence = ["crates/prkdb-core/src/wal/log.rs:947-990"]
+regression_tests = ["test:crates/prkdb-core/tests/wal_scan_edges.rs::scan_from_refuses_a_sealed_segment_cut_at_a_frame_boundary", "test:crates/prkdb-core/tests/wal_scan_edges.rs::scan_durable_from_flow_refuses_a_sealed_segment_cut_at_a_frame_boundary", "test:crates/prkdb-core/tests/wal_scan_edges.rs::a_scan_that_never_reaches_the_cut_end_is_unaffected", "test:crates/prkdb-core/tests/wal_scan_edges.rs::an_intact_log_scans_every_frame"]
+changes = ["5bc24ad", "24c967d"]
+
+[[finding]]
+id = "STO-14"
+title = "A roll between sampling a scan's cap and listing the segments lets the scan visit frames above the cap"
+area = "storage"
+severity = "medium"
+phase = 2
+status = "fixed"
+sources = ["external-review-2026-10-02"]
+evidence = ["crates/prkdb-core/src/wal/log.rs:947-990"]
+regression_tests = ["test:crates/prkdb-core/src/wal/log.rs::a_cap_sampled_before_a_roll_still_bounds_the_rolled_segment"]
+changes = ["5bc24ad", "24c967d"]
+
+[[finding]]
+id = "STO-15"
+title = "Opening a data directory under several missing directories syncs only the immediate parent: a power cut can drop the ancestors and an acknowledged Durable write"
+area = "storage"
+severity = "high"
+phase = 2
+status = "fixed"
+sources = ["external-review-2026-10-02"]
+evidence = [
+  "crates/prkdb-core/src/wal/log.rs:470-476",
+  "crates/prkdb/src/storage/wal_adapter.rs:686-688",
+  "crates/prkdb/src/raft/partition_manager.rs:71",
+]
+regression_tests = ["test:crates/prkdb-core/tests/wal_durable_dirs.rs::every_missing_ancestor_is_durable_before_the_first_durable_ack", "test:crates/prkdb-core/tests/wal_durable_dirs.rs::create_dir_all_durable_syncs_the_parent_of_every_directory_it_creates", "test:crates/prkdb/tests/durable_data_dir.rs::every_missing_ancestor_of_the_data_directory_is_durable"]
+changes = ["cd12b10", "6e7c9bf", "4d725cd"]
+
+[[finding]]
+id = "STO-16"
+title = "The WAL accepts an empty payload and writes a 0-length frame that recovery truncates together with every later acknowledged frame"
+area = "storage"
+severity = "high"
+phase = 2
+status = "fixed"
+sources = ["external-review-2026-10-02"]
+evidence = ["crates/prkdb-core/src/wal/log.rs:688-697"]
+regression_tests = ["test:crates/prkdb-core/tests/wal_log.rs::an_empty_record_is_refused_before_queueing_and_later_writes_survive_a_reopen"]
+changes = ["095a58b", "b746113"]
+
 [[phase]]
 id = 0
 title = "Honesty and tracking"
