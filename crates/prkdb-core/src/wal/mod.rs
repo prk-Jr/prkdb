@@ -6,6 +6,7 @@ pub mod frame;
 pub mod log;
 pub mod log_record;
 pub mod log_state;
+pub mod records;
 pub mod segment;
 
 pub use compression::{
@@ -133,6 +134,13 @@ pub enum WalError {
     /// segment to remove that still holds a live frame). Nothing was changed.
     #[error("compaction refused: {0}")]
     CompactionRefused(String),
+
+    /// A record batch the codec refuses to encode (`records.rs`, Task 2.15b.2): no
+    /// records or more than 65,536, a header name or header list too long for its
+    /// length prefix, or an uncompressed body over `MAX_PAYLOAD_LEN`. Nothing was
+    /// written; the caller fixes or splits the batch.
+    #[error("invalid record batch: {0}")]
+    InvalidRecords(String),
 }
 
 #[cfg(test)]
