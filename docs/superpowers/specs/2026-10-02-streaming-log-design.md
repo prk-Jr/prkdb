@@ -1,13 +1,15 @@
 # Streaming log on the single `Wal` (Task 2.15b, D13)
 
-**Status:** proposed, for maintainer review before any code.
+**Status:** accepted 2026-10-02. The decisions are in §13. One of them is flagged for
+confirmation: the keyed change feed's divergence check (§7.4).
 **Plan:** `docs/superpowers/plans/2026-09-23-root-cause-remediation.md`, "Task 2.15b".
 **Spec:** `2026-09-23-root-cause-remediation-design.md`, D3, D4, D11, D13, §6, §7.1.
 **Base:** `remediation/phase-2` @ b2a5359 (compaction, Task 2.15, merged).
 
 This note answers the design questions the plan lists for Task 2.15b, records what we take
-from Kafka, Redpanda and Iggy, and ends with the questions only the maintainer can settle
-(§13) and a task breakdown (§14). Nothing here is implemented yet.
+from Kafka, Redpanda and Iggy, and ends with the maintainer's decisions (§13) and a task
+breakdown (§14). Nothing here is implemented yet. Where a section below still says
+"recommended", §13 records what was decided.
 
 ---
 
@@ -176,8 +178,10 @@ a record without headers carries nothing else. See §13 Q6.
 encodes the payload. That happens before admission, so concurrent appenders can land
 slightly out of time order. The skew is bounded by queueing time. Retention uses each
 segment's **maximum** time, as Kafka does, so out-of-order times are harmless there.
-Seek-by-time returns the first frame whose time is ≥ the target, scanning forward from the
-sparse index (§6.3). Producer-supplied create times are §13 Q7.
+Seek-by-time in v1 is **coarse, per segment** (decided, §13 Q7): `StartAt::Timestamp(t)`
+resolves to the first offset of the oldest segment whose max time is ≥ `t`, so a reader may
+see records older than `t` from that segment. A finer seek through the sparse index (§6.3)
+can come later without a format change. There are no producer-supplied create times.
 
 ### 4.3 Offsets: `EventSeq = lsn << 16 | idx`
 
@@ -274,8 +278,8 @@ It is doable, and it costs about a day plus permanent test surface. §13 Q2.
 ### 6.1 Contract
 
 ```rust
-pub fn read_from(&self, from: StartAt, limits: ReadLimits) -> Result<ReadBatch, StorageError>;
-pub fn read_durable_from(&self, from: StartAt, limits: ReadLimits) -> Result<ReadBatch, StorageError>;
+pub async fn read_from(&self, from: StartAt, limits: ReadLimits) -> Result<ReadBatch, StorageError>;
+pub async fn read_durable_from(&self, from: StartAt, limits: ReadLimits) -> Result<ReadBatch, StorageError>;
 ```
 
 - **Default bound: acked** (`Wal::scan_from`'s cap `acked_lsn`), the same as
@@ -284,26 +288,29 @@ pub fn read_durable_from(&self, from: StartAt, limits: ReadLimits) -> Result<Rea
 - **`read_durable_from`** caps at `durable_lsn`, for consumers that must never act on a
   record that could still vanish: exactly-once sinks, and replicas built on the stream.
 - **`StartAt`**: `Offset(EventSeq)`, `Earliest`, `Latest` (= `next_offset()`, returns
-  nothing until new data arrives), `Timestamp(i64)`.
-- **Below the floor:** `Offset(o)` with `o < earliest()` returns
-  `StorageError::CompactedCursor { cursor: o.raw(), floor: earliest().raw() }`. That
-  includes `o = 0` on a fresh log, since the first offset is `1 << 16`. Nothing is skipped
-  silently, and no offset is special-cased. "From the beginning" is spelled `Earliest`. The
-  floor is read before the scan. A segment that retention removes during the scan is still
-  read through the cloned handle (on Unix an unlinked file stays readable). The records
-  returned were real and valid when the read started, so unlike compaction no
-  after-the-scan check is needed.
-- **Above the end:** `Offset(o)` with `o > next_offset()` returns
-  `StorageError::Validation("offset {o} is past the end of the stream ({next})")`. This is
-  how a consumer whose committed position outran a `Fast` power loss finds out (§7.3), as
-  long as no new appends have refilled those LSNs.
+  nothing until new data arrives), `Timestamp(i64)` (coarse, per segment, §4.2).
+- **Out of range** (decided, §13 Q3/Q4) is a dedicated error,
+  `StorageError::OffsetOutOfRange { requested, floor, end }`, with
+  `floor = earliest().raw()` and `end = next_offset().raw()`.
+  - **Below the floor:** `Offset(o)` with `o < earliest()`. That includes `o = 0` on a fresh
+    log, since the first offset is `1 << 16`. Nothing is skipped silently and no offset is
+    special-cased. "From the beginning" is spelled `StartAt::Earliest`.
+  - The floor is read before the scan. A segment that retention removes during the scan is
+    still read through the cloned handle (on Unix an unlinked file stays readable). The
+    records returned were real and valid when the read started, so unlike compaction no
+    after-the-scan check is needed.
+  - **Above the end:** `Offset(o)` with `o > next_offset()`. This is how a consumer whose
+    committed position outran a `Fast` power loss finds out, as long as no new appends have
+    refilled those LSNs. When they have, §7.3's check catches it.
+  - The keyed feed keeps `CompactedCursor`: its remedy (resynchronise from a snapshot) is
+    different.
 - **`ReadLimits { max_records, max_bytes }`**: the batch stops at whichever comes first,
   but always returns at least one record if one exists (Kafka's rule: a record larger than
   `max_bytes` would otherwise wedge the consumer). `ReadBatch { records, next: EventSeq,
   high_watermark: EventSeq }`, where `next` is the resume position.
-- A read is synchronous `pread` I/O through `Vfs`, bounded by `limits`, like `Wal::read`
-  and `get_changes_since` today. Async callers with large `max_bytes` use `spawn_blocking`
-  (§13 Q13).
+- **Async** (decided, §13 Q13): the scan is synchronous `pread` I/O through `Vfs`, bounded
+  by `limits`, and runs inside `tokio::task::spawn_blocking`, so a large read never
+  occupies a runtime worker. The closure owns an `Arc` of the stream's inner state.
 
 ### 6.2 `Wal` changes needed (2.15b.1)
 
@@ -359,14 +366,16 @@ The stream API takes an `Arc<dyn OffsetStore>`. `PartitionedStream::default_offs
 opens a `WalStorageAdapter` at `<root>/__offsets/`: a kv data directory, its own `FORMAT`
 and `LOCK`, a sibling of the partitions, like Kafka's `__consumer_offsets` and Iggy's
 `offsets/`. A commit is therefore as durable as that adapter's `SyncMode`. Delivery is
-at-least-once: process, then commit. §13 Q9.
+at-least-once: process, then commit. Decided (§13 Q9): this built-in store, which reuses
+`StorageOffsetStore`, is the default. Callers may pass their own `OffsetStore` and manage
+offsets themselves.
 
 ### 7.3 Out-of-range and `Fast` power loss
 
 - **No committed offset:** `auto_offset_reset` decides (`Earliest`, `Latest`, or `None`,
   which is an error), as today.
 - **Committed offset below `earliest()`** (retention ran past an idle group):
-  `on_out_of_range` decides. The default is `Error`: the `CompactedCursor` propagates and
+  `on_out_of_range` decides. The default is `Error`: the `OffsetOutOfRange` propagates and
   the caller chooses. `ResetToEarliest` is opt-in and logs the number of skipped LSNs.
   Kafka's silent `latest` reset is not offered as a default, per the plan's "never silent
   skip".
@@ -375,7 +384,8 @@ at-least-once: process, then commit. §13 Q9.
   consumer that read the lost records with the acked bound and committed past them now
   holds a position that **looks valid** once the log has refilled. It would silently skip
   the new records. Kafka handles the same hazard (truncation after leader change) by
-  validating positions against leader epochs. Our equivalent is cheap:
+  validating positions against leader epochs. Decided (§13 Q8): for streams, a frame-CRC
+  check, which is cheap:
   - A commit stores `(next: EventSeq, last_frame_crc: u32)`: the CRC of the frame holding
     the last consumed record.
   - On resume, `StreamConsumer` reads that one frame header. A missing frame (past the end)
@@ -383,11 +393,55 @@ at-least-once: process, then commit. §13 Q9.
     out-of-range (`Error` by default).
   - In `Durable` mode the check always passes (acked = durable). It costs one header read
     per partition per consumer start.
-  - It needs the offset store to hold 12 bytes instead of an `Offset`. Either
-    `StorageOffsetStore` stores a small versioned struct under the same key, or a sibling
-    key `__consumer_offset_check:...` holds the CRC. §13 Q8.
+  - The offset store must hold 12 bytes instead of an `Offset`. `StorageOffsetStore` stores
+    a small versioned record under the same key: `version u8 (=1) | offset u64 |
+    check_kind u8 | check u32`, where `check_kind` 0 means no check (a caller-managed
+    offset). The old bare bincode `Offset` encoding is still read, as "no check". This
+    encoding lands before Task 2.24 (§14, 2.15b.6 step 1).
+  - A CRC is not unique, so the check misses a reissued frame whose CRC happens to collide:
+    about 2⁻³². Stream frames are never rewritten (§4.4), so a mismatch always means
+    divergence.
   - Reading with `read_bound: Durable` avoids the hazard entirely, at the cost of up to
     `sync_interval_ms` extra latency.
+
+### 7.4 The same hazard in the keyed change feed (decided; mechanism needs confirmation)
+
+The maintainer decided (§13 Q8) to detect the same reuse in the keyed change feed:
+`get_changes_since` and `changes_in_collection` cursors in `Fast` mode. Its cursor is a bare
+LSN (`version`), and after a `Fast` power loss the same LSNs are reissued. That is ledger
+finding EVT-07.
+
+**A correctness problem with using the frame CRC there.** Keyed segments are rewritten by
+compaction (Task 2.15). A frame that loses ops is re-encoded, so its CRC changes, and a
+fully dead frame becomes `Elided`. A cursor whose last frame survived the crash but was later
+compacted would fail a CRC comparison: `OffsetDiverged` with no divergence. That false
+positive would hit every consumer behind a compaction, so the stream's mechanism cannot be
+reused as is.
+
+**Proposed instead: open boundaries**, Kafka's leader-epoch idea applied to restarts.
+- Each `Wal::open` that follows a session that **may have lost acked writes** (it ran in
+  `Fast` and did not close cleanly) appends the recovered `next_lsn` to a list of
+  boundaries `B[s]` in `LOG_STATE`, numbered by session `s`.
+- Close writes a clean marker that the next open clears.
+- In `Durable` a session never loses acked writes, so no boundary is appended.
+- `B` is non-decreasing: everything replayed at open is synced before the first new append.
+- A cursor becomes `ChangeCursor { lsn, session }`: the last consumed LSN and the session it
+  was read in.
+- On resume, the cursor diverged iff a boundary was appended after its session and
+  `B[first such] <= lsn`: the consumer read an LSN that a later crash dropped.
+- This is exact in both directions:
+  - no false positives, because a consumed LSN below every later boundary survived;
+  - no misses, because a lost LSN is ≥ the boundary of the open that lost it;
+  - compaction is irrelevant, because nothing is compared by content.
+- Cost: `LOG_STATE` version 2 (a variable-length boundary list after the version-1 fields;
+  it is still read magic and version first). It must land before Task 2.24. The
+  `StorageAdapter` change-feed methods take and return a `ChangeCursor`. `u64` stays
+  accepted as "no check", for callers that do their own.
+
+The same mechanism would also work for streams, and would replace the CRC with one
+mechanism for both feeds. The note keeps the decided CRC for streams, which is simpler and
+has no `LOG_STATE` dependency, and asks the maintainer to confirm boundaries for the keyed
+feed (§13 Q8).
 
 ---
 
@@ -431,7 +485,7 @@ forever.
 
 **Unlike keyed compaction, this deletes data.** Removed records are gone for every reader.
 The floor `earliest() = log_start << 16` rises. Offsets above it keep their meaning. Readers
-below it get `CompactedCursor`. Retention ignores consumers, like Kafka and Iggy: a slow
+below it get `OffsetOutOfRange`. Retention ignores consumers, like Kafka and Iggy: a slow
 group loses unread data and learns it through 7.3. §13 Q10.
 
 ### 8.3 Mechanism: Task 2.15's two calls, generalised
@@ -535,8 +589,8 @@ pub mod stream_log {
         pub async fn open_with_vfs(vfs: Arc<dyn Vfs>, cfg: StreamConfig) -> Result<StreamLog, StorageError>;
         pub async fn append(&self, records: Vec<Record>) -> Result<AppendAck, StorageError>;
         pub async fn append_timeout(&self, records: Vec<Record>, d: Duration) -> Result<AppendAck, StorageError>;
-        pub fn read_from(&self, from: StartAt, limits: ReadLimits) -> Result<ReadBatch, StorageError>;
-        pub fn read_durable_from(&self, from: StartAt, limits: ReadLimits) -> Result<ReadBatch, StorageError>;
+        pub async fn read_from(&self, from: StartAt, limits: ReadLimits) -> Result<ReadBatch, StorageError>;
+        pub async fn read_durable_from(&self, from: StartAt, limits: ReadLimits) -> Result<ReadBatch, StorageError>;
         pub async fn wait_for(&self, after: EventSeq, timeout: Duration) -> Result<bool, StorageError>;
         pub fn earliest(&self) -> EventSeq;
         pub fn next_offset(&self) -> EventSeq;
@@ -578,11 +632,14 @@ pub mod stream_log {
 }
 ```
 
-`StorageError` additions: `OffsetDiverged { committed: u64, reason: String }`.
-`CompactedCursor`'s text is generalised (the variant is unchanged) to
-`offset {cursor} is below the log's floor {floor}: the records before it were removed (by
-retention or compaction); resume at or above {floor}`. The keyed-path advice ("resynchronise
-from a snapshot") moves into `get_changes_since`'s docs. §13 Q3.
+`StorageError` additions (decided, §13 Q3):
+- `OffsetOutOfRange { requested: u64, floor: u64, end: u64 }`: `offset {requested} is
+  outside the stream [{floor}, {end}]: records below {floor} were removed by retention;
+  resume at or above {floor}`.
+- `OffsetDiverged { committed: u64, reason: String }`, used by streams (§7.3) and the keyed
+  feed (§7.4).
+
+`CompactedCursor` is unchanged and stays the keyed feed's error.
 
 ---
 
@@ -650,9 +707,13 @@ against a PrkDB server on the same box. §13 Q15.
 - **FORMAT kind:** a stream opened on a kv directory, and the reverse, refuse with nothing
   written. A missing `kind` reads as `kv`.
 - **Offsets:** a 3-record append returns `L<<16|0..2`. Offsets continue across reopen.
-  `read_from(last + 1)` is the next frame. `0xFFFF + 1` carries. `o < earliest()` is
-  `CompactedCursor` naming the floor. `o > next_offset()` is an error. `Earliest`, `Latest`
-  and `Timestamp` resolve correctly.
+  `read_from(last + 1)` is the next frame. `0xFFFF + 1` carries. `o < earliest()` (0
+  included) and `o > next_offset()` are `OffsetOutOfRange` naming the floor and the end.
+  `Earliest`, `Latest` and the coarse `Timestamp` resolve correctly.
+- **Keyed feed (EVT-07, §7.4):** a `Fast` power loss that drops LSNs a change-feed consumer
+  consumed, followed by refilling appends, gives `OffsetDiverged`. A consumer whose last
+  frame survived and was then compacted does **not** get it. `Durable` never appends a
+  boundary. A clean close appends none.
 - **Read bounds:** in `Fast`, an acked-but-unsynced record is visible to `read_from` and
   not to `read_durable_from`.
 - **Seek cost:** a read near the tail of a 64-segment log visits only the last segment.
@@ -708,60 +769,68 @@ minimisation machinery.
 
 ---
 
-## 13. Open questions for the maintainer
+## 13. Decisions
 
-1. **Frame kind.** Confirm `FrameKind::Records = 3` (recommended, §4.1) over a `Batch` op
-   tag.
-2. **Timing against 2.24.** Land the on-disk parts (frame kind, codec, `FORMAT` kind,
-   `STREAM` manifest, the unknown-kind hardening) before Task 2.24 freezes format 2
-   (recommended, §5.2)? The alternative is format 3 plus a migration (§5.4).
-3. **Error.** Reuse `CompactedCursor` with generalised text (recommended; the plan's note
-   from Task 2.15 asks for no second error), or add a distinct
-   `OffsetOutOfRange { offset, earliest, latest }`, which reads better for retention?
-4. **Offset 0.** Treat every offset below `earliest()`, including 0, as out of range, with
-   `StartAt::Earliest` for "from the start" (recommended)? `get_changes_since` treats 0 as
-   special. Streams would not.
-5. **Sparse offsets.** Accept that offsets have gaps of 2¹⁶ between appends, and that lag is
-   reported in frames and bytes (`next_offset().lsn - position.lsn`, `log_bytes`), not in
-   records?
-6. **Headers in record format v1.** Include them now (recommended, because the format
-   freezes), or keep records key/value only and accept a format bump later?
-7. **Timestamps.** Append time stamped at encode, one per append (recommended), or a
-   producer-supplied create time per record? Is seek-by-time needed in v1?
-8. **`Fast` offset reuse.** Adopt the frame-CRC position check (§7.3)? If so, extend what
-   `StorageOffsetStore` stores (a versioned struct under the same key) or add a sibling key?
-   Changing the stored bytes must land before 2.24.
-9. **Offset store location.** A kv data directory `<root>/__offsets/` by default
-   (recommended), or always caller-provided?
-10. **Retention vs consumers.** Ignore consumers like Kafka and Iggy (recommended), or offer
-    an option to hold retention for the slowest committed group (Pulsar-style)?
-11. **Repartitioning.** Partition count fixed at creation and refused on mismatch
-    (recommended for 2.15b)?
-12. **`PrkDb` integration.** Defer `db.stream(..)` and a container layout for the builder,
-    or do it in 2.15b?
-13. **Read path.** Synchronous bounded `read_from` (recommended, like `Wal::read`), or
-    async with `spawn_blocking` inside?
-14. **Windows.** Is retention on Windows a release requirement now (FILE_SHARE_DELETE in
-    `StdVfs`), or documented as best-effort until a Windows CI job exists?
-15. **Kafka.** Confirm no Kafka comparison claim in 2.15b (§11.4).
-16. **Defaults.** Streams default to 128 MiB segments and no retention (keep everything)?
-    Or 7 days, like Kafka and Redpanda?
+**Decided 2026-10-02.** Q2, Q8, Q9 and Q16 were decided by the maintainer. The others were
+decided by the program controller's defaults, which the maintainer accepted unless a
+correctness problem was found. One was found and is recorded under Q8.
+
+1. **Frame kind:** `FrameKind::Records = 3`, not a `Batch` op tag (§4.1).
+2. **Timing (maintainer):** the on-disk parts land **before Task 2.24** freezes format 2.
+   2.15b.1–2.15b.3 precede the freeze, together with the other on-disk pieces listed in §14
+   (the `STREAM` manifest codec, the versioned offset record, `LOG_STATE` version 2).
+3. **Error:** a separate `StorageError::OffsetOutOfRange { requested, floor, end }` for
+   streams, below the floor and past the end (§6.1, §10). `CompactedCursor` stays the keyed
+   feed's error. This supersedes the Task 2.15 note's "no second error" for streams: the
+   remedies differ (reset or skip for a stream, snapshot for the keyed feed).
+4. **Offset 0:** out of range like any offset below the floor. `StartAt::Earliest` is the
+   explicit "from the start".
+5. **Sparse offsets:** accepted. Lag is reported in frames and bytes, not records.
+6. **Headers:** in record format v1 (§4.2).
+7. **Timestamps:** one append time per append. Seek-by-time in v1 is coarse, per segment
+   (§4.2).
+8. **`Fast` offset reuse (maintainer):** yes. Resume checks the CRC of the last consumed
+   frame and returns `OffsetDiverged` on a mismatch (§7.3). The same detection applies to
+   the keyed change feed's cursors (`get_changes_since`, `changes_in_collection`) in `Fast`
+   mode (ledger EVT-07).
+   **Correctness problem, needs confirmation:** in the keyed feed a frame CRC gives false
+   `OffsetDiverged` after compaction rewrites or elides the cursor's frame. §7.4 proposes
+   *open boundaries* (recovered `next_lsn` per lossy restart, in `LOG_STATE` v2; cursor =
+   `(lsn, session)`). That check is exact and immune to compaction. It keeps the decided CRC
+   for streams, whose frames are never rewritten. The maintainer chooses between boundaries
+   for the keyed feed (recommended) and boundaries for both feeds.
+9. **Offset store (maintainer):** the built-in `<root>/__offsets/` store (reusing
+   `StorageOffsetStore`) by default. Callers may manage their own `OffsetStore`.
+10. **Retention vs consumers:** retention ignores consumers by default. An opt-in
+    "wait for the slowest group" may come later, outside 2.15b.
+11. **Partitions:** the partition count is fixed at creation. A mismatch is refused.
+12. **`PrkDb` integration:** `db.stream(..)` is deferred.
+13. **Read path:** async API, with `spawn_blocking` around the synchronous scan (§6.1).
+14. **Windows:** retention is best-effort on Windows until a Windows CI job exists.
+    Documented.
+15. **Kafka:** no comparison claim (§11.4).
+16. **Defaults (maintainer):** keep everything (no retention) by default, with 128 MiB
+    segments for streams.
 
 ---
 
 ## 14. Implementation breakdown
 
 Each task is TDD, a standalone commit series on a feature branch, with the harness green in
-both modes before merge. 2.15b.1–.3 precede Task 2.24.
+both modes before merge. **Before Task 2.24:** 2.15b.1, .2 and .3, plus 2.15b.6 step 1 (the
+offset record encoding) and 2.15b.10 (`LOG_STATE` v2). The ledger findings: STO-11 (frame
+kind checked before the CRC) is fixed in 2.15b.1. EVT-07 (`Fast` cursor reuse) is fixed by
+2.15b.6 for streams and by 2.15b.10 for the keyed feed.
 
 | Task | Content | Depends on |
 |---|---|---|
-| **2.15b.1** `Wal` prerequisites | Start-segment lookup + early stop in `scan_from_capped` (keyed `get_changes_since` benefits); `scan_segment_from` at a byte offset; `subscribe_acked`; `Request::Roll`; `WalOptions::front_release` (`set_log_start`/`remove_leading_segments`/open leftover rule); CRC-before-kind with unknown kind = `UnsupportedFormat` (5.3); fix the `Lsn` doc. FaultFs crash tests for `Retention` release. | — |
-| **2.15b.2** Record codec + `EventSeq` | `FrameKind::Records`, `wal/records.rs`, `peek_header`; `prkdb_types::event::EventSeq` per Task 2.20's spec if 2.20 has not landed; `records_decode` fuzz target; corpus updates. | — |
-| **2.15b.3** `StreamLog` core | `FORMAT` `kind` (+ refusals both ways), `LOCK`, open/append/read_from/read_durable_from/wait_for/sync/close, sparse index, offsets and `StartAt`, generalised `CompactedCursor` text. | .1, .2, 2.11, 2.11b |
-| **2.15b.4** Retention | `RetentionPolicy`, `Clock`, eligibility, quiet-segment roll, background task with stop-on-drop (as compaction's), crash-point tests, `RetentionReport`. | .3 |
-| **2.15b.5** Partitions | `STREAM` manifest (+ fuzz target), `PartitionedStream`, routing through the 2.13 partitioner, creation crash rules. | .3, 2.13 |
-| **2.15b.6** Consumers | `StreamConsumer` on `OffsetStore`/`ConsumerGroupCoordinator`, `__offsets` default store, out-of-range policy, `OffsetDiverged` check (Q8). | .5 |
-| **2.15b.7** Harness | Stream SUT/model/ops/checker, discovery then blocking profile, 1,000 seeds per mode, ledger entries. | .4, .5, .6 |
+| **2.15b.1** `Wal` prerequisites + STO-11 *(before 2.24)* | Start-segment lookup + early stop in `scan_from_capped` (keyed `get_changes_since` benefits); `scan_segment_from` at a byte offset; `subscribe_acked`; `Request::Roll`; `WalOptions::front_release` (`set_log_start`/`remove_leading_segments`/open leftover rule); **STO-11:** CRC before kind, unknown kind with a valid CRC = `UnsupportedFormat` (5.3); fix the `Lsn` doc. FaultFs crash tests for `Retention` release. | — |
+| **2.15b.2** Record codec + `EventSeq` *(before 2.24)* | `FrameKind::Records`, `wal/records.rs`, `peek_header`; `prkdb_types::event::EventSeq` per Task 2.20's spec if 2.20 has not landed; `records_decode` fuzz target; corpus updates. | — |
+| **2.15b.3** `StreamLog` core *(before 2.24)* | `FORMAT` `kind` (+ refusals both ways), `LOCK`, open/append/read_from/read_durable_from (async, `spawn_blocking`)/wait_for/sync/close, sparse index, offsets, `StartAt`, `OffsetOutOfRange`; the `STREAM` manifest codec + `stream_manifest_parse` fuzz target (used by .5). | .1, .2, 2.11, 2.11b |
+| **2.15b.4** Retention | `RetentionPolicy` (default none), `Clock`, eligibility, quiet-segment roll, background task with stop-on-drop (as compaction's), crash-point tests, `RetentionReport`. | .3 |
+| **2.15b.5** Partitions | `PartitionedStream`, manifest write/read rules, routing through the 2.13 partitioner, creation crash rules. | .3, 2.13 |
+| **2.15b.6** Consumers + EVT-07 (streams) | Step 1 *(before 2.24)*: the versioned offset record in `StorageOffsetStore` (reads the old encoding). Then `StreamConsumer` on `OffsetStore`/`ConsumerGroupCoordinator`, `__offsets` default store, out-of-range policy, frame-CRC check → `OffsetDiverged`. | .5 |
+| **2.15b.7** Harness | Stream SUT/model/ops/checker, discovery then blocking profile, 1,000 seeds per mode; kv harness gains a change-feed consumer for EVT-07. | .4, .5, .6, .10 |
 | **2.15b.8** Performance + docs | `wal_write_path` cells (§11.1), `pread` ceiling row, iai benches + floor, Linux probe run, results and T1–T5 verdicts in a decision record, user docs with measured numbers only. | .4, .5 |
 | **2.15b.9** Golden fixture | `out/stream/` + `expected-stream.json` in Task 2.24's generator (folded into 2.24 if 2.24 has not run yet). | .3, .4, .5 |
+| **2.15b.10** Keyed change-feed divergence, EVT-07 (keyed) *(before 2.24)* | `LOG_STATE` v2 boundary list + clean-close marker; `ChangeCursor { lsn, session }` on `get_changes_since`/`changes_in_collection` (`u64` still accepted as unchecked); `OffsetDiverged`. Mechanism per §7.4, pending the maintainer's confirmation (§13 Q8). | .1 |
