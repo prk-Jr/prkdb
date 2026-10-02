@@ -174,10 +174,10 @@ async fn report_counts_ops_per_kind() {
         report.missing_op_kinds(Profile::Blocking),
         report.op_counts
     );
-    // Discovery also enables Checkpoint, which a blocking run never executes.
+    // Discovery also enables Checkpoint and Compact, which a blocking run never executes.
     assert_eq!(
         report.missing_op_kinds(Profile::Discovery),
-        vec!["Checkpoint"]
+        vec!["Checkpoint", "Compact"]
     );
     let formatted = report.format_op_counts();
     assert!(formatted.starts_with("Put:"), "{formatted}");

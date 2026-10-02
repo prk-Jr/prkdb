@@ -241,22 +241,51 @@ pub fn scan_segment(
     })
 }
 
-/// Reads one frame at `loc`, verifying CRC, kind and that its LSN is `loc.lsn`.
+/// Reads one frame at `loc`, verifying its CRC and kind, and that it is the frame `loc`
+/// names: its LSN is `loc.lsn` and its payload is `loc.payload_len` bytes.
+///
+/// The length check matters since compaction (Task 2.15): a rewritten frame keeps its
+/// LSN but may lose ops, so a location taken before the rewrite can land on a frame with
+/// the right LSN and a different payload. Every mismatch, a short read included, is
+/// `CorruptSegment`; [`crate::wal::Wal::read`] turns it into `Moved` when compaction
+/// rewrote the segment since the log was opened.
 pub fn read_frame(file: &dyn VfsFile, path: &Path, loc: RecordLoc) -> Result<Vec<u8>, WalError> {
-    let mut header = [0u8; FRAME_HEADER_LEN];
-    file.read_at(loc.offset, &mut header)?;
-    let len = u32::from_le_bytes(header[0..4].try_into().expect("4-byte slice"));
-    if len as usize > MAX_PAYLOAD_LEN {
+    let mismatch = |reason: String| WalError::CorruptSegment {
+        path: path.to_path_buf(),
+        offset: loc.offset,
+        reason,
+    };
+    if loc.payload_len as usize > MAX_PAYLOAD_LEN {
         return Err(WalError::RecordTooLarge {
             path: path.to_path_buf(),
-            len: len as usize,
+            len: loc.payload_len as usize,
             max: MAX_PAYLOAD_LEN,
         });
     }
 
+    let mut header = [0u8; FRAME_HEADER_LEN];
+    let n = read_full(file, loc.offset, &mut header)?;
+    if n < FRAME_HEADER_LEN {
+        return Err(mismatch(format!(
+            "only {n} bytes of frame header before the end of the file"
+        )));
+    }
+    let len = u32::from_le_bytes(header[0..4].try_into().expect("4-byte slice"));
+    if len != loc.payload_len {
+        return Err(mismatch(format!(
+            "expected a {}-byte payload at this offset, found a header claiming {len}",
+            loc.payload_len
+        )));
+    }
+
     let total = FRAME_HEADER_LEN + len as usize;
     let mut buf = vec![0u8; total];
-    file.read_at(loc.offset, &mut buf)?;
+    let n = read_full(file, loc.offset, &mut buf)?;
+    if n < total {
+        return Err(mismatch(format!(
+            "frame of {total} bytes cut short at {n} by the end of the file"
+        )));
+    }
 
     match decode_frame(&buf) {
         Decoded::Frame {
@@ -265,20 +294,29 @@ pub fn read_frame(file: &dyn VfsFile, path: &Path, loc: RecordLoc) -> Result<Vec
             ..
         } => {
             if found_lsn != loc.lsn {
-                return Err(WalError::CorruptSegment {
-                    path: path.to_path_buf(),
-                    offset: loc.offset,
-                    reason: format!("expected lsn {} at this offset, found {found_lsn}", loc.lsn),
-                });
+                return Err(mismatch(format!(
+                    "expected lsn {} at this offset, found {found_lsn}",
+                    loc.lsn
+                )));
             }
             Ok(payload.to_vec())
         }
-        Decoded::Fault(fault) => Err(WalError::CorruptSegment {
-            path: path.to_path_buf(),
-            offset: loc.offset,
-            reason: format!("{fault:?}"),
-        }),
+        Decoded::Fault(fault) => Err(mismatch(format!("{fault:?}"))),
     }
+}
+
+/// Reads up to `buf.len()` bytes at `offset`, looping over short reads; returns how many
+/// bytes were read (fewer only at the end of the file).
+fn read_full(file: &dyn VfsFile, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+    let mut read = 0;
+    while read < buf.len() {
+        let n = file.read_at(offset + read as u64, &mut buf[read..])?;
+        if n == 0 {
+            break;
+        }
+        read += n;
+    }
+    Ok(read)
 }
 
 #[cfg(test)]

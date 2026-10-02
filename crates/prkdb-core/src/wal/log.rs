@@ -14,9 +14,10 @@
 use crate::vfs::{OpenMode, Vfs, VfsFile};
 use crate::wal::config::{SyncMode, WalConfig};
 use crate::wal::frame::{encode_frame, FrameKind, Lsn, MAX_PAYLOAD_LEN};
+use crate::wal::log_state::LogState;
 use crate::wal::segment::{
     read_frame, scan_segment, segment_file_name, write_segment_header, RecordLoc, ScanVisitor,
-    SEGMENT_HEADER_LEN,
+    SegmentScan, SEGMENT_HEADER_LEN,
 };
 use crate::wal::WalError;
 use std::collections::BTreeMap;
@@ -79,6 +80,116 @@ pub struct RecoveryReport {
     pub truncated: Option<(PathBuf, u64, crate::wal::frame::FrameFault)>,
 }
 
+/// A sealed segment (any but the active, last one), as compaction sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SealedSegment {
+    /// The segment's first LSN (its file-name key).
+    pub first_lsn: Lsn,
+    /// The first LSN of the next segment: this one holds exactly `first_lsn..next_lsn`.
+    pub next_lsn: Lsn,
+    /// File length in bytes.
+    pub len: u64,
+}
+
+/// A segment's read handle, and how many times compaction replaced the file under it
+/// since this `Wal` was opened (0 = never). A read that finds the wrong frame in a
+/// segment with a nonzero generation is `WalError::Moved`, not corruption.
+#[derive(Clone)]
+struct SegmentHandle {
+    file: Arc<dyn VfsFile>,
+    generation: u64,
+    /// The file this one replaced, kept readable from the swap until the caller has moved
+    /// its index to the new offsets ([`Wal::release_replaced`]): a location from before
+    /// the swap is read there, so the index update can run outside the segments lock.
+    previous: Option<Arc<dyn VfsFile>>,
+}
+
+impl SegmentHandle {
+    fn new(file: Arc<dyn VfsFile>) -> Self {
+        SegmentHandle {
+            file,
+            generation: 0,
+            previous: None,
+        }
+    }
+}
+
+/// `Wal::open`'s log-start rule: removes, oldest first, every segment that ends at or
+/// before `state.log_start` (each must be fully elided: a crash between `LOG_STATE`'s
+/// write and their removal leaves them), and returns the segments that remain.
+fn remove_leftovers_before(
+    vfs: &dyn Vfs,
+    dir: &Path,
+    segment_lsns: Vec<Lsn>,
+    state: LogState,
+) -> Result<Vec<Lsn>, WalError> {
+    let leftovers = segment_lsns
+        .iter()
+        .take_while(|first| **first < state.log_start)
+        .count();
+    for i in 0..leftovers {
+        let first = segment_lsns[i];
+        let path = dir.join(segment_file_name(first));
+        let next = segment_lsns.get(i + 1).copied();
+        if next.is_none_or(|next| next > state.log_start) {
+            return Err(WalError::CorruptSegment {
+                path,
+                offset: 0,
+                reason: format!(
+                    "segment starts before the log start {} (LOG_STATE) but does not end \
+                     at or before it",
+                    state.log_start
+                ),
+            });
+        }
+        let file = vfs.open(&path, OpenMode::Read)?;
+        let scan = scan_segment(&*file, &path, first, &mut |loc, kind, _| {
+            if kind == FrameKind::Elided {
+                Ok(())
+            } else {
+                Err(WalError::CorruptSegment {
+                    path: path.clone(),
+                    offset: loc.offset,
+                    reason: format!(
+                        "segment before the log start {} (LOG_STATE) holds a live frame \
+                         (lsn {})",
+                        state.log_start, loc.lsn
+                    ),
+                })
+            }
+        })?;
+        check_whole(&path, &scan, next.expect("checked above"))?;
+        drop(file);
+        tracing::info!(path = %path.display(), "removing a segment compaction had already released");
+        vfs.remove(&path)?;
+        vfs.sync_dir(dir)?;
+    }
+    Ok(segment_lsns[leftovers..].to_vec())
+}
+
+/// A sealed segment's scan must have read every byte as a good frame and ended exactly
+/// where the next segment starts.
+fn check_whole(path: &Path, scan: &SegmentScan, next_lsn: Lsn) -> Result<(), WalError> {
+    if let Some((offset, fault)) = scan.stopped {
+        return Err(WalError::CorruptSegment {
+            path: path.to_path_buf(),
+            offset,
+            reason: format!("{fault:?} in a sealed segment"),
+        });
+    }
+    if scan.next_lsn != next_lsn {
+        return Err(WalError::CorruptSegment {
+            path: path.to_path_buf(),
+            offset: scan.valid_len,
+            reason: format!(
+                "sealed segment ends before LSN {}, but the next segment starts at {next_lsn}",
+                scan.next_lsn
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -99,8 +210,24 @@ struct Shared {
     /// physically written — "acked" means the caller was told `Ok`, nothing else.
     acked_lsn: AtomicU64,
     health: RwLock<InternalHealth>,
-    /// Read handles for `read`/`scan_from`, keyed by each segment's first LSN.
-    segments: RwLock<BTreeMap<Lsn, Arc<dyn VfsFile>>>,
+    /// Read handles for `read`/`scan_from`, keyed by each segment's first LSN. Written by
+    /// the writer thread (a roll adds the new active segment) and by compaction (a
+    /// rewritten sealed segment's handle is replaced, a fully elided leading one removed).
+    segments: RwLock<BTreeMap<Lsn, SegmentHandle>>,
+    /// Every segment whose first LSN is below this was removed by compaction since open;
+    /// 0 = none. A location in such a segment is stale (`Moved`), not corrupt.
+    removed_below: AtomicU64,
+    /// The filesystem, for compaction's renames and removals (the writer thread owns its
+    /// own clone for rolls).
+    vfs: Arc<dyn Vfs>,
+    /// The durable `LOG_STATE` as last written (or read at open). The mutex serialises
+    /// its rewrites.
+    log_state: std::sync::Mutex<LogState>,
+    /// `log_state.deletes_compacted_through`, readable without the lock. Raised *before*
+    /// the file is written and before any rename it covers, so a reader that checks it
+    /// after scanning never misses a rewrite that could have dropped a delete it scanned
+    /// past.
+    deletes_compacted_through: AtomicU64,
     queued_bytes: AtomicUsize,
     last_progress_ms: AtomicU64,
     oldest_enqueued_ms: AtomicU64,
@@ -250,7 +377,15 @@ impl Wal {
     /// Directory: if `dir` is absent, `create_dir_all(dir)` then `sync_dir` of its parent.
     /// Recovery: lists `*.wal`, sorts by first LSN, checks each segment's first LSN equals
     /// the previous segment's `next_lsn`, scans every segment, and calls `replay` for every
-    /// frame with lsn >= `replay_from` in LSN order. Last segment: a torn tail is logged,
+    /// frame with lsn >= `replay_from` in LSN order.
+    ///
+    /// Log start (Task 2.15): `LOG_STATE` (see [`LogState`]) records the first LSN of the
+    /// log, which compaction moves forward when it removes fully elided segments from the
+    /// front. Segments that start before it are what a crash between writing `LOG_STATE`
+    /// and removing them leaves: each must be entirely elided, and is removed here
+    /// (`remove` + `sync_dir`); one that is not is `CorruptSegment`. A first segment that
+    /// starts *after* the log start means segments are missing: `CorruptSegment` naming the
+    /// missing LSN range. Last segment: a torn tail is logged,
     /// truncated (`set_len` + `sync_data`) and reported. Earlier segment: any fault is
     /// `CorruptSegment` and nothing is modified. A zero-length or header-only last segment
     /// is valid (a crash right after a roll or right after creation); a zero-length one is
@@ -293,15 +428,48 @@ impl Wal {
             .collect();
         segment_lsns.sort_unstable();
 
+        let log_state = LogState::read(&*vfs, dir)?;
+        let segment_lsns = remove_leftovers_before(&*vfs, dir, segment_lsns, log_state)?;
+        if let Some(&first) = segment_lsns.first() {
+            if first != log_state.log_start {
+                return Err(WalError::CorruptSegment {
+                    path: dir.join(segment_file_name(first)),
+                    offset: 0,
+                    reason: format!(
+                        "the log starts at LSN {} (LOG_STATE), but its first segment starts \
+                         at {first}: the segments holding LSNs {}..{first} are missing",
+                        log_state.log_start, log_state.log_start
+                    ),
+                });
+            }
+        } else if log_state.log_start > 1 {
+            return Err(WalError::CorruptSegment {
+                path: dir.join(crate::wal::log_state::LOG_STATE_FILE),
+                offset: 0,
+                reason: format!(
+                    "LOG_STATE says the log starts at LSN {}, but the directory holds no \
+                     segment",
+                    log_state.log_start
+                ),
+            });
+        }
+
         let mut report = RecoveryReport::default();
-        let mut next_lsn: Lsn = 1;
-        let mut segments: BTreeMap<Lsn, Arc<dyn VfsFile>> = BTreeMap::new();
+        let mut next_lsn: Lsn = log_state.log_start;
+        let mut segments: BTreeMap<Lsn, SegmentHandle> = BTreeMap::new();
 
         for (idx, &first_lsn) in segment_lsns.iter().enumerate() {
             let is_last = idx + 1 == segment_lsns.len();
             let path = dir.join(segment_file_name(first_lsn));
             let file = vfs.open(&path, OpenMode::ReadWrite)?;
 
+            if first_lsn == 0 {
+                return Err(WalError::CorruptSegment {
+                    path: path.clone(),
+                    offset: 0,
+                    reason: "segment first_lsn 0: LSNs start at 1".to_string(),
+                });
+            }
             if first_lsn != next_lsn {
                 return Err(WalError::CorruptSegment {
                     path: path.clone(),
@@ -325,7 +493,7 @@ impl Wal {
                 }
                 write_segment_header(&*file, first_lsn)?;
                 file.sync_data()?;
-                segments.insert(first_lsn, file.clone());
+                segments.insert(first_lsn, SegmentHandle::new(file.clone()));
                 report.segments += 1;
                 continue;
             }
@@ -364,7 +532,7 @@ impl Wal {
             }
 
             next_lsn = scan.next_lsn;
-            segments.insert(first_lsn, file.clone());
+            segments.insert(first_lsn, SegmentHandle::new(file.clone()));
             report.segments += 1;
         }
 
@@ -376,7 +544,7 @@ impl Wal {
             write_segment_header(&*file, next_lsn)?;
             file.sync_data()?;
             vfs.sync_dir(dir)?;
-            segments.insert(next_lsn, file);
+            segments.insert(next_lsn, SegmentHandle::new(file));
             report.segments += 1;
         }
         report.next_lsn = next_lsn;
@@ -385,6 +553,7 @@ impl Wal {
         let active_file = segments
             .get(&active_first_lsn)
             .expect("just inserted")
+            .file
             .clone();
         // H2: a frame can be physically present and get replayed above without ever having
         // been fsynced (Fast mode, or a process restart that is not an actual power loss —
@@ -409,6 +578,10 @@ impl Wal {
             acked_lsn: AtomicU64::new(next_lsn.saturating_sub(1)),
             health: RwLock::new(InternalHealth::Running),
             segments: RwLock::new(segments),
+            removed_below: AtomicU64::new(0),
+            vfs: vfs.clone(),
+            log_state: std::sync::Mutex::new(log_state),
+            deletes_compacted_through: AtomicU64::new(log_state.deletes_compacted_through),
             queued_bytes: AtomicUsize::new(0),
             last_progress_ms: AtomicU64::new(now_ms()),
             oldest_enqueued_ms: AtomicU64::new(0),
@@ -556,18 +729,53 @@ impl Wal {
         block_on_unbudgeted(self.sync())
     }
 
+    /// Reads the payload of the frame at `loc`, verifying that it is that frame (CRC, LSN,
+    /// payload length; see [`read_frame`]).
+    ///
+    /// A mismatch is `CorruptSegment`, except in a segment compaction rewrote or removed
+    /// since this `Wal` was opened, where it is `Moved`: the location predates the rewrite
+    /// and the caller must re-resolve it (Task 2.15). A rewrite swaps the handle and runs
+    /// the caller's index update under one lock (see [`Wal::replace_segment`]), so a
+    /// location read from the index after a `Moved` points into the current file.
     pub fn read(&self, loc: RecordLoc) -> Result<Vec<u8>, WalError> {
-        let file = {
+        let path = self.shared.dir.join(segment_file_name(loc.segment));
+        let handle = {
             let segments = self.shared.segments.read().expect("segments lock poisoned");
             segments.get(&loc.segment).cloned()
         };
-        let file = file.ok_or_else(|| WalError::CorruptSegment {
-            path: self.shared.dir.join(segment_file_name(loc.segment)),
-            offset: loc.offset,
-            reason: "no such segment".to_string(),
-        })?;
-        let path = self.shared.dir.join(segment_file_name(loc.segment));
-        read_frame(&*file, &path, loc)
+        let Some(handle) = handle else {
+            if loc.segment < self.shared.removed_below.load(Ordering::Acquire) {
+                return Err(WalError::Moved {
+                    path,
+                    offset: loc.offset,
+                    lsn: loc.lsn,
+                });
+            }
+            return Err(WalError::CorruptSegment {
+                path,
+                offset: loc.offset,
+                reason: "no such segment".to_string(),
+            });
+        };
+        match read_frame(&*handle.file, &path, loc) {
+            Err(WalError::CorruptSegment { .. } | WalError::RecordTooLarge { .. })
+                if handle.generation > 0 =>
+            {
+                // A location from before a swap whose index update is still running: the
+                // replaced file still holds exactly that frame.
+                if let Some(previous) = &handle.previous {
+                    if let Ok(payload) = read_frame(&**previous, &path, loc) {
+                        return Ok(payload);
+                    }
+                }
+                Err(WalError::Moved {
+                    path,
+                    offset: loc.offset,
+                    lsn: loc.lsn,
+                })
+            }
+            other => other,
+        }
     }
 
     /// Visits acked frames with lsn >= `from`, in order (reads through `Vfs`). "Acked"
@@ -614,7 +822,7 @@ impl Wal {
             .read()
             .expect("segments lock poisoned")
             .iter()
-            .map(|(k, v)| (*k, v.clone()))
+            .map(|(k, v)| (*k, v.file.clone()))
             .collect();
         let last_idx = segments.len().saturating_sub(1);
         for (idx, (first_lsn, file)) in segments.iter().enumerate() {
@@ -669,6 +877,309 @@ impl Wal {
             .keys()
             .copied()
             .collect()
+    }
+
+    /// The sealed segments, oldest first: every segment but the active (last) one.
+    /// Compaction only ever touches these (Task 2.15). A segment is sealed once the writer
+    /// rolled past it, which it does only after syncing it, so a sealed segment is whole
+    /// and durable.
+    pub fn sealed_segments(&self) -> Result<Vec<SealedSegment>, WalError> {
+        let segments: Vec<(Lsn, Arc<dyn VfsFile>)> = self
+            .shared
+            .segments
+            .read()
+            .expect("segments lock poisoned")
+            .iter()
+            .map(|(k, v)| (*k, v.file.clone()))
+            .collect();
+        segments
+            .windows(2)
+            .map(|pair| {
+                Ok(SealedSegment {
+                    first_lsn: pair[0].0,
+                    next_lsn: pair[1].0,
+                    len: pair[0].1.len()?,
+                })
+            })
+            .collect()
+    }
+
+    /// Total bytes of every segment file, the active one included.
+    pub fn log_bytes(&self) -> Result<u64, WalError> {
+        let files: Vec<Arc<dyn VfsFile>> = self
+            .shared
+            .segments
+            .read()
+            .expect("segments lock poisoned")
+            .values()
+            .map(|h| h.file.clone())
+            .collect();
+        let mut total = 0;
+        for file in files {
+            total += file.len()?;
+        }
+        Ok(total)
+    }
+
+    /// The path of the segment file starting at `first_lsn`.
+    pub fn segment_path(&self, first_lsn: Lsn) -> PathBuf {
+        self.shared.dir.join(segment_file_name(first_lsn))
+    }
+
+    /// How many times compaction replaced the segment starting at `first_lsn` since this
+    /// `Wal` was opened; `None` if there is no such segment.
+    pub fn segment_generation(&self, first_lsn: Lsn) -> Option<u64> {
+        self.shared
+            .segments
+            .read()
+            .expect("segments lock poisoned")
+            .get(&first_lsn)
+            .map(|h| h.generation)
+    }
+
+    /// The current handle of the sealed segment starting at `first_lsn`, and the first LSN
+    /// of the segment after it.
+    fn sealed_handle(&self, first_lsn: Lsn) -> Result<(SegmentHandle, Lsn), WalError> {
+        let segments = self.shared.segments.read().expect("segments lock poisoned");
+        let handle = segments.get(&first_lsn).cloned().ok_or_else(|| {
+            WalError::CompactionRefused(format!("no segment starts at LSN {first_lsn}"))
+        })?;
+        let next = segments
+            .range((
+                std::ops::Bound::Excluded(first_lsn),
+                std::ops::Bound::Unbounded,
+            ))
+            .next()
+            .map(|(k, _)| *k)
+            .ok_or_else(|| {
+                WalError::CompactionRefused(format!(
+                    "the segment at LSN {first_lsn} is the active segment; only sealed \
+                     segments are compacted"
+                ))
+            })?;
+        Ok((handle, next))
+    }
+
+    /// Visits every frame of the sealed segment starting at `first_lsn`, through its
+    /// current handle. A sealed segment is whole: any frame fault, or an LSN range that
+    /// does not end where the next segment starts, is `CorruptSegment`.
+    pub fn scan_sealed(
+        &self,
+        first_lsn: Lsn,
+        visit: &mut ScanVisitor<'_>,
+    ) -> Result<SegmentScan, WalError> {
+        let (handle, next_lsn) = self.sealed_handle(first_lsn)?;
+        let path = self.segment_path(first_lsn);
+        let scan = scan_segment(&*handle.file, &path, first_lsn, visit)?;
+        check_whole(&path, &scan, next_lsn)?;
+        Ok(scan)
+    }
+
+    /// Replaces the sealed segment starting at `first_lsn` with the file at `compacted`
+    /// (Task 2.15). The caller has written `compacted` completely and `sync_data`ed it.
+    ///
+    /// 1. `compacted` is checked: a segment header for `first_lsn`, every frame whole, and
+    ///    exactly the LSN range of the segment it replaces (`CompactionRefused` if not;
+    ///    nothing changes).
+    /// 2. `rename(compacted, {first_lsn:020}.wal)`, then `sync_dir`. The rename is atomic:
+    ///    a crash leaves the old file or the new one under the name, never neither.
+    /// 3. Under the segments lock, in constant time: the read handle is swapped, the
+    ///    segment's generation bumped, and the replaced file kept as the segment's
+    ///    `previous` handle. A location from before the swap that does not match the new
+    ///    file is read from the replaced one, which still holds exactly that frame, so the
+    ///    caller moves its index to the new offsets *after* this returns, outside the lock
+    ///    (a segment roll on the writer thread never waits for it), and then calls
+    ///    [`Wal::release_replaced`]. After the release, a stale location is `Moved` and
+    ///    re-resolves to the moved index entry.
+    ///
+    /// If the rename succeeded, the swap happens even when the `sync_dir` fails (the name
+    /// already points at the new file), and the sync error is returned afterwards so the
+    /// caller stops: the rename is then not known to be durable. The caller still moves
+    /// its index and releases the replaced file.
+    pub fn replace_segment(&self, first_lsn: Lsn, compacted: &Path) -> Result<(), WalError> {
+        let (_, next_lsn) = self.sealed_handle(first_lsn)?;
+        let target = self.segment_path(first_lsn);
+        let file = self.shared.vfs.open(compacted, OpenMode::Read)?;
+        let scan = scan_segment(&*file, compacted, first_lsn, &mut |_, _, _| Ok(()))?;
+        if scan.stopped.is_some() || scan.next_lsn != next_lsn {
+            return Err(WalError::CompactionRefused(format!(
+                "{} does not hold exactly LSNs {first_lsn}..{next_lsn} of the segment it \
+                 would replace (scan: {scan:?})",
+                compacted.display()
+            )));
+        }
+        self.shared.vfs.rename(compacted, &target)?;
+        let synced = self.shared.vfs.sync_dir(&self.shared.dir);
+        {
+            let mut segments = self
+                .shared
+                .segments
+                .write()
+                .expect("segments lock poisoned");
+            let replaced = segments.get(&first_lsn).cloned();
+            let generation = replaced.as_ref().map_or(0, |h| h.generation) + 1;
+            segments.insert(
+                first_lsn,
+                SegmentHandle {
+                    file,
+                    generation,
+                    previous: replaced.map(|h| h.file),
+                },
+            );
+        }
+        synced.map_err(WalError::Io)
+    }
+
+    /// Drops the file a [`Wal::replace_segment`] replaced, once the caller's index points
+    /// at the new offsets. No-op if there is none.
+    pub fn release_replaced(&self, first_lsn: Lsn) {
+        let mut segments = self
+            .shared
+            .segments
+            .write()
+            .expect("segments lock poisoned");
+        if let Some(handle) = segments.get_mut(&first_lsn) {
+            handle.previous = None;
+        }
+    }
+
+    /// The durable log state: where the log starts and the compaction floor.
+    pub fn log_state(&self) -> LogState {
+        *self
+            .shared
+            .log_state
+            .lock()
+            .expect("log state lock poisoned")
+    }
+
+    /// The change-stream compaction floor: the highest LSN of a `Delete` compaction dropped
+    /// (0 = none). A cursor below it may have missed that delete; a cursor at or above it
+    /// has missed only superseded puts, whose last write it still sees.
+    pub fn deletes_compacted_through(&self) -> Lsn {
+        self.shared
+            .deletes_compacted_through
+            .load(Ordering::Acquire)
+    }
+
+    /// Raises the compaction floor to `lsn` (no-op if already there) and makes it durable
+    /// in `LOG_STATE`. Compaction calls it before the renames that drop a delete at `lsn`;
+    /// the in-memory floor rises before the file is written.
+    pub fn raise_deletes_compacted_through(&self, lsn: Lsn) -> Result<(), WalError> {
+        let mut state = self
+            .shared
+            .log_state
+            .lock()
+            .expect("log state lock poisoned");
+        if lsn <= state.deletes_compacted_through {
+            return Ok(());
+        }
+        self.shared
+            .deletes_compacted_through
+            .fetch_max(lsn, Ordering::AcqRel);
+        let next = LogState {
+            deletes_compacted_through: lsn,
+            ..*state
+        };
+        next.write(&*self.shared.vfs, &self.shared.dir)?;
+        *state = next;
+        Ok(())
+    }
+
+    /// Moves the durable log start to `upto` (the first LSN of a later segment) after
+    /// checking that every segment before it is sealed and fully elided. Called before
+    /// [`Wal::remove_leading_segments`], so a crash in between leaves segments `open`
+    /// recognises as released and removes.
+    pub fn set_log_start(&self, upto: Lsn) -> Result<(), WalError> {
+        let mut state = self
+            .shared
+            .log_state
+            .lock()
+            .expect("log state lock poisoned");
+        if upto <= state.log_start {
+            return Ok(());
+        }
+        let leading: Vec<Lsn> = {
+            let segments = self.shared.segments.read().expect("segments lock poisoned");
+            if !segments.contains_key(&upto) {
+                return Err(WalError::CompactionRefused(format!(
+                    "no segment starts at LSN {upto}, so it cannot become the log start"
+                )));
+            }
+            segments.range(..upto).map(|(k, _)| *k).collect()
+        };
+        for first in leading {
+            self.check_fully_elided(first)?;
+        }
+        let next = LogState {
+            log_start: upto,
+            ..*state
+        };
+        next.write(&*self.shared.vfs, &self.shared.dir)?;
+        *state = next;
+        Ok(())
+    }
+
+    fn check_fully_elided(&self, first_lsn: Lsn) -> Result<(), WalError> {
+        let (handle, next_lsn) = self.sealed_handle(first_lsn)?;
+        let path = self.segment_path(first_lsn);
+        let scan = scan_segment(&*handle.file, &path, first_lsn, &mut |loc, kind, _| {
+            if kind == FrameKind::Elided {
+                Ok(())
+            } else {
+                Err(WalError::CompactionRefused(format!(
+                    "{} still holds a live frame (lsn {}); only fully elided segments \
+                     are released",
+                    path.display(),
+                    loc.lsn
+                )))
+            }
+        })?;
+        check_whole(&path, &scan, next_lsn)
+    }
+
+    /// Removes, oldest first, every segment that starts before `upto`. `upto` must not be
+    /// past the durable log start ([`Wal::set_log_start`] first; `CompactionRefused`
+    /// otherwise), and each segment is checked fully elided again. Each removal is
+    /// `remove` + `sync_dir` before the next. Returns how many segments were removed.
+    pub fn remove_leading_segments(&self, upto: Lsn) -> Result<usize, WalError> {
+        let log_start = self
+            .shared
+            .log_state
+            .lock()
+            .expect("log state lock poisoned")
+            .log_start;
+        if upto > log_start {
+            return Err(WalError::CompactionRefused(format!(
+                "segments before LSN {upto} are not released: the durable log start is \
+                 {log_start}"
+            )));
+        }
+        let mut removed = 0;
+        loop {
+            let oldest = {
+                let segments = self.shared.segments.read().expect("segments lock poisoned");
+                segments.keys().next().copied()
+            };
+            let Some(first_lsn) = oldest.filter(|first| *first < upto) else {
+                return Ok(removed);
+            };
+            self.check_fully_elided(first_lsn)?;
+            let (_, next_lsn) = self.sealed_handle(first_lsn)?;
+            let path = self.segment_path(first_lsn);
+            self.shared.vfs.remove(&path)?;
+            let synced = self.shared.vfs.sync_dir(&self.shared.dir);
+            {
+                let mut segments = self
+                    .shared
+                    .segments
+                    .write()
+                    .expect("segments lock poisoned");
+                segments.remove(&first_lsn);
+                self.shared.removed_below.store(next_lsn, Ordering::Release);
+            }
+            synced.map_err(WalError::Io)?;
+            removed += 1;
+        }
     }
 
     /// Drains the queue, syncs, joins the writer. `Drop` does the same and logs errors.
@@ -1308,7 +1819,7 @@ fn roll_segment(
         .segments
         .write()
         .expect("segments lock poisoned")
-        .insert(new_first_lsn, file.clone());
+        .insert(new_first_lsn, SegmentHandle::new(file.clone()));
     *active = ActiveSegment {
         first_lsn: new_first_lsn,
         file,

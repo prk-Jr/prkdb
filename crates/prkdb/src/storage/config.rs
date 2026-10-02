@@ -7,19 +7,32 @@ use std::time::Duration;
 /// `StorageConfig::sync_mode` was a second setting nothing read (root cause 4, D12).
 pub use prkdb_core::wal::SyncMode;
 
-/// When to compact the write-ahead log.
+/// When the background task compacts the write-ahead log (Task 2.15).
 ///
-/// Defined here rather than in `prkdb-core`'s compaction module, which drives the old mmap
-/// WAL and goes away in Task 2.9. Not read until Task 2.15 adds compaction for the single
-/// WAL (which also adds `min_dead_ratio` and drops `keep_segments`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// When a tokio runtime exists at open, the adapter starts a task that wakes every
+/// `min_interval` and runs a compaction if the log's segments total at least
+/// `min_wal_size_bytes` and at least `min_dead_ratio` of the sealed segments' bytes could
+/// be reclaimed. `WalStorageAdapter::compact` runs one on demand regardless. A zero
+/// `min_interval`, or `min_wal_size_bytes: u64::MAX`, turns the background task off.
+///
+/// Checking the dead ratio reads every sealed segment once (a dry run of compaction's
+/// liveness pass), so it happens only once the size threshold is met.
+#[derive(Debug, Clone, PartialEq)]
 pub struct CompactionConfig {
-    /// Minimum size of the WAL before compaction is considered (bytes).
+    /// Minimum total size of the WAL's segments before compaction is considered (bytes).
     pub min_wal_size_bytes: u64,
-    /// Minimum time between compaction runs.
+    /// Time between background checks (and so between background runs).
     pub min_interval: Duration,
-    /// Number of segments to keep (history).
-    pub keep_segments: usize,
+    /// Minimum fraction (0.0..=1.0) of the sealed segments' bytes that a compaction would
+    /// reclaim before the background task runs one.
+    pub min_dead_ratio: f64,
+    /// Deletes are kept by compaction while their LSN is within this many LSNs of the
+    /// log's end (and dropped after). Keeping a delete is always safe; a retained delete
+    /// stays visible to `get_changes_since` and keeps its frame (and segment) alive.
+    pub tombstone_retention_lsns: u64,
+    /// Upper bound on the bytes a compaction run reads and writes per second, to leave
+    /// disk bandwidth to the writer; `None` = unlimited.
+    pub max_bytes_per_sec: Option<u64>,
 }
 
 impl Default for CompactionConfig {
@@ -27,7 +40,9 @@ impl Default for CompactionConfig {
         Self {
             min_wal_size_bytes: 100 * 1024 * 1024,  // 100 MB
             min_interval: Duration::from_secs(300), // 5 minutes
-            keep_segments: 2,
+            min_dead_ratio: 0.5,
+            tombstone_retention_lsns: 100_000,
+            max_bytes_per_sec: None,
         }
     }
 }
@@ -41,8 +56,7 @@ pub struct StorageConfig {
     /// Cache capacity (number of items)
     pub cache_capacity: usize,
 
-    /// Compaction configuration. Not read until Task 2.15 adds compaction for the single
-    /// WAL.
+    /// When the background task compacts the WAL (see [`CompactionConfig`]).
     pub compaction: CompactionConfig,
 
     /// Batching configuration. Only `max_flush_ms` is still read: the write path's
@@ -75,13 +89,15 @@ impl Default for StorageConfig {
 mod tests {
     use super::*;
 
-    /// The move out of `prkdb-core` keeps the defaults the type had there.
+    /// The thresholds Task 2.15 documents: 100 MB, every 5 minutes, half reclaimable.
     #[test]
-    fn compaction_defaults_are_unchanged_by_the_move() {
+    fn compaction_defaults_are_the_documented_ones() {
         let config = CompactionConfig::default();
         assert_eq!(config.min_wal_size_bytes, 100 * 1024 * 1024);
         assert_eq!(config.min_interval, Duration::from_secs(300));
-        assert_eq!(config.keep_segments, 2);
+        assert_eq!(config.min_dead_ratio, 0.5);
+        assert_eq!(config.tombstone_retention_lsns, 100_000);
+        assert_eq!(config.max_bytes_per_sec, None);
         assert_eq!(StorageConfig::default().compaction, config);
     }
 }

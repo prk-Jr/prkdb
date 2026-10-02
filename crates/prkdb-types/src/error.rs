@@ -151,6 +151,17 @@ pub enum StorageError {
     /// closed it. The text names the directory and, when known, the holder's pid.
     #[error("{0}")]
     Locked(String),
+
+    /// A change-stream cursor is below the compaction floor (Task 2.15): compaction has
+    /// rewritten or removed frames above the cursor, so the changes after it are no longer
+    /// complete (dropped deletes and overwritten values are gone). Reading on would
+    /// silently diverge; the consumer must resynchronise from a snapshot and continue
+    /// from an offset at or above `floor`.
+    #[error(
+        "change cursor {cursor} is below the compaction floor {floor}: the changes after it \
+         were compacted away; resynchronise from a snapshot and resume at or above {floor}"
+    )]
+    CompactedCursor { cursor: u64, floor: u64 },
 }
 
 /// Compute handler errors

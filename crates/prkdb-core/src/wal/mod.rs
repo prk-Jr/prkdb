@@ -5,6 +5,7 @@ pub mod config;
 pub mod frame;
 pub mod log;
 pub mod log_record;
+pub mod log_state;
 pub mod segment;
 
 pub use compression::{
@@ -12,8 +13,12 @@ pub use compression::{
 };
 pub use config::{CompactionPolicy, SyncMode, WalConfig};
 pub use frame::Lsn;
-pub use log::{CommitHook, PendingAppend, RecoveryReport, Reservation, Wal, WalHealth, WalOptions};
+pub use log::{
+    CommitHook, PendingAppend, RecoveryReport, Reservation, SealedSegment, Wal, WalHealth,
+    WalOptions,
+};
 pub use log_record::{LogOperation, LogRecord};
+pub use log_state::LogState;
 pub use segment::RecordLoc;
 
 #[derive(Debug, thiserror::Error)]
@@ -79,4 +84,24 @@ pub enum WalError {
 
     #[error("WAL is closed")]
     Closed,
+
+    /// The frame at a location is not the one asked for, and the segment holding it was
+    /// rewritten or removed by compaction since this `Wal` was opened (Task 2.15): the
+    /// location is stale, not the log corrupt. The caller re-resolves the location (the
+    /// storage adapter re-reads its index) and retries. A mismatch in a segment compaction
+    /// never touched stays `CorruptSegment`.
+    #[error(
+        "stale WAL location: lsn {lsn} at byte {offset} of {path} moved when compaction rewrote the segment"
+    )]
+    Moved {
+        path: std::path::PathBuf,
+        offset: u64,
+        lsn: Lsn,
+    },
+
+    /// A compaction step's precondition did not hold (a segment that is not sealed, a
+    /// replacement file whose LSN range differs from the segment it would replace, a
+    /// segment to remove that still holds a live frame). Nothing was changed.
+    #[error("compaction refused: {0}")]
+    CompactionRefused(String),
 }

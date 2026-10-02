@@ -33,6 +33,8 @@ pub enum Op {
     /// Drop the adapter without flushing, then reopen.
     Crash,
     Checkpoint,
+    /// Run a WAL compaction to completion (Task 2.15). Changes no logical state.
+    Compact,
     /// Power cut: everything not yet synced may be lost or torn per `tear`
     /// (see [`crate::faultfs`]), with `fault_seed` driving FaultFs's choices.
     /// Then the SUT reopens.
@@ -51,6 +53,7 @@ impl Op {
             Op::Reopen => Kind::Reopen.name(),
             Op::Crash => Kind::Crash.name(),
             Op::Checkpoint => Kind::Checkpoint.name(),
+            Op::Compact => Kind::Compact.name(),
             Op::PowerLoss { .. } => Kind::PowerLoss.name(),
         }
     }
@@ -63,6 +66,7 @@ pub const OP_KIND_NAMES: &[&str] = &[
     "Reopen",
     "Crash",
     "Checkpoint",
+    "Compact",
     "PowerLoss",
 ];
 
@@ -117,6 +121,7 @@ enum Kind {
     Reopen,
     Crash,
     Checkpoint,
+    Compact,
     PowerLoss,
 }
 
@@ -128,6 +133,7 @@ impl Kind {
             Kind::Reopen => "Reopen",
             Kind::Crash => "Crash",
             Kind::Checkpoint => "Checkpoint",
+            Kind::Compact => "Compact",
             Kind::PowerLoss => "PowerLoss",
         }
     }
@@ -151,10 +157,11 @@ const BLOCKING_WEIGHTS: &[(Kind, u32)] = &[
     (Kind::PowerLoss, 9),
 ];
 const DISCOVERY_WEIGHTS: &[(Kind, u32)] = &[
-    (Kind::Put, 55),
+    (Kind::Put, 51),
     (Kind::Delete, 20),
     (Kind::Reopen, 8),
     (Kind::Checkpoint, 5),
+    (Kind::Compact, 4),
     (Kind::Crash, 5),
     (Kind::PowerLoss, 7),
 ];
@@ -194,6 +201,7 @@ pub fn generate(seed: u64, len: usize, profile: Profile) -> Vec<Op> {
                 Kind::Reopen => Op::Reopen,
                 Kind::Crash => Op::Crash,
                 Kind::Checkpoint => Op::Checkpoint,
+                Kind::Compact => Op::Compact,
                 // Drawn only when a PowerLoss is emitted, and from the fault stream.
                 Kind::PowerLoss => Op::PowerLoss {
                     tear: Tear::random(&mut fault_rng),
@@ -257,6 +265,14 @@ mod tests {
     #[test]
     fn discovery_does_checkpoint() {
         assert!((0..20).any(|s| generate(s, 200, Profile::Discovery).contains(&Op::Checkpoint)));
+    }
+
+    #[test]
+    fn discovery_compacts_and_blocking_does_not() {
+        assert!((0..20).any(|s| generate(s, 200, Profile::Discovery).contains(&Op::Compact)));
+        for profile in [Profile::Core, Profile::Blocking] {
+            assert!((0..50).all(|s| !generate(s, 200, profile).contains(&Op::Compact)));
+        }
     }
 
     #[test]

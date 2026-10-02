@@ -1,5 +1,6 @@
 use super::cache::ShardedLruCache;
 use super::checkpoint;
+use super::compaction::{self, CompactionReport, CompactionStep};
 use super::config::{CompactionConfig, StorageConfig, SyncMode};
 use super::recovery::{open_and_recover, RecoveryManager, RecoveryStats};
 use super::snapshot::SnapshotWriter;
@@ -423,7 +424,55 @@ pub(crate) mod fault_injection {
 /// whole log when there is none ([`Self::last_recovery`] says which).
 #[derive(Clone)]
 pub struct WalStorageAdapter {
+    /// Every handle a caller holds carries this; the background compaction task's never
+    /// does. Declared before `inner` so it drops first: the last caller's handle waits
+    /// here for a background run to let go of the adapter, and the log and its directory
+    /// lock are released as that handle's drop returns.
+    _guard: Option<Arc<HandleGuard>>,
     inner: Arc<WalStorageInner>,
+}
+
+/// What the background compaction task and the callers' handles share. Lives outside
+/// `WalStorageInner`, so the task can consult it without keeping the adapter alive.
+#[derive(Default)]
+struct BackgroundGate {
+    state: parking_lot::Mutex<GateState>,
+    idle: parking_lot::Condvar,
+    /// `state.closing`, for the per-frame poll in a running compaction.
+    closing: AtomicBool,
+}
+
+#[derive(Default)]
+struct GateState {
+    closing: bool,
+    /// A background pass holds a strong reference to the adapter.
+    running: bool,
+}
+
+/// Dropped with the last handle a caller holds: stops the background task and waits for
+/// a pass in progress to drop its reference (a run stops within a frame of noticing).
+struct HandleGuard(Arc<BackgroundGate>);
+
+impl Drop for HandleGuard {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock();
+        state.closing = true;
+        self.0.closing.store(true, Ordering::Release);
+        while state.running {
+            self.0.idle.wait(&mut state);
+        }
+    }
+}
+
+/// Marks a background pass finished when dropped, even if the pass never ran (its
+/// blocking task dropped unrun at runtime shutdown) or panicked.
+struct PassDone(Arc<BackgroundGate>);
+
+impl Drop for PassDone {
+    fn drop(&mut self) {
+        self.0.state.lock().running = false;
+        self.0.idle.notify_all();
+    }
 }
 
 /// Write-path accounting for [`WalStorageAdapter::write_path_health`], updated by the
@@ -485,7 +534,11 @@ struct WalStorageInner {
     /// The filesystem the log lives on; checkpoints are written through it too.
     vfs: Arc<dyn Vfs>,
     /// One `save_checkpoint` at a time (they share the temp file name for a given LSN).
+    /// A compaction run holds it from its first checkpoint deletion to its fresh
+    /// checkpoint, so no checkpoint is written in between (Task 2.15).
     checkpointing: parking_lot::Mutex<()>,
+    /// One compaction run at a time. Taken before `checkpointing`.
+    compacting: parking_lot::Mutex<()>,
     /// What the open that created this adapter did to rebuild the index.
     last_recovery: RecoveryStats,
     progress: Arc<PublishProgress>,
@@ -514,7 +567,8 @@ fn wal_err(e: WalError) -> StorageError {
         | WalError::ReplayFailed { .. }
         | WalError::UnsupportedFormat { .. }
         | WalError::Corruption(_)
-        | WalError::ChecksumMismatch { .. }) => StorageError::Corruption(e.to_string()),
+        | WalError::ChecksumMismatch { .. }
+        | WalError::Moved { .. }) => StorageError::Corruption(e.to_string()),
         e => StorageError::Internal(e.to_string()),
     }
 }
@@ -547,6 +601,16 @@ fn value_in_batch(ops: Vec<BatchOp>, key: &[u8]) -> Option<Vec<u8>> {
             _ => None,
         })
         .flatten()
+}
+
+/// How many times a read re-resolves a key whose frame compaction moved under it.
+const STALE_READ_RETRIES: usize = 3;
+
+/// One attempt at reading a key from a location (see `WalStorageAdapter::read_at`).
+enum ReadAt {
+    Value(Option<Vec<u8>>),
+    /// Compaction moved the frame: re-resolve the key and try again.
+    Stale,
 }
 
 fn raft_key() -> Vec<u8> {
@@ -672,14 +736,19 @@ impl WalStorageAdapter {
             recovery: Arc::new(RecoveryManager::new(vfs.clone(), log_dir)),
             vfs,
             checkpointing: parking_lot::Mutex::new(()),
+            compacting: parking_lot::Mutex::new(()),
             last_recovery: recovered,
             progress: Arc::new(PublishProgress::default()),
             config,
             _lock: lock,
         };
-        Ok(Self {
+        let gate = Arc::new(BackgroundGate::default());
+        let adapter = Self {
+            _guard: Some(Arc::new(HandleGuard(gate.clone()))),
             inner: Arc::new(inner),
-        })
+        };
+        adapter.spawn_background_compaction(gate);
+        Ok(adapter)
     }
 
     /// Encodes `batch`, appends it as one frame, and publishes it into the index from
@@ -921,33 +990,69 @@ impl WalStorageAdapter {
     }
 
     /// The value stored for `key` in the frame at `loc`: from the cache if it holds that
-    /// exact LSN, otherwise read from the WAL (CRC and LSN verified) and cached.
-    async fn read_value(
-        &self,
-        key: &[u8],
-        loc: RecordLoc,
-    ) -> Result<Option<Vec<u8>>, StorageError> {
+    /// exact LSN, otherwise read from the WAL (CRC, LSN and length verified) and cached.
+    ///
+    /// `Stale` when `loc` no longer names the key's frame because compaction moved it
+    /// (Task 2.15): the WAL says `Moved`, or the frame no longer carries a put for the key
+    /// while the index has moved on from `loc`. A frame without the key that the index
+    /// still points at reads as absent (a stale or corrupt entry must not answer with
+    /// another key's value).
+    async fn read_at(&self, key: &[u8], loc: RecordLoc) -> Result<ReadAt, StorageError> {
         let metrics = &self.inner.metrics;
         if let Some((lsn, value)) = self.inner.cache.get(&key.to_vec()).await {
             if lsn == loc.lsn {
                 metrics.record_cache_hit();
                 metrics.record_read((key.len() + value.len()) as u64);
-                return Ok(Some(value));
+                return Ok(ReadAt::Value(Some(value)));
             }
         }
         metrics.record_cache_miss();
 
-        let payload = self.inner.wal.read(loc).map_err(wal_err)?;
+        let payload = match self.inner.wal.read(loc) {
+            Ok(payload) => payload,
+            Err(WalError::Moved { .. }) => return Ok(ReadAt::Stale),
+            Err(e) => return Err(wal_err(e)),
+        };
         let batch = Batch::decode(&payload).map_err(wal_err)?;
-        let value = value_in_batch(batch.ops, key);
-        if let Some(value) = &value {
-            metrics.record_read((key.len() + value.len()) as u64);
-            self.inner
-                .cache
-                .put(key.to_vec(), (loc.lsn, value.clone()))
-                .await;
+        let Some(value) = value_in_batch(batch.ops, key) else {
+            let current = self.inner.index.pin().get(key).copied();
+            return Ok(if current == Some(loc) {
+                ReadAt::Value(None)
+            } else {
+                ReadAt::Stale
+            });
+        };
+        metrics.record_read((key.len() + value.len()) as u64);
+        self.inner
+            .cache
+            .put(key.to_vec(), (loc.lsn, value.clone()))
+            .await;
+        Ok(ReadAt::Value(Some(value)))
+    }
+
+    /// [`Self::read_at`], re-resolving `key` through the index and retrying (up to
+    /// [`STALE_READ_RETRIES`] times) when compaction moved its frame. A key the index no
+    /// longer holds reads as absent; one whose location is still stale after the retries
+    /// is reported as corruption.
+    async fn read_value(
+        &self,
+        key: &[u8],
+        mut loc: RecordLoc,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        for _ in 0..=STALE_READ_RETRIES {
+            if let ReadAt::Value(value) = self.read_at(key, loc).await? {
+                return Ok(value);
+            }
+            match self.inner.index.pin().get(key).copied() {
+                Some(now) => loc = now,
+                None => return Ok(None),
+            }
         }
-        Ok(value)
+        Err(StorageError::Corruption(format!(
+            "the location of a key is still stale after {STALE_READ_RETRIES} retries: \
+             {loc:?} in {}",
+            self.inner.config.wal.log_dir.display()
+        )))
     }
 
     /// The index entries whose key satisfies `keep`, sorted by key. The index guard is
@@ -996,23 +1101,38 @@ impl WalStorageAdapter {
     ///
     /// Not a transaction and not MVCC. It gives an atomic read, not a repeatable one. For
     /// read-modify-write, use a `Serializable` transaction.
+    ///
+    /// # Compaction
+    ///
+    /// If compaction moves one of the resolved frames before it is read, re-resolving that
+    /// key alone could pair a newer value with the other keys' older ones, so the whole
+    /// snapshot is taken again, at a later instant (up to [`STALE_READ_RETRIES`] times).
     pub async fn snapshot_get_many(
         &self,
         keys: Vec<Vec<u8>>,
     ) -> Result<Vec<Option<Vec<u8>>>, StorageError> {
-        let locations: Vec<Option<RecordLoc>> = {
-            let _visible = self.inner.publish.read();
-            let pinned = self.inner.index.pin();
-            keys.iter().map(|key| pinned.get(key).copied()).collect()
-        };
-        let mut values = Vec::with_capacity(keys.len());
-        for (key, loc) in keys.iter().zip(locations) {
-            values.push(match loc {
-                Some(loc) => self.read_value(key, loc).await?,
-                None => None,
-            });
+        'snapshot: for _ in 0..=STALE_READ_RETRIES {
+            let locations: Vec<Option<RecordLoc>> = {
+                let _visible = self.inner.publish.read();
+                let pinned = self.inner.index.pin();
+                keys.iter().map(|key| pinned.get(key).copied()).collect()
+            };
+            let mut values = Vec::with_capacity(keys.len());
+            for (key, loc) in keys.iter().zip(locations) {
+                values.push(match loc {
+                    Some(loc) => match self.read_at(key, loc).await? {
+                        ReadAt::Value(value) => value,
+                        ReadAt::Stale => continue 'snapshot,
+                    },
+                    None => None,
+                });
+            }
+            return Ok(values);
         }
-        Ok(values)
+        Err(StorageError::Corruption(format!(
+            "snapshot read: a location is still stale after {STALE_READ_RETRIES} retries in {}",
+            self.inner.config.wal.log_dir.display()
+        )))
     }
 
     /// Highest LSN that is both published into the index and visible to
@@ -1060,9 +1180,25 @@ impl WalStorageAdapter {
     ///
     /// Blocks the calling thread for the copy and the fsyncs; async callers use
     /// [`Self::save_checkpoint_async`].
+    ///
+    /// While a compaction run is in progress this fails at once instead of waiting for it:
+    /// the run deletes every checkpoint before its first rename and writes a fresh one when
+    /// it finishes (Task 2.15).
     pub fn save_checkpoint(&self) -> Result<(), StorageError> {
+        if self.inner.compacting.is_locked() {
+            return Err(StorageError::Internal(
+                "checkpoint not written: a WAL compaction run is in progress, and it writes \
+                 a fresh checkpoint when it finishes"
+                    .to_string(),
+            ));
+        }
+        let _one_at_a_time = self.inner.checkpointing.lock();
+        self.write_checkpoint_locked()
+    }
+
+    /// [`Self::save_checkpoint`]'s work; the caller holds `checkpointing`.
+    fn write_checkpoint_locked(&self) -> Result<(), StorageError> {
         let inner = &self.inner;
-        let _one_at_a_time = inner.checkpointing.lock();
 
         // Acquire pairs with the hook's Release store: every insert and remove of every
         // frame up to `covered` is visible to the copy below.
@@ -1114,6 +1250,175 @@ impl WalStorageAdapter {
             .spawn_blocking(move || this.save_checkpoint())
             .await
             .map_err(|e| StorageError::Internal(format!("checkpoint task failed: {e}")))?
+    }
+
+    /// Compacts the log: rewrites the sealed segments keeping only live records, removes
+    /// the leading segments left with none, and writes a fresh checkpoint (Task 2.15; the
+    /// design, its crash-safety argument and what change-stream consumers see afterwards
+    /// are in [`compaction`]'s module docs).
+    ///
+    /// Writers are never paused: the run reads and rewrites sealed segments only, off the
+    /// WAL writer thread, and asks the writer for at most one sync per batch of rewrites,
+    /// and none when everything the rewrites rely on is already durable. Readers racing a
+    /// segment swap re-resolve their location and retry. Runs on tokio's blocking pool
+    /// (inline outside a runtime); one run at a time, and `save_checkpoint` refuses while
+    /// one is in progress.
+    ///
+    /// Not on Windows: a rewrite is renamed over a segment file the log holds open, which
+    /// Windows refuses. There this logs and returns an empty report.
+    pub async fn compact(&self) -> Result<CompactionReport, StorageError> {
+        self.compact_with_hook(|_| Ok(())).await
+    }
+
+    /// [`Self::compact`] for callers that are not async; blocks the calling thread.
+    pub fn compact_blocking(&self) -> Result<CompactionReport, StorageError> {
+        self.compact_inner(&mut |_| Ok(()), &|| false)
+    }
+
+    /// [`Self::compact`] with a hook called after every step of the run
+    /// ([`CompactionStep`]); an `Err` from it aborts the run right there. For crash tests,
+    /// which cut power at a chosen step.
+    #[doc(hidden)]
+    pub async fn compact_with_hook<F>(&self, hook: F) -> Result<CompactionReport, StorageError>
+    where
+        F: FnMut(CompactionStep) -> Result<(), String> + Send + 'static,
+    {
+        self.compact_with_hook_until(hook, Arc::new(AtomicBool::new(false)))
+            .await
+    }
+
+    /// [`Self::compact_with_hook`] that also stops early once `stop` is set, as a
+    /// background run does when the adapter closes. For tests of the stop path.
+    #[doc(hidden)]
+    pub async fn compact_with_hook_until<F>(
+        &self,
+        mut hook: F,
+        stop: Arc<AtomicBool>,
+    ) -> Result<CompactionReport, StorageError>
+    where
+        F: FnMut(CompactionStep) -> Result<(), String> + Send + 'static,
+    {
+        let stopped = move || stop.load(Ordering::Acquire);
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return self.compact_inner(&mut hook, &stopped);
+        };
+        let this = self.clone();
+        runtime
+            .spawn_blocking(move || this.compact_inner(&mut hook, &stopped))
+            .await
+            .map_err(|e| StorageError::Internal(format!("compaction task failed: {e}")))?
+    }
+
+    /// The change-stream compaction floor: the highest LSN of a delete compaction dropped
+    /// (0 = none). `get_changes_since` refuses a non-zero cursor below it
+    /// ([`StorageError::CompactedCursor`]); see `get_changes_since` for what a consumer
+    /// does then.
+    pub fn compaction_floor(&self) -> u64 {
+        self.inner.wal.deletes_compacted_through()
+    }
+
+    fn compaction_ctx<'a>(&'a self, stop: &'a dyn Fn() -> bool) -> compaction::Ctx<'a> {
+        let inner = &self.inner;
+        compaction::Ctx {
+            wal: &inner.wal,
+            index: &inner.index,
+            vfs: inner.vfs.as_ref(),
+            log_dir: &inner.config.wal.log_dir,
+            compression: &inner.config.wal.compression,
+            tombstone_retention_lsns: inner.config.compaction.tombstone_retention_lsns,
+            max_bytes_per_sec: inner.config.compaction.max_bytes_per_sec,
+            stop,
+        }
+    }
+
+    fn compact_inner(
+        &self,
+        hook: &mut dyn FnMut(CompactionStep) -> Result<(), String>,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<CompactionReport, StorageError> {
+        if cfg!(windows) {
+            info!("WAL compaction is not supported on Windows (a segment is renamed over while open); skipped");
+            return Ok(CompactionReport::default());
+        }
+        let inner = &self.inner;
+        let _one_run = inner.compacting.lock();
+        let _no_checkpoints_meanwhile = inner.checkpointing.lock();
+        compaction::run(&self.compaction_ctx(stop), hook, &|| {
+            self.write_checkpoint_locked()
+        })
+    }
+
+    /// Starts the background compaction task (see [`CompactionConfig`]) when a tokio
+    /// runtime exists. Between checks the task holds only a weak reference, so it never
+    /// keeps the adapter (or its data-directory lock) alive. A pass holds a strong one;
+    /// the last caller's handle, as it drops, tells the pass to stop (it stops within a
+    /// frame) and waits for it to let go, so a reopen right after the drop never finds the
+    /// directory locked.
+    fn spawn_background_compaction(&self, gate: Arc<BackgroundGate>) {
+        let interval = self.inner.config.compaction.min_interval;
+        if interval.is_zero()
+            || self.inner.config.compaction.min_wal_size_bytes == u64::MAX
+            || cfg!(windows)
+        {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let weak = Arc::downgrade(&self.inner);
+        runtime.spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                // Claimed under the gate's lock, before the upgrade: a handle dropping now
+                // either sees `running` and waits, or has already set `closing`.
+                {
+                    let mut state = gate.state.lock();
+                    if state.closing {
+                        return;
+                    }
+                    state.running = true;
+                }
+                let done = PassDone(gate.clone());
+                let Some(inner) = weak.upgrade() else {
+                    return;
+                };
+                let adapter = WalStorageAdapter {
+                    _guard: None,
+                    inner,
+                };
+                let stop_gate = gate.clone();
+                let pass = tokio::task::spawn_blocking(move || {
+                    let result = adapter
+                        .background_compaction_pass(&|| stop_gate.closing.load(Ordering::Acquire));
+                    drop(adapter);
+                    drop(done);
+                    result
+                });
+                match pass.await {
+                    Ok(Ok(Some(report))) => info!(?report, "background WAL compaction ran"),
+                    Ok(Ok(None)) => {}
+                    Ok(Err(e)) => tracing::warn!(error = %e, "background WAL compaction failed"),
+                    Err(e) => tracing::warn!(error = %e, "background WAL compaction task failed"),
+                }
+            }
+        });
+    }
+
+    /// One background check: compacts if the thresholds are met.
+    fn background_compaction_pass(
+        &self,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<Option<CompactionReport>, StorageError> {
+        let config = &self.inner.config.compaction;
+        let total = self.inner.wal.log_bytes().map_err(wal_err)?;
+        if total < config.min_wal_size_bytes || stop() {
+            return Ok(None);
+        }
+        let (sealed, reclaimable) = compaction::reclaimable(&self.compaction_ctx(stop))?;
+        if sealed == 0 || (reclaimable as f64) < config.min_dead_ratio * sealed as f64 {
+            return Ok(None);
+        }
+        self.compact_inner(&mut |_| Ok(()), stop).map(Some)
     }
 
     /// What the open that created this adapter did to rebuild its index: the checkpoint
@@ -1414,7 +1719,32 @@ impl StorageAdapter for WalStorageAdapter {
     /// Every change in the log after `offset` (an LSN), one per op, in LSN order. Reads
     /// acknowledged frames (`Wal::scan_from`), so a Fast-mode write is visible to a
     /// consumer as soon as it is acknowledged.
+    ///
+    /// # Cursors and compaction (Task 2.15)
+    ///
+    /// - **Cursor 0 means "rebuild from an empty state".** After compaction the stream from
+    ///   0 lacks dropped ops; replayed onto nothing it yields exactly the current state, so
+    ///   it is always served. Applied on top of existing state it is *not* safe: a dropped
+    ///   delete would leave a deleted key behind.
+    /// - A cursor other than 0 below the compaction floor ([`Self::compaction_floor`], the
+    ///   highest LSN of a delete compaction dropped) is refused with
+    ///   [`StorageError::CompactedCursor`]: the stream after it misses that delete. A
+    ///   consumer resynchronising after it must **clear its local state** and replay from
+    ///   0, **or load a snapshot** and resume from the snapshot's offset (at or above the
+    ///   floor); it must never keep its state and continue from 0 or from the floor.
+    /// - A cursor at or above the floor gets a stream that converges: it may lack
+    ///   intermediate overwrites that compaction dropped, never a key's last write or a
+    ///   delete. The floor is checked again after the scan, since a compaction raises it
+    ///   before renaming anything it covers.
     async fn get_changes_since(&self, offset: u64) -> Result<Vec<Change>, StorageError> {
+        let below_floor = |floor: u64| offset != 0 && offset < floor;
+        let floor = self.inner.wal.deletes_compacted_through();
+        if below_floor(floor) {
+            return Err(StorageError::CompactedCursor {
+                cursor: offset,
+                floor,
+            });
+        }
         let mut changes = Vec::new();
         self.inner
             .wal
@@ -1438,6 +1768,13 @@ impl StorageAdapter for WalStorageAdapter {
                 Ok(())
             })
             .map_err(wal_err)?;
+        let floor = self.inner.wal.deletes_compacted_through();
+        if below_floor(floor) {
+            return Err(StorageError::CompactedCursor {
+                cursor: offset,
+                floor,
+            });
+        }
         Ok(changes)
     }
 
@@ -1491,7 +1828,9 @@ mod tests {
         let wanted = crate::storage::CompactionConfig {
             min_wal_size_bytes: 1,
             min_interval: Duration::from_secs(1),
-            keep_segments: 7,
+            min_dead_ratio: 0.25,
+            tombstone_retention_lsns: 9,
+            max_bytes_per_sec: Some(1 << 20),
         };
         let adapter = WalStorageAdapter::builder(dir.path().to_path_buf())
             .with_compaction_config(wanted.clone())

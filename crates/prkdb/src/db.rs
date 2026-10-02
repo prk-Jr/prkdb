@@ -604,6 +604,13 @@ impl PrkDb {
     /// empty name is the bare cursor (every change). This is what `FetchSegment` serves;
     /// `StorageAdapter::changes_in_collection` knows no namespace, so a
     /// `with_namespace` database would get an empty stream from it.
+    ///
+    /// Cursors follow `StorageAdapter::get_changes_since` on the WAL adapter (Task 2.15):
+    /// offset 0 means "rebuild from an empty state" (the compacted stream replayed onto
+    /// nothing is the current state); a non-zero offset below the compaction floor fails
+    /// with `StorageError::CompactedCursor`, and the consumer must then clear its local
+    /// state (and replay from 0) or load a snapshot and resume from its offset, never keep
+    /// its state and continue.
     pub async fn changes_in_collection(
         &self,
         collection: &str,

@@ -8,6 +8,10 @@
 //! Cells:
 //! - `wal_durable`, `wal_fast`: `Wal::append` of a one-op `Batch`, encoded on the caller.
 //! - `adapter_put`: `WalStorageAdapter::put`, the public write path (Fast; see below).
+//! - `compaction_concurrent_put`: `adapter_put` on 1 MiB segments over a 1,000-key space
+//!   per writer (so the log is mostly dead records), while `WalStorageAdapter::compact`
+//!   runs back to back for the whole cell: put latency with compaction running (Task 2.15;
+//!   its p99 against `adapter_put`'s is what the perf gate compares).
 //! - `model_memcpy_only`: MODEL, not product code — encode the same `Batch`, take one
 //!   async mutex, memcpy into pre-faulted memory. A CPU/memory ceiling for a put.
 //!
@@ -112,6 +116,7 @@ async fn run_cell(
     value_size: usize,
     warmup: Duration,
     measure: Duration,
+    key_space: Option<u64>,
 ) -> CellResult {
     let start = Instant::now();
     let measure_start = start + warmup;
@@ -130,7 +135,8 @@ async fn run_cell(
                 if t0 >= end {
                     break;
                 }
-                let key = format!("w{w:03}_k{i:012}").into_bytes();
+                let k = key_space.map_or(i, |n| i % n);
+                let key = format!("w{w:03}_k{k:012}").into_bytes();
                 i += 1;
                 target.put(key, &value).await;
                 if t0 >= measure_start {
@@ -332,6 +338,7 @@ fn main() {
     print_header();
     let kinds = [
         "adapter_put",
+        "compaction_concurrent_put",
         "model_memcpy_only",
         "wal_durable",
         "wal_fast",
@@ -355,6 +362,15 @@ fn main() {
                             ))),
                             "wal_durable" => open_wal(&dir, SyncMode::Durable),
                             "wal_fast" => open_wal(&dir, SyncMode::Fast),
+                            "compaction_concurrent_put" => {
+                                let cfg = WalConfig {
+                                    log_dir: dir.clone(),
+                                    sync_mode: SyncMode::Fast,
+                                    segment_bytes: 1024 * 1024,
+                                    ..WalConfig::test_config()
+                                };
+                                Target::Adapter(WalStorageAdapter::new(cfg).expect("adapter"))
+                            }
                             _ => {
                                 // `adapter_put`: Fast, because the Linux adapter rule
                                 // (Task 2.8d) compares against the pre-2.8a adapter, which
@@ -369,9 +385,37 @@ fn main() {
                             }
                         };
                         let target = Arc::new(target);
-                        let r =
-                            run_cell(name, target.clone(), writers, value_size, warmup, measure)
-                                .await;
+                        let compacting = kind == "compaction_concurrent_put";
+                        let compactor = match (&*target, compacting) {
+                            (Target::Adapter(db), true) => {
+                                let db = db.clone();
+                                let until = Instant::now() + warmup + measure;
+                                Some(tokio::spawn(async move {
+                                    let mut runs = 0u64;
+                                    while Instant::now() < until {
+                                        db.compact().await.expect("compaction");
+                                        runs += 1;
+                                    }
+                                    runs
+                                }))
+                            }
+                            _ => None,
+                        };
+                        let key_space = compacting.then_some(1_000);
+                        let r = run_cell(
+                            name,
+                            target.clone(),
+                            writers,
+                            value_size,
+                            warmup,
+                            measure,
+                            key_space,
+                        )
+                        .await;
+                        if let Some(compactor) = compactor {
+                            let runs = compactor.await.expect("compactor task");
+                            println!("- {}: {runs} compaction runs during the cell", r.name);
+                        }
                         drop(target);
                         r
                     });
