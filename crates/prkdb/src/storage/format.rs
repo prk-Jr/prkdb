@@ -130,11 +130,16 @@ fn is_ignorable(path: &Path) -> bool {
 pub fn holds_data(vfs: &dyn Vfs, dir: &Path) -> Result<bool, StorageError> {
     let tmp = dir.join(FORMAT_TMP_FILE);
     let lock = dir.join(super::lock::LOCK_FILE);
+    // `LOG_STATE` (Task 2.15) records where the log starts; like `LOCK` it is not data.
+    let log_state = dir.join(prkdb_core::wal::log_state::LOG_STATE_FILE);
+    let log_state_tmp = dir.join(prkdb_core::wal::log_state::LOG_STATE_TMP_FILE);
     Ok(vfs
         .read_dir(dir)
         .map_err(|e| io_err(dir, e))?
         .iter()
-        .any(|p| *p != tmp && *p != lock && !is_ignorable(p)))
+        .any(|p| {
+            *p != tmp && *p != lock && *p != log_state && *p != log_state_tmp && !is_ignorable(p)
+        }))
 }
 
 /// Reads `dir/FORMAT` without creating anything. `Ok(None)` if the file does not exist.

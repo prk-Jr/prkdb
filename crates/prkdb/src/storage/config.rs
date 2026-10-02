@@ -26,6 +26,13 @@ pub struct CompactionConfig {
     /// Minimum fraction (0.0..=1.0) of the sealed segments' bytes that a compaction would
     /// reclaim before the background task runs one.
     pub min_dead_ratio: f64,
+    /// Deletes are kept by compaction while their LSN is within this many LSNs of the
+    /// log's end (and dropped after). Keeping a delete is always safe; a retained delete
+    /// stays visible to `get_changes_since` and keeps its frame (and segment) alive.
+    pub tombstone_retention_lsns: u64,
+    /// Upper bound on the bytes a compaction run reads and writes per second, to leave
+    /// disk bandwidth to the writer; `None` = unlimited.
+    pub max_bytes_per_sec: Option<u64>,
 }
 
 impl Default for CompactionConfig {
@@ -34,6 +41,8 @@ impl Default for CompactionConfig {
             min_wal_size_bytes: 100 * 1024 * 1024,  // 100 MB
             min_interval: Duration::from_secs(300), // 5 minutes
             min_dead_ratio: 0.5,
+            tombstone_retention_lsns: 100_000,
+            max_bytes_per_sec: None,
         }
     }
 }
@@ -87,6 +96,8 @@ mod tests {
         assert_eq!(config.min_wal_size_bytes, 100 * 1024 * 1024);
         assert_eq!(config.min_interval, Duration::from_secs(300));
         assert_eq!(config.min_dead_ratio, 0.5);
+        assert_eq!(config.tombstone_retention_lsns, 100_000);
+        assert_eq!(config.max_bytes_per_sec, None);
         assert_eq!(StorageConfig::default().compaction, config);
     }
 }

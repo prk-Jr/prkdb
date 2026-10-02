@@ -424,7 +424,55 @@ pub(crate) mod fault_injection {
 /// whole log when there is none ([`Self::last_recovery`] says which).
 #[derive(Clone)]
 pub struct WalStorageAdapter {
+    /// Every handle a caller holds carries this; the background compaction task's never
+    /// does. Declared before `inner` so it drops first: the last caller's handle waits
+    /// here for a background run to let go of the adapter, and the log and its directory
+    /// lock are released as that handle's drop returns.
+    _guard: Option<Arc<HandleGuard>>,
     inner: Arc<WalStorageInner>,
+}
+
+/// What the background compaction task and the callers' handles share. Lives outside
+/// `WalStorageInner`, so the task can consult it without keeping the adapter alive.
+#[derive(Default)]
+struct BackgroundGate {
+    state: parking_lot::Mutex<GateState>,
+    idle: parking_lot::Condvar,
+    /// `state.closing`, for the per-frame poll in a running compaction.
+    closing: AtomicBool,
+}
+
+#[derive(Default)]
+struct GateState {
+    closing: bool,
+    /// A background pass holds a strong reference to the adapter.
+    running: bool,
+}
+
+/// Dropped with the last handle a caller holds: stops the background task and waits for
+/// a pass in progress to drop its reference (a run stops within a frame of noticing).
+struct HandleGuard(Arc<BackgroundGate>);
+
+impl Drop for HandleGuard {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock();
+        state.closing = true;
+        self.0.closing.store(true, Ordering::Release);
+        while state.running {
+            self.0.idle.wait(&mut state);
+        }
+    }
+}
+
+/// Marks a background pass finished when dropped, even if the pass never ran (its
+/// blocking task dropped unrun at runtime shutdown) or panicked.
+struct PassDone(Arc<BackgroundGate>);
+
+impl Drop for PassDone {
+    fn drop(&mut self) {
+        self.0.state.lock().running = false;
+        self.0.idle.notify_all();
+    }
 }
 
 /// Write-path accounting for [`WalStorageAdapter::write_path_health`], updated by the
@@ -694,10 +742,12 @@ impl WalStorageAdapter {
             config,
             _lock: lock,
         };
+        let gate = Arc::new(BackgroundGate::default());
         let adapter = Self {
+            _guard: Some(Arc::new(HandleGuard(gate.clone()))),
             inner: Arc::new(inner),
         };
-        adapter.spawn_background_compaction();
+        adapter.spawn_background_compaction(gate);
         Ok(adapter)
     }
 
@@ -1130,7 +1180,18 @@ impl WalStorageAdapter {
     ///
     /// Blocks the calling thread for the copy and the fsyncs; async callers use
     /// [`Self::save_checkpoint_async`].
+    ///
+    /// While a compaction run is in progress this fails at once instead of waiting for it:
+    /// the run deletes every checkpoint before its first rename and writes a fresh one when
+    /// it finishes (Task 2.15).
     pub fn save_checkpoint(&self) -> Result<(), StorageError> {
+        if self.inner.compacting.is_locked() {
+            return Err(StorageError::Internal(
+                "checkpoint not written: a WAL compaction run is in progress, and it writes \
+                 a fresh checkpoint when it finishes"
+                    .to_string(),
+            ));
+        }
         let _one_at_a_time = self.inner.checkpointing.lock();
         self.write_checkpoint_locked()
     }
@@ -1197,11 +1258,14 @@ impl WalStorageAdapter {
     /// are in [`compaction`]'s module docs).
     ///
     /// Writers are never paused: the run reads and rewrites sealed segments only, off the
-    /// WAL writer thread, and asks the writer for at most one sync per rewritten segment
-    /// (none when everything it consulted is already durable). Readers racing a segment
-    /// swap re-resolve their location and retry. Runs on tokio's blocking pool (inline
-    /// outside a runtime); one run at a time, and `save_checkpoint` waits for a run in
-    /// progress.
+    /// WAL writer thread, and asks the writer for at most one sync per batch of rewrites,
+    /// and none when everything the rewrites rely on is already durable. Readers racing a
+    /// segment swap re-resolve their location and retry. Runs on tokio's blocking pool
+    /// (inline outside a runtime); one run at a time, and `save_checkpoint` refuses while
+    /// one is in progress.
+    ///
+    /// Not on Windows: a rewrite is renamed over a segment file the log holds open, which
+    /// Windows refuses. There this logs and returns an empty report.
     pub async fn compact(&self) -> Result<CompactionReport, StorageError> {
         self.compact_with_hook(|_| Ok(())).await
     }
@@ -1229,31 +1293,56 @@ impl WalStorageAdapter {
             .map_err(|e| StorageError::Internal(format!("compaction task failed: {e}")))?
     }
 
-    fn compact_inner(
-        &self,
-        hook: &mut dyn FnMut(CompactionStep) -> Result<(), String>,
-        stop: &dyn Fn() -> bool,
-    ) -> Result<CompactionReport, StorageError> {
+    /// The compaction floor: the highest LSN of any frame compaction rewrote or removed
+    /// (0 = none). `get_changes_since` refuses a cursor below it
+    /// ([`StorageError::CompactedCursor`]).
+    pub fn compaction_floor(&self) -> u64 {
+        self.inner.wal.compacted_through()
+    }
+
+    fn compaction_ctx<'a>(&'a self, stop: &'a dyn Fn() -> bool) -> compaction::Ctx<'a> {
         let inner = &self.inner;
-        let _one_run = inner.compacting.lock();
-        let _no_checkpoints_meanwhile = inner.checkpointing.lock();
-        let ctx = compaction::Ctx {
+        compaction::Ctx {
             wal: &inner.wal,
             index: &inner.index,
             vfs: inner.vfs.as_ref(),
             log_dir: &inner.config.wal.log_dir,
             compression: &inner.config.wal.compression,
-        };
-        compaction::run(&ctx, hook, stop, &|| self.write_checkpoint_locked())
+            tombstone_retention_lsns: inner.config.compaction.tombstone_retention_lsns,
+            max_bytes_per_sec: inner.config.compaction.max_bytes_per_sec,
+            stop,
+        }
+    }
+
+    fn compact_inner(
+        &self,
+        hook: &mut dyn FnMut(CompactionStep) -> Result<(), String>,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<CompactionReport, StorageError> {
+        if cfg!(windows) {
+            info!("WAL compaction is not supported on Windows (a segment is renamed over while open); skipped");
+            return Ok(CompactionReport::default());
+        }
+        let inner = &self.inner;
+        let _one_run = inner.compacting.lock();
+        let _no_checkpoints_meanwhile = inner.checkpointing.lock();
+        compaction::run(&self.compaction_ctx(stop), hook, &|| {
+            self.write_checkpoint_locked()
+        })
     }
 
     /// Starts the background compaction task (see [`CompactionConfig`]) when a tokio
-    /// runtime exists. The task holds only a weak reference between checks, so it never
-    /// keeps the adapter (or its data-directory lock) alive; during a run it holds a
-    /// strong one, and the run stops between segments once that is the last one left.
-    fn spawn_background_compaction(&self) {
+    /// runtime exists. Between checks the task holds only a weak reference, so it never
+    /// keeps the adapter (or its data-directory lock) alive. A pass holds a strong one;
+    /// the last caller's handle, as it drops, tells the pass to stop (it stops within a
+    /// frame) and waits for it to let go, so a reopen right after the drop never finds the
+    /// directory locked.
+    fn spawn_background_compaction(&self, gate: Arc<BackgroundGate>) {
         let interval = self.inner.config.compaction.min_interval;
-        if interval.is_zero() || self.inner.config.compaction.min_wal_size_bytes == u64::MAX {
+        if interval.is_zero()
+            || self.inner.config.compaction.min_wal_size_bytes == u64::MAX
+            || cfg!(windows)
+        {
             return;
         }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
@@ -1263,13 +1352,32 @@ impl WalStorageAdapter {
         runtime.spawn(async move {
             loop {
                 tokio::time::sleep(interval).await;
+                // Claimed under the gate's lock, before the upgrade: a handle dropping now
+                // either sees `running` and waits, or has already set `closing`.
+                {
+                    let mut state = gate.state.lock();
+                    if state.closing {
+                        return;
+                    }
+                    state.running = true;
+                }
+                let done = PassDone(gate.clone());
                 let Some(inner) = weak.upgrade() else {
                     return;
                 };
-                let adapter = WalStorageAdapter { inner };
-                match tokio::task::spawn_blocking(move || adapter.background_compaction_pass())
-                    .await
-                {
+                let adapter = WalStorageAdapter {
+                    _guard: None,
+                    inner,
+                };
+                let stop_gate = gate.clone();
+                let pass = tokio::task::spawn_blocking(move || {
+                    let result = adapter
+                        .background_compaction_pass(&|| stop_gate.closing.load(Ordering::Acquire));
+                    drop(adapter);
+                    drop(done);
+                    result
+                });
+                match pass.await {
                     Ok(Ok(Some(report))) => info!(?report, "background WAL compaction ran"),
                     Ok(Ok(None)) => {}
                     Ok(Err(e)) => tracing::warn!(error = %e, "background WAL compaction failed"),
@@ -1279,28 +1387,21 @@ impl WalStorageAdapter {
         });
     }
 
-    /// One background check: compacts if the thresholds are met. Takes the adapter by
-    /// value so that its strong reference is the only one left once every caller's handle
-    /// has dropped, which is what makes the run stop early.
-    fn background_compaction_pass(self) -> Result<Option<CompactionReport>, StorageError> {
+    /// One background check: compacts if the thresholds are met.
+    fn background_compaction_pass(
+        &self,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<Option<CompactionReport>, StorageError> {
         let config = &self.inner.config.compaction;
         let total = self.inner.wal.log_bytes().map_err(wal_err)?;
-        if total < config.min_wal_size_bytes {
+        if total < config.min_wal_size_bytes || stop() {
             return Ok(None);
         }
-        let ctx = compaction::Ctx {
-            wal: &self.inner.wal,
-            index: &self.inner.index,
-            vfs: self.inner.vfs.as_ref(),
-            log_dir: &self.inner.config.wal.log_dir,
-            compression: &self.inner.config.wal.compression,
-        };
-        let (sealed, reclaimable) = compaction::reclaimable(&ctx)?;
+        let (sealed, reclaimable) = compaction::reclaimable(&self.compaction_ctx(stop))?;
         if sealed == 0 || (reclaimable as f64) < config.min_dead_ratio * sealed as f64 {
             return Ok(None);
         }
-        let last_handle = || Arc::strong_count(&self.inner) <= 1;
-        self.compact_inner(&mut |_| Ok(()), &last_handle).map(Some)
+        self.compact_inner(&mut |_| Ok(()), stop).map(Some)
     }
 
     /// What the open that created this adapter did to rebuild its index: the checkpoint
@@ -1601,7 +1702,20 @@ impl StorageAdapter for WalStorageAdapter {
     /// Every change in the log after `offset` (an LSN), one per op, in LSN order. Reads
     /// acknowledged frames (`Wal::scan_from`), so a Fast-mode write is visible to a
     /// consumer as soon as it is acknowledged.
+    ///
+    /// A cursor other than 0 below the compaction floor ([`Self::compaction_floor`]) is
+    /// refused with [`StorageError::CompactedCursor`]: compaction dropped records after it,
+    /// so the stream would be incomplete. The floor is checked again after the scan, since
+    /// a compaction raises it before renaming anything it covers.
     async fn get_changes_since(&self, offset: u64) -> Result<Vec<Change>, StorageError> {
+        let below_floor = |floor: u64| offset != 0 && offset < floor;
+        let floor = self.inner.wal.compacted_through();
+        if below_floor(floor) {
+            return Err(StorageError::CompactedCursor {
+                cursor: offset,
+                floor,
+            });
+        }
         let mut changes = Vec::new();
         self.inner
             .wal
@@ -1625,6 +1739,13 @@ impl StorageAdapter for WalStorageAdapter {
                 Ok(())
             })
             .map_err(wal_err)?;
+        let floor = self.inner.wal.compacted_through();
+        if below_floor(floor) {
+            return Err(StorageError::CompactedCursor {
+                cursor: offset,
+                floor,
+            });
+        }
         Ok(changes)
     }
 
@@ -1679,6 +1800,8 @@ mod tests {
             min_wal_size_bytes: 1,
             min_interval: Duration::from_secs(1),
             min_dead_ratio: 0.25,
+            tombstone_retention_lsns: 9,
+            max_bytes_per_sec: Some(1 << 20),
         };
         let adapter = WalStorageAdapter::builder(dir.path().to_path_buf())
             .with_compaction_config(wanted.clone())

@@ -4,6 +4,7 @@ pub mod compression;
 pub mod config;
 pub mod frame;
 pub mod log;
+pub mod log_state;
 pub mod log_record;
 pub mod segment;
 
@@ -17,6 +18,7 @@ pub use log::{
     WalOptions,
 };
 pub use log_record::{LogOperation, LogRecord};
+pub use log_state::LogState;
 pub use segment::RecordLoc;
 
 #[derive(Debug, thiserror::Error)]

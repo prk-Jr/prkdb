@@ -18,6 +18,7 @@ use crate::wal::segment::{
     read_frame, scan_segment, segment_file_name, write_segment_header, RecordLoc, ScanVisitor,
     SegmentScan, SEGMENT_HEADER_LEN,
 };
+use crate::wal::log_state::LogState;
 use crate::wal::WalError;
 use std::collections::BTreeMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -108,6 +109,59 @@ impl SegmentHandle {
     }
 }
 
+/// `Wal::open`'s log-start rule: removes, oldest first, every segment that ends at or
+/// before `state.log_start` (each must be fully elided: a crash between `LOG_STATE`'s
+/// write and their removal leaves them), and returns the segments that remain.
+fn remove_leftovers_before(
+    vfs: &dyn Vfs,
+    dir: &Path,
+    segment_lsns: Vec<Lsn>,
+    state: LogState,
+) -> Result<Vec<Lsn>, WalError> {
+    let leftovers = segment_lsns
+        .iter()
+        .take_while(|first| **first < state.log_start)
+        .count();
+    for i in 0..leftovers {
+        let first = segment_lsns[i];
+        let path = dir.join(segment_file_name(first));
+        let next = segment_lsns.get(i + 1).copied();
+        if next.is_none_or(|next| next > state.log_start) {
+            return Err(WalError::CorruptSegment {
+                path,
+                offset: 0,
+                reason: format!(
+                    "segment starts before the log start {} (LOG_STATE) but does not end \
+                     at or before it",
+                    state.log_start
+                ),
+            });
+        }
+        let file = vfs.open(&path, OpenMode::Read)?;
+        let scan = scan_segment(&*file, &path, first, &mut |loc, kind, _| {
+            if kind == FrameKind::Elided {
+                Ok(())
+            } else {
+                Err(WalError::CorruptSegment {
+                    path: path.clone(),
+                    offset: loc.offset,
+                    reason: format!(
+                        "segment before the log start {} (LOG_STATE) holds a live frame \
+                         (lsn {})",
+                        state.log_start, loc.lsn
+                    ),
+                })
+            }
+        })?;
+        check_whole(&path, &scan, next.expect("checked above"))?;
+        drop(file);
+        tracing::info!(path = %path.display(), "removing a segment compaction had already released");
+        vfs.remove(&path)?;
+        vfs.sync_dir(dir)?;
+    }
+    Ok(segment_lsns[leftovers..].to_vec())
+}
+
 /// A sealed segment's scan must have read every byte as a good frame and ended exactly
 /// where the next segment starts.
 fn check_whole(path: &Path, scan: &SegmentScan, next_lsn: Lsn) -> Result<(), WalError> {
@@ -161,6 +215,13 @@ struct Shared {
     /// The filesystem, for compaction's renames and removals (the writer thread owns its
     /// own clone for rolls).
     vfs: Arc<dyn Vfs>,
+    /// The durable `LOG_STATE` as last written (or read at open). The mutex serialises
+    /// its rewrites.
+    log_state: std::sync::Mutex<LogState>,
+    /// `log_state.compacted_through`, readable without the lock. Raised *before* the file
+    /// is written and before any rename it covers, so a reader that checks it after
+    /// scanning never misses a rewrite that could have dropped something it scanned past.
+    compacted_through: AtomicU64,
     queued_bytes: AtomicUsize,
     last_progress_ms: AtomicU64,
     oldest_enqueued_ms: AtomicU64,
@@ -310,9 +371,15 @@ impl Wal {
     /// Directory: if `dir` is absent, `create_dir_all(dir)` then `sync_dir` of its parent.
     /// Recovery: lists `*.wal`, sorts by first LSN, checks each segment's first LSN equals
     /// the previous segment's `next_lsn`, scans every segment, and calls `replay` for every
-    /// frame with lsn >= `replay_from` in LSN order. The first segment's first LSN is where
-    /// the log starts: 1 until compaction removes fully elided segments from the front
-    /// (Task 2.15), later after that. Last segment: a torn tail is logged,
+    /// frame with lsn >= `replay_from` in LSN order.
+    ///
+    /// Log start (Task 2.15): `LOG_STATE` (see [`LogState`]) records the first LSN of the
+    /// log, which compaction moves forward when it removes fully elided segments from the
+    /// front. Segments that start before it are what a crash between writing `LOG_STATE`
+    /// and removing them leaves: each must be entirely elided, and is removed here
+    /// (`remove` + `sync_dir`); one that is not is `CorruptSegment`. A first segment that
+    /// starts *after* the log start means segments are missing: `CorruptSegment` naming the
+    /// missing LSN range. Last segment: a torn tail is logged,
     /// truncated (`set_len` + `sync_data`) and reported. Earlier segment: any fault is
     /// `CorruptSegment` and nothing is modified. A zero-length or header-only last segment
     /// is valid (a crash right after a roll or right after creation); a zero-length one is
@@ -355,9 +422,34 @@ impl Wal {
             .collect();
         segment_lsns.sort_unstable();
 
+        let log_state = LogState::read(&*vfs, dir)?;
+        let segment_lsns = remove_leftovers_before(&*vfs, dir, segment_lsns, log_state)?;
+        if let Some(&first) = segment_lsns.first() {
+            if first != log_state.log_start {
+                return Err(WalError::CorruptSegment {
+                    path: dir.join(segment_file_name(first)),
+                    offset: 0,
+                    reason: format!(
+                        "the log starts at LSN {} (LOG_STATE), but its first segment starts \
+                         at {first}: the segments holding LSNs {}..{first} are missing",
+                        log_state.log_start, log_state.log_start
+                    ),
+                });
+            }
+        } else if log_state.log_start > 1 {
+            return Err(WalError::CorruptSegment {
+                path: dir.join(crate::wal::log_state::LOG_STATE_FILE),
+                offset: 0,
+                reason: format!(
+                    "LOG_STATE says the log starts at LSN {}, but the directory holds no \
+                     segment",
+                    log_state.log_start
+                ),
+            });
+        }
+
         let mut report = RecoveryReport::default();
-        // The log starts at its oldest segment (see the doc comment); a new log at 1.
-        let mut next_lsn: Lsn = segment_lsns.first().copied().unwrap_or(1);
+        let mut next_lsn: Lsn = log_state.log_start;
         let mut segments: BTreeMap<Lsn, SegmentHandle> = BTreeMap::new();
 
         for (idx, &first_lsn) in segment_lsns.iter().enumerate() {
@@ -482,6 +574,8 @@ impl Wal {
             segments: RwLock::new(segments),
             removed_below: AtomicU64::new(0),
             vfs: vfs.clone(),
+            log_state: std::sync::Mutex::new(log_state),
+            compacted_through: AtomicU64::new(log_state.compacted_through),
             queued_bytes: AtomicUsize::new(0),
             last_progress_ms: AtomicU64::new(now_ms()),
             oldest_enqueued_ms: AtomicU64::new(0),
@@ -918,12 +1012,97 @@ impl Wal {
         synced.map_err(WalError::Io)
     }
 
-    /// Removes, oldest first, every sealed segment that starts before `upto`, each one
-    /// only if all its frames are `Elided` (`CompactionRefused` otherwise, and for an
-    /// `upto` past the active segment's start). Each removal is `remove` + `sync_dir`
-    /// before the next, so a crash leaves a contiguous log that starts later, which
-    /// [`Wal::open`] accepts. Returns how many segments were removed.
+    /// The durable log state: where the log starts and the compaction floor.
+    pub fn log_state(&self) -> LogState {
+        *self.shared.log_state.lock().expect("log state lock poisoned")
+    }
+
+    /// The compaction floor: the highest LSN of any frame compaction rewrote or removed
+    /// (0 = none). A change-stream cursor below it may have missed dropped records.
+    pub fn compacted_through(&self) -> Lsn {
+        self.shared.compacted_through.load(Ordering::Acquire)
+    }
+
+    /// Raises the compaction floor to `lsn` (no-op if already there) and makes it durable
+    /// in `LOG_STATE`. Compaction calls it before the renames that drop anything at or
+    /// below `lsn`; the in-memory floor rises before the file is written.
+    pub fn raise_compacted_through(&self, lsn: Lsn) -> Result<(), WalError> {
+        let mut state = self.shared.log_state.lock().expect("log state lock poisoned");
+        if lsn <= state.compacted_through {
+            return Ok(());
+        }
+        self.shared
+            .compacted_through
+            .fetch_max(lsn, Ordering::AcqRel);
+        let next = LogState {
+            compacted_through: lsn,
+            ..*state
+        };
+        next.write(&*self.shared.vfs, &self.shared.dir)?;
+        *state = next;
+        Ok(())
+    }
+
+    /// Moves the durable log start to `upto` (the first LSN of a later segment) after
+    /// checking that every segment before it is sealed and fully elided. Called before
+    /// [`Wal::remove_leading_segments`], so a crash in between leaves segments `open`
+    /// recognises as released and removes.
+    pub fn set_log_start(&self, upto: Lsn) -> Result<(), WalError> {
+        let mut state = self.shared.log_state.lock().expect("log state lock poisoned");
+        if upto <= state.log_start {
+            return Ok(());
+        }
+        let leading: Vec<Lsn> = {
+            let segments = self.shared.segments.read().expect("segments lock poisoned");
+            if !segments.contains_key(&upto) {
+                return Err(WalError::CompactionRefused(format!(
+                    "no segment starts at LSN {upto}, so it cannot become the log start"
+                )));
+            }
+            segments.range(..upto).map(|(k, _)| *k).collect()
+        };
+        for first in leading {
+            self.check_fully_elided(first)?;
+        }
+        let next = LogState {
+            log_start: upto,
+            ..*state
+        };
+        next.write(&*self.shared.vfs, &self.shared.dir)?;
+        *state = next;
+        Ok(())
+    }
+
+    fn check_fully_elided(&self, first_lsn: Lsn) -> Result<(), WalError> {
+        let (handle, next_lsn) = self.sealed_handle(first_lsn)?;
+        let path = self.segment_path(first_lsn);
+        let scan = scan_segment(&*handle.file, &path, first_lsn, &mut |loc, kind, _| {
+            if kind == FrameKind::Elided {
+                Ok(())
+            } else {
+                Err(WalError::CompactionRefused(format!(
+                    "{} still holds a live frame (lsn {}); only fully elided segments \
+                     are released",
+                    path.display(),
+                    loc.lsn
+                )))
+            }
+        })?;
+        check_whole(&path, &scan, next_lsn)
+    }
+
+    /// Removes, oldest first, every segment that starts before `upto`. `upto` must not be
+    /// past the durable log start ([`Wal::set_log_start`] first; `CompactionRefused`
+    /// otherwise), and each segment is checked fully elided again. Each removal is
+    /// `remove` + `sync_dir` before the next. Returns how many segments were removed.
     pub fn remove_leading_segments(&self, upto: Lsn) -> Result<usize, WalError> {
+        let log_start = self.shared.log_state.lock().expect("log state lock poisoned").log_start;
+        if upto > log_start {
+            return Err(WalError::CompactionRefused(format!(
+                "segments before LSN {upto} are not released: the durable log start is \
+                 {log_start}"
+            )));
+        }
         let mut removed = 0;
         loop {
             let oldest = {
@@ -933,21 +1112,9 @@ impl Wal {
             let Some(first_lsn) = oldest.filter(|first| *first < upto) else {
                 return Ok(removed);
             };
-            let (handle, next_lsn) = self.sealed_handle(first_lsn)?;
+            self.check_fully_elided(first_lsn)?;
+            let (_, next_lsn) = self.sealed_handle(first_lsn)?;
             let path = self.segment_path(first_lsn);
-            let scan = scan_segment(&*handle.file, &path, first_lsn, &mut |loc, kind, _| {
-                if kind == FrameKind::Elided {
-                    Ok(())
-                } else {
-                    Err(WalError::CompactionRefused(format!(
-                        "{} still holds a live frame (lsn {}); only fully elided segments \
-                         are removed",
-                        path.display(),
-                        loc.lsn
-                    )))
-                }
-            })?;
-            check_whole(&path, &scan, next_lsn)?;
             self.shared.vfs.remove(&path)?;
             let synced = self.shared.vfs.sync_dir(&self.shared.dir);
             {
