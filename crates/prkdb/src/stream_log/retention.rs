@@ -182,7 +182,10 @@ impl RetentionTask {
                     Ok(Err(e)) => tracing::warn!(error = %e, "background stream retention failed"),
                     Err(e) => tracing::warn!(error = %e, "background stream retention task failed"),
                 }
-                if weak.upgrade().is_none() {
+                // Observe liveness without owning Inner on the async executor:
+                // a temporary upgrade could become its last owner and run the
+                // blocking WAL drop/join here when the public handle races us.
+                if weak.strong_count() == 0 {
                     return;
                 }
             }
