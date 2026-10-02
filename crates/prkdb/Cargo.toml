@@ -31,6 +31,8 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 rand = "0.8"
 dashmap = { workspace = true }
+# O(1) LRU for the WAL read cache (storage/cache.rs); already in the lock via sqlx-core.
+hashlink = "0.10"
 papaya = "0.1"                                                         # Lock-free HashMap for Phase 5 optimization (better than flurry)
 # The publish lock taken by WAL commit hooks (Task 2.8a): a panicking hook must not poison
 # it for every later reader, which `std::sync::RwLock` would.

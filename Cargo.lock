@@ -2475,6 +2475,7 @@ dependencies = [
  "flate2",
  "futures",
  "gungraun",
+ "hashlink",
  "http",
  "lazy_static",
  "libc",

@@ -1,6 +1,6 @@
+use hashlink::LinkedHashMap;
 use prkdb_metrics::storage::StorageMetrics;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Weak};
 use tokio::sync::RwLock;
@@ -206,21 +206,26 @@ impl<K: Eq + Hash + Clone, V: Clone> ShardedLruCache<K, V> {
     }
 }
 
-/// Simple LRU cache with configurable capacity and optional metrics tracking
+/// LRU cache with configurable capacity and optional metrics tracking.
+///
+/// Backed by `hashlink::LinkedHashMap`, a hash map threaded through a doubly linked list
+/// in recency order (least recently used at the front), so `get`, `put` and eviction are
+/// all O(1). The previous version stamped each entry with an access counter and found the
+/// victim by scanning the whole map on every evicting `put`, which made a full cache's
+/// write path O(capacity) and dominated the WAL adapter's CPU profile.
 pub struct LruCache<K, V> {
     capacity: usize,
-    map: HashMap<K, (V, usize)>, // (value, last_access_time)
-    access_counter: usize,
+    map: LinkedHashMap<K, V>,
     metrics: Option<Weak<StorageMetrics>>, // Weak reference to avoid circular dependencies
 }
 
 impl<K: Eq + Hash + Clone, V: Clone> LruCache<K, V> {
-    /// Create a new LRU cache with the given capacity
+    /// Create a new LRU cache with the given capacity. A capacity of 0 still holds the
+    /// most recent entry, as it always has.
     pub fn new(capacity: usize) -> Self {
         Self {
-            capacity,
-            map: HashMap::with_capacity(capacity),
-            access_counter: 0,
+            capacity: capacity.max(1),
+            map: LinkedHashMap::with_capacity(capacity),
             metrics: None,
         }
     }
@@ -228,34 +233,24 @@ impl<K: Eq + Hash + Clone, V: Clone> LruCache<K, V> {
     /// Create a new LRU cache with metrics tracking
     pub fn with_metrics(capacity: usize, metrics: Arc<StorageMetrics>) -> Self {
         Self {
-            capacity,
-            map: HashMap::with_capacity(capacity),
-            access_counter: 0,
             metrics: Some(Arc::downgrade(&metrics)),
+            ..Self::new(capacity)
         }
     }
 
-    /// Get a value from the cache, updating access time
+    /// Get a value from the cache, marking it most recently used
     pub fn get(&mut self, key: &K) -> Option<V> {
-        if let Some((value, access_time)) = self.map.get_mut(key) {
-            self.access_counter += 1;
-            *access_time = self.access_counter;
-            Some(value.clone())
-        } else {
-            None
-        }
+        self.map.to_back(key).map(|value| value.clone())
     }
 
-    /// Insert a value into the cache
+    /// Insert a value into the cache, marking it most recently used. Inserting a new key
+    /// into a full cache evicts the least recently used entry; overwriting a key never
+    /// evicts.
     pub fn put(&mut self, key: K, value: V) {
-        self.access_counter += 1;
-
-        // If at capacity, evict LRU item
-        if self.map.len() >= self.capacity && !self.map.contains_key(&key) {
+        let replaced = self.map.insert(key, value);
+        if replaced.is_none() && self.map.len() > self.capacity {
             self.evict_lru();
         }
-
-        self.map.insert(key, (value, self.access_counter));
     }
 
     /// Remove a key from the cache
@@ -266,7 +261,6 @@ impl<K: Eq + Hash + Clone, V: Clone> LruCache<K, V> {
     /// Clear the entire cache
     pub fn clear(&mut self) {
         self.map.clear();
-        self.access_counter = 0;
     }
 
     /// Get the current size of the cache
@@ -281,19 +275,9 @@ impl<K: Eq + Hash + Clone, V: Clone> LruCache<K, V> {
 
     /// Evict the least recently used item
     fn evict_lru(&mut self) {
-        if let Some((lru_key, _)) = self
-            .map
-            .iter()
-            .min_by_key(|(_, (_, access_time))| access_time)
-            .map(|(k, _)| (k.clone(), ()))
-        {
-            self.map.remove(&lru_key);
-
-            // Record eviction metric
-            if let Some(metrics_weak) = &self.metrics {
-                if let Some(metrics) = metrics_weak.upgrade() {
-                    metrics.record_cache_eviction();
-                }
+        if self.map.pop_front().is_some() {
+            if let Some(metrics) = self.metrics.as_ref().and_then(Weak::upgrade) {
+                metrics.record_cache_eviction();
             }
         }
     }
@@ -307,7 +291,7 @@ impl<K: Eq + Hash + Clone, V: Clone> LruCache<K, V> {
     {
         self.map
             .iter()
-            .map(|(k, (v, _))| (k.as_ref().len() + v.as_ref().len()) as u64)
+            .map(|(k, v)| (k.as_ref().len() + v.as_ref().len()) as u64)
             .sum()
     }
 }
@@ -381,5 +365,229 @@ mod tests {
         assert_eq!(cache.get(&vec![1]).await, Some(vec![10]));
         assert_eq!(cache.get(&vec![2]).await, Some(vec![20]));
         assert_eq!(cache.get(&vec![3]).await, Some(vec![30]));
+    }
+
+    #[test]
+    fn test_lru_evicts_in_least_recently_used_order() {
+        let mut cache = LruCache::new(3);
+        cache.put(1, 10);
+        cache.put(2, 20);
+        cache.put(3, 30);
+        cache.get(&1); // order, oldest first: 2, 3, 1
+        cache.put(4, 40); // evicts 2
+        assert_eq!(cache.get(&2), None);
+        cache.put(5, 50); // evicts 3
+        assert_eq!(cache.get(&3), None);
+        // 1, 4, 5 remain, oldest first (a get that misses touches nothing)
+        cache.put(6, 60); // evicts 1
+        assert_eq!(cache.get(&1), None);
+        assert_eq!(cache.get(&4), Some(40));
+        assert_eq!(cache.get(&5), Some(50));
+        assert_eq!(cache.get(&6), Some(60));
+        assert_eq!(cache.len(), 3);
+    }
+
+    #[test]
+    fn test_lru_overwrite_refreshes_recency_without_evicting() {
+        let mut cache = LruCache::new(2);
+        cache.put(1, "one");
+        cache.put(2, "two");
+        cache.put(1, "uno"); // overwrite at capacity: no eviction, 1 becomes most recent
+        assert_eq!(cache.len(), 2);
+        cache.put(3, "three"); // evicts 2, the least recently used
+        assert_eq!(cache.get(&1), Some("uno"));
+        assert_eq!(cache.get(&2), None);
+        assert_eq!(cache.get(&3), Some("three"));
+    }
+
+    #[test]
+    fn test_lru_zero_capacity_holds_one_entry() {
+        // The scanning implementation always kept the newest entry, even at capacity 0.
+        let mut cache = LruCache::new(0);
+        cache.put(1, "one");
+        assert_eq!(cache.get(&1), Some("one"));
+        cache.put(2, "two");
+        assert_eq!(cache.get(&1), None);
+        assert_eq!(cache.get(&2), Some("two"));
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn test_lru_remove_and_clear() {
+        let mut cache = LruCache::new(2);
+        cache.put(1, "one");
+        cache.put(2, "two");
+        cache.remove(&1);
+        cache.remove(&42); // absent: no-op
+        assert_eq!(cache.len(), 1);
+        cache.put(3, "three"); // a slot was free: nothing evicted
+        assert_eq!(cache.get(&2), Some("two"));
+        assert_eq!(cache.get(&3), Some("three"));
+        cache.clear();
+        assert!(cache.is_empty());
+        assert_eq!(cache.get(&2), None);
+    }
+
+    #[test]
+    fn test_lru_records_one_eviction_metric_per_eviction() {
+        let metrics = Arc::new(StorageMetrics::new());
+        let mut cache = LruCache::with_metrics(2, metrics.clone());
+        cache.put(1, 1);
+        cache.put(2, 2);
+        cache.put(1, 11); // overwrite: not an eviction
+        cache.remove(&2); // removal: not an eviction
+        cache.put(3, 3);
+        assert_eq!(metrics.cache_evictions(), 0);
+        cache.put(4, 4);
+        cache.put(5, 5);
+        assert_eq!(metrics.cache_evictions(), 2);
+    }
+
+    #[test]
+    fn test_lru_estimate_size_bytes() {
+        let mut cache = LruCache::new(4);
+        cache.put(vec![1u8, 2], vec![0u8; 10]);
+        cache.put(vec![3u8], vec![0u8; 5]);
+        assert_eq!(cache.estimate_size_bytes(), 18);
+    }
+
+    /// A shard at capacity evicts exactly its least recently used entry on every put, and
+    /// does so without scanning: 50k evicting puts into a full 50k-entry shard cost 2.5e9
+    /// entry visits with the old min-by-access-time scan, and take milliseconds with a
+    /// linked LRU. The time bound is deliberately loose (it only has to tell O(1) from
+    /// O(n) per put), so a slow CI machine does not flake it.
+    #[test]
+    fn test_full_shard_evicts_lru_entry_in_constant_time() {
+        const CAP: u32 = 50_000;
+        let mut cache = LruCache::new(CAP as usize);
+        for k in 0..CAP {
+            cache.put(k, k);
+        }
+        assert_eq!(cache.get(&0), Some(0)); // 0 is now the most recently used
+
+        let start = std::time::Instant::now();
+        for k in CAP..(2 * CAP - 1) {
+            cache.put(k, k);
+        }
+        let elapsed = start.elapsed();
+
+        assert_eq!(cache.len(), CAP as usize);
+        assert_eq!(
+            cache.get(&0),
+            Some(0),
+            "the touched entry outlived the rest"
+        );
+        for k in 1..CAP {
+            assert_eq!(cache.get(&k), None, "key {k} should have been evicted");
+        }
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "49_999 evicting puts took {elapsed:?}: eviction is not O(1)"
+        );
+    }
+
+    #[test]
+    fn test_sharded_capacity_is_per_shard_floor_times_shards() {
+        assert_eq!(ShardedLruCache::<u32, u32>::new(1_600).capacity(), 1_600);
+        assert_eq!(ShardedLruCache::<u32, u32>::new(1_610).capacity(), 1_600);
+        assert_eq!(ShardedLruCache::<u32, u32>::new(16).capacity(), 16);
+        assert_eq!(ShardedLruCache::<u32, u32>::new(5).capacity(), 16); // max(1, 5/16)
+        assert_eq!(ShardedLruCache::<u32, u32>::new(0).capacity(), 16);
+        let metrics = Arc::new(StorageMetrics::new());
+        assert_eq!(
+            ShardedLruCache::<u32, u32>::with_metrics(100_000, metrics).capacity(),
+            100_000
+        );
+        assert_eq!(
+            ShardedLruCache::<u32, u32>::with_shard_count(10, 4).capacity(),
+            8
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sharded_cache_never_exceeds_capacity() {
+        let cache = ShardedLruCache::new(64);
+        for i in 0..10_000u32 {
+            cache.put(i, i).await;
+        }
+        assert!(cache.len().await <= cache.capacity());
+    }
+
+    /// The setup `bench_wal_get_one` (benches/iai_hot_paths.rs) relies on: capacity 16
+    /// gives every shard one slot, so 256 further distinct puts evict the first key.
+    #[tokio::test]
+    async fn test_sharded_capacity_16_with_256_decoys_evicts_key() {
+        let cache = ShardedLruCache::new(16);
+        cache.put(b"bench-key".to_vec(), vec![1u8]).await;
+        for i in 0..256u32 {
+            cache
+                .put(format!("evict-{i}").into_bytes(), b"x".to_vec())
+                .await;
+        }
+        assert_eq!(cache.get(&b"bench-key".to_vec()).await, None);
+        assert!(cache.len().await <= 16);
+    }
+
+    #[tokio::test]
+    async fn test_sharded_put_batch_last_write_of_a_key_wins() {
+        let cache = ShardedLruCache::new(100);
+        cache
+            .put_batch(vec![
+                (vec![1u8], (1u64, vec![10u8])),
+                (vec![2u8], (1u64, vec![20u8])),
+                (vec![1u8], (1u64, vec![11u8])),
+            ])
+            .await;
+        assert_eq!(cache.get(&vec![1u8]).await, Some((1, vec![11])));
+        assert_eq!(cache.get(&vec![2u8]).await, Some((1, vec![20])));
+        assert_eq!(cache.len().await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_sharded_put_batch_keeps_op_order_within_a_shard() {
+        // One shard of capacity 2: the batch's later entries are the more recent.
+        let cache = ShardedLruCache::with_shard_count(2, 1);
+        cache.put_batch(vec![(1u32, 1u32), (2, 2), (3, 3)]).await;
+        assert_eq!(cache.get(&1).await, None);
+        assert_eq!(cache.get(&2).await, Some(2));
+        assert_eq!(cache.get(&3).await, Some(3));
+    }
+
+    #[tokio::test]
+    async fn test_sharded_remove_and_remove_batch() {
+        let cache = ShardedLruCache::new(100);
+        for i in 0..10u32 {
+            cache.put(i, i).await;
+        }
+        cache.remove(&0).await;
+        cache.remove_batch(vec![1, 2, 3, 99]).await;
+        for i in 0..4u32 {
+            assert_eq!(cache.get(&i).await, None);
+        }
+        for i in 4..10u32 {
+            assert_eq!(cache.get(&i).await, Some(i));
+        }
+        assert_eq!(cache.len().await, 6);
+        cache.clear().await;
+        assert!(cache.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn test_sharded_cache_replaces_stale_lsn_entry() {
+        // wal_adapter caches (lsn, value) and only serves an entry whose LSN matches the
+        // index; a newer write must replace, never sit beside, the older entry.
+        let cache = ShardedLruCache::new(100);
+        cache.put(b"k".to_vec(), (1u64, b"old".to_vec())).await;
+        cache.put(b"k".to_vec(), (2u64, b"new".to_vec())).await;
+        assert_eq!(cache.get(&b"k".to_vec()).await, Some((2, b"new".to_vec())));
+        assert_eq!(cache.len().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_sharded_estimate_size_bytes() {
+        let cache = ShardedLruCache::new(100);
+        cache.put(vec![1u8], vec![0u8; 9]).await;
+        cache.put(vec![2u8, 3], vec![0u8; 3]).await;
+        assert_eq!(cache.estimate_size_bytes().await, 15);
     }
 }
