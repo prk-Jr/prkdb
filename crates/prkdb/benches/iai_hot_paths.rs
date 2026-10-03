@@ -76,6 +76,11 @@
 //! call, the `block_on`, and `stop_instrumentation` — is still what gets wrapped, and its
 //! signature still returns the fixture for the same reason.
 
+// This bench uses only the shared config; wall-clock counters are used by wal_write_path.
+#[allow(dead_code)]
+#[path = "support/stream_measurement.rs"]
+mod stream_measurement;
+
 use gungraun::client_requests::callgrind::{start_instrumentation, stop_instrumentation};
 use gungraun::{library_benchmark, library_benchmark_group, main};
 use gungraun::{Callgrind, EntryPoint, LibraryBenchmarkConfig};
@@ -83,7 +88,7 @@ use prkdb::indexed_storage::IndexedStorage;
 use prkdb::keys::{encode_record_key, CollectionId};
 use prkdb::storage::config::StorageConfig;
 use prkdb::storage::{InMemoryAdapter, WalStorageAdapter};
-use prkdb::stream_log::{ReadLimits, StartAt, StreamConfig, StreamLog};
+use prkdb::stream_log::{ReadLimits, StartAt, StreamLog};
 use prkdb_core::wal::batch::{Batch, BatchOp};
 use prkdb_core::wal::records::{Record, RecordBatch};
 use prkdb_core::wal::{CompressionConfig, WalConfig};
@@ -92,6 +97,7 @@ use prkdb_types::storage::StorageAdapter;
 use serde::{Deserialize, Serialize};
 use std::hint::black_box;
 use std::sync::Arc;
+use stream_measurement::stream_config;
 use tempfile::TempDir;
 use tokio::runtime::{Builder, Runtime};
 
@@ -212,9 +218,7 @@ fn stream_records() -> Vec<Record> {
 /// A `Fast` stream (instruction counts are then not dominated by sync waits, §11.3) with
 /// no background retention task, opened on `rt`.
 fn open_stream(rt: &Runtime, dir: &std::path::Path) -> StreamLog {
-    let mut cfg = StreamConfig::new(dir);
-    cfg.wal.sync_mode = prkdb_core::wal::SyncMode::Fast;
-    cfg.retention_interval = std::time::Duration::ZERO;
+    let cfg = stream_config(dir, prkdb_core::wal::SyncMode::Fast);
     rt.block_on(StreamLog::open(cfg)).expect("stream opens")
 }
 
@@ -246,6 +250,9 @@ fn setup_stream_read() -> (Runtime, TempDir, StreamLog) {
     let dir = tempfile::tempdir().unwrap();
     let log = open_stream(&rt, dir.path());
     rt.block_on(log.append(stream_records())).unwrap();
+    // Settle Fast durability outside whole-process instrumentation so a periodic
+    // sync cannot be attributed to the measured read.
+    rt.block_on(log.sync()).unwrap();
     rt.block_on(read_100(&log));
     (rt, dir, log)
 }

@@ -27,6 +27,9 @@
 //!   the start of every pass.
 //! - `stream_append_retention/durable/64w/1k/b1`: as `stream_append` on 1 MiB segments
 //!   with `max_bytes` = 8 MiB and `apply_retention` looping for the whole cell.
+//! - A retention row without measured segment reclamation is explicitly T4 UNJUDGEABLE.
+//! - T5 requires a separate matched 1 GiB stream/keyed reopen measurement in Step 2;
+//!   this harness does not measure recovery.
 //! - The ceiling block gains `pread 1 MiB` rows (page cache, and cold on Linux): the
 //!   denominator for the read targets.
 //!
@@ -42,8 +45,12 @@
 //!      `SPIKE_FILTER` (substring of the cell name, e.g. `fast/64w`),
 //!      `SPIKE_REPS` (default 1). (The names predate the rename; CI passes them.)
 
+mod support {
+    pub mod stream_measurement;
+}
+
 use prkdb::storage::WalStorageAdapter;
-use prkdb::stream_log::{ReadLimits, Record, RetentionPolicy, StartAt, StreamConfig, StreamLog};
+use prkdb::stream_log::{ReadLimits, Record, RetentionPolicy, StartAt, StreamLog};
 use prkdb_core::vfs::{StdVfs, Vfs};
 use prkdb_core::wal::batch::{Batch, BatchOp};
 use prkdb_core::wal::{CompressionConfig, SyncMode, Wal, WalConfig, WalOptions};
@@ -52,6 +59,9 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use support::stream_measurement::{
+    stream_config, MeasurementWindow, RetentionCounts, StreamCounts,
+};
 
 enum Target {
     /// `WalStorageAdapter::put` — the public write path.
@@ -142,13 +152,9 @@ async fn run_cell(
     target: Arc<Target>,
     writers: usize,
     value_size: usize,
-    warmup: Duration,
-    measure: Duration,
+    window: MeasurementWindow,
     key_space: Option<u64>,
 ) -> CellResult {
-    let start = Instant::now();
-    let measure_start = start + warmup;
-    let end = measure_start + measure;
     let value: Arc<Vec<u8>> = Arc::new((0..value_size).map(|i| (i % 251) as u8).collect());
 
     let mut handles = Vec::with_capacity(writers);
@@ -160,14 +166,14 @@ async fn run_cell(
             let mut i: u64 = 0;
             loop {
                 let t0 = Instant::now();
-                if t0 >= end {
+                if t0 >= window.end {
                     break;
                 }
                 let k = key_space.map_or(i, |n| i % n);
                 let key = format!("w{w:03}_k{k:012}").into_bytes();
                 i += 1;
                 target.put(key, &value).await;
-                if t0 >= measure_start {
+                if window.measures(t0) {
                     lat.push(ns(t0.elapsed()));
                 }
             }
@@ -180,7 +186,7 @@ async fn run_cell(
         all.extend(h.await.expect("writer task"));
     }
     // Ops are counted when they *start* inside the window, so the window is the divisor.
-    let secs = measure.as_secs_f64();
+    let secs = window.measure.as_secs_f64();
     all.sort_unstable();
     CellResult {
         name,
@@ -393,15 +399,6 @@ fn read_ceiling(dir: &Path, measure: Duration) -> io::Result<()> {
     Ok(())
 }
 
-fn stream_config(dir: &Path, sync_mode: SyncMode) -> StreamConfig {
-    let mut cfg = StreamConfig::new(dir);
-    cfg.wal.sync_mode = sync_mode;
-    cfg.wal.sync_interval_ms = 10;
-    // No background retention: cells that measure retention drive it themselves.
-    cfg.retention_interval = Duration::ZERO;
-    cfg
-}
-
 fn print_stream_header() {
     println!();
     println!(
@@ -410,17 +407,17 @@ fn print_stream_header() {
     println!("|---|---|---|---|---|---|---|---|---|---|");
 }
 
-/// `records` per op; MB/s counts record values.
-fn print_stream_row(r: &CellResult, records: usize) {
-    let ops_s = r.ops as f64 / r.secs;
-    let rec_s = ops_s * records as f64;
+/// Exact measured operation/record totals; MB/s counts record values.
+fn print_stream_row(r: &CellResult, counts: StreamCounts) {
+    let ops_s = counts.operations_per_second(r.secs);
+    let rec_s = counts.records_per_second(r.secs);
     println!(
         "| {} | {} | {} KiB | {:.0} | {:.1} | {:.1} | {:.1} | {:.1} | {:.0} | {} |",
         r.name,
         r.writers,
         r.value_size / 1024,
         ops_s,
-        rec_s * r.value_size as f64 / 1_000_000.0,
+        counts.value_megabytes_per_second(r.value_size, r.secs),
         r.p50_us,
         r.p99_us,
         r.p999_us,
@@ -438,7 +435,7 @@ async fn stream_read_cell(
     cold: bool,
     warmup: Duration,
     measure: Duration,
-) -> (CellResult, usize, bool) {
+) -> (CellResult, StreamCounts, bool) {
     const FILL: usize = 256 * 1024 * 1024;
     let log = StreamLog::open(stream_config(dir, SyncMode::Fast))
         .await
@@ -501,7 +498,6 @@ async fn stream_read_cell(
         };
     }
     log.close().expect("stream close");
-    let reads = lat.len().max(1);
     lat.sort_unstable();
     let kind = if cold { "cold" } else { "tail" };
     let r = CellResult {
@@ -514,7 +510,11 @@ async fn stream_read_cell(
         p99_us: pct(&lat, 0.99),
         p999_us: pct(&lat, 0.999),
     };
-    (r, records_read / reads, !cold || dropped)
+    let counts = StreamCounts {
+        operations: r.ops,
+        records: records_read as u64,
+    };
+    (r, counts, !cold || dropped)
 }
 
 fn open_wal(dir: &Path, sync_mode: SyncMode) -> Target {
@@ -633,8 +633,7 @@ fn main() {
                             target.clone(),
                             writers,
                             value_size,
-                            warmup,
-                            measure,
+                            MeasurementWindow::new(Instant::now(), warmup, measure),
                             key_space,
                         )
                         .await;
@@ -673,9 +672,23 @@ fn main() {
                                 .await
                                 .expect("stream open");
                             let target = Arc::new(Target::Stream { log, batch });
-                            run_cell(name, target, writers, value_size, warmup, measure, None).await
+                            run_cell(
+                                name,
+                                target,
+                                writers,
+                                value_size,
+                                MeasurementWindow::new(Instant::now(), warmup, measure),
+                                None,
+                            )
+                            .await
                         });
-                        print_stream_row(&r, batch);
+                        print_stream_row(
+                            &r,
+                            StreamCounts {
+                                operations: r.ops,
+                                records: r.ops * batch as u64,
+                            },
+                        );
                         let _ = std::fs::remove_dir_all(&dir);
                     }
                 }
@@ -686,7 +699,7 @@ fn main() {
         if filter.is_empty() || name.contains(&filter) {
             cell_id += 1;
             let dir = base.path().join(format!("cell_{cell_id}"));
-            let (r, runs, removed) = rt.block_on(async {
+            let (r, counts) = rt.block_on(async {
                 let mut cfg = stream_config(&dir, SyncMode::Durable);
                 cfg.wal.segment_bytes = 1024 * 1024;
                 cfg.retention = RetentionPolicy {
@@ -695,31 +708,44 @@ fn main() {
                 };
                 let log = StreamLog::open(cfg).await.expect("stream open");
                 let target = Arc::new(Target::Stream { log, batch: 1 });
-                let until = Instant::now() + warmup + measure;
+                let window = MeasurementWindow::new(Instant::now(), warmup, measure);
                 let retainer = {
                     let target = target.clone();
                     tokio::task::spawn_blocking(move || {
                         let Target::Stream { log, .. } = &*target else {
                             unreachable!("stream target")
                         };
-                        let (mut runs, mut removed) = (0u64, 0usize);
-                        while Instant::now() < until {
-                            removed += log.apply_retention().expect("retention").segments_removed;
-                            runs += 1;
+                        let mut counts = RetentionCounts::default();
+                        while Instant::now() < window.end {
+                            let removed =
+                                log.apply_retention().expect("retention").segments_removed;
+                            counts.observe(window, Instant::now(), removed);
                             std::thread::sleep(Duration::from_millis(1));
                         }
-                        (runs, removed)
+                        counts
                     })
                 };
-                let r = run_cell(name, target, 64, 1024, warmup, measure, None).await;
-                let (runs, removed) = retainer.await.expect("retention task");
-                (r, runs, removed)
+                let r = run_cell(name, target, 64, 1024, window, None).await;
+                let counts = retainer.await.expect("retention task");
+                (r, counts)
             });
-            print_stream_row(&r, 1);
-            println!(
-                "- {}: {runs} retention runs removed {removed} segments during the cell",
-                r.name
+            print_stream_row(
+                &r,
+                StreamCounts {
+                    operations: r.ops,
+                    records: r.ops,
+                },
             );
+            println!(
+                "- {}: {} measured retention runs removed {} segments; {} warmup runs removed {} segments",
+                r.name, counts.measured_runs, counts.measured_removed, counts.warmup_runs, counts.warmup_removed
+            );
+            if let Err(reason) = counts.validate() {
+                println!(
+                    "- T4 UNJUDGEABLE for {}: {reason}; this p99 row is not retention evidence",
+                    r.name
+                );
+            }
             let _ = std::fs::remove_dir_all(&dir);
         }
 
@@ -731,9 +757,9 @@ fn main() {
             }
             cell_id += 1;
             let dir = base.path().join(format!("cell_{cell_id}"));
-            let (r, per_read, really_cold) =
+            let (r, counts, really_cold) =
                 rt.block_on(stream_read_cell(&dir, value_size, cold, warmup, measure));
-            print_stream_row(&r, per_read);
+            print_stream_row(&r, counts);
             if !really_cold {
                 println!(
                     "- {}: page cache could not be dropped here; equals tail",
