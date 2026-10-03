@@ -76,6 +76,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | STO-14 | medium | 2 | fixed | A runtime WAL scan silently skips the tail of a sealed segment cut exactly between two frames |
 | STO-15 | medium | 2 | fixed | A roll between sampling a scan's cap and listing the segments lets the scan visit frames above the cap |
 | STO-18 | medium | 2 | fixed | RecordBatch has no aggregate decoded-header limit: a 64 MiB body can allocate about 535 MB of empty header tuples |
+| STO-20 | medium | 2 | fixed | A stream directory's kind is unprotected: one flipped bit in FORMAT opens a stream as key/value, and migrations cannot see the kind |
 | TST-02 | medium | 4 | open | Linearizability workloads use 1 writer, 1 reader, ~25 ops; failed reads dropped |
 | TST-05 | medium | 2 | fixed | No power-loss (unsynced-data) testing; needs the WAL routed through Vfs |
 | TST-06 | medium | 4 | open | No deterministic simulation of the cluster |

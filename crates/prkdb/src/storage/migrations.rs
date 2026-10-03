@@ -5,7 +5,7 @@
 //! directory the previous release wrote. Format 1 had no marker and has no migrator: it
 //! is refused (D3).
 
-use super::format::FORMAT_VERSION;
+use super::format::{Kind, FORMAT_VERSION};
 use prkdb_types::error::StorageError;
 use std::path::Path;
 
@@ -15,7 +15,12 @@ pub trait Migration: Send + Sync {
     fn to(&self) -> u32;
     fn description(&self) -> &str;
     /// Must leave `dir` either fully at `to()` (FORMAT rewritten last, atomically) or untouched.
-    fn run(&self, dir: &Path) -> Result<(), StorageError>;
+    ///
+    /// `kind` is the directory's kind from its marker (format 1 predates streams, so it is
+    /// always [`Kind::Kv`]). A step that only applies to one kind must leave the other
+    /// untouched, and the final FORMAT rewrite must go through
+    /// [`super::format::rewrite_format`] with this `kind`, never a key/value marker.
+    fn run(&self, dir: &Path, kind: Kind) -> Result<(), StorageError>;
 }
 
 /// Every migration this build knows, in no particular order.
@@ -83,7 +88,7 @@ mod tests {
         fn description(&self) -> &str {
             "test step"
         }
-        fn run(&self, _dir: &Path) -> Result<(), StorageError> {
+        fn run(&self, _dir: &Path, _kind: Kind) -> Result<(), StorageError> {
             Ok(())
         }
     }

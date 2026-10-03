@@ -81,7 +81,10 @@ async fn migrate_on_a_multi_raft_root_reports_each_data_directory() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("is a container"), "{stdout}");
     for member in ["meta", "partition_0", "partition_1"] {
-        let line = format!("{} is at format 2", root.path().join(member).display());
+        let line = format!(
+            "{} is a key/value store at format 2",
+            root.path().join(member).display()
+        );
         assert!(stdout.contains(&line), "{line} missing from {stdout}");
     }
     assert!(!stdout.contains("format 1"), "{stdout}");
@@ -267,5 +270,76 @@ fn migrate_on_a_read_only_directory_reports_but_does_not_migrate() {
     assert!(
         err.contains("no migrations available for format 1"),
         "{err}"
+    );
+}
+
+/// A stream directory is reported as a stream, so a future migration step sees its kind
+/// (the review found migrations kind-blind: a step that rewrote FORMAT as kv would have
+/// silently turned a stream into an empty key/value store).
+#[tokio::test(flavor = "multi_thread")]
+async fn migrate_on_a_stream_directory_reports_its_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    prkdb::stream_log::StreamLog::open(prkdb::stream_log::StreamConfig::new(dir.path()))
+        .await
+        .unwrap()
+        .close()
+        .unwrap();
+    let out = migrate(dir.path());
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("is a stream at format 2") && !stdout.contains("key/value"),
+        "{stdout}"
+    );
+    assert!(
+        std::fs::read_to_string(dir.path().join("FORMAT"))
+            .unwrap()
+            .contains("kind = \"stream\""),
+        "migrate must not rewrite a stream marker"
+    );
+}
+
+/// A partitioned stream's root holds `STREAM` and `partition_<n>/`, not `FORMAT`: it is a
+/// container, and every partition is reported as a stream.
+#[tokio::test(flavor = "multi_thread")]
+async fn migrate_on_a_partitioned_stream_reports_each_partition_as_a_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("orders");
+    prkdb::stream_log::PartitionedStream::open(
+        &root,
+        3,
+        prkdb::stream_log::StreamConfig::new(&root),
+    )
+    .await
+    .unwrap()
+    .close()
+    .unwrap();
+    let out = migrate(&root);
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("is a container"), "{stdout}");
+    for p in 0..3 {
+        let line = format!("partition_{p} is a stream at format 2");
+        assert!(stdout.contains(&line), "missing {line:?} in {stdout}");
+    }
+}
+
+/// A key/value directory is still reported as one, in the same words as before plus its
+/// kind.
+#[tokio::test(flavor = "multi_thread")]
+async fn migrate_on_a_kv_directory_reports_its_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(
+        prkdb::storage::WalStorageAdapter::new(prkdb_core::wal::WalConfig {
+            log_dir: dir.path().to_path_buf(),
+            ..prkdb_core::wal::WalConfig::test_config()
+        })
+        .unwrap(),
+    );
+    let out = migrate(dir.path());
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("is a key/value store at format 2"),
+        "{out:?}"
     );
 }
