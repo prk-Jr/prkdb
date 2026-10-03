@@ -1,6 +1,5 @@
 //! Container creation, crash recovery and routing for partitioned streams.
 
-use prkdb::partitioning::{DefaultPartitioner, Partitioner};
 use prkdb::stream_log::manifest::StreamManifest;
 use prkdb::stream_log::partitioned::{PartitionedStream, Route};
 use prkdb::stream_log::{ReadLimits, Record, StartAt, StreamConfig, StreamLog};
@@ -196,17 +195,15 @@ async fn routes_use_stable_partitioner_round_robin_and_validated_explicit_partit
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("orders");
     let stream = open(&root, 3).await.unwrap();
-    let partitioner = DefaultPartitioner::<&[u8]>::new();
-    // Fixed-seed SeaHasher over byte-slice Hash, on the supported 64-bit toolchain.
+    // Fixed raw-byte SeaHash routing, independent of Rust Hash framing.
     for (key, golden) in [
-        (b"".as_slice(), 0),
-        (b"user-0".as_slice(), 0),
-        (b"user-1".as_slice(), 0),
-        (&[0, 255, 1], 2),
+        (b"".as_slice(), 2),
+        (b"user-0".as_slice(), 1),
+        (b"user-1".as_slice(), 1),
+        (&[0, 255, 1], 0),
     ] {
         let (partition, ack) = stream.append(Route::Key(key), rec()).await.unwrap();
         assert_eq!(partition, golden);
-        assert_eq!(partition, partitioner.partition(&key, 3));
         let read = stream
             .partition(partition)
             .unwrap()
@@ -477,4 +474,98 @@ async fn durable_append_under_two_new_ancestors_syncs_every_directory_entry() {
             created.display(), created.parent().unwrap().display()
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn raw_byte_routing_golden_vectors_survive_reopen() {
+    // Literal vectors cover empty/binary keys and either side of an eight-byte block.
+    // They were calculated from SeaHash's reference algorithm, independent of Hash.
+    let vectors: &[(&[u8], [u32; 4])] = &[
+        (b"", [2, 4, 9, 12]),
+        (b"user-0", [1, 6, 6, 16]),
+        (b"user-1", [1, 3, 2, 20]),
+        (&[0, 255, 1], [0, 5, 0, 4]),
+        (b"12345678", [0, 6, 4, 15]),
+        (b"123456789", [2, 0, 9, 0]),
+        (b"0123456789abcdef0123456789abcdef", [0, 1, 5, 24]),
+    ];
+    for (column, count) in [3, 7, 16, 31].into_iter().enumerate() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("orders");
+        for _ in 0..2 {
+            let stream = open(&root, count).await.unwrap();
+            for &(key, expected) in vectors {
+                let (partition, ack) = stream.append(Route::Key(key), rec()).await.unwrap();
+                assert_eq!(partition, expected[column], "key {key:?}, count {count}");
+                let batch = stream
+                    .partition(partition)
+                    .unwrap()
+                    .read_from(StartAt::Offset(ack.first()), ReadLimits::default())
+                    .await
+                    .unwrap();
+                assert_eq!(batch.records[0].value, b"value");
+            }
+            stream.close().unwrap();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_routing_manifest_is_refused_before_partition_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("orders");
+    let stream = open(&root, 1).await.unwrap();
+    stream.append(Route::Partition(0), rec()).await.unwrap();
+    stream.close().unwrap();
+    let wal = root
+        .join("partition_0")
+        .join(prkdb_core::wal::segment::segment_file_name(1));
+    let mut wal_bytes = std::fs::read(&wal).unwrap();
+    wal_bytes.extend_from_slice(&[1, 2, 3]); // Would be repaired if partitions were opened.
+    std::fs::write(&wal, &wal_bytes).unwrap();
+    let path = root.join("STREAM");
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+    let crc_at = bytes.len() - 4;
+    let crc = crc32fast::hash(&bytes[..crc_at]);
+    bytes[crc_at..].copy_from_slice(&crc.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+    let error = open(&root, 1)
+        .await
+        .err()
+        .expect("legacy routing must not be silently changed");
+    assert!(
+        matches!(error, StorageError::UnsupportedFormat(_)),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(std::fs::read(&wal).unwrap(), wal_bytes);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn crc_valid_future_manifest_is_unsupported_and_preserved() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("orders");
+    open(&root, 1).await.unwrap().close().unwrap();
+    let path = root.join("STREAM");
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[8..12].copy_from_slice(&99u32.to_le_bytes());
+    let crc_at = bytes.len() - 4;
+    let crc = crc32fast::hash(&bytes[..crc_at]);
+    bytes[crc_at..].copy_from_slice(&crc.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+    let error = open(&root, 1).await.err().unwrap();
+    assert!(
+        matches!(error, StorageError::UnsupportedFormat(_)),
+        "{error}"
+    );
+    assert!(error.to_string().contains("newer PrkDB"), "{error}");
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    bytes[8] ^= 1; // Same version bytes without resealing remain corruption.
+    std::fs::write(&path, &bytes).unwrap();
+    assert!(matches!(
+        open(&root, 1).await,
+        Err(StorageError::Corruption(_))
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
 }

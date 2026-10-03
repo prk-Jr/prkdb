@@ -116,8 +116,8 @@ refusal has to be explicit, and why it must land before the format freezes (§5.
 
 - **The partition count is durable.** Key-hash routing depends on N, so `STREAM` records
   it. Opening with a different N is refused: repartitioning is not supported (§13 Q11).
-- **Manifest version 1 bytes (Task 2.15b.3):** 8-byte magic `PRKSTRM\0`,
-  little-endian `u32` version (1), `u32` nonzero partition count, `u32` length of
+- **Manifest version 2 bytes (stream format hardening):** 8-byte magic `PRKSTRM\0`,
+  little-endian `u32` version (2), `u32` nonzero partition count, `u32` length of
   `created_by`, that many UTF-8 bytes, and a trailing little-endian CRC-32 of every
   preceding byte. The total encoding is at most 4096 bytes. Decode requires exact length,
   valid UTF-8, known magic/version, nonzero partitions and a valid CRC; no trailing bytes
@@ -131,8 +131,16 @@ refusal has to be explicit, and why it must land before the format freezes (§5.
 - `partition_<n>` matches the multi-raft layout's naming (Task 2.11).
 - Stream names given by users go through `catalog::validate_name` (SCH-01's allowlist)
   before they become path components.
-- Routing: explicit partition, round-robin, or key hash through Task 2.13's fixed-seed
-  `seahash` partitioner, so key → partition has golden vectors.
+- Routing: explicit partition, round-robin, or `seahash::hash(key) % N` over raw
+  bytes. Rust's Hash trait framing is not part of stream routing. Literal vectors pin
+  empty, binary and block-boundary keys across several counts and reopen.
+- **Routing versioning decision:** the existing manifest version field is sufficient;
+  no separate routing-scheme field is added. Experimental STREAM version 1 used Rust
+  byte-slice Hash, including a platform-sized length prefix. Version 2 binds routing
+  to raw-byte SeaHash. Version 1 is refused before any partition recovery, preserving
+  data instead of silently remapping keys; automatic repartitioning is unsupported.
+  This is a pre-freeze correction within FORMAT 2. After Task 2.24, D3/D4 requires a
+  format-version increase and migration for another routing/on-disk contract change.
 
 **Not in scope:** nesting streams inside a `PrkDb` keyed data directory. A data directory
 holds exactly one WAL, so streams sit next to it under a container root, never inside it.
@@ -437,7 +445,11 @@ offsets themselves.
   check, which is cheap:
   - A commit stores `(next: EventSeq, last_frame_crc: u32)`: the CRC of the frame holding
     the last consumed record.
-  - On resume, `StreamConsumer` reads that one frame header. A missing frame (past the end)
+  - If the last consumed LSN is below the durable retention floor, its removed frame
+    was durable and cannot have been reissued by a Fast power cut. Skip the divergence
+    check while retaining the committed next-position range checks. Committing S2.first
+    and removing S1 must still resume successfully.
+  - Otherwise on resume, `StreamConsumer` reads that one frame header. A missing frame (past the end)
     or a different CRC is `StorageError::OffsetDiverged { committed, reason }`, handled like
     out-of-range (`Error` by default).
   - In `Durable` mode the check always passes (acked = durable). It costs one header read
@@ -447,9 +459,13 @@ offsets themselves.
     check_kind u8 | check u32`, where `check_kind` 0 means no check (a caller-managed
     offset). The old bare bincode `Offset` encoding is still read, as "no check". This
     encoding lands before Task 2.24 (§14, 2.15b.6 step 1).
-  - A CRC is not unique, so the check misses a reissued frame whose CRC happens to collide:
-    about 2⁻³². Stream frames are never rewritten (§4.4), so a mismatch always means
-    divergence.
+  - A CRC misses byte-identical refilled frames, a realistic case with a fixed clock
+    or deterministic producer, as well as different frames whose CRC collides. It is
+    probabilistic protection, not exact incarnation detection. Task 2.15b.10 writes
+    session/open boundaries at the WAL level for every directory kind, including
+    streams, before the freeze; later exact stream checks can use those records
+    without another format change. Stream frames are never rewritten (§4.4), so a
+    mismatch means divergence.
   - Reading with `read_bound: Durable` avoids the hazard entirely, at the cost of up to
     `sync_interval_ms` extra latency.
 

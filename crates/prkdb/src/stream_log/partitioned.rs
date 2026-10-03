@@ -1,9 +1,8 @@
 //! Fixed-count stream partitions beneath a container directory without a WAL.
 
-use super::manifest::StreamManifest;
+use super::manifest::{StreamManifest, StreamManifestError};
 use super::{AppendAck, Record, StreamConfig, StreamLog};
 use crate::catalog::Catalog;
-use crate::partitioning::{DefaultPartitioner, Partitioner};
 use crate::storage::lock::lock_data_dir;
 use crate::storage::wal_adapter::wal_err;
 use prkdb_core::vfs::{create_dir_all_durable, LockGuard, OpenMode, StdVfs, Vfs};
@@ -14,8 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-/// How an append chooses a partition. Key routing uses byte-slice `Hash` through
-/// the same fixed-seed partitioner as partitioned collections.
+/// How an append chooses a partition. Key routing hashes raw bytes with SeaHash,
+/// independent of Rust Hash trait framing, platform width and toolchain.
 #[derive(Debug, Clone, Copy)]
 pub enum Route<'a> {
     Partition(u32),
@@ -67,7 +66,17 @@ fn read_manifest(vfs: &dyn Vfs, path: &Path) -> Result<StreamManifest, StorageEr
     if file.len().map_err(|e| io_error(path, e))? != len {
         return Err(corruption(path, "STREAM manifest changed during read"));
     }
-    StreamManifest::decode(&bytes).map_err(|e| corruption(path, e))
+    StreamManifest::decode(&bytes).map_err(|e| match e {
+        StreamManifestError::UnsupportedVersion { found, supported } => {
+            let creator = if found < supported { "an older" } else { "a newer" };
+            StorageError::UnsupportedFormat(format!(
+                "stream container {} was created by {creator} PrkDB (STREAM version {found}); \
+                 this build reads STREAM version {supported}. Routing schemes cannot be changed on open",
+                path.display()
+            ))
+        }
+        e => corruption(path, e),
+    })
 }
 
 fn has_frames(vfs: &dyn Vfs, dir: &Path) -> Result<bool, StorageError> {
@@ -258,7 +267,7 @@ impl PartitionedStream {
                     "partition {p} is outside stream's {n} partitions"
                 )))
             }
-            Route::Key(key) => DefaultPartitioner::<&[u8]>::new().partition(&key, n),
+            Route::Key(key) => (seahash::hash(key) % u64::from(n)) as u32,
             Route::RoundRobin => self
                 .round_robin
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |p| {

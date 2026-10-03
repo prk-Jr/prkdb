@@ -736,14 +736,18 @@ fn the_stream_manifest_round_trips_and_refuses_bit_flips_and_unknown_versions() 
         );
     }
 
-    // Version 2, correctly checksummed, is refused by its number.
+    // A future version, correctly checksummed, is refused by its number.
     let mut v2 = bytes.clone();
     v2[8..12].copy_from_slice(&(STREAM_MANIFEST_VERSION + 1).to_le_bytes());
     let body = v2.len() - 4;
     let crc = crc32fast::hash(&v2[..body]);
     v2[body..].copy_from_slice(&crc.to_le_bytes());
     let err = StreamManifest::decode(&v2).unwrap_err();
-    assert!(err.contains("version 2"), "{err}");
+    assert!(
+        err.to_string()
+            .contains(&format!("version {}", STREAM_MANIFEST_VERSION + 1)),
+        "{err}"
+    );
 
     // Zero partitions is no stream.
     let zero = StreamManifest {

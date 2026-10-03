@@ -1,6 +1,22 @@
 //! Versioned, checksummed codec for a partitioned stream's `STREAM` manifest.
 
-pub const STREAM_MANIFEST_VERSION: u32 = 1;
+/// Version 2 binds key routing to SeaHash over raw bytes. Version 1 used Rust Hash
+/// framing and is refused rather than silently changing existing partition routing.
+pub const STREAM_MANIFEST_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StreamManifestError {
+    #[error("{0}")]
+    Invalid(String),
+    #[error("unsupported STREAM manifest version {found}; this build reads {supported}")]
+    UnsupportedVersion { found: u32, supported: u32 },
+}
+
+impl From<&str> for StreamManifestError {
+    fn from(message: &str) -> Self {
+        Self::Invalid(message.into())
+    }
+}
 
 const MAGIC: &[u8; 8] = b"PRKSTRM\0";
 const HEADER_LEN: usize = 20;
@@ -40,7 +56,7 @@ impl StreamManifest {
         Ok(bytes)
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, StreamManifestError> {
         if !(HEADER_LEN + CHECKSUM_LEN..=MAX_MANIFEST_BYTES).contains(&bytes.len()) {
             return Err("STREAM manifest length must be between 24 and 4096 bytes".into());
         }
@@ -54,7 +70,10 @@ impl StreamManifest {
         }
         let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
         if version != STREAM_MANIFEST_VERSION {
-            return Err(format!("unsupported STREAM manifest version {version}"));
+            return Err(StreamManifestError::UnsupportedVersion {
+                found: version,
+                supported: STREAM_MANIFEST_VERSION,
+            });
         }
         let partitions = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
         if partitions == 0 {
@@ -134,12 +153,12 @@ mod tests {
     #[test]
     fn unknown_version_is_named_after_crc_validation() {
         let mut bytes = GOLDEN.to_vec();
-        replace_u32(&mut bytes, 8, 2);
+        replace_u32(&mut bytes, 8, STREAM_MANIFEST_VERSION + 1);
         let error = StreamManifest::decode(&bytes).unwrap_err();
-        assert!(error.contains("version 2"), "{error}");
+        assert!(error.to_string().contains("version 3"), "{error}");
         bytes[8] ^= 1;
         let error = StreamManifest::decode(&bytes).unwrap_err();
-        assert!(error.contains("checksum"), "{error}");
+        assert!(error.to_string().contains("checksum"), "{error}");
     }
 
     #[test]
@@ -190,7 +209,7 @@ mod tests {
     }
 
     const GOLDEN: &[u8] = &[
-        80, 82, 75, 83, 84, 82, 77, 0, 1, 0, 0, 0, 3, 0, 0, 0, 5, 0, 0, 0, 48, 46, 54, 46, 48, 151,
-        36, 14, 247,
+        80, 82, 75, 83, 84, 82, 77, 0, 2, 0, 0, 0, 3, 0, 0, 0, 5, 0, 0, 0, 48, 46, 54, 46, 48, 19,
+        127, 148, 164,
     ];
 }
