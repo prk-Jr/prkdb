@@ -7,13 +7,12 @@ use crate::db::PrkDb;
 use crate::outbox::{OutboxEnvelope, OutboxRecord};
 use crate::partitioning::{AssignmentStrategy, PartitionCoordinator, PartitionId};
 use async_trait::async_trait;
-use bincode::{config, serde::encode_to_vec};
 use dashmap::DashMap;
 use prkdb_types::codec::decode_serde;
 use prkdb_types::collection::Collection;
 use prkdb_types::consumer::{
     AutoOffsetReset, CommitResult, Consumer, ConsumerConfig, ConsumerGroupId, ConsumerRecord,
-    Offset, OffsetStore,
+    Offset, OffsetStore, Position,
 };
 use prkdb_types::error::{Error, StorageError};
 use prkdb_types::storage::StorageAdapter;
@@ -45,6 +44,45 @@ impl StorageOffsetStore {
     fn group_prefix(group_id: &str) -> Vec<u8> {
         format!("__consumer_offset:{}:", group_id).into_bytes()
     }
+
+    // The old bincode u64 encoding is at most nine bytes. The fixed fourteen-byte
+    // versioned record is therefore distinguishable even from a legacy offset of 1.
+    fn decode_position(bytes: &[u8]) -> Result<Position, StorageError> {
+        if bytes.len() == 14 {
+            if bytes[0] != 1 {
+                return Err(StorageError::Deserialization(format!(
+                    "unsupported consumer position version {}",
+                    bytes[0]
+                )));
+            }
+            let offset = Offset(u64::from_le_bytes(
+                bytes[1..9].try_into().expect("eight-byte offset"),
+            ));
+            let check = match bytes[9] {
+                0 => None,
+                1 => Some(u32::from_le_bytes(
+                    bytes[10..14].try_into().expect("four-byte frame check"),
+                )),
+                kind => {
+                    return Err(StorageError::Deserialization(format!(
+                        "unsupported consumer position check kind {kind}"
+                    )))
+                }
+            };
+            return Ok(Position { offset, check });
+        }
+        let (offset, consumed): (Offset, _) =
+            decode_serde(bytes).map_err(|e| StorageError::Deserialization(e.to_string()))?;
+        if consumed != bytes.len() {
+            return Err(StorageError::Deserialization(
+                "trailing bytes in a legacy consumer offset".into(),
+            ));
+        }
+        Ok(Position {
+            offset,
+            check: None,
+        })
+    }
 }
 
 #[async_trait]
@@ -55,15 +93,10 @@ impl OffsetStore for StorageOffsetStore {
         collection_name: &str,
         partition: u32,
     ) -> Result<Option<Offset>, Error> {
-        let key = Self::offset_key(group_id, collection_name, partition);
-        match self.storage.get(&key).await? {
-            Some(bytes) => {
-                let (offset, _): (Offset, _) = decode_serde(&bytes)
-                    .map_err(|e| StorageError::Deserialization(e.to_string()))?;
-                Ok(Some(offset))
-            }
-            None => Ok(None),
-        }
+        Ok(self
+            .get_position(group_id, collection_name, partition)
+            .await?
+            .map(|position| position.offset))
     }
 
     async fn save_offset(
@@ -73,9 +106,46 @@ impl OffsetStore for StorageOffsetStore {
         partition: u32,
         offset: Offset,
     ) -> Result<(), Error> {
+        self.save_position(
+            group_id,
+            collection_name,
+            partition,
+            Position {
+                offset,
+                check: None,
+            },
+        )
+        .await
+    }
+
+    async fn get_position(
+        &self,
+        group_id: &str,
+        collection_name: &str,
+        partition: u32,
+    ) -> Result<Option<Position>, Error> {
         let key = Self::offset_key(group_id, collection_name, partition);
-        let bytes = encode_to_vec(offset, config::standard())
-            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+        self.storage
+            .get(&key)
+            .await?
+            .map(|bytes| Self::decode_position(&bytes))
+            .transpose()
+            .map_err(Error::from)
+    }
+
+    async fn save_position(
+        &self,
+        group_id: &str,
+        collection_name: &str,
+        partition: u32,
+        position: Position,
+    ) -> Result<(), Error> {
+        let key = Self::offset_key(group_id, collection_name, partition);
+        let mut bytes = [0u8; 14];
+        bytes[0] = 1;
+        bytes[1..9].copy_from_slice(&position.offset.value().to_le_bytes());
+        bytes[9] = u8::from(position.check.is_some());
+        bytes[10..14].copy_from_slice(&position.check.unwrap_or(0).to_le_bytes());
         self.storage.put(&key, &bytes).await.map_err(Error::from)
     }
 
@@ -107,9 +177,8 @@ impl OffsetStore for StorageOffsetStore {
         let offsets = DashMap::new();
         for (key, value) in entries {
             if let Ok(key_str) = String::from_utf8(key) {
-                let (offset, _): (Offset, _) =
-                    decode_serde(&value).map_err(|e| Error::Deserialization(e.to_string()))?;
-                offsets.insert(key_str, offset);
+                let position = Self::decode_position(&value)?;
+                offsets.insert(key_str, position.offset);
             }
         }
 
