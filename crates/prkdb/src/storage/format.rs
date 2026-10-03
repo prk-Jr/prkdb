@@ -417,7 +417,7 @@ pub fn ensure_format(
 ) -> Result<FormatMarker, StorageError> {
     if !vfs.exists(dir).map_err(|e| io_err(dir, e))? {
         prkdb_core::vfs::create_dir_all_durable(vfs, dir).map_err(|e| io_err(dir, e))?;
-        return write_format(vfs, dir, expected);
+        return write_format(vfs, dir, expected, FORMAT_VERSION);
     }
 
     if let Some(marker) = read_format_with(vfs, dir)? {
@@ -440,21 +440,32 @@ pub fn ensure_format(
             vfs.sync_dir(parent).map_err(|e| io_err(parent, e))?;
         }
     }
-    write_format(vfs, dir, expected)
+    write_format(vfs, dir, expected, FORMAT_VERSION)
 }
 
-/// Rewrites `dir/FORMAT` as this build's format for `kind`, atomically. For a migration's
-/// last step (`Migration::run`): it takes the directory's kind explicitly, so a step cannot
-/// rewrite a stream's marker as key/value (which would make the stream an empty store).
-pub fn rewrite_format(vfs: &dyn Vfs, dir: &Path, kind: Kind) -> Result<FormatMarker, StorageError> {
-    write_format(vfs, dir, kind)
+/// Rewrites `dir/FORMAT` to a migration step's explicit target version, atomically.
+/// Pass `Migration::to()` and the directory's kind; an intermediate step must not
+/// advertise this build's final version before later conversions have run.
+pub fn rewrite_format(
+    vfs: &dyn Vfs,
+    dir: &Path,
+    kind: Kind,
+    target: u32,
+) -> Result<FormatMarker, StorageError> {
+    write_format(vfs, dir, kind, target)
 }
 
 /// `FORMAT.tmp` create → write → sync_data → rename to `FORMAT` → sync_dir. A crash at any
 /// point leaves either no `FORMAT` (and at most a stale temp file, which counts as empty)
 /// or a complete one.
-fn write_format(vfs: &dyn Vfs, dir: &Path, kind: Kind) -> Result<FormatMarker, StorageError> {
-    let marker = FormatMarker::current_for(kind);
+fn write_format(
+    vfs: &dyn Vfs,
+    dir: &Path,
+    kind: Kind,
+    target: u32,
+) -> Result<FormatMarker, StorageError> {
+    let mut marker = FormatMarker::current_for(kind);
+    marker.format = target;
     let tmp = dir.join(FORMAT_TMP_FILE);
     let path = dir.join(FORMAT_FILE);
     let file = vfs.create(&tmp).map_err(|e| io_err(&tmp, e))?;
