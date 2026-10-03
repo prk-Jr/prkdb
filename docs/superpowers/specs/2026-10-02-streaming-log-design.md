@@ -116,6 +116,16 @@ refusal has to be explicit, and why it must land before the format freezes (§5.
 
 - **The partition count is durable.** Key-hash routing depends on N, so `STREAM` records
   it. Opening with a different N is refused: repartitioning is not supported (§13 Q11).
+- **Partition resource cap:** 1..=256 per stream, checked before provisioning and by
+  manifest encode/decode. Every partition is eagerly opened with its own OS writer
+  thread and at least an active WAL handle plus a lock handle; 256 partitions already
+  require 256 writers and at least 513 handles including the container lock. A cap of
+  65,536 would permit 131,073 minimum handles. Sealed segments and optional retention
+  tasks add resources. The cap bounds per-open amplification; it is not a guarantee
+  that every host can open the maximum, nor a bound across all streams. Queue budgets
+  are potential admitted memory, not eager allocation. Existing larger manifests are
+  refused with an explicit limit error and preserved; never clamped or repartitioned.
+  Record-batch MAX_RECORDS remains 65,536 and KV partition limits are unchanged.
 - **Manifest version 2 bytes (stream format hardening):** 8-byte magic `PRKSTRM\0`,
   little-endian `u32` version (2), `u32` nonzero partition count, `u32` length of
   `created_by`, that many UTF-8 bytes, and a trailing little-endian CRC-32 of every
@@ -181,8 +191,8 @@ body                   compressed when codec != 0
 ```
 
 Open validates only the fixed Records header and frame CRC; it deliberately does not
-fully decode record bodies. Runtime bounded reads and the verify/fuzz paths decode the
-entire body, including compressed data. Task 2.15b.7 must reject CRC-valid malformed
+fully decode record bodies. Runtime bounded reads decode the entire body, including compressed data.
+The verify/fuzz paths must do the same under Task 2.15b.7. Task 2.15b.7 must reject CRC-valid malformed
 bodies; header-only validation is insufficient for verification.
 
 Decoding rejects an unknown version or codec, `count` of 0 or above 65,536, `raw_len`
@@ -454,7 +464,7 @@ offsets themselves.
     out-of-range (`Error` by default).
   - In `Durable` mode the check always passes (acked = durable). It costs one header read
     per partition per consumer start.
-  - The offset store must hold 12 bytes instead of an `Offset`. `StorageOffsetStore` stores
+  - The offset store writes a 14-byte versioned record instead of a bare `Offset`. `StorageOffsetStore` stores
     a small versioned record under the same key: `version u8 (=1) | offset u64 |
     check_kind u8 | check u32`, where `check_kind` 0 means no check (a caller-managed
     offset). The old bare bincode `Offset` encoding is still read, as "no check". This

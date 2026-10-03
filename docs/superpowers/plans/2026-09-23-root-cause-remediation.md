@@ -5908,7 +5908,7 @@ beyond the original review's file list must be reported explicitly.
    kind discrimination, with byte-identical KV markers.
    Commit `fix: protect stream format kind with a checksum`.
 3. Bound partitions at creation and manifest decode/encode; justify the maximum of
-   65,536 in the design note. Test cap acceptance in the codec and rejection above it
+   256 in the design note. Test cap acceptance in the codec and rejection above it
    without allocating/opening partition directories.
    Commit `fix: bound stream manifest partition counts`.
 4. Existing STREAM requires a stream FORMAT in every declared partition. Refuse wiped

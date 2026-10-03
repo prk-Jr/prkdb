@@ -388,6 +388,13 @@ impl Vfs for TraceVfs {
         StdVfs.read_dir(p)
     }
     fn exists(&self, p: &Path) -> std::io::Result<bool> {
+        if self.fail == Some("preflight") {
+            self.events
+                .lock()
+                .unwrap()
+                .push("unexpected filesystem access".into());
+            return Err(std::io::Error::other("provisioning must not begin"));
+        }
         StdVfs.exists(p)
     }
     fn sync_dir(&self, p: &Path) -> std::io::Result<()> {
@@ -568,4 +575,54 @@ async fn crc_valid_future_manifest_is_unsupported_and_preserved() {
         Err(StorageError::Corruption(_))
     ));
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn excessive_partition_counts_refuse_before_filesystem_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("orders");
+    for count in [257, 65_537, u32::MAX] {
+        let events = Arc::new(Mutex::new(vec![]));
+        let error = PartitionedStream::open_with_vfs(
+            Arc::new(TraceVfs {
+                events: events.clone(),
+                synced_dirs: Arc::default(),
+                fail: Some("preflight"),
+            }),
+            &root,
+            count,
+            StreamConfig::new(&root),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(matches!(error, StorageError::Validation(_)), "{error}");
+        assert!(error.to_string().contains("256"), "{error}");
+        assert!(events.lock().unwrap().is_empty());
+        assert!(!root.exists());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn excessive_persisted_partition_count_reports_limit_without_modification() {
+    for count in [257, u32::MAX] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("orders");
+        open(&root, 1).await.unwrap().close().unwrap();
+        let path = root.join("STREAM");
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[12..16].copy_from_slice(&count.to_le_bytes());
+        let crc_at = bytes.len() - 4;
+        let crc = crc32fast::hash(&bytes[..crc_at]);
+        bytes[crc_at..].copy_from_slice(&crc.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        let error = open(&root, 1).await.err().unwrap();
+        assert!(matches!(error, StorageError::Validation(_)), "{error}");
+        assert!(
+            error.to_string().contains("supported maximum of 256"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(!root.join("partition_1").exists());
+    }
 }

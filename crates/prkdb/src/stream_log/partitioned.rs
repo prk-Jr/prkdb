@@ -1,6 +1,6 @@
 //! Fixed-count stream partitions beneath a container directory without a WAL.
 
-use super::manifest::{StreamManifest, StreamManifestError};
+use super::manifest::{StreamManifest, StreamManifestError, MAX_STREAM_PARTITIONS};
 use super::{AppendAck, Record, StreamConfig, StreamLog};
 use crate::catalog::Catalog;
 use crate::storage::lock::lock_data_dir;
@@ -75,6 +75,7 @@ fn read_manifest(vfs: &dyn Vfs, path: &Path) -> Result<StreamManifest, StorageEr
                 path.display()
             ))
         }
+        e @ StreamManifestError::PartitionLimit { .. } => StorageError::Validation(format!("{}: {e}", path.display())),
         e => corruption(path, e),
     })
 }
@@ -154,6 +155,11 @@ impl PartitionedStream {
             return Err(StorageError::Validation(
                 "stream must have at least one partition".into(),
             ));
+        }
+        if partitions > MAX_STREAM_PARTITIONS {
+            return Err(StorageError::Validation(format!(
+                "stream partition count {partitions} exceeds the supported maximum of {MAX_STREAM_PARTITIONS}"
+            )));
         }
         let root = root.to_path_buf();
         let (lock, creating, existing_locks) = {
