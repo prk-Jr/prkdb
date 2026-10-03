@@ -10,7 +10,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 |---|---|---|---|
 | 0 | Honesty and tracking | gate_passed | 6/6 |
 | 1 | Harness and baseline | gate_passed | 2/2 |
-| 2 | Format v2 and single-node root fixes | in_progress | 0/34 |
+| 2 | Format v2 and single-node root fixes | in_progress | 0/40 |
 | 3 | Semantics | not_started | 0/9 |
 | 4 | Raft | not_started | 0/15 |
 | 5 | Documentation and release | not_started | 0/9 |
@@ -52,6 +52,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | STO-16 | high | 2 | fixed | Opening a data directory under several missing directories syncs only the immediate parent: a power cut can drop the ancestors and an acknowledged Durable write |
 | STO-17 | high | 2 | fixed | The WAL accepts an empty payload and writes a 0-length frame that recovery truncates together with every later acknowledged frame |
 | STO-19 | high | 2 | fixed | WAL short reads expose fabricated bytes and recovery truncates acknowledged Durable frames |
+| STO-22 | high | 2 | fixed | Published stream partitions can be recreated at LSN 1 after identity or WAL loss, while extra numeric directories are ignored |
 | TST-01 | high | 4 | open | Chaos monkey tolerates 20% of acknowledged writes missing |
 | TST-09 | high | 2 | fixed | Perf gate WAL benches count ~500 instructions: the WAL work is outside the measured region |
 | TST-11 | high | 2 | fixed | FaultFs::power_loss keeps the pre-crash synced baseline: a second power loss can resurrect data the first one lost |
@@ -67,6 +68,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | DOC-12 | medium | 5 | open | Nothing in CI runs the documented deploy recipes (docker compose up, 3-node setup) |
 | EVT-07 | medium | 2 | open | Fast-mode power loss reissues acked LSNs; a change-feed consumer that committed past them silently skips the new records |
 | KEY-05 | medium | 4 | open | Multi-raft collection catalog is node-local; name-addressed records on multi-raft use raw name:id keys |
+| KEY-09 | medium | 2 | fixed | Stream key routing uses platform-sized Rust Hash framing |
 | RFT-08 | medium | 4 | open | RPC client never sends x-prkdb-cluster-secret; mTLS mode configures no server TLS, so cluster cannot elect |
 | RFT-09 | medium | 4 | open | a_committed_write_replicates_to_every_node failed the unmutated baseline in CI run 34021601202 |
 | STO-03 | medium | 2 | fixed | WAL append outside publish_barrier can leave the live index pointing at a stale offset |
@@ -75,6 +77,10 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | STO-14 | medium | 2 | fixed | A runtime WAL scan silently skips the tail of a sealed segment cut exactly between two frames |
 | STO-15 | medium | 2 | fixed | A roll between sampling a scan's cap and listing the segments lets the scan visit frames above the cap |
 | STO-18 | medium | 2 | fixed | RecordBatch has no aggregate decoded-header limit: a 64 MiB body can allocate about 535 MB of empty header tuples |
+| STO-20 | medium | 2 | fixed | A stream directory's kind is unprotected: one flipped bit in FORMAT opens a stream as key/value, and migrations cannot see the kind |
+| STO-21 | medium | 2 | fixed | Unbounded stream partition counts amplify manifests into OS writer threads and file handles |
+| STO-23 | medium | 2 | fixed | Unknown stream and Records versions are classified as corruption, and future FORMAT markers are parsed using the current checksum schema |
+| STO-24 | medium | 2 | fixed | The kind-aware migration marker writer advertises the build's final version instead of each completed step's target |
 | TST-02 | medium | 4 | open | Linearizability workloads use 1 writer, 1 reader, ~25 ops; failed reads dropped |
 | TST-05 | medium | 2 | fixed | No power-loss (unsynced-data) testing; needs the WAL routed through Vfs |
 | TST-06 | medium | 4 | open | No deterministic simulation of the cluster |

@@ -76,7 +76,7 @@ fn the_frame_corpora_hold_records_frames() {
     }
 }
 
-/// STREAM mutations must start from actual version-one encodings, not only errors.
+/// STREAM mutations must start from actual current-version encodings, not only errors.
 #[test]
 fn the_stream_manifest_corpus_contains_decodable_manifest_shapes() {
     let root =

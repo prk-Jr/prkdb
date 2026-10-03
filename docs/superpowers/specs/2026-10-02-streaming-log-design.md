@@ -103,6 +103,15 @@ kind) with a corruption message, and a stream opened on a keyed directory would 
 `Batch` frames. Today's parser ignores unknown keys. That tolerance is exactly why the
 refusal has to be explicit, and why it must land before the format freezes (§5.4).
 
+Stream FORMAT markers additionally end with `checksum = "<crc32>"`, an eight-digit
+lowercase IEEE CRC-32 of every byte before that line. Missing, mismatched, duplicate
+or nonfinal checksums refuse; KV marker bytes remain unchanged. The unique frozen
+`format = <u32>` line is recognized before interpreting a future marker's checksum
+or kind schema. A bounded marker with a newer format is `UnsupportedFormat`, while
+ambiguous version lines and corrupt current markers remain corruption. Migrations
+receive the directory kind and atomically write each step's explicit target version
+last; an intermediate step must never advertise a later step's completed format.
+
 ### 3.2 A partitioned stream = a container of N stream directories
 
 ```
@@ -116,8 +125,18 @@ refusal has to be explicit, and why it must land before the format freezes (§5.
 
 - **The partition count is durable.** Key-hash routing depends on N, so `STREAM` records
   it. Opening with a different N is refused: repartitioning is not supported (§13 Q11).
-- **Manifest version 1 bytes (Task 2.15b.3):** 8-byte magic `PRKSTRM\0`,
-  little-endian `u32` version (1), `u32` nonzero partition count, `u32` length of
+- **Partition resource cap:** 1..=256 per stream, checked before provisioning and by
+  manifest encode/decode. Every partition is eagerly opened with its own OS writer
+  thread and at least an active WAL handle plus a lock handle; 256 partitions already
+  require 256 writers and at least 513 handles including the container lock. A cap of
+  65,536 would permit 131,073 minimum handles. Sealed segments and optional retention
+  tasks add resources. The cap bounds per-open amplification; it is not a guarantee
+  that every host can open the maximum, nor a bound across all streams. Queue budgets
+  are potential admitted memory, not eager allocation. Existing larger manifests are
+  refused with an explicit limit error and preserved; never clamped or repartitioned.
+  Record-batch MAX_RECORDS remains 65,536 and KV partition limits are unchanged.
+- **Manifest version 2 bytes (stream format hardening):** 8-byte magic `PRKSTRM\0`,
+  little-endian `u32` version (2), `u32` nonzero partition count, `u32` length of
   `created_by`, that many UTF-8 bytes, and a trailing little-endian CRC-32 of every
   preceding byte. The total encoding is at most 4096 bytes. Decode requires exact length,
   valid UTF-8, known magic/version, nonzero partitions and a valid CRC; no trailing bytes
@@ -126,13 +145,28 @@ refusal has to be explicit, and why it must land before the format freezes (§5.
 - **Creation order:** create every `partition_<i>/` (each through `ensure_format`), then
   write `STREAM` atomically (tmp → `sync_data` → rename → `sync_dir(root)`).
   - On open, a root that has partition directories but no `STREAM` was cut off during
-    creation. If every partition directory holds no segment with a frame, creation is
-    finished. Otherwise the open is refused, naming the directories.
+    creation. Creation is finished only when every partition has no frame and no
+    retained history (`LOG_STATE.log_start <= 1`). Otherwise open refuses and names
+    the directories.
+  - Once `STREAM` exists, every declared partition must retain its stream-kind
+    `FORMAT` and at least one WAL segment. All partitions are checked before any WAL
+    recovery begins; missing identity or a wiped WAL set must never recreate LSN 1.
+  - Numeric partition directories must use canonical `partition_<n>` names and
+    `n < N`; extra directories and aliases such as `partition_00` are refused before
+    provisioning or recovery, preserving their bytes.
 - `partition_<n>` matches the multi-raft layout's naming (Task 2.11).
 - Stream names given by users go through `catalog::validate_name` (SCH-01's allowlist)
   before they become path components.
-- Routing: explicit partition, round-robin, or key hash through Task 2.13's fixed-seed
-  `seahash` partitioner, so key → partition has golden vectors.
+- Routing: explicit partition, round-robin, or `seahash::hash(key) % N` over raw
+  bytes. Rust's Hash trait framing is not part of stream routing. Literal vectors pin
+  empty, binary and block-boundary keys across several counts and reopen.
+- **Routing versioning decision:** the existing manifest version field is sufficient;
+  no separate routing-scheme field is added. Experimental STREAM version 1 used Rust
+  byte-slice Hash, including a platform-sized length prefix. Version 2 binds routing
+  to raw-byte SeaHash. Version 1 is refused before any partition recovery, preserving
+  data instead of silently remapping keys; automatic repartitioning is unsupported.
+  This is a pre-freeze correction within FORMAT 2. After Task 2.24, D3/D4 requires a
+  format-version increase and migration for another routing/on-disk contract change.
 
 **Not in scope:** nesting streams inside a `PrkDb` keyed data directory. A data directory
 holds exactly one WAL, so streams sit next to it under a container root, never inside it.
@@ -171,6 +205,11 @@ body                   compressed when codec != 0
     value_len    u32 | value
     [header_count u16 | (name_len u16 | name UTF-8 | val_len u32 | val)*]   if has_headers
 ```
+
+Open validates only the fixed Records header and frame CRC; it deliberately does not
+fully decode record bodies. Runtime bounded reads decode the entire body, including compressed data.
+The verify/fuzz paths must do the same under Task 2.15b.7. Task 2.15b.7 must reject CRC-valid malformed
+bodies; header-only validation is insufficient for verification.
 
 Decoding rejects an unknown version or codec, `count` of 0 or above 65,536, `raw_len`
 above `MAX_PAYLOAD_LEN` (checked before decompressing, as in `batch.rs`), set reserved
@@ -432,19 +471,27 @@ offsets themselves.
   check, which is cheap:
   - A commit stores `(next: EventSeq, last_frame_crc: u32)`: the CRC of the frame holding
     the last consumed record.
-  - On resume, `StreamConsumer` reads that one frame header. A missing frame (past the end)
+  - If the last consumed LSN is below the durable retention floor, its removed frame
+    was durable and cannot have been reissued by a Fast power cut. Skip the divergence
+    check while retaining the committed next-position range checks. Committing S2.first
+    and removing S1 must still resume successfully.
+  - Otherwise on resume, `StreamConsumer` reads that one frame header. A missing frame (past the end)
     or a different CRC is `StorageError::OffsetDiverged { committed, reason }`, handled like
     out-of-range (`Error` by default).
   - In `Durable` mode the check always passes (acked = durable). It costs one header read
     per partition per consumer start.
-  - The offset store must hold 12 bytes instead of an `Offset`. `StorageOffsetStore` stores
+  - The offset store writes a 14-byte versioned record instead of a bare `Offset`. `StorageOffsetStore` stores
     a small versioned record under the same key: `version u8 (=1) | offset u64 |
     check_kind u8 | check u32`, where `check_kind` 0 means no check (a caller-managed
     offset). The old bare bincode `Offset` encoding is still read, as "no check". This
     encoding lands before Task 2.24 (§14, 2.15b.6 step 1).
-  - A CRC is not unique, so the check misses a reissued frame whose CRC happens to collide:
-    about 2⁻³². Stream frames are never rewritten (§4.4), so a mismatch always means
-    divergence.
+  - A CRC misses byte-identical refilled frames, a realistic case with a fixed clock
+    or deterministic producer, as well as different frames whose CRC collides. It is
+    probabilistic protection, not exact incarnation detection. Task 2.15b.10 writes
+    session/open boundaries at the WAL level for every directory kind, including
+    streams, before the freeze; later exact stream checks can use those records
+    without another format change. Stream frames are never rewritten (§4.4), so a
+    mismatch means divergence.
   - Reading with `read_bound: Durable` avoids the hazard entirely, at the cost of up to
     `sync_interval_ms` extra latency.
 
@@ -873,7 +920,7 @@ kind checked before the CRC) is fixed in 2.15b.1. EVT-07 (`Fast` cursor reuse) i
 | **2.15b.2** Record codec + `EventSeq` *(before 2.24)* | `FrameKind::Records`, `wal/records.rs`, `peek_header`; `prkdb_types::event::EventSeq` per Task 2.20's spec if 2.20 has not landed; `records_decode` fuzz target; corpus updates. | — |
 | **2.15b.3** `StreamLog` core *(before 2.24)* | `FORMAT` `kind` (+ refusals both ways), `LOCK`, open/append/read_from/read_durable_from (async, `spawn_blocking`)/wait_for/sync/close, sparse index, offsets, `StartAt`, `OffsetOutOfRange`; the `STREAM` manifest codec + `stream_manifest_parse` fuzz target (used by .5). | .1, .2, 2.11, 2.11b |
 | **2.15b.4** Retention | `RetentionPolicy` (default none), `Clock`, eligibility, quiet-segment roll, background task with stop-on-drop (as compaction's), crash-point tests, `RetentionReport`. | .3 |
-| **2.15b.5** Partitions | `PartitionedStream`, manifest write/read rules, routing through the 2.13 partitioner, creation crash rules. | .3, 2.13 |
+| **2.15b.5** Partitions | `PartitionedStream`, manifest write/read rules, raw-byte SeaHash routing (KV 2.13 partitioner unchanged), creation crash rules. | .3, 2.13 |
 | **2.15b.6** Consumers + EVT-07 (streams) | Step 1 *(before 2.24)*: the versioned offset record in `StorageOffsetStore` (reads the old encoding). Then `StreamConsumer` on `OffsetStore`/`ConsumerGroupCoordinator`, `__offsets` default store, out-of-range policy, frame-CRC check → `OffsetDiverged`. | .5 |
 | **2.15b.7** Harness | Stream SUT/model/ops/checker, discovery then blocking profile, 1,000 seeds per mode; kv harness gains a change-feed consumer for EVT-07. | .4, .5, .6, .10 |
 | **2.15b.8** Performance + docs | `wal_write_path` cells (§11.1), `pread` ceiling row, iai benches + floor, Linux probe run, results and T1–T5 verdicts in a decision record, user docs with measured numbers only. | .4, .5 |

@@ -1,6 +1,5 @@
 //! Container creation, crash recovery and routing for partitioned streams.
 
-use prkdb::partitioning::{DefaultPartitioner, Partitioner};
 use prkdb::stream_log::manifest::StreamManifest;
 use prkdb::stream_log::partitioned::{PartitionedStream, Route};
 use prkdb::stream_log::{ReadLimits, Record, StartAt, StreamConfig, StreamLog};
@@ -96,7 +95,7 @@ async fn interrupted_creation_finishes_only_when_every_partition_has_no_frames()
                 (wal, bytes)
             })
             .collect();
-        let result = open(&root, 3).await;
+        let result = open(&root, 10).await;
         if nonempty {
             let error = result.err().unwrap().to_string();
             assert!(
@@ -196,17 +195,15 @@ async fn routes_use_stable_partitioner_round_robin_and_validated_explicit_partit
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("orders");
     let stream = open(&root, 3).await.unwrap();
-    let partitioner = DefaultPartitioner::<&[u8]>::new();
-    // Fixed-seed SeaHasher over byte-slice Hash, on the supported 64-bit toolchain.
+    // Fixed raw-byte SeaHash routing, independent of Rust Hash framing.
     for (key, golden) in [
-        (b"".as_slice(), 0),
-        (b"user-0".as_slice(), 0),
-        (b"user-1".as_slice(), 0),
-        (&[0, 255, 1], 2),
+        (b"".as_slice(), 2),
+        (b"user-0".as_slice(), 1),
+        (b"user-1".as_slice(), 1),
+        (&[0, 255, 1], 0),
     ] {
         let (partition, ack) = stream.append(Route::Key(key), rec()).await.unwrap();
         assert_eq!(partition, golden);
-        assert_eq!(partition, partitioner.partition(&key, 3));
         let read = stream
             .partition(partition)
             .unwrap()
@@ -391,6 +388,13 @@ impl Vfs for TraceVfs {
         StdVfs.read_dir(p)
     }
     fn exists(&self, p: &Path) -> std::io::Result<bool> {
+        if self.fail == Some("preflight") {
+            self.events
+                .lock()
+                .unwrap()
+                .push("unexpected filesystem access".into());
+            return Err(std::io::Error::other("provisioning must not begin"));
+        }
         StdVfs.exists(p)
     }
     fn sync_dir(&self, p: &Path) -> std::io::Result<()> {
@@ -476,5 +480,322 @@ async fn durable_append_under_two_new_ancestors_syncs_every_directory_entry() {
             "acknowledged Durable data under {} can be lost: parent {} was not synced; syncs: {synced:?}",
             created.display(), created.parent().unwrap().display()
         );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn raw_byte_routing_golden_vectors_survive_reopen() {
+    // Literal vectors cover empty/binary keys and either side of an eight-byte block.
+    // They were calculated from SeaHash's reference algorithm, independent of Hash.
+    let vectors: &[(&[u8], [u32; 4])] = &[
+        (b"", [2, 4, 9, 12]),
+        (b"user-0", [1, 6, 6, 16]),
+        (b"user-1", [1, 3, 2, 20]),
+        (&[0, 255, 1], [0, 5, 0, 4]),
+        (b"12345678", [0, 6, 4, 15]),
+        (b"123456789", [2, 0, 9, 0]),
+        (b"0123456789abcdef0123456789abcdef", [0, 1, 5, 24]),
+    ];
+    for (column, count) in [3, 7, 16, 31].into_iter().enumerate() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("orders");
+        for _ in 0..2 {
+            let stream = open(&root, count).await.unwrap();
+            for &(key, expected) in vectors {
+                let (partition, ack) = stream.append(Route::Key(key), rec()).await.unwrap();
+                assert_eq!(partition, expected[column], "key {key:?}, count {count}");
+                let batch = stream
+                    .partition(partition)
+                    .unwrap()
+                    .read_from(StartAt::Offset(ack.first()), ReadLimits::default())
+                    .await
+                    .unwrap();
+                assert_eq!(batch.records[0].value, b"value");
+            }
+            stream.close().unwrap();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_routing_manifest_is_refused_before_partition_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("orders");
+    let stream = open(&root, 1).await.unwrap();
+    stream.append(Route::Partition(0), rec()).await.unwrap();
+    stream.close().unwrap();
+    let wal = root
+        .join("partition_0")
+        .join(prkdb_core::wal::segment::segment_file_name(1));
+    let mut wal_bytes = std::fs::read(&wal).unwrap();
+    wal_bytes.extend_from_slice(&[1, 2, 3]); // Would be repaired if partitions were opened.
+    std::fs::write(&wal, &wal_bytes).unwrap();
+    let path = root.join("STREAM");
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+    let crc_at = bytes.len() - 4;
+    let crc = crc32fast::hash(&bytes[..crc_at]);
+    bytes[crc_at..].copy_from_slice(&crc.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+    let error = open(&root, 1)
+        .await
+        .err()
+        .expect("legacy routing must not be silently changed");
+    assert!(
+        matches!(error, StorageError::UnsupportedFormat(_)),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(std::fs::read(&wal).unwrap(), wal_bytes);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn crc_valid_future_manifest_is_unsupported_and_preserved() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("orders");
+    open(&root, 1).await.unwrap().close().unwrap();
+    let path = root.join("STREAM");
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[8..12].copy_from_slice(&99u32.to_le_bytes());
+    let crc_at = bytes.len() - 4;
+    let crc = crc32fast::hash(&bytes[..crc_at]);
+    bytes[crc_at..].copy_from_slice(&crc.to_le_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+    let error = open(&root, 1).await.err().unwrap();
+    assert!(
+        matches!(error, StorageError::UnsupportedFormat(_)),
+        "{error}"
+    );
+    assert!(error.to_string().contains("newer PrkDB"), "{error}");
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    bytes[8] ^= 1; // Same version bytes without resealing remain corruption.
+    std::fs::write(&path, &bytes).unwrap();
+    assert!(matches!(
+        open(&root, 1).await,
+        Err(StorageError::Corruption(_))
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn excessive_partition_counts_refuse_before_filesystem_access() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("orders");
+    for count in [257, 65_537, u32::MAX] {
+        let events = Arc::new(Mutex::new(vec![]));
+        let error = PartitionedStream::open_with_vfs(
+            Arc::new(TraceVfs {
+                events: events.clone(),
+                synced_dirs: Arc::default(),
+                fail: Some("preflight"),
+            }),
+            &root,
+            count,
+            StreamConfig::new(&root),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(matches!(error, StorageError::Validation(_)), "{error}");
+        assert!(error.to_string().contains("256"), "{error}");
+        assert!(events.lock().unwrap().is_empty());
+        assert!(!root.exists());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn excessive_persisted_partition_count_reports_limit_without_modification() {
+    for count in [257, u32::MAX] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("orders");
+        open(&root, 1).await.unwrap().close().unwrap();
+        let path = root.join("STREAM");
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[12..16].copy_from_slice(&count.to_le_bytes());
+        let crc_at = bytes.len() - 4;
+        let crc = crc32fast::hash(&bytes[..crc_at]);
+        bytes[crc_at..].copy_from_slice(&crc.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        let error = open(&root, 1).await.err().unwrap();
+        assert!(matches!(error, StorageError::Validation(_)), "{error}");
+        assert!(
+            error.to_string().contains("supported maximum of 256"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(!root.join("partition_1").exists());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn published_wiped_partition_refuses_before_any_partition_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("orders");
+    let stream = open(&root, 2).await.unwrap();
+    stream.append(Route::Partition(0), rec()).await.unwrap();
+    stream.close().unwrap();
+    let earlier = root
+        .join("partition_0")
+        .join(prkdb_core::wal::segment::segment_file_name(1));
+    let mut before = std::fs::read(&earlier).unwrap();
+    before.extend_from_slice(&[1, 2, 3]);
+    std::fs::write(&earlier, &before).unwrap();
+    let wiped = root.join("partition_1");
+    for entry in std::fs::read_dir(&wiped).unwrap() {
+        std::fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    let result = open(&root, 2).await;
+    assert!(
+        matches!(result, Err(StorageError::Corruption(_))),
+        "a published partition must not be recreated"
+    );
+    assert_eq!(std::fs::read(&earlier).unwrap(), before);
+    assert_eq!(std::fs::read_dir(&wiped).unwrap().count(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn published_partition_requires_a_stream_marker_before_recovery() {
+    for wrong_kind in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("orders");
+        let stream = open(&root, 2).await.unwrap();
+        stream.append(Route::Partition(0), rec()).await.unwrap();
+        stream.close().unwrap();
+        let earlier = root
+            .join("partition_0")
+            .join(prkdb_core::wal::segment::segment_file_name(1));
+        let mut before = std::fs::read(&earlier).unwrap();
+        before.extend_from_slice(&[1, 2, 3]);
+        std::fs::write(&earlier, &before).unwrap();
+        let marker = root.join("partition_1/FORMAT");
+        if wrong_kind {
+            std::fs::write(&marker, b"format = 2\ncreated_by = \"0.6.0\"\n").unwrap();
+        } else {
+            std::fs::remove_file(&marker).unwrap();
+        }
+        assert!(matches!(
+            open(&root, 2).await,
+            Err(StorageError::Corruption(_))
+        ));
+        assert_eq!(std::fs::read(&earlier).unwrap(), before);
+        assert_eq!(marker.exists(), wrong_kind);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn out_of_range_partition_directories_are_refused_without_provisioning() {
+    for published in [false, true] {
+        for name in ["partition_1", "partition_4294967296"] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("orders");
+            if published {
+                open(&root, 1).await.unwrap().close().unwrap();
+            } else {
+                std::fs::create_dir(&root).unwrap();
+            }
+            let extra = root.join(name);
+            std::fs::create_dir(&extra).unwrap();
+            assert!(
+                open(&root, 1).await.is_err(),
+                "unexpected {name}, published={published}"
+            );
+            assert_eq!(std::fs::read_dir(&extra).unwrap().count(), 0);
+            assert_eq!(root.join("STREAM").exists(), published);
+            assert_eq!(root.join("partition_0").exists(), published);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retained_empty_partition_cannot_finish_manifest_creation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("orders");
+    let partition = root.join("partition_0");
+    StreamLog::open(StreamConfig::new(&partition))
+        .await
+        .unwrap()
+        .close()
+        .unwrap();
+    std::fs::remove_file(partition.join(prkdb_core::wal::segment::segment_file_name(1))).unwrap();
+    let state = prkdb_core::wal::LogState {
+        log_start: 3,
+        deletes_compacted_through: 0,
+    };
+    state.write(&StdVfs, &partition).unwrap();
+    let before = std::fs::read(partition.join("LOG_STATE")).unwrap();
+    assert!(matches!(
+        open(&root, 1).await,
+        Err(StorageError::Validation(_))
+    ));
+    assert!(!root.join("STREAM").exists());
+    assert_eq!(std::fs::read(partition.join("LOG_STATE")).unwrap(), before);
+    assert!(!partition
+        .join(prkdb_core::wal::segment::segment_file_name(3))
+        .exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn published_partition_with_only_format_refuses_before_any_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("orders");
+    let stream = open(&root, 2).await.unwrap();
+    stream.append(Route::Partition(1), rec()).await.unwrap();
+    stream.close().unwrap();
+    let earlier = root
+        .join("partition_0")
+        .join(prkdb_core::wal::segment::segment_file_name(1));
+    let mut before = std::fs::read(&earlier).unwrap();
+    before.extend_from_slice(&[1, 2, 3]);
+    std::fs::write(&earlier, &before).unwrap();
+    let wiped = root.join("partition_1");
+    for entry in std::fs::read_dir(&wiped).unwrap() {
+        let path = entry.unwrap().path();
+        if path.file_name().unwrap() != "FORMAT" {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    let marker = std::fs::read(wiped.join("FORMAT")).unwrap();
+    assert!(matches!(
+        open(&root, 2).await,
+        Err(StorageError::Corruption(_))
+    ));
+    assert_eq!(std::fs::read(&earlier).unwrap(), before);
+    assert_eq!(std::fs::read(wiped.join("FORMAT")).unwrap(), marker);
+    assert_eq!(std::fs::read_dir(wiped).unwrap().count(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn numeric_partition_aliases_are_refused_without_recovery_or_data_loss() {
+    for published in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("orders");
+        if published {
+            open(&root, 1).await.unwrap().close().unwrap();
+        } else {
+            std::fs::create_dir(&root).unwrap();
+        }
+        let alias = root.join("partition_00");
+        std::fs::create_dir(&alias).unwrap();
+        let evidence = alias.join("00000000000000000001.wal");
+        std::fs::write(&evidence, b"preserve aliased partition bytes").unwrap();
+        let result = open(&root, 1).await;
+        let Err(StorageError::Validation(message)) = result else {
+            panic!(
+                "numeric aliases must be explicitly refused, got {}",
+                if result.is_ok() {
+                    "success"
+                } else {
+                    "another error"
+                }
+            );
+        };
+        assert!(message.contains("partition_00"), "{message}");
+        assert_eq!(
+            std::fs::read(evidence).unwrap(),
+            b"preserve aliased partition bytes"
+        );
+        assert_eq!(std::fs::read_dir(alias).unwrap().count(), 1);
+        assert_eq!(root.join("STREAM").exists(), published);
+        assert_eq!(root.join("partition_0").exists(), published);
     }
 }

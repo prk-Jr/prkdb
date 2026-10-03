@@ -6,7 +6,7 @@ use super::{
 };
 use crate::storage::format::{ensure_format, Kind};
 use crate::storage::lock::lock_data_dir;
-use crate::storage::wal_adapter::{queued_wal_err, wal_err};
+use crate::storage::wal_adapter::{queued_wal_err, wal_err as storage_wal_err};
 use crate::storage::writer_liveness::LivenessBounds;
 use parking_lot::RwLock;
 use prkdb_core::vfs::{LockGuard, StdVfs, Vfs};
@@ -36,6 +36,24 @@ pub struct StreamLog {
 
 pub(super) fn position(lsn: u64) -> EventSeq {
     EventSeq::try_from_wal(lsn, 0).expect("stream recovery and writer enforce a representable end")
+}
+
+fn unsupported_schema(error: &WalError) -> bool {
+    match error {
+        WalError::UnsupportedFormat { .. } | WalError::UnsupportedRecordsVersion { .. } => true,
+        WalError::ReplayFailed { source, .. } => unsupported_schema(source),
+        _ => false,
+    }
+}
+
+// Keep replay location/context in the diagnostic while exposing the actionable type.
+// This stream-only mapping avoids overlapping the active indexed adapter task.
+fn wal_err(error: WalError) -> StorageError {
+    if unsupported_schema(&error) {
+        StorageError::UnsupportedFormat(error.to_string())
+    } else {
+        storage_wal_err(error)
+    }
 }
 
 // Kind mismatches in streams name the corrupt frame directly. Payload decode errors

@@ -202,11 +202,15 @@ async fn a_new_stream_directory_writes_kind_stream() {
         .close()
         .unwrap();
     let text = std::fs::read_to_string(dir.path().join(FORMAT_FILE)).unwrap();
+    let body = format!(
+        "format = 2\ncreated_by = \"{}\"\nkind = \"stream\"\n",
+        env!("CARGO_PKG_VERSION")
+    );
     assert_eq!(
         text,
         format!(
-            "format = 2\ncreated_by = \"{}\"\nkind = \"stream\"\n",
-            env!("CARGO_PKG_VERSION")
+            "{body}checksum = \"{:08x}\"\n",
+            crc32fast::hash(body.as_bytes())
         )
     );
     assert_eq!(read_format(dir.path()).unwrap().unwrap().kind, Kind::Stream);
@@ -330,4 +334,66 @@ async fn an_unknown_kind_is_refused() {
     .unwrap();
     let err = WalStorageAdapter::new(cfg(dir.path())).err().unwrap();
     assert!(err.to_string().contains("newer PrkDB (format 3)"), "{err}");
+}
+
+/// Only the frozen version line belongs to a future marker's schema. Its checksum
+/// and kind encoding may change; refusal must name its version before recovery.
+#[tokio::test(flavor = "multi_thread")]
+async fn future_stream_marker_schema_is_refused_by_version_without_recovery() {
+    let version = FORMAT_VERSION + 1;
+    let future_markers = [
+        format!("format = {version}\nkind = \"stream\"\n"),
+        format!("format = {version}\nkind = \"stream\"\nchecksum = \"future-algorithm\"\n"),
+        format!("format = {version}\nchecksum = \"00000000\"\nkind = \"future-stream\"\n"),
+        format!("kind = \"stream\"\nformat = \"{version}\"\nchecksum = \"00000000\"\n"),
+        format!("format = {version}\nkind = [stream, archived]\ncreated_by = \"a\"\ncreated_by = \"b\"\n"),
+    ];
+    for marker in future_markers {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(FORMAT_FILE), &marker).unwrap();
+        std::fs::write(dir.path().join("FORMAT.tmp"), b"preserve temp").unwrap();
+        std::fs::write(
+            dir.path().join("00000000000000000001.wal"),
+            b"preserve torn WAL",
+        )
+        .unwrap();
+        let before = snapshot(dir.path());
+        for result in [
+            StreamLog::open(StreamConfig::new(dir.path()))
+                .await
+                .map(|_| ()),
+            WalStorageAdapter::open_async(cfg(dir.path()))
+                .await
+                .map(|_| ()),
+        ] {
+            let Err(StorageError::UnsupportedFormat(message)) = result else {
+                panic!("future marker must refuse by version: {result:?}; marker={marker:?}");
+            };
+            assert!(
+                message.contains(&format!("newer PrkDB (format {version})")),
+                "{message}"
+            );
+            assert_eq!(snapshot(dir.path()), before);
+        }
+    }
+}
+
+#[test]
+fn an_ambiguous_future_format_number_remains_corruption() {
+    for marker in [
+        "format = 3\nformat = 3\n",
+        "format = 3\nformat = 2\n",
+        "format = 3\nformat = invalid\n",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(FORMAT_FILE), marker).unwrap();
+        assert!(matches!(
+            read_format(dir.path()),
+            Err(StorageError::Corruption(_))
+        ));
+        assert_eq!(
+            std::fs::read(dir.path().join(FORMAT_FILE)).unwrap(),
+            marker.as_bytes()
+        );
+    }
 }

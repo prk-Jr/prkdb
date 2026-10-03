@@ -7,9 +7,20 @@
 //! created_by = "0.6.0"
 //! ```
 //!
-//! KV markers keep two `key = value` lines; streams add `kind = "stream"`. A missing
-//! `kind` is KV. Unknown kinds are refused. Unknown keys are ignored so a later version
-//! can add fields. The number is [`FORMAT_VERSION`], the same one written into every WAL
+//! KV markers keep two `key = value` lines; streams add `kind = "stream"` and then a last
+//! line `checksum = "<crc32>"`: the CRC-32 (IEEE, lowercase hex, 8 digits) of every byte
+//! before that line. A missing `kind` is KV. Unknown kinds are refused. Unknown keys are
+//! ignored so a later version can add fields.
+//!
+//! # Checksum
+//!
+//! A `checksum` line, for any kind, must be the last line and must match; otherwise the
+//! marker is refused as corrupt. A stream marker without one is refused too. Without it a
+//! single flipped bit in the `kind` line (`kinf`, or a newline turned into another
+//! character that merges `kind` into the line before) would read an empty stream
+//! directory as KV, and a KV open would then write `Batch` frames into it. KV markers
+//! carry no checksum, so their bytes are what every format-2 build has written; for them a
+//! damaged marker still fails closed on the frames (keyed replay refuses `Records`). The number is [`FORMAT_VERSION`], the same one written into every WAL
 //! segment header, so the program has exactly one format version.
 //!
 //! # Frozen syntax
@@ -62,7 +73,8 @@ pub enum Kind {
 }
 
 impl Kind {
-    fn description(self) -> &'static str {
+    /// "a key/value store" or "a stream", for messages.
+    pub fn description(self) -> &'static str {
         match self {
             Self::Kv => "a key/value store",
             Self::Stream => "a stream",
@@ -73,6 +85,37 @@ impl Kind {
 enum MarkerParseError {
     Invalid,
     UnknownKind { kind: String, format: u32 },
+    ChecksumMismatch,
+    MissingChecksum,
+}
+
+/// The key of the marker's integrity line (see the module docs).
+const CHECKSUM_KEY: &str = "checksum";
+
+/// The quoted checksum value for the marker bytes `body`.
+fn checksum_value(body: &str) -> String {
+    format!("\"{:08x}\"", crc32fast::hash(body.as_bytes()))
+}
+
+/// Splits `text` at its `checksum` line, if it has one: the bytes before the line, and
+/// the line's value. The line must be the last one (only its own newline may follow).
+fn split_checksum(text: &str) -> Result<Option<(&str, &str)>, MarkerParseError> {
+    let mut start = 0;
+    while start < text.len() {
+        let end = text[start..]
+            .find('\n')
+            .map_or(text.len(), |i| start + i + 1);
+        if let Some((key, value)) = text[start..end].split_once('=') {
+            if key.trim() == CHECKSUM_KEY {
+                if end != text.len() {
+                    return Err(MarkerParseError::ChecksumMismatch);
+                }
+                return Ok(Some((&text[..start], value.trim())));
+            }
+        }
+        start = end;
+    }
+    Ok(None)
 }
 
 /// The contents of a data directory's `FORMAT` file.
@@ -106,25 +149,36 @@ impl FormatMarker {
         );
         if self.kind == Kind::Stream {
             text.push_str("kind = \"stream\"\n");
+            let checksum = checksum_value(&text);
+            text.push_str(&format!("{CHECKSUM_KEY} = {checksum}\n"));
         }
         text
     }
 
     #[cfg(test)]
     fn parse(text: &str) -> Option<Self> {
-        Self::parse_checked(text).ok()
+        let format = Self::parse_version(text).ok()?;
+        Self::parse_checked(text, format).ok()
     }
 
-    fn parse_checked(text: &str) -> Result<Self, MarkerParseError> {
+    fn parse_checked(text: &str, format: u32) -> Result<Self, MarkerParseError> {
+        let covered = match split_checksum(text)? {
+            Some((body, value)) if value == checksum_value(body) => Some(body),
+            Some(_) => return Err(MarkerParseError::ChecksumMismatch),
+            None => None,
+        };
+        let marker = Self::parse_fields(covered.unwrap_or(text), format)?;
+        if marker.kind == Kind::Stream && covered.is_none() {
+            return Err(MarkerParseError::MissingChecksum);
+        }
+        Ok(marker)
+    }
+
+    fn parse_version(text: &str) -> Result<u32, MarkerParseError> {
         let mut format = None;
-        let mut created_by = None;
-        let mut kind = None;
         for line in text.lines() {
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
-            };
-            match key.trim() {
-                "format" => {
+            if let Some((key, value)) = line.split_once('=') {
+                if key.trim() == "format" {
                     if format.is_some() {
                         return Err(MarkerParseError::Invalid);
                     }
@@ -136,6 +190,19 @@ impl FormatMarker {
                             .map_err(|_| MarkerParseError::Invalid)?,
                     );
                 }
+            }
+        }
+        format.ok_or(MarkerParseError::Invalid)
+    }
+
+    fn parse_fields(text: &str, format: u32) -> Result<Self, MarkerParseError> {
+        let mut created_by = None;
+        let mut kind = None;
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            match key.trim() {
                 "created_by" => {
                     if created_by.is_some() {
                         return Err(MarkerParseError::Invalid);
@@ -164,7 +231,6 @@ impl FormatMarker {
                 _ => {}
             }
         }
-        let format = format.ok_or(MarkerParseError::Invalid)?;
         let kind = kind
             .unwrap_or(Ok(Kind::Kv))
             .map_err(|kind| MarkerParseError::UnknownKind { kind, format })?;
@@ -223,6 +289,8 @@ pub fn holds_data(vfs: &dyn Vfs, dir: &Path) -> Result<bool, StorageError> {
 }
 
 /// Reads `dir/FORMAT` without creating anything. `Ok(None)` if the file does not exist.
+/// A future version is refused by its unique frozen version line, before interpreting
+/// its checksum or kind schema. Current and older markers still validate their fields.
 pub fn read_format(dir: &Path) -> Result<Option<FormatMarker>, StorageError> {
     read_format_with(&StdVfs, dir)
 }
@@ -262,10 +330,24 @@ pub fn read_format_with(vfs: &dyn Vfs, dir: &Path) -> Result<Option<FormatMarker
         ))
     };
     let text = std::str::from_utf8(&buf).map_err(|_| unreadable())?;
-    FormatMarker::parse_checked(text)
+    // The reader's version policy precedes current schema checks; the pure syntax
+    // parser can still recognize a quoted future number without opening a directory.
+    let format = FormatMarker::parse_version(text).map_err(|_| unreadable())?;
+    if format > FORMAT_VERSION {
+        return Err(unsupported_format(dir, format));
+    }
+    FormatMarker::parse_checked(text, format)
         .map(Some)
         .map_err(|e| match e {
             MarkerParseError::Invalid => unreadable(),
+            MarkerParseError::ChecksumMismatch => StorageError::Corruption(format!(
+                "{}: format marker checksum does not match its contents, or is not its last line",
+                path.display()
+            )),
+            MarkerParseError::MissingChecksum => StorageError::Corruption(format!(
+                "{}: stream format marker has no checksum line",
+                path.display()
+            )),
             MarkerParseError::UnknownKind { format, .. } if format != FORMAT_VERSION => {
                 unsupported_format(dir, format)
             }
@@ -278,7 +360,7 @@ pub fn read_format_with(vfs: &dyn Vfs, dir: &Path) -> Result<Option<FormatMarker
 
 /// The format of an existing directory, read-only: `Some(n)` from its `FORMAT`, `Some(1)`
 /// for a directory without one that [`holds_data`], `None` for an empty one (which the
-/// open rules would create as format 2).
+/// open rules would create as format 2). Future markers return `UnsupportedFormat`.
 pub fn detect_format(vfs: &dyn Vfs, dir: &Path) -> Result<Option<u32>, StorageError> {
     if let Some(marker) = read_format_with(vfs, dir)? {
         return Ok(Some(marker.format));
@@ -334,7 +416,7 @@ pub fn ensure_format(
 ) -> Result<FormatMarker, StorageError> {
     if !vfs.exists(dir).map_err(|e| io_err(dir, e))? {
         prkdb_core::vfs::create_dir_all_durable(vfs, dir).map_err(|e| io_err(dir, e))?;
-        return write_format(vfs, dir, expected);
+        return write_format(vfs, dir, expected, FORMAT_VERSION);
     }
 
     if let Some(marker) = read_format_with(vfs, dir)? {
@@ -357,14 +439,32 @@ pub fn ensure_format(
             vfs.sync_dir(parent).map_err(|e| io_err(parent, e))?;
         }
     }
-    write_format(vfs, dir, expected)
+    write_format(vfs, dir, expected, FORMAT_VERSION)
+}
+
+/// Rewrites `dir/FORMAT` to a migration step's explicit target version, atomically.
+/// Pass `Migration::to()` and the directory's kind; an intermediate step must not
+/// advertise this build's final version before later conversions have run.
+pub fn rewrite_format(
+    vfs: &dyn Vfs,
+    dir: &Path,
+    kind: Kind,
+    target: u32,
+) -> Result<FormatMarker, StorageError> {
+    write_format(vfs, dir, kind, target)
 }
 
 /// `FORMAT.tmp` create → write → sync_data → rename to `FORMAT` → sync_dir. A crash at any
 /// point leaves either no `FORMAT` (and at most a stale temp file, which counts as empty)
 /// or a complete one.
-fn write_format(vfs: &dyn Vfs, dir: &Path, kind: Kind) -> Result<FormatMarker, StorageError> {
-    let marker = FormatMarker::current_for(kind);
+fn write_format(
+    vfs: &dyn Vfs,
+    dir: &Path,
+    kind: Kind,
+    target: u32,
+) -> Result<FormatMarker, StorageError> {
+    let mut marker = FormatMarker::current_for(kind);
+    marker.format = target;
     let tmp = dir.join(FORMAT_TMP_FILE);
     let path = dir.join(FORMAT_FILE);
     let file = vfs.create(&tmp).map_err(|e| io_err(&tmp, e))?;
@@ -411,7 +511,7 @@ mod tests {
         assert_eq!(marker.kind, Kind::Stream);
         assert!(std::fs::read_to_string(dir.path().join(FORMAT_FILE))
             .unwrap()
-            .ends_with("kind = \"stream\"\n"));
+            .contains("\nkind = \"stream\"\nchecksum = \""));
         assert_eq!(
             ensure_format(&StdVfs, dir.path(), Kind::Stream).unwrap(),
             marker
@@ -516,11 +616,103 @@ mod tests {
         }
     }
 
+    /// Writes `bytes` as the marker of a fresh directory and reads it back.
+    fn read_marker_bytes(bytes: &[u8]) -> Result<Option<FormatMarker>, StorageError> {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(FORMAT_FILE), bytes).unwrap();
+        read_format(dir.path())
+    }
+
+    #[test]
+    fn a_stream_marker_ends_with_a_checksum_of_everything_before_it() {
+        let text = FormatMarker::current_for(Kind::Stream).encode();
+        let (body, last) = text
+            .trim_end_matches('\n')
+            .rsplit_once('\n')
+            .expect("more than one line");
+        let body = format!("{body}\n");
+        assert_eq!(
+            last,
+            format!("checksum = \"{:08x}\"", crc32fast::hash(body.as_bytes()))
+        );
+        assert!(body.ends_with("kind = \"stream\"\n"), "{text}");
+        assert_eq!(
+            FormatMarker::parse(&text),
+            Some(FormatMarker::current_for(Kind::Stream))
+        );
+    }
+
+    #[test]
+    fn no_single_bit_flip_turns_a_stream_marker_into_a_kv_marker() {
+        let text = FormatMarker::current_for(Kind::Stream).encode();
+        for i in 0..text.len() {
+            for bit in 0..8 {
+                let mut bytes = text.clone().into_bytes();
+                bytes[i] ^= 1 << bit;
+                if let Ok(Some(marker)) = read_marker_bytes(&bytes) {
+                    assert_eq!(
+                        marker.kind,
+                        Kind::Stream,
+                        "flipping bit {bit} of byte {i} read a stream marker as {:?}: {:?}",
+                        marker.kind,
+                        String::from_utf8_lossy(&bytes)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_stream_marker_without_its_checksum_is_refused() {
+        let text = format!(
+            "format = 2\ncreated_by = \"{}\"\nkind = \"stream\"\n",
+            env!("CARGO_PKG_VERSION")
+        );
+        let result = read_marker_bytes(text.as_bytes());
+        assert!(
+            matches!(result, Err(StorageError::Corruption(_))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn a_checksum_that_is_wrong_or_not_last_is_refused() {
+        let good = FormatMarker::current_for(Kind::Stream).encode();
+        let wrong = good.replace("created_by = \"", "created_by = \"x");
+        let (body, last) = good.trim_end_matches('\n').rsplit_once('\n').unwrap();
+        let not_last = format!("{last}\n{body}\n");
+        let with_trailer = format!("{good}note = \"after\"\n");
+        for text in [wrong, not_last, with_trailer] {
+            let result = read_marker_bytes(text.as_bytes());
+            assert!(
+                matches!(result, Err(StorageError::Corruption(_))),
+                "{text:?} → {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_kv_marker_with_a_valid_checksum_is_accepted() {
+        // A later version may checksum kv markers too; the rule is the same for every kind.
+        let body = format!(
+            "format = 2\ncreated_by = \"{}\"\n",
+            env!("CARGO_PKG_VERSION")
+        );
+        let text = format!(
+            "{body}checksum = \"{:08x}\"\n",
+            crc32fast::hash(body.as_bytes())
+        );
+        assert_eq!(
+            read_marker_bytes(text.as_bytes()).unwrap(),
+            Some(FormatMarker::current())
+        );
+    }
+
     #[test]
     fn the_marker_round_trips_and_ignores_unknown_keys() {
         let m = FormatMarker::current();
         assert_eq!(FormatMarker::parse(&m.encode()), Some(m));
-        let later = "format = 2\ncreated_by = \"1.0.0\"\nchecksum = \"abc\"\n";
+        let later = "format = 2\ncreated_by = \"1.0.0\"\ncompression = \"zstd\"\n";
         assert_eq!(
             FormatMarker::parse(later),
             Some(FormatMarker {

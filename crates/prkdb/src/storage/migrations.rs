@@ -5,7 +5,7 @@
 //! directory the previous release wrote. Format 1 had no marker and has no migrator: it
 //! is refused (D3).
 
-use super::format::FORMAT_VERSION;
+use super::format::{Kind, FORMAT_VERSION};
 use prkdb_types::error::StorageError;
 use std::path::Path;
 
@@ -15,7 +15,12 @@ pub trait Migration: Send + Sync {
     fn to(&self) -> u32;
     fn description(&self) -> &str;
     /// Must leave `dir` either fully at `to()` (FORMAT rewritten last, atomically) or untouched.
-    fn run(&self, dir: &Path) -> Result<(), StorageError>;
+    ///
+    /// `kind` is the directory's kind from its marker (format 1 predates streams, so it is
+    /// always [`Kind::Kv`]). A step that only applies to one kind must leave the other
+    /// untouched, and the final FORMAT rewrite must go through
+    /// [`super::format::rewrite_format`] with this `kind` and `self.to()`, never a key/value marker or a later step's version.
+    fn run(&self, dir: &Path, kind: Kind) -> Result<(), StorageError>;
 }
 
 /// Every migration this build knows, in no particular order.
@@ -83,8 +88,54 @@ mod tests {
         fn description(&self) -> &str {
             "test step"
         }
-        fn run(&self, _dir: &Path) -> Result<(), StorageError> {
+        fn run(&self, _dir: &Path, _kind: Kind) -> Result<(), StorageError> {
             Ok(())
+        }
+    }
+
+    struct MarkerStep(u32, u32);
+
+    impl Migration for MarkerStep {
+        fn from(&self) -> u32 {
+            self.0
+        }
+        fn to(&self) -> u32 {
+            self.1
+        }
+        fn description(&self) -> &str {
+            "test marker conversion"
+        }
+        fn run(&self, dir: &Path, kind: Kind) -> Result<(), StorageError> {
+            super::super::format::rewrite_format(&prkdb_core::vfs::StdVfs, dir, kind, self.to())?;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn migration_marker_records_each_step_target_and_preserves_kind() {
+        // Synthetic future steps exercise the writer contract without registering a
+        // migration or pretending this build can decode a future data format.
+        for kind in [Kind::Kv, Kind::Stream] {
+            let dir = tempfile::tempdir().unwrap();
+            for version in [FORMAT_VERSION + 1, FORMAT_VERSION + 2] {
+                MarkerStep(version - 1, version)
+                    .run(dir.path(), kind)
+                    .unwrap();
+                let marker = std::fs::read_to_string(dir.path().join("FORMAT")).unwrap();
+                assert!(
+                    marker.starts_with(&format!("format = {version}\n")),
+                    "step {version}: {marker}"
+                );
+                assert_eq!(marker.contains("kind = \"stream\""), kind == Kind::Stream);
+                if kind == Kind::Stream {
+                    let (body, checksum) = marker.rsplit_once("checksum = ").unwrap();
+                    assert_eq!(
+                        checksum,
+                        format!("\"{:08x}\"\n", crc32fast::hash(body.as_bytes()))
+                    );
+                }
+                assert!(!dir.path().join("FORMAT.tmp").exists());
+            }
         }
     }
 

@@ -130,15 +130,22 @@ fn u32_at(bytes: &[u8], at: usize) -> u32 {
 /// Reads and checks the header: version, codec, `raw_len <= MAX_PAYLOAD_LEN` and
 /// `count` in range. Touches nothing past byte 18.
 fn read_header(bytes: &[u8]) -> Result<Header, WalError> {
+    // Only the version prefix belongs to every version. Do not apply version-one
+    // header sizing to a future schema before recognizing that it is unsupported.
+    if let Some(&found) = bytes.first() {
+        if found != RECORDS_VERSION {
+            return Err(WalError::UnsupportedRecordsVersion {
+                found,
+                supported: RECORDS_VERSION,
+            });
+        }
+    }
     let Some(header) = bytes.get(..RECORDS_HEADER_LEN) else {
         return Err(malformed(format!(
             "{} bytes, shorter than the {RECORDS_HEADER_LEN}-byte header",
             bytes.len()
         )));
     };
-    if header[0] != RECORDS_VERSION {
-        return Err(malformed(format!("unsupported version {}", header[0])));
-    }
     let codec = CompressionType::from_u8(header[1])
         .ok_or_else(|| malformed(format!("unknown codec {}", header[1])))?;
     let raw_len = u32_at(header, 2) as usize;
