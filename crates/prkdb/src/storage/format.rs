@@ -87,6 +87,7 @@ enum MarkerParseError {
     UnknownKind { kind: String, format: u32 },
     ChecksumMismatch,
     MissingChecksum,
+    UnsupportedVersion(u32),
 }
 
 /// The key of the marker's integrity line (see the module docs).
@@ -161,28 +162,29 @@ impl FormatMarker {
     }
 
     fn parse_checked(text: &str) -> Result<Self, MarkerParseError> {
+        // Only the unique frozen version line is shared with a future schema. Do
+        // not apply this build's checksum/kind rules before recognizing it.
+        let format = Self::parse_version(text)?;
+        if format > FORMAT_VERSION {
+            return Err(MarkerParseError::UnsupportedVersion(format));
+        }
         let covered = match split_checksum(text)? {
             Some((body, value)) if value == checksum_value(body) => Some(body),
             Some(_) => return Err(MarkerParseError::ChecksumMismatch),
             None => None,
         };
-        let marker = Self::parse_fields(covered.unwrap_or(text))?;
+        let marker = Self::parse_fields(covered.unwrap_or(text), format)?;
         if marker.kind == Kind::Stream && covered.is_none() {
             return Err(MarkerParseError::MissingChecksum);
         }
         Ok(marker)
     }
 
-    fn parse_fields(text: &str) -> Result<Self, MarkerParseError> {
+    fn parse_version(text: &str) -> Result<u32, MarkerParseError> {
         let mut format = None;
-        let mut created_by = None;
-        let mut kind = None;
         for line in text.lines() {
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
-            };
-            match key.trim() {
-                "format" => {
+            if let Some((key, value)) = line.split_once('=') {
+                if key.trim() == "format" {
                     if format.is_some() {
                         return Err(MarkerParseError::Invalid);
                     }
@@ -194,6 +196,19 @@ impl FormatMarker {
                             .map_err(|_| MarkerParseError::Invalid)?,
                     );
                 }
+            }
+        }
+        format.ok_or(MarkerParseError::Invalid)
+    }
+
+    fn parse_fields(text: &str, format: u32) -> Result<Self, MarkerParseError> {
+        let mut created_by = None;
+        let mut kind = None;
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            match key.trim() {
                 "created_by" => {
                     if created_by.is_some() {
                         return Err(MarkerParseError::Invalid);
@@ -222,7 +237,6 @@ impl FormatMarker {
                 _ => {}
             }
         }
-        let format = format.ok_or(MarkerParseError::Invalid)?;
         let kind = kind
             .unwrap_or(Ok(Kind::Kv))
             .map_err(|kind| MarkerParseError::UnknownKind { kind, format })?;
@@ -281,6 +295,8 @@ pub fn holds_data(vfs: &dyn Vfs, dir: &Path) -> Result<bool, StorageError> {
 }
 
 /// Reads `dir/FORMAT` without creating anything. `Ok(None)` if the file does not exist.
+/// A future version is refused by its unique frozen version line, before interpreting
+/// its checksum or kind schema. Current and older markers still validate their fields.
 pub fn read_format(dir: &Path) -> Result<Option<FormatMarker>, StorageError> {
     read_format_with(&StdVfs, dir)
 }
@@ -324,6 +340,7 @@ pub fn read_format_with(vfs: &dyn Vfs, dir: &Path) -> Result<Option<FormatMarker
         .map(Some)
         .map_err(|e| match e {
             MarkerParseError::Invalid => unreadable(),
+            MarkerParseError::UnsupportedVersion(format) => unsupported_format(dir, format),
             MarkerParseError::ChecksumMismatch => StorageError::Corruption(format!(
                 "{}: format marker checksum does not match its contents, or is not its last line",
                 path.display()
@@ -344,7 +361,7 @@ pub fn read_format_with(vfs: &dyn Vfs, dir: &Path) -> Result<Option<FormatMarker
 
 /// The format of an existing directory, read-only: `Some(n)` from its `FORMAT`, `Some(1)`
 /// for a directory without one that [`holds_data`], `None` for an empty one (which the
-/// open rules would create as format 2).
+/// open rules would create as format 2). Future markers return `UnsupportedFormat`.
 pub fn detect_format(vfs: &dyn Vfs, dir: &Path) -> Result<Option<u32>, StorageError> {
     if let Some(marker) = read_format_with(vfs, dir)? {
         return Ok(Some(marker.format));
