@@ -60,7 +60,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use support::stream_measurement::{
-    stream_config, MeasurementWindow, RetentionCounts, StreamCounts,
+    records_for_append, stream_config, MeasurementWindow, RetentionCounts, StreamCounts,
 };
 
 enum Target {
@@ -111,13 +111,7 @@ impl Target {
                     .expect("wal append");
             }
             Target::Stream { log, batch } => {
-                let records = (0..*batch)
-                    .map(|_| Record {
-                        key: Some(key.clone()),
-                        value: value.to_vec(),
-                        headers: vec![],
-                    })
-                    .collect();
+                let records = records_for_append(key, value, *batch);
                 log.append(records).await.expect("stream append");
             }
         }

@@ -1,6 +1,6 @@
 //! Configuration and accounting used by the stream wall-clock and instruction benches.
 
-use prkdb::stream_log::StreamConfig;
+use prkdb::stream_log::{Record, StreamConfig};
 use prkdb_core::wal::{CompressionConfig, SyncMode};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -85,4 +85,25 @@ impl RetentionCounts {
             Ok(())
         }
     }
+}
+
+pub fn records_for_append(key: Vec<u8>, value: &[u8], count: usize) -> Vec<Record> {
+    let mut records = Vec::with_capacity(count);
+    for _ in 1..count {
+        records.push(Record {
+            key: Some(key.clone()),
+            value: value.to_vec(),
+            headers: Vec::new(),
+        });
+    }
+    if count > 0 {
+        // Like the reference Batch, the last record takes the caller's owned key.
+        // b1 makes no key clone; b100 clones 99 keys and moves the final one.
+        records.push(Record {
+            key: Some(key),
+            value: value.to_vec(),
+            headers: Vec::new(),
+        });
+    }
+    records
 }

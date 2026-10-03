@@ -5,7 +5,9 @@ mod stream_measurement;
 
 use prkdb_core::wal::compression::CompressionType;
 use prkdb_core::wal::SyncMode;
-use stream_measurement::{stream_config, MeasurementWindow, RetentionCounts, StreamCounts};
+use stream_measurement::{
+    records_for_append, stream_config, MeasurementWindow, RetentionCounts, StreamCounts,
+};
 
 #[test]
 fn stream_cells_use_the_uncompressed_reference_workload() {
@@ -81,4 +83,19 @@ fn retention_completion_uses_the_shared_half_open_measurement_window() {
     assert_eq!(counts.measured_runs, 1);
     assert_eq!(counts.measured_removed, 2);
     assert!(counts.validate().is_ok());
+}
+
+#[test]
+fn append_input_preserves_one_and_one_hundred_record_bytes() {
+    let key = b"w003_k000000000017".to_vec();
+    let value = (0..1024).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+    for count in [1, 100] {
+        let records = records_for_append(key.clone(), &value, count);
+        assert_eq!(records.len(), count);
+        for record in records {
+            assert_eq!(record.key.as_deref(), Some(key.as_slice()));
+            assert_eq!(record.value, value);
+            assert!(record.headers.is_empty());
+        }
+    }
 }
