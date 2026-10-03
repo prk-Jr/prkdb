@@ -1347,3 +1347,57 @@ async fn an_expired_append_deadline_does_not_admit_a_ready_reservation() {
     );
     log.close().unwrap();
 }
+
+fn replace_with_future_records_frame(path: &Path, lsn: u64) -> Vec<u8> {
+    let original = std::fs::read(path).unwrap();
+    let mut payload = RecordBatch {
+        append_time_ms: 0,
+        records: recs(&["future"]),
+    }
+    .encode(&CompressionConfig::none())
+    .unwrap();
+    payload[0] = prkdb_core::wal::records::RECORDS_VERSION + 1;
+    let mut bytes = original[..prkdb_core::wal::segment::SEGMENT_HEADER_LEN as usize].to_vec();
+    encode_frame(&mut bytes, lsn, FrameKind::Records, &payload);
+    std::fs::write(path, &bytes).unwrap();
+    bytes
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn future_records_version_is_unsupported_on_open_without_truncation() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = StreamLog::open(cfg(dir.path())).await.unwrap();
+    let ack = log.append(recs(&["old"])).await.unwrap();
+    log.close().unwrap();
+    let path = dir.path().join(segment_file_name(1));
+    let before = replace_with_future_records_frame(&path, ack.lsn);
+    let error = StreamLog::open(cfg(dir.path())).await.err().unwrap();
+    assert!(
+        matches!(error, StorageError::UnsupportedFormat(_)),
+        "{error}"
+    );
+    assert!(error.to_string().contains("newer PrkDB"), "{error}");
+    assert!(error.to_string().contains("Records version 2"), "{error}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn future_records_version_is_unsupported_on_live_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = StreamLog::open(cfg(dir.path())).await.unwrap();
+    let ack = log.append(recs(&["old"])).await.unwrap();
+    let path = dir.path().join(segment_file_name(1));
+    let before = replace_with_future_records_frame(&path, ack.lsn);
+    let error = log
+        .read_from(StartAt::Offset(ack.first()), ReadLimits::default())
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(error, StorageError::UnsupportedFormat(_)),
+        "{error}"
+    );
+    assert!(error.to_string().contains("newer PrkDB"), "{error}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    log.close().unwrap();
+}
