@@ -1018,6 +1018,71 @@ regression_tests = [
 ]
 changes = ["131599a", "981afe6"]
 
+[[finding]]
+id = "STO-21"
+title = "Unbounded stream partition counts amplify manifests into OS writer threads and file handles"
+area = "streams"
+severity = "medium"
+phase = 2
+status = "fixed"
+sources = ["claude-stream-format-review-2026-10-03"]
+evidence = ["crates/prkdb/src/stream_log/manifest.rs", "crates/prkdb/src/stream_log/partitioned.rs"]
+regression_tests = [
+  "test:crates/prkdb/src/stream_log/manifest.rs::partition_count_cap_applies_to_encode_and_crc_valid_decode",
+  "test:crates/prkdb/tests/stream_partitions.rs::excessive_partition_counts_refuse_before_filesystem_access",
+  "test:crates/prkdb/tests/stream_partitions.rs::excessive_persisted_partition_count_reports_limit_without_modification",
+]
+changes = ["f58781de3cbcc242a82bc6bd11dd80c10839aaa8"]
+
+[[finding]]
+id = "STO-22"
+title = "Published stream partitions can be recreated at LSN 1 after identity or WAL loss, while extra numeric directories are ignored"
+area = "streams"
+severity = "high"
+phase = 2
+status = "fixed"
+sources = ["claude-stream-format-review-2026-10-03", "codex-independent-format-review-2026-10-03"]
+evidence = ["crates/prkdb/src/stream_log/partitioned.rs", "crates/prkdb-core/src/wal/log.rs"]
+regression_tests = [
+  "test:crates/prkdb/tests/stream_partitions.rs::published_wiped_partition_refuses_before_any_partition_recovery",
+  "test:crates/prkdb/tests/stream_partitions.rs::published_partition_requires_a_stream_marker_before_recovery",
+  "test:crates/prkdb/tests/stream_partitions.rs::published_partition_with_only_format_refuses_before_any_recovery",
+  "test:crates/prkdb/tests/stream_partitions.rs::out_of_range_partition_directories_are_refused_without_provisioning",
+  "test:crates/prkdb/tests/stream_partitions.rs::numeric_partition_aliases_are_refused_without_recovery_or_data_loss",
+  "test:crates/prkdb/tests/stream_partitions.rs::retained_empty_partition_cannot_finish_manifest_creation",
+]
+changes = ["995407cfbc7ac17aaefec0c2e5e20b69879499ed"]
+
+[[finding]]
+id = "STO-23"
+title = "Unknown stream and Records versions are classified as corruption, and future FORMAT markers are parsed using the current checksum schema"
+area = "streams"
+severity = "medium"
+phase = 2
+status = "fixed"
+sources = ["claude-stream-format-review-2026-10-03", "codex-independent-format-review-2026-10-03"]
+evidence = ["crates/prkdb/src/stream_log/partitioned.rs", "crates/prkdb-core/src/wal/records.rs", "crates/prkdb/src/storage/format.rs"]
+regression_tests = [
+  "test:crates/prkdb/tests/stream_partitions.rs::crc_valid_future_manifest_is_unsupported_and_preserved",
+  "test:crates/prkdb/tests/stream_log.rs::future_records_version_is_unsupported_on_open_without_truncation",
+  "test:crates/prkdb/tests/stream_log.rs::future_records_version_is_unsupported_on_live_read",
+  "test:crates/prkdb/tests/format_v2.rs::future_stream_marker_schema_is_refused_by_version_without_recovery",
+  "test:crates/prkdb/tests/format_v2.rs::an_ambiguous_future_format_number_remains_corruption",
+]
+changes = ["d3ae8c98b748b26c2af9d2828beb05c63cf80a15", "123e4c27df26b5469a6a1d8a5e70921b3a8e30b0", "4a6aee9866f713bd0749bec4ae2ff27a66affa0d"]
+
+[[finding]]
+id = "STO-24"
+title = "The kind-aware migration marker writer advertises the build's final version instead of each completed step's target"
+area = "storage"
+severity = "medium"
+phase = 2
+status = "fixed"
+sources = ["codex-independent-format-review-2026-10-03"]
+evidence = ["crates/prkdb/src/storage/format.rs", "crates/prkdb/src/storage/migrations.rs"]
+regression_tests = ["test:crates/prkdb/src/storage/migrations.rs::migration_marker_records_each_step_target_and_preserves_kind"]
+changes = ["6e9c783f1288917a53754ca201bba1641dea7e2e"]
+
 [[phase]]
 id = 0
 title = "Honesty and tracking"

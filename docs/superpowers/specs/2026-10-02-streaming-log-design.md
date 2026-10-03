@@ -103,6 +103,15 @@ kind) with a corruption message, and a stream opened on a keyed directory would 
 `Batch` frames. Today's parser ignores unknown keys. That tolerance is exactly why the
 refusal has to be explicit, and why it must land before the format freezes (§5.4).
 
+Stream FORMAT markers additionally end with `checksum = "<crc32>"`, an eight-digit
+lowercase IEEE CRC-32 of every byte before that line. Missing, mismatched, duplicate
+or nonfinal checksums refuse; KV marker bytes remain unchanged. The unique frozen
+`format = <u32>` line is recognized before interpreting a future marker's checksum
+or kind schema. A bounded marker with a newer format is `UnsupportedFormat`, while
+ambiguous version lines and corrupt current markers remain corruption. Migrations
+receive the directory kind and atomically write each step's explicit target version
+last; an intermediate step must never advertise a later step's completed format.
+
 ### 3.2 A partitioned stream = a container of N stream directories
 
 ```
