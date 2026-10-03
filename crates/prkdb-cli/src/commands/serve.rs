@@ -184,7 +184,17 @@ impl<T> ApiResponse<T> {
     }
 }
 
-pub async fn handle_serve(args: ServeArgs) -> Result<()> {
+pub async fn handle_serve(args: ServeArgs, output_format: crate::OutputFormat) -> Result<()> {
+    let json_output = matches!(output_format, crate::OutputFormat::Json);
+    macro_rules! serve_info {
+        ($($arguments:tt)*) => {
+            if json_output {
+                eprintln!($($arguments)*);
+            } else {
+                println!($($arguments)*);
+            }
+        };
+    }
     // Resolve TLS before binding anything. A server that binds first and discovers an
     // unreadable key on the first handshake has already advertised a port it cannot
     // serve; worse, one that silently falls back to plaintext is exactly the failure
@@ -195,7 +205,7 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         args.tls_client_ca.clone(),
     )?;
     if let Some(t) = &tls {
-        println!(
+        serve_info!(
             "🔒 TLS enabled (cert {}){}",
             t.cert.display(),
             if t.requires_client_certs() {
@@ -205,7 +215,7 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
             }
         );
     } else {
-        println!("⚠️  TLS is not configured; traffic is plaintext. Pass --tls-cert/--tls-key to enable it.");
+        serve_info!("⚠️  TLS is not configured; traffic is plaintext. Pass --tls-cert/--tls-key to enable it.");
     }
 
     // Authorization. A cold instance has no principals and can authenticate nobody, so
@@ -231,7 +241,7 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("loading principals: {e}"))?;
         if loaded > 0 {
-            println!("🔑 Loaded {loaded} principal(s) from storage");
+            serve_info!("🔑 Loaded {loaded} principal(s) from storage");
         }
 
         if let Ok(token) = std::env::var("PRKDB_BOOTSTRAP_TOKEN") {
@@ -244,10 +254,10 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
                             .persist(db.storage().as_ref(), admin)
                             .await
                             .map_err(|e| anyhow::anyhow!("persisting bootstrap admin: {e}"))?;
-                        println!("🔑 Bootstrapped admin principal from PRKDB_BOOTSTRAP_TOKEN");
+                        serve_info!("🔑 Bootstrapped admin principal from PRKDB_BOOTSTRAP_TOKEN");
                     }
                     Err(prkdb::authz::BootstrapError::AlreadyInitialised { existing }) => {
-                        println!(
+                        serve_info!(
                             "🔑 PRKDB_BOOTSTRAP_TOKEN ignored; {existing} principal(s)                              already exist"
                         );
                     }
@@ -309,7 +319,7 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
              issue AppendEntries."
         );
     } else {
-        println!("🔒 Raft peer authentication: {}", peer_identity.describe());
+        serve_info!("🔒 Raft peer authentication: {}", peer_identity.describe());
     }
     let peer_identity_requires_tls = peer_identity.requires_tls();
     let peer_auth = prkdb::raft::peer_auth::PeerAuthInterceptor::new(peer_identity);
@@ -322,21 +332,61 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         Some(store.clone())
     };
 
-    let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
+    let requested_http: SocketAddr = format!("{}:{}", args.host, args.port)
+        .parse()
+        .context("parsing HTTP listen address")?;
+    let requested_grpc: SocketAddr = format!("{}:{}", args.host, args.grpc_port)
+        .parse()
+        .context("parsing gRPC listen address")?;
+
+    // SCH-02: validate the schema before binding either listener. Storage has already
+    // been opened above to load principals; this obtains the same managed instance.
+    let preflight_db = crate::database_manager::get_db_instance()
+        .await
+        .context("opening storage for schema validation")?;
+    let schema_storage_path =
+        crate::database_manager::try_get_database_manager()?.schema_storage_path();
+    let schema_service = prkdb::raft::grpc_service::PrkDbGrpcService::with_schema_storage_path(
+        std::sync::Arc::new(preflight_db),
+        std::env::var("PRKDB_ADMIN_TOKEN").unwrap_or_default(),
+        schema_storage_path,
+    )
+    .await
+    .context("loading the schema registry")?;
+
+    // Prepare HTTPS before tonic can configure TLS too. Both use the same installed
+    // crypto provider; neither may report success with invalid TLS material.
+    let https_config = if let Some(t) = &tls {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        Some(
+            axum_server::tls_rustls::RustlsConfig::from_pem(t.read_cert()?, t.read_key()?)
+                .await
+                .context("building the HTTPS listener from --tls-cert/--tls-key")?,
+        )
+    } else {
+        None
+    };
+
+    let listener = tokio::net::TcpListener::bind(requested_http)
+        .await
+        .with_context(|| format!("binding HTTP listener {requested_http}"))?;
+    let grpc_listener = tokio::net::TcpListener::bind(requested_grpc)
+        .await
+        .with_context(|| format!("binding gRPC listener {requested_grpc}"))?;
+    let addr = listener
+        .local_addr()
+        .context("reading HTTP listener address")?;
+    let grpc_addr = grpc_listener
+        .local_addr()
+        .context("reading gRPC listener address")?;
     let node_id_label = args.id.to_string();
 
-    println!("🚀 Starting PrkDB server on http://{}", addr);
-
-    if args.prometheus {
-        println!("📊 Prometheus metrics enabled at http://{}/metrics", addr);
-    }
-
     if args.cors {
-        println!("🌐 CORS enabled for web dashboards");
+        serve_info!("🌐 CORS enabled for web dashboards");
     }
 
     if args.websockets {
-        println!("⚡ WebSocket support enabled for real-time data");
+        serve_info!("⚡ WebSocket support enabled for real-time data");
     }
 
     // Create broadcast channel for WebSocket updates
@@ -370,7 +420,7 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         prkdb::prometheus_metrics::init_prometheus_metrics();
         prkdb::prometheus_metrics::SERVER_UP
             .with_label_values(&[&node_id_label])
-            .set(1.0);
+            .set(0.0);
     }
 
     let peer_grpc_overrides =
@@ -378,7 +428,7 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     let peer_http_overrides = parse_node_address_overrides(args.peer_http_addresses.as_deref())?;
     let advertised_http_address = resolve_advertised_http_address(
         &args.host,
-        args.port,
+        addr.port(),
         args.advertised_http_address.as_deref(),
     )?;
     let peer_http_addrs = build_peer_http_addresses(
@@ -481,7 +531,7 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     // resolving a credential, or the limiter cannot protect the thing it guards.
     let rate_limit = match args.rate_limit {
         Some(n) => {
-            println!("🚦 Rate limit: {n} requests/sec (probe endpoints exempt)");
+            serve_info!("🚦 Rate limit: {n} requests/sec (probe endpoints exempt)");
             crate::probes::RateLimit::per_second(n)
         }
         None => crate::probes::RateLimit::disabled(),
@@ -499,7 +549,7 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
 
     // Add CORS middleware if enabled
     let app = if args.cors {
-        app.layer(build_cors_layer(&args.host, args.port)?)
+        app.layer(build_cors_layer(&args.host, addr.port())?)
     } else {
         app
     };
@@ -523,12 +573,7 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     }
 
     // Start gRPC server in background
-    let grpc_port = args.grpc_port;
-    // Use the same host as HTTP server (default 127.0.0.1)
-    let grpc_addr_str = format!("{}:{}", args.host, grpc_port);
-    let grpc_addr: SocketAddr = grpc_addr_str
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Failed to parse gRPC address '{}': {}", grpc_addr_str, e))?;
+    let grpc_port = grpc_addr.port();
     let advertised_grpc_address = resolve_advertised_grpc_address(
         &args.host,
         grpc_port,
@@ -639,7 +684,7 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
             // client API, the policy is the same for all five RPCs, so it does not need
             // the method name the interceptor cannot see.
             if let Some(pm) = &db.partition_manager {
-                println!("✨ Multiplexing Raft Service (All Partitions) on main port");
+                serve_info!("✨ Multiplexing Raft Service (All Partitions) on main port");
                 let raft_service = RaftServiceImpl::new(pm.clone());
                 router = router.add_service(RaftServiceServer::with_interceptor(
                     raft_service,
@@ -729,6 +774,40 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
 
     println!("\n👋 Server shutting down...");
     Ok(())
+}
+
+async fn supervise_servers<H, G, S, F>(http: H, grpc: G, shutdown: S, stop: F) -> Result<()>
+where
+    H: std::future::Future<Output = Result<()>>,
+    G: std::future::Future<Output = Result<()>>,
+    S: std::future::Future<Output = ()>,
+    F: FnOnce(),
+{
+    tokio::pin!(http, grpc, shutdown);
+    let result = tokio::select! {
+        result = &mut http => Some(result.context("HTTP server stopped")
+            .and_then(|()| Err(anyhow::anyhow!("HTTP server stopped unexpectedly")))),
+        result = &mut grpc => Some(result.context("gRPC server stopped")
+            .and_then(|()| Err(anyhow::anyhow!("gRPC server stopped unexpectedly")))),
+        _ = &mut shutdown => None,
+    };
+    // Signal before dropping a sibling on failure. On normal shutdown, both serving
+    // futures finish before the caller flushes storage.
+    stop();
+    if let Some(result) = result {
+        result
+    } else {
+        let (http_result, grpc_result) = tokio::join!(http, grpc);
+        http_result.and(grpc_result)
+    }
+}
+
+async fn wait_for_shutdown(mut receiver: tokio::sync::watch::Receiver<bool>) {
+    while !*receiver.borrow_and_update() {
+        if receiver.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -2021,6 +2100,65 @@ fn build_cors_layer(host: &str, port: u16) -> Result<CorsLayer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn grpc_failure_propagates_and_drops_http_serving() {
+        let http_dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        struct Serving(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Serving {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let serving = Serving(http_dropped.clone());
+        let http = async move {
+            let _serving = serving;
+            std::future::pending::<Result<()>>().await
+        };
+        let stopped = stop_called.clone();
+        let error = supervise_servers(
+            http,
+            async { anyhow::bail!("gRPC transport failed") },
+            std::future::pending(),
+            move || stopped.store(true, std::sync::atomic::Ordering::SeqCst),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("gRPC transport failed"));
+        assert!(http_dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(stop_called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn shutdown_signals_and_waits_for_both_transports() {
+        let http_finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let grpc_finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let http_done = http_finished.clone();
+        let grpc_done = grpc_finished.clone();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let mut http_shutdown = shutdown_rx.clone();
+        let mut grpc_shutdown = shutdown_rx;
+        let http = async move {
+            http_shutdown.changed().await.unwrap();
+            assert!(*http_shutdown.borrow());
+            http_done.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        };
+        let grpc = async move {
+            grpc_shutdown.changed().await.unwrap();
+            assert!(*grpc_shutdown.borrow());
+            grpc_done.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        };
+        supervise_servers(http, grpc, std::future::ready(()), move || {
+            shutdown_tx.send_replace(true);
+        })
+        .await
+        .unwrap();
+        assert!(http_finished.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(grpc_finished.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     #[test]
     fn parse_node_address_overrides_normalizes_bare_addresses() {

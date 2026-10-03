@@ -130,8 +130,18 @@ impl ServerProcess {
         self.directory.path()
     }
 
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+
     pub fn diagnostics(&self) -> String {
         format!("stdout:\n{}\nstderr:\n{}", self.stdout(), self.stderr())
+    }
+
+    pub fn stop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.join_readers();
     }
 
     fn join_readers(&mut self) {
@@ -143,9 +153,7 @@ impl ServerProcess {
 
 impl Drop for ServerProcess {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        self.join_readers();
+        self.stop();
         // TempDir removes the owned database only after the process is reaped.
     }
 }

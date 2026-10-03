@@ -132,9 +132,13 @@ async fn ephemeral_ports_report_serving_endpoints_and_drop_closes_them() {
     let mut grpc = PrkDbServiceClient::connect(listening.grpc_url.clone())
         .await
         .unwrap();
-    grpc.metadata(MetadataRequest { topics: vec![] })
+    let metadata = grpc
+        .metadata(MetadataRequest { topics: vec![] })
         .await
-        .unwrap();
+        .unwrap()
+        .into_inner();
+    assert_eq!(metadata.nodes.len(), 1);
+    assert_eq!(metadata.nodes[0].address, listening.grpc_url);
 
     let stdout = process.stdout();
     let lines: Vec<_> = stdout.lines().collect();
@@ -173,4 +177,53 @@ async fn simultaneous_servers_own_distinct_endpoints_and_directories() {
     ];
     let unique: std::collections::HashSet<_> = endpoints.into_iter().collect();
     assert_eq!(unique.len(), 4);
+}
+
+#[tokio::test]
+async fn cancelling_startup_owner_reaps_child_before_removing_its_directory() {
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let mut process = ServerProcess::spawn(&["--port", "0", "--grpc-port", "0"]);
+        let listening = process.listening().await.unwrap();
+        started
+            .send((process.database_directory().to_path_buf(), listening))
+            .unwrap();
+        std::future::pending::<()>().await;
+        drop(process);
+    });
+    let (directory, listening) = tokio::time::timeout(std::time::Duration::from_secs(30), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(!directory.exists(), "cancelled owner leaked its directory");
+    assert!(tokio::net::TcpStream::connect(listening.http_address)
+        .await
+        .is_err());
+    assert!(tokio::net::TcpStream::connect(listening.grpc_address)
+        .await
+        .is_err());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sigterm_immediately_after_listening_record_exits_gracefully() {
+    let mut process = ServerProcess::spawn(&["--port", "0", "--grpc-port", "0"]);
+    process.listening().await.expect("listening record");
+    assert!(std::process::Command::new("kill")
+        .args(["-TERM", &process.id().to_string()])
+        .status()
+        .unwrap()
+        .success());
+    let status = process
+        .wait_for_exit()
+        .await
+        .expect("graceful SIGTERM exit");
+    assert!(status.success(), "{}", process.diagnostics());
+    assert!(
+        process.stderr().contains("Server shutting down"),
+        "{}",
+        process.diagnostics()
+    );
 }

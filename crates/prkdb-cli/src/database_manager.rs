@@ -68,7 +68,7 @@ impl DatabaseManager {
         if conn_guard.is_none() {
             // Check if Raft is enabled
             if let Some(raft_opts) = &self.raft_options {
-                println!(
+                eprintln!(
                     "🚀 Initializing PrkDB with Multi-Raft (Node ID: {})",
                     raft_opts.node_id
                 );
