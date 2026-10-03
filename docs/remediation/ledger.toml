@@ -796,7 +796,7 @@ regression_tests = ["script:scripts/wal_fast_rule.py", "script:scripts/check_per
 # thirteen/six exact scoped mutations; the assembled Linux inventory still needs
 # remeasurement. Neither these local replays nor the successful standalone
 # remediation gate establish that the programme phase gate is complete.
-changes = ["72d1c75", "a7a4c8c", "5c83909", "8474c33", "5b0ac78", "a1c13d6", "3443964", "4894e77", "2d0bfb5"]
+changes = ["72d1c75", "a7a4c8c", "5c83909", "8474c33", "5b0ac78", "a1c13d6", "3443964", "4894e77", "2d0bfb5", "bbde1f1585cd2fe25b3cba0e162e14908c37c5cb"]
 
 [[finding]]
 id = "TST-13"

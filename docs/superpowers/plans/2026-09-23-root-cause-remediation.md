@@ -6003,6 +6003,9 @@ Note §11.
   - `iai`: `bench_stream_append_100` and `bench_stream_read_100` with their floors in
     `check_perf_gate_floors.sh`.
 - [ ] **Step 2: Probe and decision record.**
+  - Carried over from the Step 1 review: the 3.0x/10.0x stream floors are provisional codec-based plausibility checks; record first Linux instruction counts before calibration, preserving the unchanged regression rule. All comparisons use explicit uncompressed stream/reference workloads.
+  - A T4 verdict requires segment reclamation during the measured append window; `T4 UNJUDGEABLE` rows are missing evidence, not passes.
+  - T5 requires a separately measured, matched 1 GiB stream/keyed reopen pair; `wal-bench` does not run `recovery_bench` and currently cannot establish T5. Acceptance: raw reopen times and a truthful T5 verdict. Fixing/evidence commit: open.
   - Linux probe `probe=wal-bench` (maintainer-approved push per D10).
   - Decision record with raw rows and the T1–T5 verdicts. A miss goes to the maintainer with
     the cause and is not tuned away.
