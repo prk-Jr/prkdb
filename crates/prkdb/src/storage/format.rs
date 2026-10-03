@@ -87,7 +87,6 @@ enum MarkerParseError {
     UnknownKind { kind: String, format: u32 },
     ChecksumMismatch,
     MissingChecksum,
-    UnsupportedVersion(u32),
 }
 
 /// The key of the marker's integrity line (see the module docs).
@@ -158,16 +157,11 @@ impl FormatMarker {
 
     #[cfg(test)]
     fn parse(text: &str) -> Option<Self> {
-        Self::parse_checked(text).ok()
+        let format = Self::parse_version(text).ok()?;
+        Self::parse_checked(text, format).ok()
     }
 
-    fn parse_checked(text: &str) -> Result<Self, MarkerParseError> {
-        // Only the unique frozen version line is shared with a future schema. Do
-        // not apply this build's checksum/kind rules before recognizing it.
-        let format = Self::parse_version(text)?;
-        if format > FORMAT_VERSION {
-            return Err(MarkerParseError::UnsupportedVersion(format));
-        }
+    fn parse_checked(text: &str, format: u32) -> Result<Self, MarkerParseError> {
         let covered = match split_checksum(text)? {
             Some((body, value)) if value == checksum_value(body) => Some(body),
             Some(_) => return Err(MarkerParseError::ChecksumMismatch),
@@ -336,11 +330,16 @@ pub fn read_format_with(vfs: &dyn Vfs, dir: &Path) -> Result<Option<FormatMarker
         ))
     };
     let text = std::str::from_utf8(&buf).map_err(|_| unreadable())?;
-    FormatMarker::parse_checked(text)
+    // The reader's version policy precedes current schema checks; the pure syntax
+    // parser can still recognize a quoted future number without opening a directory.
+    let format = FormatMarker::parse_version(text).map_err(|_| unreadable())?;
+    if format > FORMAT_VERSION {
+        return Err(unsupported_format(dir, format));
+    }
+    FormatMarker::parse_checked(text, format)
         .map(Some)
         .map_err(|e| match e {
             MarkerParseError::Invalid => unreadable(),
-            MarkerParseError::UnsupportedVersion(format) => unsupported_format(dir, format),
             MarkerParseError::ChecksumMismatch => StorageError::Corruption(format!(
                 "{}: format marker checksum does not match its contents, or is not its last line",
                 path.display()
