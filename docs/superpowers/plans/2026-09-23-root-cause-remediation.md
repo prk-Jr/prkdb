@@ -6979,6 +6979,35 @@ shutdown durability to `wip-wal-shutdown-tests`. Shutdown slice fixed by 3443964
 (STO-19, seven deterministic regressions). Remaining slices must be completed
 before the phase gate. Remaining coverage slices and the assembled Linux gate: open.
 
+**Latest checkpoint (`ff5d993`, 2026-10-03):** Linux full remediation run
+37044841742 passes, including 10000 crash seeds per mode; CI coverage passes.
+CI mutation inventory still fails with 100 missed core mutants, 357 caught,
+54 unviable and 8 timeouts. The targeted mutation baseline also exposes a CLI
+listener ownership/startup failure; `wip-cli-listener-startup` owns its root fix.
+Metadata/watch coverage `4894e77` catches thirteen exact selected mutations and
+codec boundaries `2d0bfb5` catches six; both full local checks pass. Remeasure the
+assembled Linux inventory before reporting a remaining count or a green gate.
+The balanced-preset replacement is individually equivalent but remains unexcluded;
+resource-allocation mutants require an actual witness or an individual proof.
+
+**Performance evidence:** paired Linux `wal_write_path`, baseline `d8248e5` to
+`ff5d993`, Rust 1.98.1, run 37084352924, three repetitions per cell: Fast adapter
+throughput delta -1.78%..+3.92%; raw Fast -2.44%..+1.59%; raw Durable
++0.49%..+9.45% (descriptive, not a causal speedup claim). The unchanged 15% Fast
+rule passes. Raw Fast 64 writers / 64 KiB median p99/p99.9 remains 53.09 / 55.88 ms;
+compaction p99 spans 0.363..29.106 ms. The 50x compaction rule remains provisional;
+absolute budgets, Durable adapter cells and reclaimed-byte progress remain open.
+Separate head instruction probes show no count increase in 13 matched benchmarks,
+but are not the formal paired 5% instruction gate.
+
+**Compression follow-up:** the LZ4 encoder hard-codes level 4 while presets publish
+other levels; the shared `compression_level` field documents Zstd semantics and
+Zstd honors it. Benchmark the LZ4 preset policy explicitly before claiming its
+level 1 setting buys speed. Destination: this task's performance baseline; acceptance:
+`test:crates/prkdb-core/tests/wal_compression_policy.rs::lz4_preset_matches_its_documented_encoder_policy`
+and paired codec/end-to-end CPU, ratio and tail-latency measurements; fixing commit: open.
+
+
 - [ ] **Step 1: Baseline, both modes, without an environment variable.** Spec §6.1 wants every metric in Durable and Fast. Each §6.1 bench builds its own `WalConfig`, so the mode is chosen in the bench source, per benchmark id, and one run captures both:
 
 | §6.1 bench | Storage it builds today | Durable vs Fast |

@@ -781,7 +781,7 @@ evidence = [
   ".github/workflows/ci.yml:208",
   ".github/workflows/ci.yml:353",
 ]
-regression_tests = ["script:scripts/wal_fast_rule.py", "script:scripts/check_perf_gate_floors.sh", "ci-job:ci.yml/perf-gate-floors", "ci-job:remediation-gate.yml/probe-wal-bench", "ci-job:ci.yml/mutants-core", "test:crates/prkdb-core/tests/wal_shutdown.rs::close_syncs_acknowledged_fast_write_before_returning", "test:crates/prkdb-core/tests/wal_shutdown.rs::drop_waits_for_final_sync_of_acknowledged_fast_write", "test:crates/prkdb-core/tests/wal_shutdown.rs::close_returns_final_fast_sync_failure"]
+regression_tests = ["script:scripts/wal_fast_rule.py", "script:scripts/check_perf_gate_floors.sh", "ci-job:ci.yml/perf-gate-floors", "ci-job:remediation-gate.yml/probe-wal-bench", "ci-job:ci.yml/mutants-core", "test:crates/prkdb-core/tests/wal_shutdown.rs::close_syncs_acknowledged_fast_write_before_returning", "test:crates/prkdb-core/tests/wal_shutdown.rs::drop_waits_for_final_sync_of_acknowledged_fast_write", "test:crates/prkdb-core/tests/wal_shutdown.rs::close_returns_final_fast_sync_failure", "test:crates/prkdb-core/tests/wal_metadata.rs::log_bytes_counts_headers_and_payloads_across_every_segment_after_reopen", "test:crates/prkdb-core/tests/wal_metadata.rs::delete_compaction_floor_is_monotonic_and_persisted_before_reopen", "test:crates/prkdb-core/tests/wal_metadata.rs::subscribing_at_the_same_ack_does_not_wake_existing_receivers", "test:crates/prkdb-core/tests/wal_metadata.rs::advancing_log_start_persists_it_without_losing_the_compaction_floor", "test:crates/prkdb-core/tests/wal_codec_boundaries.rs::throughput_preset_keeps_its_higher_threshold_and_fast_level", "test:crates/prkdb-core/tests/wal_codec_boundaries.rs::compression_preset_uses_zstd_at_its_lower_threshold", "test:crates/prkdb-core/tests/wal_codec_boundaries.rs::compression_starts_at_the_threshold_inclusively", "test:crates/prkdb-core/tests/wal_codec_boundaries.rs::uncompressed_decompression_accepts_the_exact_bound_including_zero", "test:crates/prkdb-core/tests/wal_codec_boundaries.rs::a_tiny_batch_records_the_codec_actually_used", "test:crates/prkdb-core/tests/wal_codec_boundaries.rs::an_exact_limit_frame_length_is_validated_before_payload_completeness"]
 # 72d1c75 benchmark job built examples deleted in Task 2.9; a7a4c8c wal_fast_rule.py
 # compared only cells present on both sides, passed a zero reference as ratio inf and
 # ignored rep counts, and nothing enforced the compaction p99 the bench claimed was gated
@@ -792,7 +792,11 @@ regression_tests = ["script:scripts/wal_fast_rule.py", "script:scripts/check_per
 # existing benchmark new. extract --self-test covers empty and partial inventories.
 # Enabling mutation CI exposed 106 core survivors on d8248e5; its checks are working,
 # but those behavioral coverage gaps remain required work before Task 2.25's gate.
-changes = ["72d1c75", "a7a4c8c", "5c83909", "8474c33", "5b0ac78", "a1c13d6", "3443964"]
+# The ff5d993 run has 100 survivors. Metadata 4894e77 and codec 2d0bfb5 catch
+# thirteen/six exact scoped mutations; the assembled Linux inventory still needs
+# remeasurement. Neither these local replays nor the successful standalone
+# remediation gate establish that the programme phase gate is complete.
+changes = ["72d1c75", "a7a4c8c", "5c83909", "8474c33", "5b0ac78", "a1c13d6", "3443964", "4894e77", "2d0bfb5"]
 
 [[finding]]
 id = "TST-13"
