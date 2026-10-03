@@ -5911,9 +5911,9 @@ beyond the original review's file list must be reported explicitly.
    256 in the design note. Test cap acceptance in the codec and rejection above it
    without allocating/opening partition directories.
    Commit `fix: bound stream manifest partition counts`.
-4. Existing STREAM requires a stream FORMAT in every declared partition. Refuse wiped
-   or wrong-kind partitions before WAL recovery; reject extra partition_N directories
-   outside the count. Retained log_start > 1 cannot prove interrupted creation empty.
+4. Existing STREAM requires a stream FORMAT and at least one WAL segment in every
+   declared partition. Refuse wiped or wrong-kind partitions before WAL recovery;
+   reject extra partition_N directories outside the count and numeric aliases. Retained log_start > 1 cannot prove interrupted creation empty.
    Commit `fix: refuse incomplete published stream containers`.
 5. Pass Kind to Migration::run, preserve stream markers, and walk STREAM partitions.
    Commit `fix: preserve directory kind during migrations`.

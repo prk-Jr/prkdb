@@ -3,6 +3,7 @@
 use super::manifest::{StreamManifest, StreamManifestError, MAX_STREAM_PARTITIONS};
 use super::{AppendAck, Record, StreamConfig, StreamLog};
 use crate::catalog::Catalog;
+use crate::storage::format::{read_format_with, unsupported_format, Kind, FORMAT_VERSION};
 use crate::storage::lock::lock_data_dir;
 use crate::storage::wal_adapter::wal_err;
 use prkdb_core::vfs::{create_dir_all_durable, LockGuard, OpenMode, StdVfs, Vfs};
@@ -81,6 +82,13 @@ fn read_manifest(vfs: &dyn Vfs, path: &Path) -> Result<StreamManifest, StorageEr
 }
 
 fn has_frames(vfs: &dyn Vfs, dir: &Path) -> Result<bool, StorageError> {
+    if prkdb_core::wal::LogState::read(vfs, dir)
+        .map_err(wal_err)?
+        .log_start
+        > 1
+    {
+        return Ok(true);
+    }
     let mut segments: Vec<_> = vfs
         .read_dir(dir)
         .map_err(|e| io_error(dir, e))?
@@ -122,7 +130,7 @@ fn has_frames(vfs: &dyn Vfs, dir: &Path) -> Result<bool, StorageError> {
 
 fn incomplete(nonempty: &[PathBuf]) -> StorageError {
     StorageError::Validation(format!(
-        "STREAM manifest is missing, but these partition directories contain frames: {}",
+        "STREAM manifest is missing, but these partition directories contain frames or retained history: {}",
         nonempty
             .iter()
             .map(|p| p.display().to_string())
@@ -177,6 +185,18 @@ impl PartitionedStream {
                 }
                 let manifest_path = root.join("STREAM");
                 let creating = !vfs.exists(&manifest_path).map_err(|e| io_error(&manifest_path, e))?;
+                for path in &entries {
+                    if let Some(number) = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_prefix("partition_")) {
+                        if !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) {
+                            let canonical = number.parse::<u32>().ok().is_some_and(|p| p < partitions && number == p.to_string());
+                            if !canonical {
+                                return Err(StorageError::Validation(format!(
+                                    "unexpected partition directory {} is outside stream's {partitions} partitions or has a noncanonical name", path.display()
+                                )));
+                            }
+                        }
+                    }
+                }
                 let mut existing_locks = Vec::new();
                 if creating {
                     let mut nonempty = Vec::new();
@@ -197,6 +217,23 @@ impl PartitionedStream {
                         let dir = root.join(format!("partition_{p}"));
                         if !vfs.exists(&dir).map_err(|e| io_error(&dir, e))? {
                             return Err(corruption(&manifest_path, format!("missing partition directory {}", dir.display())));
+                        }
+                        let marker = read_format_with(vfs.as_ref(), &dir)?;
+                        let Some(marker) = marker.filter(|m| m.kind == Kind::Stream) else {
+                            return Err(corruption(&manifest_path, format!(
+                                "published partition {} requires a FORMAT marker of kind stream; refusing to recreate it", dir.display()
+                            )));
+                        };
+                        if marker.format != FORMAT_VERSION {
+                            return Err(unsupported_format(&dir, marker.format));
+                        }
+                        // Publication follows every partition's durable initial segment.
+                        // Even with a surviving FORMAT, an empty WAL set is data loss;
+                        // opening it as fresh would reuse offsets starting at LSN 1.
+                        if !vfs.read_dir(&dir).map_err(|e| io_error(&dir, e))?.iter().any(|path| path.file_name().and_then(|name| name.to_str()).and_then(parse_segment_file_name).is_some()) {
+                            return Err(corruption(&manifest_path, format!(
+                                "published partition {} has no WAL segment; refusing to recreate its log", dir.display()
+                            )));
                         }
                     }
                 }

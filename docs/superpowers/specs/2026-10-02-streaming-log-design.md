@@ -136,8 +136,15 @@ refusal has to be explicit, and why it must land before the format freezes (§5.
 - **Creation order:** create every `partition_<i>/` (each through `ensure_format`), then
   write `STREAM` atomically (tmp → `sync_data` → rename → `sync_dir(root)`).
   - On open, a root that has partition directories but no `STREAM` was cut off during
-    creation. If every partition directory holds no segment with a frame, creation is
-    finished. Otherwise the open is refused, naming the directories.
+    creation. Creation is finished only when every partition has no frame and no
+    retained history (`LOG_STATE.log_start <= 1`). Otherwise open refuses and names
+    the directories.
+  - Once `STREAM` exists, every declared partition must retain its stream-kind
+    `FORMAT` and at least one WAL segment. All partitions are checked before any WAL
+    recovery begins; missing identity or a wiped WAL set must never recreate LSN 1.
+  - Numeric partition directories must use canonical `partition_<n>` names and
+    `n < N`; extra directories and aliases such as `partition_00` are refused before
+    provisioning or recovery, preserving their bytes.
 - `partition_<n>` matches the multi-raft layout's naming (Task 2.11).
 - Stream names given by users go through `catalog::validate_name` (SCH-01's allowlist)
   before they become path components.
@@ -904,7 +911,7 @@ kind checked before the CRC) is fixed in 2.15b.1. EVT-07 (`Fast` cursor reuse) i
 | **2.15b.2** Record codec + `EventSeq` *(before 2.24)* | `FrameKind::Records`, `wal/records.rs`, `peek_header`; `prkdb_types::event::EventSeq` per Task 2.20's spec if 2.20 has not landed; `records_decode` fuzz target; corpus updates. | — |
 | **2.15b.3** `StreamLog` core *(before 2.24)* | `FORMAT` `kind` (+ refusals both ways), `LOCK`, open/append/read_from/read_durable_from (async, `spawn_blocking`)/wait_for/sync/close, sparse index, offsets, `StartAt`, `OffsetOutOfRange`; the `STREAM` manifest codec + `stream_manifest_parse` fuzz target (used by .5). | .1, .2, 2.11, 2.11b |
 | **2.15b.4** Retention | `RetentionPolicy` (default none), `Clock`, eligibility, quiet-segment roll, background task with stop-on-drop (as compaction's), crash-point tests, `RetentionReport`. | .3 |
-| **2.15b.5** Partitions | `PartitionedStream`, manifest write/read rules, routing through the 2.13 partitioner, creation crash rules. | .3, 2.13 |
+| **2.15b.5** Partitions | `PartitionedStream`, manifest write/read rules, raw-byte SeaHash routing (KV 2.13 partitioner unchanged), creation crash rules. | .3, 2.13 |
 | **2.15b.6** Consumers + EVT-07 (streams) | Step 1 *(before 2.24)*: the versioned offset record in `StorageOffsetStore` (reads the old encoding). Then `StreamConsumer` on `OffsetStore`/`ConsumerGroupCoordinator`, `__offsets` default store, out-of-range policy, frame-CRC check → `OffsetDiverged`. | .5 |
 | **2.15b.7** Harness | Stream SUT/model/ops/checker, discovery then blocking profile, 1,000 seeds per mode; kv harness gains a change-feed consumer for EVT-07. | .4, .5, .6, .10 |
 | **2.15b.8** Performance + docs | `wal_write_path` cells (§11.1), `pread` ceiling row, iai benches + floor, Linux probe run, results and T1–T5 verdicts in a decision record, user docs with measured numbers only. | .4, .5 |

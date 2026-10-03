@@ -95,7 +95,7 @@ async fn interrupted_creation_finishes_only_when_every_partition_has_no_frames()
                 (wal, bytes)
             })
             .collect();
-        let result = open(&root, 3).await;
+        let result = open(&root, 10).await;
         if nonempty {
             let error = result.err().unwrap().to_string();
             assert!(
@@ -624,5 +624,178 @@ async fn excessive_persisted_partition_count_reports_limit_without_modification(
         );
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         assert!(!root.join("partition_1").exists());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn published_wiped_partition_refuses_before_any_partition_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("orders");
+    let stream = open(&root, 2).await.unwrap();
+    stream.append(Route::Partition(0), rec()).await.unwrap();
+    stream.close().unwrap();
+    let earlier = root
+        .join("partition_0")
+        .join(prkdb_core::wal::segment::segment_file_name(1));
+    let mut before = std::fs::read(&earlier).unwrap();
+    before.extend_from_slice(&[1, 2, 3]);
+    std::fs::write(&earlier, &before).unwrap();
+    let wiped = root.join("partition_1");
+    for entry in std::fs::read_dir(&wiped).unwrap() {
+        std::fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    let result = open(&root, 2).await;
+    assert!(
+        matches!(result, Err(StorageError::Corruption(_))),
+        "a published partition must not be recreated"
+    );
+    assert_eq!(std::fs::read(&earlier).unwrap(), before);
+    assert_eq!(std::fs::read_dir(&wiped).unwrap().count(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn published_partition_requires_a_stream_marker_before_recovery() {
+    for wrong_kind in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("orders");
+        let stream = open(&root, 2).await.unwrap();
+        stream.append(Route::Partition(0), rec()).await.unwrap();
+        stream.close().unwrap();
+        let earlier = root
+            .join("partition_0")
+            .join(prkdb_core::wal::segment::segment_file_name(1));
+        let mut before = std::fs::read(&earlier).unwrap();
+        before.extend_from_slice(&[1, 2, 3]);
+        std::fs::write(&earlier, &before).unwrap();
+        let marker = root.join("partition_1/FORMAT");
+        if wrong_kind {
+            std::fs::write(&marker, b"format = 2\ncreated_by = \"0.6.0\"\n").unwrap();
+        } else {
+            std::fs::remove_file(&marker).unwrap();
+        }
+        assert!(matches!(
+            open(&root, 2).await,
+            Err(StorageError::Corruption(_))
+        ));
+        assert_eq!(std::fs::read(&earlier).unwrap(), before);
+        assert_eq!(marker.exists(), wrong_kind);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn out_of_range_partition_directories_are_refused_without_provisioning() {
+    for published in [false, true] {
+        for name in ["partition_1", "partition_4294967296"] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("orders");
+            if published {
+                open(&root, 1).await.unwrap().close().unwrap();
+            } else {
+                std::fs::create_dir(&root).unwrap();
+            }
+            let extra = root.join(name);
+            std::fs::create_dir(&extra).unwrap();
+            assert!(
+                open(&root, 1).await.is_err(),
+                "unexpected {name}, published={published}"
+            );
+            assert_eq!(std::fs::read_dir(&extra).unwrap().count(), 0);
+            assert_eq!(root.join("STREAM").exists(), published);
+            assert_eq!(root.join("partition_0").exists(), published);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retained_empty_partition_cannot_finish_manifest_creation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("orders");
+    let partition = root.join("partition_0");
+    StreamLog::open(StreamConfig::new(&partition))
+        .await
+        .unwrap()
+        .close()
+        .unwrap();
+    std::fs::remove_file(partition.join(prkdb_core::wal::segment::segment_file_name(1))).unwrap();
+    let state = prkdb_core::wal::LogState {
+        log_start: 3,
+        deletes_compacted_through: 0,
+    };
+    state.write(&StdVfs, &partition).unwrap();
+    let before = std::fs::read(partition.join("LOG_STATE")).unwrap();
+    assert!(matches!(
+        open(&root, 1).await,
+        Err(StorageError::Validation(_))
+    ));
+    assert!(!root.join("STREAM").exists());
+    assert_eq!(std::fs::read(partition.join("LOG_STATE")).unwrap(), before);
+    assert!(!partition
+        .join(prkdb_core::wal::segment::segment_file_name(3))
+        .exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn published_partition_with_only_format_refuses_before_any_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("orders");
+    let stream = open(&root, 2).await.unwrap();
+    stream.append(Route::Partition(1), rec()).await.unwrap();
+    stream.close().unwrap();
+    let earlier = root
+        .join("partition_0")
+        .join(prkdb_core::wal::segment::segment_file_name(1));
+    let mut before = std::fs::read(&earlier).unwrap();
+    before.extend_from_slice(&[1, 2, 3]);
+    std::fs::write(&earlier, &before).unwrap();
+    let wiped = root.join("partition_1");
+    for entry in std::fs::read_dir(&wiped).unwrap() {
+        let path = entry.unwrap().path();
+        if path.file_name().unwrap() != "FORMAT" {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    let marker = std::fs::read(wiped.join("FORMAT")).unwrap();
+    assert!(matches!(
+        open(&root, 2).await,
+        Err(StorageError::Corruption(_))
+    ));
+    assert_eq!(std::fs::read(&earlier).unwrap(), before);
+    assert_eq!(std::fs::read(wiped.join("FORMAT")).unwrap(), marker);
+    assert_eq!(std::fs::read_dir(wiped).unwrap().count(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn numeric_partition_aliases_are_refused_without_recovery_or_data_loss() {
+    for published in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("orders");
+        if published {
+            open(&root, 1).await.unwrap().close().unwrap();
+        } else {
+            std::fs::create_dir(&root).unwrap();
+        }
+        let alias = root.join("partition_00");
+        std::fs::create_dir(&alias).unwrap();
+        let evidence = alias.join("00000000000000000001.wal");
+        std::fs::write(&evidence, b"preserve aliased partition bytes").unwrap();
+        let result = open(&root, 1).await;
+        let Err(StorageError::Validation(message)) = result else {
+            panic!(
+                "numeric aliases must be explicitly refused, got {}",
+                if result.is_ok() {
+                    "success"
+                } else {
+                    "another error"
+                }
+            );
+        };
+        assert!(message.contains("partition_00"), "{message}");
+        assert_eq!(
+            std::fs::read(evidence).unwrap(),
+            b"preserve aliased partition bytes"
+        );
+        assert_eq!(std::fs::read_dir(alias).unwrap().count(), 1);
+        assert_eq!(root.join("STREAM").exists(), published);
+        assert_eq!(root.join("partition_0").exists(), published);
     }
 }
