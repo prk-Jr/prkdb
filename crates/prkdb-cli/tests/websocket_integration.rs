@@ -1,108 +1,42 @@
 use futures_util::StreamExt;
 use prkdb_client::{ClientConfig, PrkDbClient, WsConfig, WsConsumer, WsEvent};
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tokio::time::sleep;
 
+#[path = "common/server.rs"]
+pub mod server;
+
 struct TestServer {
-    process: Child,
+    _process: server::ServerProcess,
     http_port: u16,
     grpc_port: u16,
-    db_path: PathBuf,
 }
 
 impl TestServer {
     async fn start() -> Self {
-        let http_port = 18080 + (rand::random::<u16>() % 1000);
-        let grpc_port = 50051 + (rand::random::<u16>() % 1000);
-        let db_path = PathBuf::from(format!("test_prkdb_{}.db", http_port));
+        use prkdb_proto::raft::{prk_db_service_client::PrkDbServiceClient, MetadataRequest};
 
-        // Ensure clean slate
-        if db_path.exists() {
-            let _ = std::fs::remove_dir_all(&db_path);
-        }
-
-        // Use the binary built by cargo for integration tests
-        let binary_path = env!("CARGO_BIN_EXE_prkdb-cli");
-        println!("Using binary: {}", binary_path);
-        println!("Using database: {:?}", db_path);
-
-        let child = Command::new(binary_path)
-            .arg("--database")
-            .arg(&db_path)
-            .arg("serve")
-            .arg("--websockets")
-            .arg("--host")
-            .arg("127.0.0.1")
-            .arg("--port")
-            .arg(http_port.to_string())
-            .arg("--grpc-port")
-            .arg(grpc_port.to_string())
-            // These tests exercise WebSocket streaming, not authorization, which has its
-            // own suite in http_authz.rs. Since Task 1 the server refuses to start with
-            // no principals, so the opt-out has to be explicit.
-            .arg("--allow-anonymous")
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("Failed to spawn prkdb-cli");
-
-        // Wait for server to start
-        let client = reqwest::Client::new();
-        let health_url = format!("http://127.0.0.1:{}/health", http_port);
-
-        let mut attempts = 0;
-        loop {
-            if client.get(&health_url).send().await.is_ok() {
-                break;
-            }
-            // 30s, not 3. Three seconds is enough on a developer machine and not under
-            // llvm-cov instrumentation on a shared runner, which is where this failed —
-            // the Coverage job runs the whole workspace instrumented. The other harnesses
-            // in this repository allow 15-30s for the same reason.
-            if attempts > 300 {
-                panic!("Server failed to start after 30 seconds");
-            }
-            sleep(Duration::from_millis(100)).await;
-            attempts += 1;
-        }
-
-        let grpc_url = format!("http://127.0.0.1:{}", grpc_port);
-        let mut grpc_attempts = 0;
-        loop {
-            if PrkDbClient::with_config(vec![grpc_url.clone()], ClientConfig::default())
+        let mut process =
+            server::ServerProcess::spawn(&["--websockets", "--port", "0", "--grpc-port", "0"]);
+        let listening = process.listening().await.expect("server listening record");
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let response = reqwest::get(format!("{}/health", listening.http_url))
                 .await
-                .is_ok()
-            {
-                break;
-            }
-
-            if grpc_attempts > 300 {
-                panic!("gRPC server failed to start after 30 seconds");
-            }
-
-            sleep(Duration::from_millis(100)).await;
-            grpc_attempts += 1;
-        }
-
+                .expect("HTTP health request");
+            assert!(response.status().is_success());
+            let mut grpc = PrkDbServiceClient::connect(listening.grpc_url.clone())
+                .await
+                .expect("gRPC endpoint");
+            grpc.metadata(MetadataRequest { topics: vec![] })
+                .await
+                .expect("gRPC metadata request");
+        })
+        .await
+        .expect("both owned endpoints must serve within the startup deadline");
         Self {
-            process: child,
-            http_port,
-            grpc_port,
-            db_path,
-        }
-    }
-}
-
-impl Drop for TestServer {
-    fn drop(&mut self) {
-        let _ = self.process.kill();
-        let _ = self.process.wait();
-
-        // Clean up database directory
-        if self.db_path.exists() {
-            let _ = std::fs::remove_dir_all(&self.db_path);
+            _process: process,
+            http_port: listening.http_address.port(),
+            grpc_port: listening.grpc_address.port(),
         }
     }
 }
@@ -110,7 +44,7 @@ impl Drop for TestServer {
 #[tokio::test]
 async fn test_websocket_streaming_flow() {
     // 1. Start Server
-    let server = TestServer::start().await;
+    let mut server = TestServer::start().await;
     let collection = "ws-test-collection";
 
     // 2. Setup WebSocket Client
@@ -174,6 +108,20 @@ async fn test_websocket_streaming_flow() {
     }
 
     assert!(found, "Did not receive WebSocket update for inserted data");
+    // Reap and drain the child before inspecting all output, so the assertion does
+    // not race a pipe-reader thread or delayed WebSocket diagnostic.
+    server._process.stop();
+    let stdout = server._process.stdout();
+    let records: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("JSON serve stdout after WebSocket traffic"))
+        .collect();
+    assert_eq!(
+        records.len(),
+        1,
+        "unexpected serve stdout records: {stdout}"
+    );
+    assert_eq!(records[0]["event"], "server_listening");
 }
 
 #[tokio::test]

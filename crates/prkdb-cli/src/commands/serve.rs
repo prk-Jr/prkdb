@@ -184,7 +184,17 @@ impl<T> ApiResponse<T> {
     }
 }
 
-pub async fn handle_serve(args: ServeArgs) -> Result<()> {
+pub async fn handle_serve(args: ServeArgs, output_format: crate::OutputFormat) -> Result<()> {
+    let json_output = matches!(output_format, crate::OutputFormat::Json);
+    macro_rules! serve_info {
+        ($($arguments:tt)*) => {
+            if json_output {
+                eprintln!($($arguments)*);
+            } else {
+                println!($($arguments)*);
+            }
+        };
+    }
     // Resolve TLS before binding anything. A server that binds first and discovers an
     // unreadable key on the first handshake has already advertised a port it cannot
     // serve; worse, one that silently falls back to plaintext is exactly the failure
@@ -195,7 +205,7 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         args.tls_client_ca.clone(),
     )?;
     if let Some(t) = &tls {
-        println!(
+        serve_info!(
             "🔒 TLS enabled (cert {}){}",
             t.cert.display(),
             if t.requires_client_certs() {
@@ -205,7 +215,7 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
             }
         );
     } else {
-        println!("⚠️  TLS is not configured; traffic is plaintext. Pass --tls-cert/--tls-key to enable it.");
+        serve_info!("⚠️  TLS is not configured; traffic is plaintext. Pass --tls-cert/--tls-key to enable it.");
     }
 
     // Authorization. A cold instance has no principals and can authenticate nobody, so
@@ -231,7 +241,7 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("loading principals: {e}"))?;
         if loaded > 0 {
-            println!("🔑 Loaded {loaded} principal(s) from storage");
+            serve_info!("🔑 Loaded {loaded} principal(s) from storage");
         }
 
         if let Ok(token) = std::env::var("PRKDB_BOOTSTRAP_TOKEN") {
@@ -244,10 +254,10 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
                             .persist(db.storage().as_ref(), admin)
                             .await
                             .map_err(|e| anyhow::anyhow!("persisting bootstrap admin: {e}"))?;
-                        println!("🔑 Bootstrapped admin principal from PRKDB_BOOTSTRAP_TOKEN");
+                        serve_info!("🔑 Bootstrapped admin principal from PRKDB_BOOTSTRAP_TOKEN");
                     }
                     Err(prkdb::authz::BootstrapError::AlreadyInitialised { existing }) => {
-                        println!(
+                        serve_info!(
                             "🔑 PRKDB_BOOTSTRAP_TOKEN ignored; {existing} principal(s)                              already exist"
                         );
                     }
@@ -309,7 +319,7 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
              issue AppendEntries."
         );
     } else {
-        println!("🔒 Raft peer authentication: {}", peer_identity.describe());
+        serve_info!("🔒 Raft peer authentication: {}", peer_identity.describe());
     }
     let peer_identity_requires_tls = peer_identity.requires_tls();
     let peer_auth = prkdb::raft::peer_auth::PeerAuthInterceptor::new(peer_identity);
@@ -322,21 +332,61 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         Some(store.clone())
     };
 
-    let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
+    let requested_http: SocketAddr = format!("{}:{}", args.host, args.port)
+        .parse()
+        .context("parsing HTTP listen address")?;
+    let requested_grpc: SocketAddr = format!("{}:{}", args.host, args.grpc_port)
+        .parse()
+        .context("parsing gRPC listen address")?;
+
+    // SCH-02: validate the schema before binding either listener. Storage has already
+    // been opened above to load principals; this obtains the same managed instance.
+    let preflight_db = crate::database_manager::get_db_instance()
+        .await
+        .context("opening storage for schema validation")?;
+    let schema_storage_path =
+        crate::database_manager::try_get_database_manager()?.schema_storage_path();
+    let schema_service = prkdb::raft::grpc_service::PrkDbGrpcService::with_schema_storage_path(
+        std::sync::Arc::new(preflight_db),
+        std::env::var("PRKDB_ADMIN_TOKEN").unwrap_or_default(),
+        schema_storage_path,
+    )
+    .await
+    .context("loading the schema registry")?;
+
+    // Prepare HTTPS before tonic can configure TLS too. Both use the same installed
+    // crypto provider; neither may report success with invalid TLS material.
+    let https_config = if let Some(t) = &tls {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        Some(
+            axum_server::tls_rustls::RustlsConfig::from_pem(t.read_cert()?, t.read_key()?)
+                .await
+                .context("building the HTTPS listener from --tls-cert/--tls-key")?,
+        )
+    } else {
+        None
+    };
+
+    let listener = tokio::net::TcpListener::bind(requested_http)
+        .await
+        .with_context(|| format!("binding HTTP listener {requested_http}"))?;
+    let grpc_listener = tokio::net::TcpListener::bind(requested_grpc)
+        .await
+        .with_context(|| format!("binding gRPC listener {requested_grpc}"))?;
+    let addr = listener
+        .local_addr()
+        .context("reading HTTP listener address")?;
+    let grpc_addr = grpc_listener
+        .local_addr()
+        .context("reading gRPC listener address")?;
     let node_id_label = args.id.to_string();
 
-    println!("🚀 Starting PrkDB server on http://{}", addr);
-
-    if args.prometheus {
-        println!("📊 Prometheus metrics enabled at http://{}/metrics", addr);
-    }
-
     if args.cors {
-        println!("🌐 CORS enabled for web dashboards");
+        serve_info!("🌐 CORS enabled for web dashboards");
     }
 
     if args.websockets {
-        println!("⚡ WebSocket support enabled for real-time data");
+        serve_info!("⚡ WebSocket support enabled for real-time data");
     }
 
     // Create broadcast channel for WebSocket updates
@@ -370,7 +420,7 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
         prkdb::prometheus_metrics::init_prometheus_metrics();
         prkdb::prometheus_metrics::SERVER_UP
             .with_label_values(&[&node_id_label])
-            .set(1.0);
+            .set(0.0);
     }
 
     let peer_grpc_overrides =
@@ -378,9 +428,14 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     let peer_http_overrides = parse_node_address_overrides(args.peer_http_addresses.as_deref())?;
     let advertised_http_address = resolve_advertised_http_address(
         &args.host,
-        args.port,
+        addr.port(),
         args.advertised_http_address.as_deref(),
     )?;
+    let advertised_http_address = if tls.is_some() && args.advertised_http_address.is_none() {
+        advertised_http_address.map(|address| address.replacen("http://", "https://", 1))
+    } else {
+        advertised_http_address
+    };
     let peer_http_addrs = build_peer_http_addresses(
         args.id,
         advertised_http_address.as_deref(),
@@ -481,7 +536,7 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     // resolving a credential, or the limiter cannot protect the thing it guards.
     let rate_limit = match args.rate_limit {
         Some(n) => {
-            println!("🚦 Rate limit: {n} requests/sec (probe endpoints exempt)");
+            serve_info!("🚦 Rate limit: {n} requests/sec (probe endpoints exempt)");
             crate::probes::RateLimit::per_second(n)
         }
         None => crate::probes::RateLimit::disabled(),
@@ -499,226 +554,173 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
 
     // Add CORS middleware if enabled
     let app = if args.cors {
-        app.layer(build_cors_layer(&args.host, args.port)?)
+        app.layer(build_cors_layer(&args.host, addr.port())?)
     } else {
         app
     };
 
-    println!("✅ Server started successfully!");
-    println!("🔗 Available endpoints:");
-    println!("   GET  /               - API documentation");
-    println!("   GET  /health         - Health check");
-    println!("   GET  /collections    - List all collections");
-    println!("   GET  /collections/{{name}}       - Collection details");
-    println!("   GET  /collections/{{name}}/data  - Collection data");
-    println!("   GET  /collections/{{name}}/count - Collection count");
-    println!("   GET  /collections/{{name}}/schema - Collection schema");
-
-    if args.websockets {
-        println!("   WS   /ws/collections/{{name}}   - Real-time updates");
-    }
-
-    if args.prometheus {
-        println!("   GET  /metrics       - Prometheus metrics");
-    }
-
-    // Start gRPC server in background
-    let grpc_port = args.grpc_port;
-    // Use the same host as HTTP server (default 127.0.0.1)
-    let grpc_addr_str = format!("{}:{}", args.host, grpc_port);
-    let grpc_addr: SocketAddr = grpc_addr_str
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Failed to parse gRPC address '{}': {}", grpc_addr_str, e))?;
+    // Configure and retain the gRPC transport under the owning CLI lifecycle.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let advertised_grpc_address = resolve_advertised_grpc_address(
         &args.host,
-        grpc_port,
+        grpc_addr.port(),
         args.advertised_grpc_address.as_deref(),
     )?;
+    let advertised_grpc_address = if tls.is_some() && args.advertised_grpc_address.is_none() {
+        advertised_grpc_address.replacen("http://", "https://", 1)
+    } else {
+        advertised_grpc_address
+    };
     let advertised_node_addresses = build_advertised_node_addresses(
         args.id,
         &advertised_grpc_address,
         &args.peers,
         &peer_grpc_overrides,
     );
-
-    // Get DB instance for gRPC service
-    if let Ok(db) = crate::database_manager::get_db_instance().await {
-        println!("🚀 Starting PrkDB gRPC server on {}", grpc_addr);
-        let schema_storage_path =
-            crate::database_manager::try_get_database_manager()?.schema_storage_path();
-
-        // Load the schema registry here rather than inside the spawned server task, so a
-        // registry that cannot be loaded fails `serve` before anything listens (SCH-02)
-        // instead of serving an empty registry clients could re-register over.
-        let service = prkdb::raft::grpc_service::PrkDbGrpcService::with_schema_storage_path(
-            std::sync::Arc::new(db.clone()),
-            std::env::var("PRKDB_ADMIN_TOKEN").unwrap_or_default(),
-            schema_storage_path,
-        )
+    let db = crate::database_manager::get_db_instance()
         .await
-        .context("loading the schema registry")?
-        // The layer requires Admin for these RPCs, so the deprecated admin_token
-        // message field is no longer the only way in.
+        .context("opening storage for the gRPC service")?;
+    let service = schema_service
         .with_authz_enforced(grpc_authz_store.is_some())
-        // Distinct from `!authz_enforced`: only an explicit --allow-anonymous waives
-        // the admin check, so a missing layer still denies.
         .with_anonymous_access(args.allow_anonymous)
         .with_local_node_id(args.id)
         .with_public_address(advertised_grpc_address)
         .with_advertised_node_addresses(advertised_node_addresses);
 
-        // Start Multi-Raft partitions (background tasks)
-        // Skip serving Partition 0's Raft server here, as we'll multiplex it on the main gRPC server below
-        // This avoids port collision on 50051
-        let rpc_pool = std::sync::Arc::new({
-            let pool = prkdb::raft::RpcClientPool::new(args.id);
-            // Dial peers the same way they listen. Without this the pool builds
-            // `http://` and the handshake fails against a TLS peer.
-            match (&tls, peer_identity_requires_tls) {
-                (Some(t), true) => pool.with_tls(prkdb::raft::rpc_client::PeerTls {
-                    cert_pem: t.read_cert()?,
-                    key_pem: t.read_key()?,
-                    ca_pem: t.read_client_ca()?.unwrap_or_default(),
-                    domain: args.host.clone(),
-                }),
-                _ => pool,
-            }
-        });
-        db.start_multi_raft(rpc_pool, &[0]);
-
-        let grpc_tls = tls.clone();
-        let grpc_rate_limit = args.rate_limit;
-        tokio::spawn(async move {
-            use prkdb::raft::rpc::prk_db_service_server::PrkDbServiceServer;
-            use prkdb::raft::rpc::raft_service_server::RaftServiceServer;
-            use prkdb::raft::service::RaftServiceImpl;
-            use tonic::transport::Server;
-
-            // Authorization runs as a tower layer rather than a tonic interceptor: an
-            // interceptor sees Request<()> and cannot read the method name, so it could
-            // not tell `Health` from `FetchSegment`. This closes spec S-01 on the gRPC
-            // side — `fetch_segment` streams raw WAL segments and required no credential.
-            // Rate limiting outside authorization: a shed request should cost a token
-            // bucket check, not a credential comparison against every principal.
-            //
-            // Until now --rate-limit guarded the HTTP surface only, so the gRPC data
-            // plane — including FetchSegment, which streams raw WAL — had no limit and no
-            // in-flight bound. An operator passing the flag had every reason to think
-            // otherwise.
-            let mut builder = Server::builder()
-                .layer(tower::util::option_layer(grpc_rate_limit.map(
-                    prkdb::raft::grpc_rate_limit::GrpcRateLimitLayer::per_second,
-                )))
-                .layer(prkdb::raft::authz_interceptor::AuthzGrpcLayer::new(
-                    grpc_authz_store,
-                ));
-            if let Some(t) = &grpc_tls {
-                match t.tonic_config() {
-                    Ok(cfg) => match builder.tls_config(cfg) {
-                        Ok(b) => builder = b,
-                        Err(e) => {
-                            eprintln!("❌ gRPC TLS configuration rejected: {}", e);
-                            return;
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!("❌ could not read TLS material: {}", e);
-                        return;
-                    }
-                }
-            }
-
-            // Register client service
-            let mut router = builder.add_service(PrkDbServiceServer::new(service));
-
-            // Register Raft service for all partitions (multiplexed on same port)
-            //
-            // Peer authentication is applied here rather than in AuthzGrpcLayer, which
-            // deliberately passes RaftService through: peers present client certificates,
-            // not bearer credentials. A tonic Interceptor is sufficient here — unlike the
-            // client API, the policy is the same for all five RPCs, so it does not need
-            // the method name the interceptor cannot see.
-            if let Some(pm) = &db.partition_manager {
-                println!("✨ Multiplexing Raft Service (All Partitions) on main port");
-                let raft_service = RaftServiceImpl::new(pm.clone());
-                router = router.add_service(RaftServiceServer::with_interceptor(
-                    raft_service,
-                    peer_auth.clone(),
-                ));
-            }
-
-            if let Err(e) = router.serve(grpc_addr).await {
-                eprintln!("❌ gRPC server error: {}", e);
-            }
-        });
-    } else {
-        eprintln!("⚠️ Failed to get database instance for gRPC server");
-    }
-
-    // Start the server
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    let shutdown_db = crate::database_manager::get_db_instance().await.ok();
-
-    if let Some(t) = &tls {
-        // axum-server terminates TLS in front of the same tower service axum builds.
-        // Its own graceful-shutdown handle differs from axum::serve's, so the flush runs
-        // after the server returns rather than inside a shutdown future.
-        // Choose the crypto backend before rustls is asked to.
-        //
-        // Without this the listener binds, `serve` prints "TLS enabled" and "Server
-        // started successfully", and then **every HTTPS connection panics a worker
-        // thread**:
-        //
-        //     Could not automatically determine the process-level CryptoProvider
-        //     from Rustls crate features.
-        //
-        // rustls refuses to guess when it cannot see exactly one backend feature, and the
-        // dependency graph here exposes more than one. The process stays alive, so the
-        // operator sees a healthy-looking server that serves nothing over HTTPS — the
-        // S-02 shape again: a capability that is reachable, reports success, and does not
-        // work.
-        //
-        // The fix existed only in `prkdb/tests/peer_mtls.rs`, never in a shipped binary,
-        // because no test had ever made an HTTPS request to this listener.
-        //
-        // The error is ignored deliberately: a provider already installed is the desired
-        // state, and `install_default` fails precisely when one is.
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-
-        let rustls = axum_server::tls_rustls::RustlsConfig::from_pem(t.read_cert()?, t.read_key()?)
-            .await
-            .context("building the HTTPS listener from --tls-cert/--tls-key")?;
-
-        drop(listener);
-        let handle = axum_server::Handle::new();
-        let shutdown_handle = handle.clone();
-        tokio::spawn(async move {
-            shutdown_signal().await;
-            shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
-        });
-
-        axum_server::bind_rustls(addr, rustls)
-            .handle(handle)
-            .serve(app.into_make_service())
-            .await?;
-
-        if let Some(db) = shutdown_db {
-            if let Err(error) = flush_db_state(&db).await {
-                eprintln!("⚠️ Failed to flush storage during shutdown: {}", error);
-            }
+    // Start Multi-Raft partitions (background tasks)
+    // Skip serving Partition 0's Raft server here, as we'll multiplex it on the main gRPC server below
+    // This avoids port collision on 50051
+    let rpc_pool = std::sync::Arc::new({
+        let pool = prkdb::raft::RpcClientPool::new(args.id);
+        // Dial peers the same way they listen. Without this the pool builds
+        // `http://` and the handshake fails against a TLS peer.
+        match (&tls, peer_identity_requires_tls) {
+            (Some(t), true) => pool.with_tls(prkdb::raft::rpc_client::PeerTls {
+                cert_pem: t.read_cert()?,
+                key_pem: t.read_key()?,
+                ca_pem: t.read_client_ca()?.unwrap_or_default(),
+                domain: args.host.clone(),
+            }),
+            _ => pool,
         }
-    } else {
-        axum::serve(listener, app.into_make_service())
-            .with_graceful_shutdown(async move {
-                shutdown_signal().await;
+    });
+    db.start_multi_raft(rpc_pool, &[0]);
 
-                if let Some(db) = shutdown_db {
-                    if let Err(error) = flush_db_state(&db).await {
-                        eprintln!("⚠️ Failed to flush storage during shutdown: {}", error);
-                    }
-                }
+    use prkdb::raft::rpc::prk_db_service_server::PrkDbServiceServer;
+    use prkdb::raft::rpc::raft_service_server::RaftServiceServer;
+    use prkdb::raft::service::RaftServiceImpl;
+    use tonic::transport::Server;
+
+    // Preserve the existing rate-limit/authz order and peer interceptor.
+    let mut builder = Server::builder()
+        .layer(tower::util::option_layer(args.rate_limit.map(
+            prkdb::raft::grpc_rate_limit::GrpcRateLimitLayer::per_second,
+        )))
+        .layer(prkdb::raft::authz_interceptor::AuthzGrpcLayer::new(
+            grpc_authz_store,
+        ));
+    if let Some(t) = &tls {
+        builder = builder
+            .tls_config(t.tonic_config().context("reading gRPC TLS material")?)
+            .context("configuring gRPC TLS")?;
+    }
+    let mut router = builder.add_service(PrkDbServiceServer::new(service));
+    if let Some(pm) = &db.partition_manager {
+        serve_info!("✨ Multiplexing Raft Service (All Partitions) on main port");
+        router = router.add_service(RaftServiceServer::with_interceptor(
+            RaftServiceImpl::new(pm.clone()),
+            peer_auth.clone(),
+        ));
+    }
+    let incoming = tonic::transport::server::TcpIncoming::from_listener(grpc_listener, true, None)
+        .map_err(anyhow::Error::from_boxed)
+        .context("configuring the retained gRPC listener")?;
+    let grpc_shutdown = shutdown_rx.clone();
+    let grpc = async move {
+        router
+            .serve_with_incoming_shutdown(incoming, wait_for_shutdown(grpc_shutdown))
+            .await
+            .with_context(|| format!("serving gRPC on {grpc_addr}"))
+    };
+
+    // Construct each server around its retained listener before reporting startup.
+    let shutdown_db = crate::database_manager::get_db_instance().await.ok();
+    let shutdown = prepare_shutdown_signal()?;
+    let tls_handle = https_config.as_ref().map(|_| axum_server::Handle::new());
+    let http: std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> =
+        if let Some(rustls) = https_config {
+            let server = axum_server::from_tcp_rustls(listener.into_std()?, rustls)
+                .context("configuring the retained HTTPS listener")?;
+            let handle = tls_handle.clone().expect("TLS shutdown handle");
+            Box::pin(async move {
+                server
+                    .handle(handle)
+                    .serve(app.into_make_service())
+                    .await
+                    .with_context(|| format!("serving HTTPS on {addr}"))
             })
-            .await?;
+        } else {
+            Box::pin(async move {
+                axum::serve(listener, app.into_make_service())
+                    .with_graceful_shutdown(wait_for_shutdown(shutdown_rx))
+                    .await
+                    .with_context(|| format!("serving HTTP on {addr}"))
+            })
+        };
+
+    let scheme = if tls.is_some() { "https" } else { "http" };
+    if json_output {
+        use std::io::Write;
+        println!(
+            "{}",
+            json!({
+                "event": "server_listening",
+                "http_address": addr.to_string(),
+                "grpc_address": grpc_addr.to_string(),
+                "http_url": format!("{scheme}://{addr}"),
+                "grpc_url": format!("{scheme}://{grpc_addr}"),
+            })
+        );
+        std::io::stdout()
+            .flush()
+            .context("flushing server listening record")?;
+    } else {
+        println!("✅ Server started successfully!");
+        println!("🚀 PrkDB HTTP server on {scheme}://{addr}");
+        println!("🚀 PrkDB gRPC server on {scheme}://{grpc_addr}");
+        println!("🔗 Available endpoints:");
+        println!("   GET  /               - API documentation");
+        println!("   GET  /health         - Health check");
+        println!("   GET  /collections    - List all collections");
+        println!("   GET  /collections/{{name}}       - Collection details");
+        println!("   GET  /collections/{{name}}/data  - Collection data");
+        println!("   GET  /collections/{{name}}/count - Collection count");
+        println!("   GET  /collections/{{name}}/schema - Collection schema");
+        if args.websockets {
+            println!("   WS   /ws/collections/{{name}}   - Real-time updates");
+        }
+        if args.prometheus {
+            println!("📊 Prometheus metrics at {scheme}://{addr}/metrics");
+        }
+    }
+    if args.prometheus {
+        prkdb::prometheus_metrics::SERVER_UP
+            .with_label_values(&[&node_id_label])
+            .set(1.0);
+    }
+    let result = supervise_servers(http, grpc, shutdown, move || {
+        shutdown_tx.send_replace(true);
+        if let Some(handle) = tls_handle {
+            handle.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
+        }
+    })
+    .await;
+    // Normal shutdown joins both transports before flushing. Transport failure signals
+    // shutdown and drops sibling serving ownership before reaching this flush/result.
+    if let Some(db) = shutdown_db {
+        if let Err(error) = flush_db_state(&db).await {
+            eprintln!("⚠️ Failed to flush storage during shutdown: {error}");
+        }
     }
 
     if args.prometheus {
@@ -727,33 +729,87 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
             .set(0.0);
     }
 
-    println!("\n👋 Server shutting down...");
-    Ok(())
+    serve_info!("\n👋 Server shutting down...");
+    result
 }
 
-#[allow(dead_code)]
-async fn shutdown_signal() {
+async fn supervise_servers<H, G, S, F>(http: H, grpc: G, shutdown: S, stop: F) -> Result<()>
+where
+    H: std::future::Future<Output = Result<()>>,
+    G: std::future::Future<Output = Result<()>>,
+    S: std::future::Future<Output = ()>,
+    F: FnOnce(),
+{
+    tokio::pin!(http, grpc, shutdown);
+    let result = tokio::select! {
+        result = &mut http => Some(result.context("HTTP server stopped")
+            .and_then(|()| Err(anyhow::anyhow!("HTTP server stopped unexpectedly")))),
+        result = &mut grpc => Some(result.context("gRPC server stopped")
+            .and_then(|()| Err(anyhow::anyhow!("gRPC server stopped unexpectedly")))),
+        _ = &mut shutdown => None,
+    };
+    // Signal before dropping a sibling on failure. On normal shutdown, both serving
+    // futures finish before the caller flushes storage.
+    stop();
+    if let Some(result) = result {
+        result
+    } else {
+        let (http_result, grpc_result) = tokio::join!(http, grpc);
+        http_result.and(grpc_result)
+    }
+}
+
+async fn wait_for_shutdown(mut receiver: tokio::sync::watch::Receiver<bool>) {
+    while !*receiver.borrow_and_update() {
+        if receiver.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+fn prepare_shutdown_signal() -> Result<impl std::future::Future<Output = ()>> {
+    // Register synchronously so a signal sent immediately after server_listening is
+    // handled by the graceful shutdown path, even before its future is first polled.
+    #[cfg(unix)]
+    let ctrl_c = {
+        let mut interrupt =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                .context("installing Ctrl+C handler")?;
+        async move {
+            interrupt.recv().await;
+        }
+    };
+    #[cfg(windows)]
+    let ctrl_c = {
+        let mut interrupt =
+            tokio::signal::windows::ctrl_c().context("installing Ctrl+C handler")?;
+        async move {
+            interrupt.recv().await;
+        }
+    };
+    #[cfg(not(any(unix, windows)))]
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
             .expect("failed to install Ctrl+C handler");
     };
-
     #[cfg(unix)]
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
+    let terminate = {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .context("installing SIGTERM handler")?;
+        async move {
+            terminate.recv().await;
+        }
     };
-
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
-    }
+    Ok(async move {
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = terminate => {},
+        }
+    })
 }
 
 async fn root_handler() -> impl IntoResponse {
@@ -1402,7 +1458,7 @@ async fn websocket_connection(
     params: WsParams,
     _state: AppState,
 ) {
-    println!("🔌 WebSocket connected for collection: {}", collection_name);
+    eprintln!("🔌 WebSocket connected for collection: {}", collection_name);
 
     // Get database instance
     let db = match crate::database_manager::get_db_instance().await {
@@ -1544,7 +1600,7 @@ async fn websocket_connection(
                     Some(Err(_)) => break,
                     Some(Ok(Message::Text(text))) => {
                          // Optional: Handle client commands like "seek" or "pause"
-                         println!("Received WS message from client: {}", text);
+                         eprintln!("Received WS message from client: {}", text);
                     }
                     _ => {}
                 }
@@ -1552,7 +1608,7 @@ async fn websocket_connection(
         }
     }
 
-    println!(
+    eprintln!(
         "🔌 WebSocket disconnected for collection: {}",
         collection_name
     );
@@ -2021,6 +2077,65 @@ fn build_cors_layer(host: &str, port: u16) -> Result<CorsLayer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn grpc_failure_propagates_and_drops_http_serving() {
+        let http_dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        struct Serving(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Serving {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let serving = Serving(http_dropped.clone());
+        let http = async move {
+            let _serving = serving;
+            std::future::pending::<Result<()>>().await
+        };
+        let stopped = stop_called.clone();
+        let error = supervise_servers(
+            http,
+            async { anyhow::bail!("gRPC transport failed") },
+            std::future::pending(),
+            move || stopped.store(true, std::sync::atomic::Ordering::SeqCst),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("gRPC transport failed"));
+        assert!(http_dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(stop_called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn shutdown_signals_and_waits_for_both_transports() {
+        let http_finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let grpc_finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let http_done = http_finished.clone();
+        let grpc_done = grpc_finished.clone();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let mut http_shutdown = shutdown_rx.clone();
+        let mut grpc_shutdown = shutdown_rx;
+        let http = async move {
+            http_shutdown.changed().await.unwrap();
+            assert!(*http_shutdown.borrow());
+            http_done.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        };
+        let grpc = async move {
+            grpc_shutdown.changed().await.unwrap();
+            assert!(*grpc_shutdown.borrow());
+            grpc_done.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        };
+        supervise_servers(http, grpc, std::future::ready(()), move || {
+            shutdown_tx.send_replace(true);
+        })
+        .await
+        .unwrap();
+        assert!(http_finished.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(grpc_finished.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     #[test]
     fn parse_node_address_overrides_normalizes_bare_addresses() {

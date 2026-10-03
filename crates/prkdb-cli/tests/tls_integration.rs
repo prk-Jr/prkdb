@@ -70,27 +70,14 @@ fn a_half_configured_pair_is_rejected_at_the_command_line() {
 // the side that works.
 // ═══════════════════════════════════════════════════════════════════════════
 
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+#[path = "common/server.rs"]
+pub mod server;
 
 struct Server {
-    child: Child,
+    _process: server::ServerProcess,
     port: u16,
-}
-
-impl Drop for Server {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("binding an ephemeral port cannot fail")
-        .local_addr()
-        .expect("a bound listener has an address")
-        .port()
 }
 
 /// A self-signed certificate for 127.0.0.1, written to disk because `serve` takes paths.
@@ -105,50 +92,59 @@ fn write_cert(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf)
     (cert_path, key_path)
 }
 
-fn spawn_https(dir: &std::path::Path) -> Option<Server> {
+async fn spawn_https(dir: &std::path::Path) -> Server {
+    use prkdb_proto::raft::{prk_db_service_client::PrkDbServiceClient, MetadataRequest};
+    use tonic::transport::{Certificate, ClientTlsConfig, Endpoint};
+
+    // Provider defaults are process-local. The child configures its server, while
+    // this test process must also select the provider for tonic's TLS client.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let (cert, key) = write_cert(dir);
-    let port = free_port();
-    let data = dir.join("db");
-
-    let mut child = Command::new(env!("CARGO_BIN_EXE_prkdb-cli"))
-        .args(["--database", data.to_str().unwrap(), "serve", "--port"])
-        .arg(port.to_string())
-        .arg("--grpc-port")
-        .arg(free_port().to_string())
-        .args(["--tls-cert", cert.to_str().unwrap()])
-        .args(["--tls-key", key.to_str().unwrap()])
-        // Anonymous on purpose: this test is about the transport, and a credential
-        // requirement would make a 401 indistinguishable from a TLS failure.
-        .arg("--allow-anonymous")
-        .env_remove("PRKDB_BOOTSTRAP_TOKEN")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("the CLI binary must launch");
-
-    let client = reqwest::blocking::Client::builder()
-        .danger_accept_invalid_certs(true) // self-signed
-        .timeout(Duration::from_secs(5))
-        .build()
-        .expect("build a TLS client");
-
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline {
-        if let Ok(Some(_)) = child.try_wait() {
-            return None; // port taken between free_port and bind; caller retries
-        }
-        if client
-            .get(format!("https://127.0.0.1:{port}/health"))
-            .send()
-            .is_ok()
-        {
-            return Some(Server { child, port });
-        }
-        std::thread::sleep(Duration::from_millis(150));
+    let mut process = server::ServerProcess::spawn(&[
+        "--port",
+        "0",
+        "--grpc-port",
+        "0",
+        "--tls-cert",
+        cert.to_str().unwrap(),
+        "--tls-key",
+        key.to_str().unwrap(),
+    ]);
+    let listening = process.listening().await.expect("TLS listening record");
+    assert_eq!(
+        listening.http_url,
+        format!("https://{}", listening.http_address)
+    );
+    assert_eq!(
+        listening.grpc_url,
+        format!("https://{}", listening.grpc_address)
+    );
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let channel = Endpoint::from_shared(listening.grpc_url.clone())
+            .unwrap()
+            .tls_config(
+                ClientTlsConfig::new()
+                    .ca_certificate(Certificate::from_pem(std::fs::read(&cert).unwrap()))
+                    .domain_name("localhost"),
+            )
+            .unwrap()
+            .connect()
+            .await
+            .expect("the reported gRPC endpoint must speak TLS");
+        let metadata = PrkDbServiceClient::new(channel)
+            .metadata(MetadataRequest { topics: vec![] })
+            .await
+            .expect("gRPC metadata over TLS")
+            .into_inner();
+        assert_eq!(metadata.nodes.len(), 1);
+        assert_eq!(metadata.nodes[0].address, listening.grpc_url);
+    })
+    .await
+    .expect("TLS endpoint must serve within the startup deadline");
+    Server {
+        _process: process,
+        port: listening.http_address.port(),
     }
-    let _ = child.kill();
-    let _ = child.wait();
-    None
 }
 
 /// The listener speaks TLS, and a plaintext client is refused.
@@ -156,20 +152,13 @@ fn spawn_https(dir: &std::path::Path) -> Option<Server> {
 /// Both halves matter. Serving over HTTPS alone would pass against a server that also
 /// accepted plaintext — which is not TLS, it is TLS-optional, and an eavesdropper picks
 /// the option. The plaintext assertion is what makes the first one mean something.
-#[test]
-fn the_https_listener_serves_tls_and_refuses_plaintext() {
+#[tokio::test]
+async fn the_https_listener_serves_tls_and_refuses_plaintext() {
     let dir = tempfile::tempdir().expect("tempdir");
 
-    let mut server = None;
-    for _ in 0..3 {
-        server = spawn_https(dir.path());
-        if server.is_some() {
-            break;
-        }
-    }
-    let server = server.expect("the HTTPS listener must come up within 3 attempts");
+    let server = spawn_https(dir.path()).await;
 
-    let tls = reqwest::blocking::Client::builder()
+    let tls = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .timeout(Duration::from_secs(5))
         .build()
@@ -178,6 +167,7 @@ fn the_https_listener_serves_tls_and_refuses_plaintext() {
     let response = tls
         .get(format!("https://127.0.0.1:{}/health", server.port))
         .send()
+        .await
         .expect("an HTTPS request must succeed against a TLS listener");
     assert!(
         response.status().is_success(),
@@ -188,13 +178,14 @@ fn the_https_listener_serves_tls_and_refuses_plaintext() {
     // The same port over plaintext must not answer. A TLS listener handed an unencrypted
     // request fails the handshake; anything else means traffic a user believes is
     // encrypted is not.
-    let plain = reqwest::blocking::Client::builder()
+    let plain = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap();
     let outcome = plain
         .get(format!("http://127.0.0.1:{}/health", server.port))
-        .send();
+        .send()
+        .await;
     assert!(
         outcome.is_err(),
         "a plaintext request succeeded against the TLS listener; the transport is not \

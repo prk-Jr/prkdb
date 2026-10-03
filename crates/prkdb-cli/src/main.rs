@@ -193,7 +193,15 @@ async fn main() -> anyhow::Result<()> {
     // Initialize logging based on verbosity
     // Initialize logging based on verbosity or RUST_LOG env var
     if cli.verbose || std::env::var("RUST_LOG").is_ok() {
-        tracing_subscriber::fmt::init();
+        if matches!(&cli.command, Commands::Serve { .. })
+            && matches!(&cli.format, OutputFormat::Json)
+        {
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
+                .init();
+        } else {
+            tracing_subscriber::fmt::init();
+        }
     } else if cli.verbose {
         // Fallback if RUST_LOG not set but verbose is on (though fmt::init handles defaults)
         tracing_subscriber::fmt::init();
@@ -231,6 +239,11 @@ async fn main() -> anyhow::Result<()> {
             advertised_grpc_address,
             num_partitions,
         } => {
+            if peers.is_some() && *grpc_port == 0 {
+                anyhow::bail!(
+                    "clustered serve does not support gRPC port 0: configure a fixed --grpc-port before initializing Raft"
+                );
+            }
             let advertised_http_address = std::env::var("PRKDB_ADVERTISED_HTTP_ADDR")
                 .ok()
                 .filter(|value| !value.trim().is_empty());
@@ -289,7 +302,7 @@ async fn main() -> anyhow::Result<()> {
                 peer_advertised_grpc_addresses,
                 peer_http_addresses,
             };
-            commands::serve::handle_serve(args).await
+            commands::serve::handle_serve(args, cli.format.clone()).await
         }
         // Client commands - DO NOT init database manager (pure remote)
         Commands::Get(args) => data::handle_get(args.clone(), &cli).await,
