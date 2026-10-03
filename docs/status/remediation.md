@@ -10,7 +10,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 |---|---|---|---|
 | 0 | Honesty and tracking | gate_passed | 6/6 |
 | 1 | Harness and baseline | gate_passed | 2/2 |
-| 2 | Format v2 and single-node root fixes | in_progress | 0/33 |
+| 2 | Format v2 and single-node root fixes | in_progress | 0/34 |
 | 3 | Semantics | not_started | 0/9 |
 | 4 | Raft | not_started | 0/15 |
 | 5 | Documentation and release | not_started | 0/9 |
@@ -56,6 +56,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | TST-09 | high | 2 | fixed | Perf gate WAL benches count ~500 instructions: the WAL work is outside the measured region |
 | TST-11 | high | 2 | fixed | FaultFs::power_loss keeps the pre-crash synced baseline: a second power loss can resurrect data the first one lost |
 | TST-12 | high | 2 | fixed | Perf and CI gates pass vacuously: WAL bench rule fails open, compaction tail unenforced, blanket perf_note override, WAL core never mutated |
+| TST-14 | high | 2 | fixed | CLI startup reports success before both transports bind; port fixtures race and can leak failed startup children |
 | TXN-01 | high | 3 | open | Commit writes puts then deletes in separate append_batch calls; crash between leaves a torn commit |
 | TXN-02 | high | 3 | open | Indexed "atomic" transaction loops over independent puts |
 | TXN-03 | high | 3 | open | Serializable read set keeps only the last read hash; ReadCommitted writers bypass the barrier, losing updates |

@@ -971,6 +971,31 @@ regression_tests = [
 ]
 changes = ["d688c82c3bd06b3ee7d6ff97914375678c737b8e"]
 
+[[finding]]
+id = "TST-14"
+title = "CLI startup reports success before both transports bind; port fixtures race and can leak failed startup children"
+area = "testing"
+severity = "high"
+phase = 2
+status = "fixed"
+sources = ["ci-startup-review-2026-10-03"]
+evidence = [
+  "https://github.com/prk-Jr/prkdb/actions/runs/37044717598",
+  "crates/prkdb-cli/src/commands/serve.rs",
+  "crates/prkdb-cli/tests/websocket_integration.rs",
+]
+regression_tests = [
+  "test:crates/prkdb-cli/tests/listener_startup.rs::occupied_http_port_fails_without_reporting_startup_success",
+  "test:crates/prkdb-cli/tests/listener_startup.rs::occupied_grpc_port_terminates_instead_of_serving_http",
+  "test:crates/prkdb-cli/tests/listener_startup.rs::invalid_tls_material_fails_without_reporting_startup_success",
+  "test:crates/prkdb-cli/tests/listener_startup.rs::ephemeral_ports_report_serving_endpoints_and_drop_closes_them",
+  "test:crates/prkdb-cli/tests/listener_startup.rs::simultaneous_servers_own_distinct_endpoints_and_directories",
+  "test:crates/prkdb-cli/tests/listener_startup.rs::cancelling_startup_owner_reaps_child_before_removing_its_directory",
+  "test:crates/prkdb-cli/tests/listener_startup.rs::sigterm_immediately_after_listening_record_exits_gracefully",
+  "test:crates/prkdb-cli/tests/tls_integration.rs::the_https_listener_serves_tls_and_refuses_plaintext",
+]
+changes = ["5cc9a721abd23c140cc0eb52a48f9e0a3c038757"]
+
 [[phase]]
 id = 0
 title = "Honesty and tracking"
