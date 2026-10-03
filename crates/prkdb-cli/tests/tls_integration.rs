@@ -96,6 +96,9 @@ async fn spawn_https(dir: &std::path::Path) -> Server {
     use prkdb_proto::raft::{prk_db_service_client::PrkDbServiceClient, MetadataRequest};
     use tonic::transport::{Certificate, ClientTlsConfig, Endpoint};
 
+    // Provider defaults are process-local. The child configures its server, while
+    // this test process must also select the provider for tonic's TLS client.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let (cert, key) = write_cert(dir);
     let mut process = server::ServerProcess::spawn(&[
         "--port",
