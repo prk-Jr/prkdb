@@ -73,7 +73,8 @@ pub enum Kind {
 }
 
 impl Kind {
-    fn description(self) -> &'static str {
+    /// "a key/value store" or "a stream", for messages.
+    pub fn description(self) -> &'static str {
         match self {
             Self::Kv => "a key/value store",
             Self::Stream => "a stream",
@@ -423,6 +424,13 @@ pub fn ensure_format(
         }
     }
     write_format(vfs, dir, expected)
+}
+
+/// Rewrites `dir/FORMAT` as this build's format for `kind`, atomically. For a migration's
+/// last step (`Migration::run`): it takes the directory's kind explicitly, so a step cannot
+/// rewrite a stream's marker as key/value (which would make the stream an empty store).
+pub fn rewrite_format(vfs: &dyn Vfs, dir: &Path, kind: Kind) -> Result<FormatMarker, StorageError> {
+    write_format(vfs, dir, kind)
 }
 
 /// `FORMAT.tmp` create → write → sync_data → rename to `FORMAT` → sync_dir. A crash at any

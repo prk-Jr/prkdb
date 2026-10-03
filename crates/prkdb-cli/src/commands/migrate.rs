@@ -25,7 +25,9 @@
 //! lists its plan, but a migration that would write is refused.
 
 use clap::Args;
-use prkdb::storage::format::{detect_format, read_format, unsupported_format, FORMAT_VERSION};
+use prkdb::storage::format::{
+    detect_format, read_format, unsupported_format, Kind, FORMAT_VERSION,
+};
 use prkdb::storage::lock::lock_data_dir_unless_read_only;
 use prkdb::storage::migrations::plan;
 use prkdb_core::vfs::StdVfs;
@@ -126,11 +128,14 @@ fn migrate_one(dir: &Path, dry_run: bool) -> anyhow::Result<()> {
         return Ok(());
     };
 
+    // Format 1 had no marker and no streams, so a directory without one is key/value.
+    let kind = read_format(dir)?.map_or(Kind::Kv, |marker| marker.kind);
     if found == FORMAT_VERSION {
         println!(
-            "data directory {} is at format {FORMAT_VERSION}; no migrations available for \
-             format {FORMAT_VERSION}",
-            dir.display()
+            "data directory {} is {} at format {FORMAT_VERSION}; no migrations available \
+             for format {FORMAT_VERSION}",
+            dir.display(),
+            kind.description()
         );
         return Ok(());
     }
@@ -151,14 +156,15 @@ fn migrate_one(dir: &Path, dry_run: bool) -> anyhow::Result<()> {
         plan(found).map_err(|e| anyhow::anyhow!("data directory {}: {e}", dir.display()))?;
     for step in &chain {
         println!(
-            "{}: format {} → {}: {}",
+            "{} ({}): format {} → {}: {}",
             dir.display(),
+            kind.description(),
             step.from(),
             step.to(),
             step.description()
         );
         if !dry_run {
-            step.run(dir)?;
+            step.run(dir, kind)?;
         }
     }
     if dry_run {
