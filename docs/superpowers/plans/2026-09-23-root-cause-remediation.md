@@ -7026,6 +7026,8 @@ exit "$fail"
 
 ### Task 2.25: Phase 2 durable baseline and gate
 
+**Current bounded health slice:** `381a26cb1a8edbda425bc38ef5eaf1e7c5a1e3a8` catches six current `health_snapshot` survivors with unchanged production code. The exact elapsed `>` to `>=` equality mutation remains open: acceptance requires a deterministic exact-boundary witness or an individual equivalence proof, followed by the unchanged assembled Linux mutation gate. Do not treat the six local catches as a new full inventory.
+
 **Carried over from the d8248e5 Linux CI review:** run 37029506251's ten WAL-core
 mutation shards reported 106 surviving mutations (77 log, 18 segment, 5 compression,
 3 batch, 2 log-state, 1 frame). Fix actual defects and add deterministic tests for
