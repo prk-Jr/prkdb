@@ -5884,11 +5884,52 @@ Note §3.2.
 - [x] **Step 4: Commit** `feat: partitioned streams under a container root`.
 
 
+### Task 2.15b-format-hardening: Stream on-disk review fixes — *before Tasks 2.15b.9 and 2.24*
+
+Maintainer-authorized review of b107521. Six independent fix commits, with failing
+regression tests observed before each implementation. KV partition routing and KV FORMAT
+bytes remain unchanged. Task 2.17 proceeds independently; consumer stream wiring waits.
+
+**Files:** `crates/prkdb/src/stream_log/{partitioned.rs,manifest.rs,log.rs}`,
+`crates/prkdb/src/storage/{format.rs,migrations.rs}`,
+`crates/prkdb-cli/src/commands/migrate.rs`, stream/format/migration tests;
+`crates/prkdb-core/src/wal/{records.rs,mod.rs}` for typed Records version refusal;
+`crates/prkdb/benches/stream_log.rs` if keyed routing needs a dedicated append cell.
+Tracking and design documents are updated alongside evidence. Necessary source additions
+beyond the original review's file list must be reported explicitly.
+
+1. Raw-byte `seahash::hash(key)` stream routing; literal golden vectors for several
+   partition counts through public append. No KV DefaultPartitioner changes. Record the
+   manifest routing-version decision under the streaming design's pre-freeze rule.
+   Measure keyed stream append Criterion before/after, Fast and Durable, with baseline
+   SHA and no other builds or benchmarks running.
+   Commit `fix: route stream keys with a stable raw-byte hash`.
+2. Checksummed stream FORMAT, refusing missing/mismatched integrity data and corrupted
+   kind discrimination, with byte-identical KV markers.
+   Commit `fix: protect stream format kind with a checksum`.
+3. Bound partitions at creation and manifest decode/encode; justify the maximum of
+   65,536 in the design note. Test cap acceptance in the codec and rejection above it
+   without allocating/opening partition directories.
+   Commit `fix: bound stream manifest partition counts`.
+4. Existing STREAM requires a stream FORMAT in every declared partition. Refuse wiped
+   or wrong-kind partitions before WAL recovery; reject extra partition_N directories
+   outside the count. Retained log_start > 1 cannot prove interrupted creation empty.
+   Commit `fix: refuse incomplete published stream containers`.
+5. Pass Kind to Migration::run, preserve stream markers, and walk STREAM partitions.
+   Commit `fix: preserve directory kind during migrations`.
+6. CRC-valid unknown STREAM and Records versions report UnsupportedFormat, identifying
+   a newer PrkDB, and preserve files. Corrupt checksums retain corruption errors.
+   Commit `fix: report unsupported stream payload versions`.
+
+Run focused tests after every item, then workspace format, Clippy, nextest, doctests,
+ledger/render checks, both 200-seed harness modes, relevant fuzz targets, and the full
+pre-push script. Independent review and Linux checks remain separate readiness states.
+
 ### Task 2.15b.6: Stream consumers, and EVT-07 for streams
 
 Note §7.1–7.3.
 
-**Files:** `crates/prkdb/src/consumer.rs` (`StorageOffsetStore` record encoding), `crates/prkdb/src/stream_log/consumer.rs (create)`, `crates/prkdb/tests/{consumer_tests.rs,stream_consumer.rs (create)}`
+**Files:** `crates/prkdb-types/src/consumer.rs` (`Position` and compatible trait defaults), `crates/prkdb/src/consumer.rs` (`StorageOffsetStore` record encoding), `crates/prkdb/src/stream_log/{mod.rs,partitioned.rs}` (consumer/default offset-store wiring), `crates/prkdb/src/stream_log/consumer.rs (create)`, `crates/prkdb/tests/{consumer_tests.rs,stream_consumer.rs (create)}`
 
 - [ ] **Step 1 (*before Task 2.24*): versioned offset record.**
   - `StorageOffsetStore` writes `version u8 (=1) | offset u64 | check_kind u8 | check u32`.
@@ -5906,6 +5947,11 @@ Note §7.1–7.3.
   - **EVT-07 (streams):** in `Fast`, consume and commit, then FaultFs `PowerLoss` dropping
     the consumed frames, then append enough to refill their LSNs, then resume →
     `OffsetDiverged`. In `Durable` the same sequence resumes cleanly.
+  - `resume_after_retention_removes_last_consumed_frame`: commit the next position at
+    S2.first, retain away S1, then resume successfully. When the last consumed LSN is
+    below the durable retention floor, skip its divergence check: that frame was durable
+    before removal, so a Fast power cut cannot have reissued it. Preserve the committed
+    next-position range checks.
   - Two group members get disjoint partitions through `ConsumerGroupCoordinator`.
   - `default_offset_store()` creates `<root>/__offsets/` as a kv data directory.
   - A caller-provided `OffsetStore` is used when given.
@@ -5934,6 +5980,10 @@ Note §12.2.
 - [ ] **Step 2: Implement.**
   - The stream model, ops and checker per note §12.2. Per-partition acceptable prefixes in
     `Fast` (Task 2.10a's rule).
+  - Verify/fuzz paths fully decode Records bodies, including compressed bodies, flags,
+    lengths, UTF-8 and trailing bytes. Open deliberately checks headers only. Add
+    `stream_verifier_rejects_crc_valid_malformed_records_body` and a corresponding
+    compressed-body case; reseal the frame CRC so a header-only verifier would miss it.
   - `cargo xtask verify --profile stream`.
 - [ ] **Step 3: Run** `cargo xtask verify --profile stream --seeds 1000 --mode durable` and
   `--mode fast` → green. Then promote the stream ops to the blocking profile.
@@ -6001,6 +6051,11 @@ open boundaries instead. Do not start until the maintainer confirms.
 - [ ] **Step 2: Implement.**
   - `LOG_STATE` v2: the version-1 fields, then `clean_close_lsn u64`, then
     `boundary_base u32 | count u32 | B[count] u64`, then the CRC, with a size cap.
+  - Write the boundary at the WAL level for every directory kind, including streams,
+    so exact stream Fast-reissue detection can be added later without another format
+    change. A CRC alone misses byte-identical refilled frames with a fixed clock or
+    deterministic producer. Acceptance: identical Records bytes are refilled at a lost
+    LSN and the WAL boundary/session evidence still distinguishes the new incarnation.
   - `Wal::open` appends a boundary when the previous session may have lost acked writes:
     it ran in `Fast` and has no clean-close marker. Close writes the marker.
   - `ChangeCursor { lsn, session }` on `get_changes_since`/`changes_in_collection`, as new

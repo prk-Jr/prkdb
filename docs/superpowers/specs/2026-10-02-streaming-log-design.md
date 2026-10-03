@@ -172,6 +172,11 @@ body                   compressed when codec != 0
     [header_count u16 | (name_len u16 | name UTF-8 | val_len u32 | val)*]   if has_headers
 ```
 
+Open validates only the fixed Records header and frame CRC; it deliberately does not
+fully decode record bodies. Runtime bounded reads and the verify/fuzz paths decode the
+entire body, including compressed data. Task 2.15b.7 must reject CRC-valid malformed
+bodies; header-only validation is insufficient for verification.
+
 Decoding rejects an unknown version or codec, `count` of 0 or above 65,536, `raw_len`
 above `MAX_PAYLOAD_LEN` (checked before decompressing, as in `batch.rs`), set reserved
 flag bits, invalid UTF-8 header names, lengths that run past the end, and trailing bytes.
