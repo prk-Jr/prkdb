@@ -1000,7 +1000,7 @@ gate_evidence = ["https://github.com/prk-Jr/prkdb/actions/runs/35961505905", "ht
 [[phase]]
 id = 2
 title = "Format v2 and single-node root fixes"
-status = "not_started"
+status = "in_progress"
 gate = [
   "all Phase 2 findings verified",
   "Phase 2 blocking profile (§7.1) at 10k seeds green in both modes",
