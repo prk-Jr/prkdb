@@ -981,10 +981,14 @@ status = "fixed"
 sources = ["ci-startup-review-2026-10-03"]
 evidence = [
   "https://github.com/prk-Jr/prkdb/actions/runs/37044717598",
+  "https://github.com/prk-Jr/prkdb/actions/runs/37104586743",
+  "https://github.com/prk-Jr/prkdb/actions/runs/37104588854",
   "crates/prkdb-cli/src/commands/serve.rs",
   "crates/prkdb-cli/tests/websocket_integration.rs",
 ]
 regression_tests = [
+  "test:crates/prkdb-cli/tests/http_authz.rs::accepts_the_bootstrap_credential",
+  "test:crates/prkdb-cli/tests/http_authz.rs::probe_endpoints_stay_public",
   "test:crates/prkdb-cli/tests/listener_startup.rs::occupied_http_port_fails_without_reporting_startup_success",
   "test:crates/prkdb-cli/tests/listener_startup.rs::occupied_grpc_port_terminates_instead_of_serving_http",
   "test:crates/prkdb-cli/tests/listener_startup.rs::invalid_tls_material_fails_without_reporting_startup_success",
@@ -994,7 +998,7 @@ regression_tests = [
   "test:crates/prkdb-cli/tests/listener_startup.rs::sigterm_immediately_after_listening_record_exits_gracefully",
   "test:crates/prkdb-cli/tests/tls_integration.rs::the_https_listener_serves_tls_and_refuses_plaintext",
 ]
-changes = ["5cc9a721abd23c140cc0eb52a48f9e0a3c038757"]
+changes = ["5cc9a721abd23c140cc0eb52a48f9e0a3c038757", "6caf56c43f792409c51555c64cc99ddbdd6830af"]
 
 [[finding]]
 id = "STO-20"
