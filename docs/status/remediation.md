@@ -10,7 +10,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 |---|---|---|---|
 | 0 | Honesty and tracking | gate_passed | 6/6 |
 | 1 | Harness and baseline | gate_passed | 2/2 |
-| 2 | Format v2 and single-node root fixes | in_progress | 0/34 |
+| 2 | Format v2 and single-node root fixes | in_progress | 0/35 |
 | 3 | Semantics | not_started | 0/9 |
 | 4 | Raft | not_started | 0/15 |
 | 5 | Documentation and release | not_started | 0/9 |
@@ -67,6 +67,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | DOC-12 | medium | 5 | open | Nothing in CI runs the documented deploy recipes (docker compose up, 3-node setup) |
 | EVT-07 | medium | 2 | open | Fast-mode power loss reissues acked LSNs; a change-feed consumer that committed past them silently skips the new records |
 | KEY-05 | medium | 4 | open | Multi-raft collection catalog is node-local; name-addressed records on multi-raft use raw name:id keys |
+| KEY-09 | medium | 2 | fixed | Stream key routing uses platform-sized Rust Hash framing |
 | RFT-08 | medium | 4 | open | RPC client never sends x-prkdb-cluster-secret; mTLS mode configures no server TLS, so cluster cannot elect |
 | RFT-09 | medium | 4 | open | a_committed_write_replicates_to_every_node failed the unmutated baseline in CI run 34021601202 |
 | STO-03 | medium | 2 | fixed | WAL append outside publish_barrier can leave the live index pointing at a stale offset |
