@@ -83,6 +83,7 @@ use prkdb::indexed_storage::IndexedStorage;
 use prkdb::keys::{encode_record_key, CollectionId};
 use prkdb::storage::config::StorageConfig;
 use prkdb::storage::{InMemoryAdapter, WalStorageAdapter};
+use prkdb::stream_log::{ReadLimits, StartAt, StreamConfig, StreamLog};
 use prkdb_core::wal::batch::{Batch, BatchOp};
 use prkdb_core::wal::records::{Record, RecordBatch};
 use prkdb_core::wal::{CompressionConfig, WalConfig};
@@ -192,6 +193,83 @@ fn bench_wal_put_100(
     // Returned (not dropped here) so the runtime/tempdir/adapter teardown happens in
     // the uncounted caller — see the module doc comment.
     (rt, dir, adapter, value)
+}
+
+/// Records per `bench_stream_append_100` append and per `bench_stream_read_100` read
+/// (design note §11.3: 100 records of 1 KiB).
+const STREAM_RECORDS: usize = 100;
+
+fn stream_records() -> Vec<Record> {
+    (0..STREAM_RECORDS)
+        .map(|i| Record {
+            key: Some(format!("bench-key-{i}").into_bytes()),
+            value: one_kib_value(),
+            headers: vec![],
+        })
+        .collect()
+}
+
+/// A `Fast` stream (instruction counts are then not dominated by sync waits, §11.3) with
+/// no background retention task, opened on `rt`.
+fn open_stream(rt: &Runtime, dir: &std::path::Path) -> StreamLog {
+    let mut cfg = StreamConfig::new(dir);
+    cfg.wal.sync_mode = prkdb_core::wal::SyncMode::Fast;
+    cfg.retention_interval = std::time::Duration::ZERO;
+    rt.block_on(StreamLog::open(cfg)).expect("stream opens")
+}
+
+// Setup for `bench_stream_append_100`: runtime, tempdir, stream and the 100 records are
+// built outside the measured region.
+fn setup_stream_append() -> (Runtime, TempDir, StreamLog, Vec<Record>) {
+    let rt = current_thread_runtime();
+    let dir = tempfile::tempdir().unwrap();
+    let log = open_stream(&rt, dir.path());
+    (rt, dir, log, stream_records())
+}
+
+// One `StreamLog::append` of 100 keyed 1 KiB records: the record codec, one WAL frame and
+// the stream's commit hook.
+#[library_benchmark(setup = setup_stream_append, config = whole_process())]
+fn bench_stream_append_100(
+    (rt, dir, log, records): (Runtime, TempDir, StreamLog, Vec<Record>),
+) -> (Runtime, TempDir, StreamLog) {
+    start_instrumentation();
+    black_box(rt.block_on(log.append(black_box(records))).unwrap());
+    stop_instrumentation();
+    (rt, dir, log)
+}
+
+// Setup for `bench_stream_read_100`: a stream holding one 100-record frame, read once
+// already so the blocking-pool thread `read_from` uses exists before measuring.
+fn setup_stream_read() -> (Runtime, TempDir, StreamLog) {
+    let rt = current_thread_runtime();
+    let dir = tempfile::tempdir().unwrap();
+    let log = open_stream(&rt, dir.path());
+    rt.block_on(log.append(stream_records())).unwrap();
+    rt.block_on(read_100(&log));
+    (rt, dir, log)
+}
+
+async fn read_100(log: &StreamLog) -> usize {
+    let limits = ReadLimits {
+        max_records: STREAM_RECORDS,
+        max_bytes: 1024 * 1024,
+    };
+    let batch = log.read_from(StartAt::Earliest, limits).await.unwrap();
+    assert_eq!(batch.records.len(), STREAM_RECORDS);
+    batch.records.len()
+}
+
+// `StreamLog::read_from(Earliest)` of the 100 records: the seek, the frame read and the
+// record decode.
+#[library_benchmark(setup = setup_stream_read, config = whole_process())]
+fn bench_stream_read_100(
+    (rt, dir, log): (Runtime, TempDir, StreamLog),
+) -> (Runtime, TempDir, StreamLog) {
+    start_instrumentation();
+    black_box(rt.block_on(read_100(&log)));
+    stop_instrumentation();
+    (rt, dir, log)
 }
 
 /// `ShardedLruCache` (`crates/prkdb/src/storage/cache.rs`) always uses 16 shards, each
@@ -500,6 +578,8 @@ library_benchmark_group!(
         bench_records_decode,
         bench_records_encode_100,
         bench_records_decode_100,
+        bench_stream_append_100,
+        bench_stream_read_100,
         bench_encode_record_key_u64,
         bench_encode_record_key_string,
         bench_encode_record_key_uuid,

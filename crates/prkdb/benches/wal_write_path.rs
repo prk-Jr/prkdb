@@ -16,6 +16,20 @@
 //! - `model_memcpy_only`: MODEL, not product code — encode the same `Batch`, take one
 //!   async mutex, memcpy into pre-faulted memory. A CPU/memory ceiling for a put.
 //!
+//! Stream cells (Task 2.15b.8, design note `2026-10-02-streaming-log-design.md` §11),
+//! printed in a second table with a records/s column; `wal_fast_rule.py` does not parse
+//! them (its row pattern is `<cell>/<w>w/<v>k`), so the rule's input is unchanged:
+//! - `stream_append/{durable,fast}/{1,64}w/{1,64}k/b{1,100}`: `StreamLog::append` of 1 or
+//!   100 keyed records per call. ops/s counts calls; records/s and MB/s count records.
+//! - `stream_read/tail/1k`, `stream_read/cold/64k`: one reader, `read_from` with 1 MiB
+//!   limits, cycling over a pre-filled stream; cold drops the page cache
+//!   (`posix_fadvise(DONTNEED)`, Linux only; elsewhere cold equals tail and says so) at
+//!   the start of every pass.
+//! - `stream_append_retention/durable/64w/1k/b1`: as `stream_append` on 1 MiB segments
+//!   with `max_bytes` = 8 MiB and `apply_retention` looping for the whole cell.
+//! - The ceiling block gains `pread 1 MiB` rows (page cache, and cold on Linux): the
+//!   denominator for the read targets.
+//!
 //! The spike's `SingleLog` prototype, the old mmap WAL cell and the two-shard probe were
 //! removed in Task 2.9 with the implementations they measured (D13). Old runs still print
 //! the adapter cell as `current_adapter_put`; `wal_fast_rule.py` accepts either name.
@@ -29,6 +43,7 @@
 //!      `SPIKE_REPS` (default 1). (The names predate the rename; CI passes them.)
 
 use prkdb::storage::WalStorageAdapter;
+use prkdb::stream_log::{ReadLimits, Record, RetentionPolicy, StartAt, StreamConfig, StreamLog};
 use prkdb_core::vfs::{StdVfs, Vfs};
 use prkdb_core::wal::batch::{Batch, BatchOp};
 use prkdb_core::wal::{CompressionConfig, SyncMode, Wal, WalConfig, WalOptions};
@@ -47,6 +62,8 @@ enum Target {
     /// The single ordered `Wal`. `put` encodes a one-op `Batch` on the caller, as the
     /// adapter does.
     Wal(Wal),
+    /// `StreamLog::append` of `batch` keyed records per call.
+    Stream { log: StreamLog, batch: usize },
 }
 
 const MODEL_BYTES: usize = 64 * 1024 * 1024;
@@ -82,6 +99,16 @@ impl Target {
                 wal.append(encode_put(key, value), None)
                     .await
                     .expect("wal append");
+            }
+            Target::Stream { log, batch } => {
+                let records = (0..*batch)
+                    .map(|_| Record {
+                        key: Some(key.clone()),
+                        value: value.to_vec(),
+                        headers: vec![],
+                    })
+                    .collect();
+                log.append(records).await.expect("stream append");
             }
         }
     }
@@ -261,6 +288,7 @@ fn disk_ceiling(dir: &Path, measure: Duration) -> io::Result<()> {
         drop(f);
         vfs.remove(&path)?;
     }
+    read_ceiling(dir, measure)?;
     // Sync latency for a tiny write, to show the per-commit floor.
     let path = dir.join("ceiling_small.bin");
     let f = vfs.create(&path)?;
@@ -294,6 +322,199 @@ fn disk_ceiling(dir: &Path, measure: Duration) -> io::Result<()> {
     drop(f);
     vfs.remove(&path)?;
     Ok(())
+}
+
+/// Drops `path`'s cached pages so the next read comes from the device. Linux only; returns
+/// whether it did anything. The file must be synced first (dirty pages are not dropped).
+fn drop_page_cache(path: &Path) -> io::Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let f = std::fs::File::open(path)?;
+        // SAFETY: `posix_fadvise` on a file descriptor owned by a live `File`.
+        let rc = unsafe { libc::posix_fadvise(f.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
+        if rc != 0 {
+            return Err(io::Error::from_raw_os_error(rc));
+        }
+        Ok(true)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path; // no portable equivalent; cold rows say so
+        Ok(false)
+    }
+}
+
+/// Sequential read ceiling: 1 MiB `pread`s over a 256 MiB synced file, from the page
+/// cache, then (Linux) after dropping it before every pass.
+fn read_ceiling(dir: &Path, measure: Duration) -> io::Result<()> {
+    let vfs = StdVfs;
+    let path = dir.join("ceiling_read.bin");
+    let chunk = vec![0x5au8; 1024 * 1024];
+    let size: u64 = 256 * 1024 * 1024;
+    let f = vfs.create(&path)?;
+    let mut pos = 0;
+    while pos < size {
+        f.write_at(pos, &chunk)?;
+        pos += chunk.len() as u64;
+    }
+    f.sync_data()?;
+    let mut buf = vec![0u8; chunk.len()];
+    for cold in [false, true] {
+        let start = Instant::now();
+        let mut pos = 0u64;
+        let mut n = 0u64;
+        let mut dropped = cold && drop_page_cache(&path)?;
+        while start.elapsed() < measure {
+            if pos >= size {
+                pos = 0;
+                if cold {
+                    dropped = drop_page_cache(&path)?;
+                }
+            }
+            let got = f.read_at(pos, &mut buf)?;
+            assert_eq!(got, buf.len(), "short read in the read ceiling");
+            pos += got as u64;
+            n += 1;
+        }
+        let secs = start.elapsed().as_secs_f64();
+        let label = match (cold, dropped) {
+            (false, _) => "pread 1 MiB, page cache".to_string(),
+            (true, true) => "pread 1 MiB, cold (fadvise DONTNEED per pass)".to_string(),
+            (true, false) => "pread 1 MiB, cold unavailable here (same as page cache)".to_string(),
+        };
+        println!(
+            "- device: {label}: {:.0} MB/s",
+            n as f64 * buf.len() as f64 / 1e6 / secs
+        );
+    }
+    drop(f);
+    vfs.remove(&path)?;
+    Ok(())
+}
+
+fn stream_config(dir: &Path, sync_mode: SyncMode) -> StreamConfig {
+    let mut cfg = StreamConfig::new(dir);
+    cfg.wal.sync_mode = sync_mode;
+    cfg.wal.sync_interval_ms = 10;
+    // No background retention: cells that measure retention drive it themselves.
+    cfg.retention_interval = Duration::ZERO;
+    cfg
+}
+
+fn print_stream_header() {
+    println!();
+    println!(
+        "| cell | writers | value | ops/s | MB/s | p50 µs | p99 µs | p99.9 µs | records/s | load1 |"
+    );
+    println!("|---|---|---|---|---|---|---|---|---|---|");
+}
+
+/// `records` per op; MB/s counts record values.
+fn print_stream_row(r: &CellResult, records: usize) {
+    let ops_s = r.ops as f64 / r.secs;
+    let rec_s = ops_s * records as f64;
+    println!(
+        "| {} | {} | {} KiB | {:.0} | {:.1} | {:.1} | {:.1} | {:.1} | {:.0} | {} |",
+        r.name,
+        r.writers,
+        r.value_size / 1024,
+        ops_s,
+        rec_s * r.value_size as f64 / 1_000_000.0,
+        r.p50_us,
+        r.p99_us,
+        r.p999_us,
+        rec_s,
+        load_avg(),
+    );
+}
+
+/// `stream_read/{tail,cold}/<v>k`: fills ~`fill` bytes, syncs, then one reader cycles
+/// `read_from` with 1 MiB limits. ops are reads; the row's value column is the record
+/// size and records/s counts records read.
+async fn stream_read_cell(
+    dir: &Path,
+    value_size: usize,
+    cold: bool,
+    warmup: Duration,
+    measure: Duration,
+) -> (CellResult, usize, bool) {
+    const FILL: usize = 256 * 1024 * 1024;
+    let log = StreamLog::open(stream_config(dir, SyncMode::Fast))
+        .await
+        .expect("stream open");
+    let per_append = (1024 * 1024 / value_size).max(1);
+    let value = vec![0x42u8; value_size];
+    let mut written = 0;
+    while written < FILL {
+        let records = (0..per_append)
+            .map(|i| Record {
+                key: Some(format!("k{i:06}").into_bytes()),
+                value: value.clone(),
+                headers: vec![],
+            })
+            .collect();
+        log.append(records).await.expect("fill append");
+        written += per_append * value_size;
+    }
+    log.sync().await.expect("fill sync");
+    let segments: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .expect("read stream dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "wal"))
+        .collect();
+    let drop_all = |segments: &[std::path::PathBuf]| -> bool {
+        let mut all = !segments.is_empty();
+        for p in segments {
+            all &= drop_page_cache(p).expect("posix_fadvise");
+        }
+        all
+    };
+    let limits = ReadLimits {
+        max_records: usize::MAX,
+        max_bytes: 1024 * 1024,
+    };
+    let start = Instant::now();
+    let measure_start = start + warmup;
+    let end = measure_start + measure;
+    let mut lat = Vec::with_capacity(1 << 16);
+    let mut records_read = 0usize;
+    let mut dropped = cold && drop_all(&segments);
+    let mut from = StartAt::Earliest;
+    loop {
+        let t0 = Instant::now();
+        if t0 >= end {
+            break;
+        }
+        let batch = log.read_from(from, limits).await.expect("stream read");
+        if t0 >= measure_start {
+            lat.push(ns(t0.elapsed()));
+            records_read += batch.records.len();
+        }
+        from = if batch.records.is_empty() || batch.next >= log.next_offset() {
+            if cold {
+                dropped = drop_all(&segments);
+            }
+            StartAt::Earliest
+        } else {
+            StartAt::Offset(batch.next)
+        };
+    }
+    log.close().expect("stream close");
+    let reads = lat.len().max(1);
+    lat.sort_unstable();
+    let kind = if cold { "cold" } else { "tail" };
+    let r = CellResult {
+        name: format!("stream_read/{kind}/{}k", value_size / 1024),
+        writers: 1,
+        value_size,
+        ops: lat.len() as u64,
+        secs: measure.as_secs_f64(),
+        p50_us: pct(&lat, 0.50),
+        p99_us: pct(&lat, 0.99),
+        p999_us: pct(&lat, 0.999),
+    };
+    (r, records_read / reads, !cold || dropped)
 }
 
 fn open_wal(dir: &Path, sync_mode: SyncMode) -> Target {
@@ -428,6 +649,98 @@ fn main() {
                     let _ = std::fs::remove_dir_all(&dir);
                 }
             }
+        }
+    }
+
+    print_stream_header();
+    for _ in 0..reps {
+        for value_size in [1024usize, 64 * 1024] {
+            for writers in [1usize, 64] {
+                for (mode_name, mode) in [("durable", SyncMode::Durable), ("fast", SyncMode::Fast)]
+                {
+                    for batch in [1usize, 100] {
+                        let name = format!(
+                            "stream_append/{mode_name}/{writers}w/{}k/b{batch}",
+                            value_size / 1024
+                        );
+                        if !filter.is_empty() && !name.contains(&filter) {
+                            continue;
+                        }
+                        cell_id += 1;
+                        let dir = base.path().join(format!("cell_{cell_id}"));
+                        let r = rt.block_on(async {
+                            let log = StreamLog::open(stream_config(&dir, mode))
+                                .await
+                                .expect("stream open");
+                            let target = Arc::new(Target::Stream { log, batch });
+                            run_cell(name, target, writers, value_size, warmup, measure, None).await
+                        });
+                        print_stream_row(&r, batch);
+                        let _ = std::fs::remove_dir_all(&dir);
+                    }
+                }
+            }
+        }
+
+        let name = "stream_append_retention/durable/64w/1k/b1".to_string();
+        if filter.is_empty() || name.contains(&filter) {
+            cell_id += 1;
+            let dir = base.path().join(format!("cell_{cell_id}"));
+            let (r, runs, removed) = rt.block_on(async {
+                let mut cfg = stream_config(&dir, SyncMode::Durable);
+                cfg.wal.segment_bytes = 1024 * 1024;
+                cfg.retention = RetentionPolicy {
+                    max_age: None,
+                    max_bytes: Some(8 * 1024 * 1024),
+                };
+                let log = StreamLog::open(cfg).await.expect("stream open");
+                let target = Arc::new(Target::Stream { log, batch: 1 });
+                let until = Instant::now() + warmup + measure;
+                let retainer = {
+                    let target = target.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let Target::Stream { log, .. } = &*target else {
+                            unreachable!("stream target")
+                        };
+                        let (mut runs, mut removed) = (0u64, 0usize);
+                        while Instant::now() < until {
+                            removed += log.apply_retention().expect("retention").segments_removed;
+                            runs += 1;
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        (runs, removed)
+                    })
+                };
+                let r = run_cell(name, target, 64, 1024, warmup, measure, None).await;
+                let (runs, removed) = retainer.await.expect("retention task");
+                (r, runs, removed)
+            });
+            print_stream_row(&r, 1);
+            println!(
+                "- {}: {runs} retention runs removed {removed} segments during the cell",
+                r.name
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        for (value_size, cold) in [(1024usize, false), (64 * 1024, true)] {
+            let kind = if cold { "cold" } else { "tail" };
+            let name = format!("stream_read/{kind}/{}k", value_size / 1024);
+            if !filter.is_empty() && !name.contains(&filter) {
+                continue;
+            }
+            cell_id += 1;
+            let dir = base.path().join(format!("cell_{cell_id}"));
+            let (r, per_read, really_cold) =
+                rt.block_on(stream_read_cell(&dir, value_size, cold, warmup, measure));
+            print_stream_row(&r, per_read);
+            if !really_cold {
+                println!(
+                    "- {}: page cache could not be dropped here; equals tail",
+                    r.name
+                );
+            }
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 }

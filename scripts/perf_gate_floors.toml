@@ -68,3 +68,14 @@ min_ratio = 3.0
 [floors.bench_records_decode_100]
 reference = "bench_batch_decode"
 min_ratio = 10.0
+
+# The stream's append and read of 100 keyed 1 KiB records (Task 2.15b.8, design note
+# §11.3). Each must at least do the record batch codec's work on the same data, so the
+# floors sit at the codec benchmarks' own floors against the same references.
+[floors.bench_stream_append_100]
+reference = "bench_batch_encode"
+min_ratio = 3.0
+
+[floors.bench_stream_read_100]
+reference = "bench_batch_decode"
+min_ratio = 10.0
