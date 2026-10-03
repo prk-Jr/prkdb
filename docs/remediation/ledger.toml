@@ -1068,8 +1068,9 @@ regression_tests = [
   "test:crates/prkdb/tests/stream_log.rs::future_records_version_is_unsupported_on_live_read",
   "test:crates/prkdb/tests/format_v2.rs::future_stream_marker_schema_is_refused_by_version_without_recovery",
   "test:crates/prkdb/tests/format_v2.rs::an_ambiguous_future_format_number_remains_corruption",
+  "test:crates/prkdb/src/storage/format.rs::a_quoted_integer_format_parses",
 ]
-changes = ["d3ae8c98b748b26c2af9d2828beb05c63cf80a15", "123e4c27df26b5469a6a1d8a5e70921b3a8e30b0", "4a6aee9866f713bd0749bec4ae2ff27a66affa0d"]
+changes = ["d3ae8c98b748b26c2af9d2828beb05c63cf80a15", "123e4c27df26b5469a6a1d8a5e70921b3a8e30b0", "4a6aee9866f713bd0749bec4ae2ff27a66affa0d", "24bef40b7a195cb4a935576d14c090fca4364090"]
 
 [[finding]]
 id = "STO-24"
