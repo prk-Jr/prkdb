@@ -202,11 +202,15 @@ async fn a_new_stream_directory_writes_kind_stream() {
         .close()
         .unwrap();
     let text = std::fs::read_to_string(dir.path().join(FORMAT_FILE)).unwrap();
+    let body = format!(
+        "format = 2\ncreated_by = \"{}\"\nkind = \"stream\"\n",
+        env!("CARGO_PKG_VERSION")
+    );
     assert_eq!(
         text,
         format!(
-            "format = 2\ncreated_by = \"{}\"\nkind = \"stream\"\n",
-            env!("CARGO_PKG_VERSION")
+            "{body}checksum = \"{:08x}\"\n",
+            crc32fast::hash(body.as_bytes())
         )
     );
     assert_eq!(read_format(dir.path()).unwrap().unwrap().kind, Kind::Stream);
