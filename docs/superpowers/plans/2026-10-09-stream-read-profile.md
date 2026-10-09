@@ -56,8 +56,7 @@ applicable. No Linux CPU result is claimed.
 The verified task-owned Mac target was cleaned (8.0 GiB logical files removed);
 source, RED/GREEN logs and handoff remain. GitHub Actions was subsequently selected;
 run37908155101 failed qualification because perf_event_paranoid=4 blocks userspace
-perf. No build or CPU recording occurred. The profile/correction steps above
-remain unchecked; original failure artifacts and hashes are retained. See the pending
+perf. No build or CPU recording occurred. At that checkpoint the profile/correction steps were incomplete; original failure artifacts and hashes are retained. See the pending
 checkpoint decision record and handoff for commands and the complete report.
 
 Permission amendment explicitly approved: temporary level2 only in the disposable profile job, restore original in always() cleanup with setup/restore logs. Workflow amended before the first actual CPU recording round; helper/workload/quality thresholds unchanged.
@@ -70,7 +69,48 @@ nonzero (446/427/437), all43original artifact hashes match, all9commands returne
 zero, and raw loss/throttle/stderr diagnostic checks pass. The permission policy
 was restored to its original4. Original failure and full recording are retained.
 
-STOP: no qualified CPU cost or production correction. The proposed separate
-offline symbol recovery in the design is awaiting maintainer approval. It would
-decode the same recording with exact-build-ID symbols and unchanged rules;
-it would not rerun the workload or edit the failed original manifests.
+STOP: no qualified CPU cost or production correction. The separate offline symbol recovery
+was subsequently authorized as described below. It decodes the same recording
+with exact-build-ID symbols and unchanged rules, without rerunning the workload
+or editing the failed original manifests.
+
+
+## Approved same-recording offline recovery implementation
+
+Maintainer requested "Do the needful" after the concrete recovery proposal.
+Files: existing scripts/stream_read_profile.py, scripts/test_stream_read_profile.py,
+.github/workflows/remediation-gate.yml and the three already scoped task documents.
+No Rust/production changes. Use executing-plans with independent review.
+
+- [x] Add RED tests for chain-IP/DSO cohort comparison: accept symbol-name-only
+  changes; reject dropped/reordered/changed sample metadata and chain identities,
+  wrong build IDs and resolution of unapproved vDSO/other external frames.
+- [x] Add RED tests for pinned eligible original failure and unchanged normal
+  failure rejection. Missing artifacts, changed hashes, failed commands/loss,
+  mismatched source/parser and a still-failing10% threshold remain refused.
+- [x] Implement minimal separate recovery functions; keep ordinary qualification
+  semantics. Require all original provenance, exact verified ELF/debug files,
+  same perf version, isolated caches/symfs and unchanged cohort/interval checks.
+- [x] Run `python3 -m unittest discover -s scripts -p test_stream_read_profile.py -v`
+  to GREEN; archive genuine RED/GREEN command logs outside source worktree.
+- [x] Add isolated offline Actions choice/job; download only fixed original
+  artifact, actions:read only there; no benchmark/build/record/stat/sysctl.
+  Preserve errors/raw output with always-upload. Expose retained step errors.
+- [x] Independent protocol/code review, actionlint, diff/doc checks and required
+  pre-push checks; commit small checkpoints and update handoff each time.
+- [ ] Publish one reviewed milestone and dispatch offline probe at exact analysis
+  SHA. Preserve original/derived artifacts and statuses; no measured-round retry.
+- [ ] Report qualified derived CPU costs only if fixed original rules pass;
+  otherwise report remaining blocker. Production correction stays separately scoped.
+
+Commits: `test: pin offline profile recovery provenance and sample identities`;
+`ci: recover saved stream profile with exact glibc symbols`;
+`docs: record offline stream profile recovery result`.
+
+
+Implementation checkpoint:73Python tests pass, actionlint/diff/doc-claim checks
+pass, independent final helper/workflow review has no HIGH/MEDIUM blockers.
+Fullprepush passes:1509nextest/10skipped, concurrentworkspace tests/doctests,
+200seeds68256checks eachmode and every script/ledger/status/doc gate.
+No production/hot-path change; Criterion does not apply. Actual offline Actions
+extraction is pending; original failure remains immutable.

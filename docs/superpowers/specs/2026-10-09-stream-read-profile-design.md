@@ -10,8 +10,8 @@ profile of the existing read workload, then at most one reviewed correction.
 The portable audit isolated duplicate hint validation but measured no CPU-time share.
 This task adds optional benchmark instrumentation and a labelled Linux probe.
 No production, format, durability, gate threshold or index changes are authorized.
-Hardware selection is pending; preparation can proceed independently, execution
-must record the selected host and actual tools/permissions before measurement.
+GitHub Actions was selected. Execution records the actual host, tools and
+permissions before measurement; retained-recording recovery collects no new samples.
 
 ## Profile contract
 
@@ -166,9 +166,10 @@ or favorable-data retry is authorized. Record setup and restore logs alongside
 raw artifacts; restore failure must fail the job and remain visible.
 
 
-## Proposed recovery of the existing stream CPU recording
+## Approved recovery of the existing stream CPU recording
 
-Status: awaiting maintainer approval; no recovery implementation or execution.
+Status: maintainer instructed "Do the needful" after the concrete proposal on
+2026-10-09; recovery implementation is now authorized. No measured-round rerun.
 
 Run [37909749321](https://github.com/prk-Jr/prkdb/actions/runs/37909749321)
 captured the one fixed round at source `06965f2cbad61628488a423106084fdc34fe0be4`.
@@ -176,8 +177,8 @@ It failed the unchanged unknown-leaf limit: 483 of 1,310 measured samples
 (36.8702%) were unresolved. Of those, 476 belong to libc and seven to vDSO.
 The original failure is retained. Temporary perf permission was restored to 4.
 
-The current protocol prohibits qualifying a failed manifest. This proposal asks
-for a narrow amendment allowing separate derived analysis of a complete recording
+The current protocol prohibits qualifying a failed manifest. The maintainer instruction authorizes
+a narrow amendment allowing separate derived analysis of a complete recording
 that failed only symbol resolution. It does not authorize a benchmark rerun.
 
 1. Preserve the original failed qualification, source manifest and 43 hashed
@@ -186,7 +187,8 @@ that failed only symbol resolution. It does not authorize a benchmark rerun.
 2. Retrieve the recorded libc executable and debug symbols only by exact ELF
    build ID `a4a7992a8e66555c8141ab2a08a8465ff6e0ea65`. Verify both build IDs,
    retain download provenance and hashes, and isolate the symbol root/cache.
-   Availability remains unverified. Keep the exact retained benchmark; never
+   Official Ubuntu packages contain the recorded debug-ID file; executable/debug
+   ELF-ID and hash checks remain mandatory. Keep the exact retained benchmark; never
    substitute the analysis host's libc or vDSO.
 3. Re-extract only the existing perf.data using the original extraction options
    plus the approved symbol-root/cache configuration. No benchmark, perf record,
@@ -210,3 +212,32 @@ Original perf.data SHA256:
 The implementation must be test-first and independently reviewed before offline
 Actions execution. Incomplete, failed-command or lossy rounds remain ineligible.
 No production correction or performance acceptance is authorized by this proposal.
+
+
+### Bounded implementation details
+
+Keep ordinary failed-round rejection unchanged. A separate `recover` command is
+pinned to the original source-manifest SHA256, perf.data SHA256, source06965f2,
+original parser hash and sole unknown-leaf failure. Reuse all original provenance
+checks with the original pinned parser identity, verify hashes again after analysis,
+and independently confirm that unknown leaves are the original qualification error.
+
+The Ubuntu debuginfod GET endpoints returned404. Official security.ubuntu.com
+glibc2.39-0ubuntu8.9 amd64 libc6 and libc6-dbg packages contain the exact ID.
+Recovery downloads these fixed HTTPS URLs, verifies pinned package/file SHA256,
+extracts without installation using dpkg-deb, and verifies ELF GNU IDs with readelf.
+Those tools must already exist; missing tools stop with an install request.
+Archive download URLs/status/headers, package/file hashes and ELF-ID tool output.
+
+Require perf6.17.13, an isolated global build-ID cache and symfs. Disable automatic
+debuginfod access. Only exact retained benchmark and matching libc may supply symbols;
+vDSO/other unresolved external frames must remain unresolved. Preserve every ordered
+sample's PID/TID/ns/event/period/leafIP and each callchain IP/DSO identity. New unwind
+or inline frame identities stop for review; no silent normalization. All original
+quality rules apply to the derived result. Keep original paths/source distinct from
+the analysis revision, and hash all derived artifacts and supplied symbol files.
+
+Add an isolated `stream-read-symbols` Actions probe with job-local actions:read,
+pinned run37909749321/artifactsource06965f2, no Rust setup/build or CPU collection,
+ordinary jobs excluded and always-upload derived output. Print retained error on
+failure while preserving its exit code in both profile/recovery steps.

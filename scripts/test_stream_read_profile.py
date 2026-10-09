@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Synthetic protocol tests; these never run a benchmark or perf."""
 import copy
+import io
+import sys
 import json
 from pathlib import Path
 import tempfile
@@ -438,6 +440,259 @@ class RunnerTests(unittest.TestCase):
             with self.assertRaises(profile.QualificationError):
                 profile.qualify_retained(output)
 
+class RecoveryTests(unittest.TestCase):
+    def original(self, output):
+        manifest = retained_fixture(output)
+        text = samples().replace('hot (binary)', '[unknown] (binary)')
+        (output/'script.stdout').write_text(text)
+        profile.save_json(output/'qualification.json', {'qualified': False, 'reason': 'more than 10 percent unknown leaf samples', 'retry_permitted': False, 'timing_claim': False})
+        manifest.update(qualified=False, complete_round=False)
+        manifest['artifacts'] = {p.name: profile.sha256(p) for p in output.iterdir()}
+        profile.save_json(output/'source-manifest.json', manifest)
+        return mock.patch.multiple(profile, ORIGINAL_MANIFEST_SHA=profile.sha256(output/'source-manifest.json'),
+              ORIGINAL_PERF_SHA=profile.sha256(output/'perf.data'), ORIGINAL_SOURCE=SHA,
+              ORIGINAL_PARSER=profile.sha256(profile.__file__), ORIGINAL_ARTIFACT_COUNT=len(manifest['artifacts']),
+              ORIGINAL_FULL_SAMPLES=300, ORIGINAL_PHASE_SAMPLES=(100,100,100), ORIGINAL_UNKNOWN=300)
 
-if __name__ == "__main__":
+    def test_parser_preserves_callchain_ips_and_dsos(self):
+        parsed = profile.parse_samples(sample(5_100_000_000))[0]
+        self.assertEqual(parsed.get('chain_ips'), ['deadbeef', 'deadbeef'])
+        self.assertEqual(parsed.get('chain_dsos'), ['binary', 'binary'])
+
+    def test_symbol_only_changes_preserve_ordered_sample_identity(self):
+        before = profile.parse_samples(samples())
+        after = copy.deepcopy(before)
+        after[0]['leaf'] = ('renamed', 'binary')
+        after[0]['chain'][0] = ('renamed', 'binary')
+        profile.compare_recovery_samples(before, after, {'binary'})
+
+    def test_recovery_rejects_cohort_and_chain_changes(self):
+        before = profile.parse_samples(samples())
+        for field in ('pid', 'tid', 'mono_ns', 'period', 'event', 'ip', 'chain_ips', 'chain_dsos'):
+            with self.subTest(field=field):
+                after = copy.deepcopy(before)
+                value = after[0].get(field)
+                after[0][field] = value + 1 if isinstance(value, int) else ['changed'] if isinstance(value,list) else 'changed'
+                with self.assertRaises(profile.QualificationError): profile.compare_recovery_samples(before,after,{'binary'})
+        for change in ('drop','reorder','extra'):
+            with self.subTest(change=change):
+                after = copy.deepcopy(before)
+                if change=='drop': after.pop()
+                elif change=='reorder': after[0],after[1]=after[1],after[0]
+                else: after.append(copy.deepcopy(after[0]))
+                with self.assertRaises(profile.QualificationError): profile.compare_recovery_samples(before,after,{'binary'})
+
+    def test_recovery_rejects_vdso_and_unapproved_resolution(self):
+        for dso in ('[vdso]', '/usr/lib/other.so'):
+            before=profile.parse_samples(sample(5_100_000_000,leaf='[unknown]').replace('(binary)',f'({dso})'))
+            after=copy.deepcopy(before);after[0]['leaf']=('resolved',dso);after[0]['chain'][0]=('resolved',dso)
+            with self.subTest(dso=dso),self.assertRaises(profile.QualificationError):
+                profile.compare_recovery_samples(before,after,{'binary'})
+
+    def test_pinned_unknown_only_failure_is_recoverable_but_normal_qualify_still_refuses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output=Path(directory)
+            with self.original(output):
+                with self.assertRaises(profile.QualificationError): profile.qualify_retained(output)
+                value=profile.validate_recovery_original(output)
+                self.assertEqual(value.get('source_sha'),SHA)
+
+    def test_recovery_original_rejects_unpinned_or_incomplete_lossy_failure(self):
+        for change in ('pin','source','parser','missing','status','loss','fixture','reason','not_unknown'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as directory:
+                output=Path(directory)
+                with self.original(output):
+                    manifest=json.loads((output/'source-manifest.json').read_text())
+                    if change=='pin': (output/'perf.data').write_bytes(b'wrong')
+                    elif change in ('source','parser'): manifest['source_sha' if change=='source' else 'parser_sha256']='b'*40
+                    elif change=='missing': (output/'phase-1-report.stdout').unlink()
+                    elif change=='status': profile.save_json(output/'phase-2-script-status.json',{'exit_code':1})
+                    elif change=='loss': (output/'dump.stdout').write_text('PERF_RECORD_LOST')
+                    elif change=='fixture': (output/'record.stdout').write_text(stdout().replace('"verified": true','"verified": false',1))
+                    elif change=='reason': profile.save_json(output/'qualification.json',{'qualified':False,'reason':'other'})
+                    else: (output/'script.stdout').write_text(samples())
+                    if change!='pin':
+                        manifest['artifacts']={name:profile.sha256(output/name) for name in manifest['artifacts'] if (output/name).exists()}
+                        profile.save_json(output/'source-manifest.json',manifest)
+                    with mock.patch.object(profile,'ORIGINAL_MANIFEST_SHA',profile.sha256(output/'source-manifest.json')):
+                        with self.assertRaises(profile.QualificationError): profile.validate_recovery_original(output)
+
+    def test_elf_build_id_and_file_hash_are_both_required(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output=Path(directory);binary=output/'elf';binary.write_bytes(b'test')
+            def command(argv,dest,label,env=None):
+                profile.save_json(dest/f'{label}-status.json',{'exit_code':0})
+                (dest/f'{label}.stdout').write_text('Build ID: '+ 'a'*40+'\n')
+                (dest/f'{label}.stderr').write_text('')
+            with mock.patch.object(profile,'logged_command',side_effect=command):
+                for expected_hash,expected_id in (('wrong','a'*40),(profile.sha256(binary),'b'*40)):
+                    with self.subTest(expected_id=expected_id),self.assertRaises(profile.QualificationError):
+                        profile.verify_elf(binary,expected_hash,expected_id,output,'elf-id')
+
+    def test_recovery_command_is_offline_and_isolates_symbols(self):
+        command=profile.recovery_command(['perf','script','-i','old','--ns'],Path('/derived'))
+        self.assertEqual(command,['perf','--buildid-dir','/derived/cache','script','-i','/derived/perf.data','--ns','--symfs','/derived/symfs'])
+        env=profile.recovery_env({'DEBUGINFOD_URLS':'https://ambient','PERF_CONFIG':'ambient'})
+        self.assertEqual(env['DEBUGINFOD_URLS'],'');self.assertEqual(env['PERF_CONFIG'],'/dev/null')
+        self.assertNotIn('record',command);self.assertNotIn('stat',command)
+
+    def test_recover_refuses_existing_output_before_tools(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(profile,'capture') as capture:
+            with self.assertRaises(profile.QualificationError):profile.run_recovery(Path('/original'),Path(directory))
+            capture.assert_not_called()
+
+    def test_derived_quality_threshold_remains_unchanged(self):
+        before=profile.parse_samples(samples().replace('hot (binary)','[unknown] (binary)'))
+        after=copy.deepcopy(before)
+        profile.compare_recovery_samples(before,after,{'binary'})
+        with self.assertRaisesRegex(profile.QualificationError,'10 percent'):profile.qualify(stdout(),samples().replace('hot (binary)','[unknown] (binary)'),SHA)
+
+
+    def test_recover_cli_routes_only_to_offline_recovery(self):
+        with mock.patch.object(sys,'argv',['profile','recover','--original','/original','--output','/derived']),mock.patch.object(sys,'stdout',new_callable=io.StringIO),mock.patch.object(profile,'run_recovery',return_value={'qualified':True}) as run:
+            try: result=profile.main()
+            except SystemExit as error: result=error.code
+            self.assertEqual(result,0)
+            run.assert_called_once_with(Path('/original'),Path('/derived'))
+
+    def test_download_preserves_headers_and_rejects_wrong_hash_and_redirect(self):
+        url='https://security.ubuntu.com/fixed.deb'
+        for change in ('hash','redirect'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as directory:
+                output=Path(directory);response=io.BytesIO(b'package')
+                response.status=200;response.headers={'Content-Type':'application/octet-stream'}
+                response.geturl=lambda: url if change=='hash' else 'https://other/mirror'
+                with mock.patch.object(profile.urllib.request,'urlopen',return_value=response):
+                    with self.assertRaises(profile.QualificationError):profile.download_package('libc',url,'wrong',output)
+                metadata=json.loads((output/'libc-download.json').read_text())
+                self.assertEqual(metadata['status'],200);self.assertTrue(metadata['headers'])
+
+    def run_fixture(self, base, outcome='success'):
+        original=base/'original';original.mkdir();output=base/'derived'
+        pins=self.original(original)
+        identity={'source_sha':'b'*40,'source_tree':'c'*40,'parser_sha256':profile.sha256(profile.__file__)}
+        calls=[]
+        def command(argv,dest,label,env=None):
+            calls.append((label,argv,env))
+            profile.save_json(dest/f'{label}-command.json',argv)
+            failed=outcome=='failed_command' and label=='phase-2-script'
+            profile.save_json(dest/f'{label}-status.json',{'exit_code':1 if failed else 0})
+            (dest/f'{label}.stderr').write_text('')
+            value='perf version 6.17.13\n' if label=='perf-version' else 'synthetic tool version\n'
+            if label=='script': value=samples() if outcome!='unknown' else samples().replace('hot (binary)','[unknown] (binary)')
+            if label.startswith('phase-') and label.endswith('-script'):
+                identity_number=int(label.split('-')[1]);value=''.join(sample(identity_number*5_000_000_000+(i+1)*10_000_000) for i in range(100))
+            (dest/f'{label}.stdout').write_text(value)
+            if failed:raise profile.QualificationError('phase-2-script failed (1); raw files retained')
+        return original,output,pins,identity,calls,command
+
+    def test_complete_mocked_recovery_preserves_original_and_retains_derivation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original,output,pins,identity,calls,command=self.run_fixture(Path(directory))
+            snapshot={p.name:profile.sha256(p) for p in original.iterdir()}
+            with pins,mock.patch.object(profile.platform,'system',return_value='Linux'),mock.patch.object(profile.shutil,'which',return_value='/existing/tool'),mock.patch.object(profile,'recovery_analysis_identity',return_value=identity),mock.patch.object(profile,'prepare_recovery_symbols',side_effect=self.mock_symbols),mock.patch.object(profile,'logged_command',side_effect=command),mock.patch.object(profile,'BENCHMARK_DSO','binary'),mock.patch.object(profile,'preflight') as preflight:
+                result=profile.run_recovery(original,output)
+            self.assertTrue(result['qualified']);preflight.assert_not_called()
+            self.assertEqual(snapshot,{p.name:profile.sha256(p) for p in original.iterdir()})
+            manifest=json.loads((output/'derived-manifest.json').read_text())
+            self.assertTrue(manifest['qualified']);self.assertEqual(manifest['recording_attempts'],0)
+            self.assertTrue((output/'original-source-manifest.json').is_file())
+            self.assertEqual((output/'original-source-manifest.json').read_bytes(),(original/'source-manifest.json').read_bytes())
+            self.assertEqual((output/'original-qualification.json').read_bytes(),(original/'qualification.json').read_bytes())
+            self.assertTrue(manifest['original_verified_after']);self.assertTrue(manifest['analysis_verified_after'])
+            self.assertEqual(len([label for label,_,_ in calls if label=='script']),1)
+            self.assertTrue(all(env['DEBUGINFOD_URLS']=='' for _,_,env in calls))
+            for name,digest in manifest['artifacts'].items():self.assertEqual(profile.sha256(output/name),digest)
+
+    def test_failed_offline_command_retains_failure_and_never_retries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original,output,pins,identity,calls,command=self.run_fixture(Path(directory),'failed_command')
+            with pins,mock.patch.object(profile.platform,'system',return_value='Linux'),mock.patch.object(profile.shutil,'which',return_value='/existing/tool'),mock.patch.object(profile,'recovery_analysis_identity',return_value=identity),mock.patch.object(profile,'prepare_recovery_symbols',side_effect=self.mock_symbols),mock.patch.object(profile,'logged_command',side_effect=command):
+                with self.assertRaisesRegex(profile.QualificationError,'phase-2-script failed'):profile.run_recovery(original,output)
+            manifest=json.loads((output/'derived-manifest.json').read_text())
+            self.assertFalse(manifest['qualified']);self.assertTrue(manifest['original_verified_after'])
+            self.assertIn('phase-2-script-status.json',manifest['artifacts'])
+            self.assertEqual(len([label for label,_,_ in calls if label=='phase-2-script']),1)
+            self.assertFalse(json.loads((output/'qualification.json').read_text())['qualified'])
+
+    def test_analysis_change_in_final_recheck_cannot_leave_success_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original,output,pins,identity,calls,command=self.run_fixture(Path(directory))
+            with pins,mock.patch.object(profile.platform,'system',return_value='Linux'),mock.patch.object(profile.shutil,'which',return_value='/existing/tool'),mock.patch.object(profile,'recovery_analysis_identity',side_effect=[identity,identity,{**identity,'source_sha':'d'*40}]),mock.patch.object(profile,'prepare_recovery_symbols',side_effect=self.mock_symbols),mock.patch.object(profile,'logged_command',side_effect=command),mock.patch.object(profile,'BENCHMARK_DSO','binary'):
+                with self.assertRaises(profile.QualificationError):profile.run_recovery(original,output)
+            self.assertFalse(json.loads((output/'derived-manifest.json').read_text())['qualified'])
+            self.assertFalse(json.loads((output/'qualification.json').read_text())['qualified'])
+
+
+    def mock_symbols(self, original, output, manifest):
+        symbols={}
+        for label in ('libc','debug','benchmark'):
+            path=output/'symfs'/label;path.parent.mkdir(exist_ok=True);path.write_bytes(label.encode())
+            symbols[label]={'path':str(path),'sha256':profile.sha256(path),'build_id':'a'*40}
+        self.current_symbols=symbols
+        return symbols
+
+    def test_actual_used_symfs_files_are_elf_verified_and_recorded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output=Path(directory);original=output/'original';original.mkdir();(original/'benchmark-profiled').write_bytes(b'benchmark')
+            used=[]
+            def download(label,url,digest,dest):
+                package=dest/(label+'.deb');package.write_bytes(b'package');return package
+            def extract(argv,dest,label,env=None):
+                root=Path(argv[-1]);relative=Path(profile.LIBC_DSO.lstrip('/')) if label=='libc6-extract' else profile.DEBUG_PATH
+                path=root/relative;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(label.encode())
+            def verify(path,digest,build_id,dest,label):
+                used.append(path);return {'path':str(path),'sha256':profile.sha256(path),'build_id':build_id}
+            with mock.patch.object(profile,'download_package',side_effect=download),mock.patch.object(profile,'logged_command',side_effect=extract),mock.patch.object(profile,'verify_elf',side_effect=verify):
+                symbols=profile.prepare_recovery_symbols(original,output,{'build':{'binary_sha256':profile.sha256(original/'benchmark-profiled')}})
+            for label,relative in (('libc',Path(profile.LIBC_DSO.lstrip('/'))),('debug',profile.DEBUG_PATH),('benchmark',Path(profile.BENCHMARK_DSO.lstrip('/')))):
+                path=output/'symfs'/relative
+                self.assertIn(path,used);self.assertEqual(symbols[label]['path'],str(path))
+
+    def test_mutated_actual_symbol_copies_cannot_qualify(self):
+        for label in ('libc','debug','benchmark'):
+            with self.subTest(label=label),tempfile.TemporaryDirectory() as directory:
+                original,output,pins,identity,calls,command=self.run_fixture(Path(directory))
+                def mutate(argv,dest,command_label,env=None):
+                    command(argv,dest,command_label,env)
+                    if command_label=='script':Path(self.current_symbols[label]['path']).write_bytes(b'changed')
+                with pins,mock.patch.object(profile.platform,'system',return_value='Linux'),mock.patch.object(profile.shutil,'which',return_value='/existing/tool'),mock.patch.object(profile,'recovery_analysis_identity',return_value=identity),mock.patch.object(profile,'prepare_recovery_symbols',side_effect=self.mock_symbols),mock.patch.object(profile,'logged_command',side_effect=mutate),mock.patch.object(profile,'BENCHMARK_DSO','binary'):
+                    with self.assertRaises(profile.QualificationError):profile.run_recovery(original,output)
+                self.assertFalse(json.loads((output/'qualification.json').read_text())['qualified'])
+                self.assertFalse(json.loads((output/'derived-manifest.json').read_text())['qualified'])
+
+
+    def test_success_report_write_failure_cannot_leave_qualified_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original,output,pins,identity,calls,command=self.run_fixture(Path(directory))
+            actual_save=profile.save_json;failed=False
+            def save(path,value):
+                nonlocal failed
+                if path.name=='qualification.json' and value.get('qualified') is True and not failed:
+                    failed=True;raise OSError('injected success report write failure')
+                actual_save(path,value)
+            with pins,mock.patch.object(profile.platform,'system',return_value='Linux'),mock.patch.object(profile.shutil,'which',return_value='/existing/tool'),mock.patch.object(profile,'recovery_analysis_identity',return_value=identity),mock.patch.object(profile,'prepare_recovery_symbols',side_effect=self.mock_symbols),mock.patch.object(profile,'logged_command',side_effect=command),mock.patch.object(profile,'BENCHMARK_DSO','binary'),mock.patch.object(profile,'save_json',side_effect=save):
+                with self.assertRaisesRegex(OSError,'success report write failure'):profile.run_recovery(original,output)
+            self.assertFalse(json.loads((output/'qualification.json').read_text())['qualified'])
+            self.assertFalse(json.loads((output/'derived-manifest.json').read_text())['qualified'])
+
+    def test_recover_cli_prints_failure_reason_and_returns_two(self):
+        with mock.patch.object(sys,'argv',['profile','recover','--original','/original','--output','/derived']),mock.patch.object(sys,'stderr',new_callable=io.StringIO) as stderr,mock.patch.object(profile,'run_recovery',side_effect=profile.QualificationError('retained reason')):
+            self.assertEqual(profile.main(),2)
+            self.assertEqual(json.loads(stderr.getvalue())['reason'],'retained reason')
+
+
+    def test_mutated_used_recording_cannot_qualify_even_if_samples_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original,output,pins,identity,calls,command=self.run_fixture(Path(directory))
+            def mutate(argv,dest,label,env=None):
+                command(argv,dest,label,env)
+                if label=='script':(dest/'perf.data').write_bytes(b'changed recording metadata')
+            with pins,mock.patch.object(profile.platform,'system',return_value='Linux'),mock.patch.object(profile.shutil,'which',return_value='/existing/tool'),mock.patch.object(profile,'recovery_analysis_identity',return_value=identity),mock.patch.object(profile,'prepare_recovery_symbols',side_effect=self.mock_symbols),mock.patch.object(profile,'logged_command',side_effect=mutate),mock.patch.object(profile,'BENCHMARK_DSO','binary'):
+                with self.assertRaises(profile.QualificationError):profile.run_recovery(original,output)
+            self.assertFalse(json.loads((output/'qualification.json').read_text())['qualified'])
+            self.assertFalse(json.loads((output/'derived-manifest.json').read_text())['qualified'])
+
+
+if __name__ == '__main__':
     unittest.main()
