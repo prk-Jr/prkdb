@@ -515,5 +515,6 @@ jobs:
         with:
           name: stream-read-symbols-${{ needs.resolve.outputs.sha }}
           path: ${{ runner.temp }}/stream-symbol-evidence/
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 30

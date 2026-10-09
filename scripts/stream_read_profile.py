@@ -491,7 +491,7 @@ def recovery_command(command, output):
     relocated = list(command[1:])
     require(relocated[1] == "-i", "offline command input differs")
     relocated[2] = str(output / "perf.data")
-    return ["perf", "--buildid-dir", str(output / "cache")] + relocated + ["--symfs", str(output / "symfs")]
+    return ["perf", "--buildid-dir", str(recovery_cache(output))] + relocated + ["--symfs", str(output / "symfs"), "--no-inline"]
 
 
 def verify_elf(path, expected_hash, expected_id, output, label):
@@ -548,14 +548,23 @@ def prepare_recovery_symbols(original, output, manifest):
                                     output, label + "-used-elf")
     # symfs contains only the exact two ELF objects and matching libc debug file.
     # A fresh empty global cache prevents access to ambient build-ID entries.
-    (output / "cache").mkdir()
+    recovery_cache(output).mkdir()
     return symbols
 
 
 def recheck_recovery_symbols(symbols):
-    require(set(symbols) == {"libc", "debug", "benchmark"}, "exact used symbol objects required")
+    require(set(symbols) == {"libc", "debug", "benchmark", "vdso"}, "exact used symbol objects required")
     for label, metadata in symbols.items():
         require(sha256(Path(metadata["path"])) == metadata["sha256"], f"used symbol file changed: {label}")
+        if label == "vdso":
+            link = Path(metadata["cache_link"])
+            require(link.is_dir() and not link.is_symlink() and str(link.resolve()) == metadata["cache_target"]
+                    and link.resolve().is_relative_to(Path(metadata["cache_root"]).resolve()),
+                    "vDSO cache binding changed")
+            require({path.name for path in link.iterdir()} == {"elf", "vdso"}, "unexpected vDSO cache entry")
+            for name in ("candidate_path", "cache_elf_path", "resolved_path", "cache_add_elf_path"):
+                path = Path(metadata[name])
+                require(not path.is_symlink() and sha256(path) == metadata["sha256"], "vDSO supplied file changed")
 
 
 def recheck_recovery_recording(output):
@@ -598,7 +607,7 @@ def run_recovery(original, output):
         derived["analysis"] = recovery_analysis_identity()
         environment = recovery_env(os.environ)
         save_json(output / "recovery-settings.json", {"PERF_CONFIG": environment["PERF_CONFIG"],
-                  "DEBUGINFOD_URLS": environment["DEBUGINFOD_URLS"], "buildid_dir": str(output / "cache"),
+                  "DEBUGINFOD_URLS": environment["DEBUGINFOD_URLS"], "buildid_dir": str(recovery_cache(output)),
                   "symfs": str(output / "symfs")})
         for tool, command in (("perf", ["perf", "--version"]), ("readelf", ["readelf", "--version"]),
                               ("dpkg-deb", ["dpkg-deb", "--version"]), ("git", ["git", "--version"])):
@@ -609,6 +618,7 @@ def run_recovery(original, output):
         shutil.copyfile(original / "perf.data", output / "perf.data")
         recheck_recovery_recording(output)
         derived["recording_verified_before"] = True
+        derived["symbols"]["vdso"] = prepare_recovery_vdso(output)
         shutil.copyfile(original / "record.stdout", output / "record.stdout")
         labels = ["script"] + [f"phase-{identity}-{suffix}" for identity in range(1,4)
                                  for suffix in ("script", "report")]
@@ -619,7 +629,7 @@ def run_recovery(original, output):
         recheck_recovery_recording(output)
         before = parse_samples((original / "script.stdout").read_text())
         after = parse_samples((output / "script.stdout").read_text())
-        compare_recovery_samples(before, after, {BENCHMARK_DSO, LIBC_DSO})
+        compare_recovery_samples(before, after, {BENCHMARK_DSO, LIBC_DSO, "[vdso]"})
         # Every interval extraction is also the exact ordered subset of the full script.
         intervals = parse_intervals((original / "record.stdout").read_text(), ORIGINAL_SOURCE)
         for interval in intervals:
@@ -634,12 +644,14 @@ def run_recovery(original, output):
         validate_recovery_original(original)
         derived.update(qualified=True, original_verified_after=True, full_samples=len(after), measured_samples=result["samples"])
         result.update(derived_analysis=True, original_failure_retained=True, original_manifest_sha256=ORIGINAL_MANIFEST_SHA,
-                      original_unknown_leaf_samples=ORIGINAL_UNKNOWN)
+                      original_unknown_leaf_samples=ORIGINAL_UNKNOWN,
+                      vdso_resolved_measured_leaves=resolved_vdso_leaves(before, after, intervals))
         save_json(output / "qualification.json", result)
         return result
     except (QualificationError, OSError, KeyError, ValueError) as error:
         derived["qualified"] = False
         derived["reason"] = str(error)
+        derived["primary_failure"] = str(error)
         save_json(output / "qualification.json", {"qualified": False, "reason": str(error),
                   "timing_claim": False, "retry_permitted": False, "original_failure_retained": True})
         raise
@@ -651,7 +663,7 @@ def run_recovery(original, output):
             derived["original_verified_after"] = False
             derived["original_recheck_error"] = str(error)
             derived["qualified"] = False
-            save_json(output / "qualification.json", {"qualified": False, "reason": str(error),
+            save_json(output / "qualification.json", {"qualified": False, "reason": derived.get("primary_failure", str(error)),
                       "timing_claim": False, "retry_permitted": False})
         if "analysis" in derived:
             try:
@@ -659,7 +671,7 @@ def run_recovery(original, output):
                 derived["analysis_verified_after"] = True
             except (QualificationError, OSError, KeyError, ValueError) as error:
                 derived.update(qualified=False, analysis_verified_after=False, analysis_recheck_error=str(error), reason=str(error))
-                save_json(output / "qualification.json", {"qualified": False, "reason": str(error),
+                save_json(output / "qualification.json", {"qualified": False, "reason": derived.get("primary_failure", str(error)),
                           "timing_claim": False, "retry_permitted": False, "original_failure_retained": True})
         if "symbols" in derived:
             try:
@@ -667,7 +679,7 @@ def run_recovery(original, output):
                 derived["symbols_verified_after"] = True
             except (QualificationError, OSError, KeyError, ValueError) as error:
                 derived.update(qualified=False, symbols_verified_after=False, symbol_recheck_error=str(error), reason=str(error))
-                save_json(output / "qualification.json", {"qualified": False, "reason": str(error),
+                save_json(output / "qualification.json", {"qualified": False, "reason": derived.get("primary_failure", str(error)),
                           "timing_claim": False, "retry_permitted": False, "original_failure_retained": True})
         if derived.get("recording_verified_before"):
             try:
@@ -675,13 +687,91 @@ def run_recovery(original, output):
                 derived["recording_verified_after"] = True
             except (QualificationError, OSError, KeyError, ValueError) as error:
                 derived.update(qualified=False, recording_verified_after=False, recording_recheck_error=str(error), reason=str(error))
-                save_json(output / "qualification.json", {"qualified": False, "reason": str(error),
+                save_json(output / "qualification.json", {"qualified": False, "reason": derived.get("primary_failure", str(error)),
                           "timing_claim": False, "retry_permitted": False, "original_failure_retained": True})
         derived["artifacts"] = recovery_artifacts(output)
         save_json(output / "derived-manifest.json", derived)
         require(derived.get("original_verified_after") is True and derived.get("analysis_verified_after", True) is True
                 and derived.get("symbols_verified_after", True) is True and derived.get("recording_verified_after", True) is True,
-                derived.get("reason", "original, analysis or symbol provenance changed; derived evidence refused"))
+                derived.get("primary_failure", derived.get("reason", "original, analysis or symbol provenance changed; derived evidence refused")))
+
+
+VDSO_ID = "f0566cac49ca64809e998c75b1373572e3fbc598"
+
+
+def recovery_cache(output):
+    # perf's --symfs callback overrides the global cache with symfs/.debug.
+    return output / "symfs" / ".debug"
+
+
+def recorded_vdso_id(text):
+    ids = re.findall(r"^([0-9a-f]{40})\s+\[vdso\]\s*$", text, re.M)
+    require(ids == [VDSO_ID], "recorded vDSO build ID differs or is missing/duplicated")
+    return ids[0]
+
+
+def capture_self_vdso(output):
+    lines = [line for line in Path("/proc/self/maps").read_text().splitlines() if line.endswith(" [vdso]")]
+    require(len(lines) == 1, "one self vDSO mapping required")
+    fields = lines[0].split()
+    begin, end = (int(value, 16) for value in fields[0].split("-"))
+    require(fields[1].startswith("r-x") and 64 <= end - begin <= 1_048_576, "invalid self vDSO mapping")
+    fd = os.open("/proc/self/mem", os.O_RDONLY)
+    try:
+        data = os.pread(fd, end - begin, begin)
+    finally:
+        os.close(fd)
+    require(len(data) == end - begin and data.startswith(b"\x7fELF"), "self vDSO candidate read failed")
+    candidate = output / "vdso-candidate.elf"
+    candidate.write_bytes(data)
+    save_json(output / "vdso-capture.json", {"source": "/proc/self/maps [vdso] and /proc/self/mem",
+              "pid": os.getpid(), "mapping": lines[0], "bytes": len(data), "sha256": sha256(candidate)})
+    return candidate
+
+
+def prepare_recovery_vdso(output):
+    cache = recovery_cache(output)
+    cache.mkdir(parents=True, exist_ok=True)
+    environment = recovery_env(os.environ)
+    logged_command(["perf", "--buildid-dir", str(cache), "buildid-list", "-i", str(output / "perf.data")],
+                   output, "vdso-buildids", environment)
+    recorded_vdso_id((output / "vdso-buildids.stdout").read_text())
+    candidate = capture_self_vdso(output)
+    digest = sha256(candidate)
+    verify_elf(candidate, digest, VDSO_ID, output, "vdso-candidate-elf")
+    logged_command(["perf", "--buildid-dir", str(cache), "buildid-cache", "--add", str(candidate)],
+                   output, "vdso-cache-add", environment)
+    link = cache / ".build-id" / VDSO_ID[:2] / VDSO_ID[2:]
+    require(link.is_symlink() and link.is_dir() and link.resolve().is_relative_to(cache.resolve()),
+            "vDSO build-ID cache link escapes owned cache")
+    require({path.name for path in link.iterdir()} == {"elf"}, "unexpected vDSO cache symbol source")
+    cached_elf = link / "elf"
+    require(cached_elf.resolve().is_relative_to(cache.resolve()), "cached vDSO ELF escapes owned cache")
+    verify_elf(cached_elf, digest, VDSO_ID, output, "vdso-cache-elf")
+    # buildid-cache --add uses 'elf' for a regular candidate; vDSO lookup uses 'vdso'.
+    cache_add_target = str(link.resolve())
+    cache_add_link_target = os.readlink(link)
+    cache_add_elf = cached_elf.resolve()
+    # Materialize the lookup directory: uploaded artifacts need no directory symlink.
+    link.unlink()
+    link.mkdir()
+    cached_elf = link / "elf"
+    shutil.copyfile(cache_add_elf, cached_elf)
+    verify_elf(cached_elf, digest, VDSO_ID, output, "vdso-materialized-elf")
+    used = link / "vdso"
+    shutil.copyfile(cached_elf, used)
+    metadata = verify_elf(used, digest, VDSO_ID, output, "vdso-used-elf")
+    metadata.update(candidate_path=str(candidate), cache_elf_path=str(cached_elf),
+                    resolved_path=str(used.resolve()), cache_link=str(link), cache_add_link_target=cache_add_link_target, cache_add_target=cache_add_target,
+                    cache_add_elf_path=str(cache_add_elf), cache_layout="materialized build-ID directory",
+                    cache_root=str(cache), cache_target=str(link.resolve()), recorded_build_id=VDSO_ID)
+    return metadata
+
+
+def resolved_vdso_leaves(before, after, intervals):
+    return sum(old["leaf"][1] == "[vdso]" and unknown(old["leaf"][0]) and not unknown(new["leaf"][0])
+               and any(i["begin_ns"] <= old["mono_ns"] < i["end_ns"] for i in intervals)
+               for old, new in zip(before, after))
 
 
 def main():

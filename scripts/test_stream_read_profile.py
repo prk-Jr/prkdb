@@ -531,7 +531,7 @@ class RecoveryTests(unittest.TestCase):
 
     def test_recovery_command_is_offline_and_isolates_symbols(self):
         command=profile.recovery_command(['perf','script','-i','old','--ns'],Path('/derived'))
-        self.assertEqual(command,['perf','--buildid-dir','/derived/cache','script','-i','/derived/perf.data','--ns','--symfs','/derived/symfs'])
+        self.assertEqual(command,['perf','--buildid-dir','/derived/symfs/.debug','script','-i','/derived/perf.data','--ns','--symfs','/derived/symfs','--no-inline'])
         env=profile.recovery_env({'DEBUGINFOD_URLS':'https://ambient','PERF_CONFIG':'ambient'})
         self.assertEqual(env['DEBUGINFOD_URLS'],'');self.assertEqual(env['PERF_CONFIG'],'/dev/null')
         self.assertNotIn('record',command);self.assertNotIn('stat',command)
@@ -590,7 +590,7 @@ class RecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             original,output,pins,identity,calls,command=self.run_fixture(Path(directory))
             snapshot={p.name:profile.sha256(p) for p in original.iterdir()}
-            with pins,mock.patch.object(profile.platform,'system',return_value='Linux'),mock.patch.object(profile.shutil,'which',return_value='/existing/tool'),mock.patch.object(profile,'recovery_analysis_identity',return_value=identity),mock.patch.object(profile,'prepare_recovery_symbols',side_effect=self.mock_symbols),mock.patch.object(profile,'logged_command',side_effect=command),mock.patch.object(profile,'BENCHMARK_DSO','binary'),mock.patch.object(profile,'preflight') as preflight:
+            with pins,mock.patch.object(profile.platform,'system',return_value='Linux'),mock.patch.object(profile.shutil,'which',return_value='/existing/tool'),mock.patch.object(profile,'recovery_analysis_identity',return_value=identity),mock.patch.object(profile,'prepare_recovery_symbols',side_effect=self.mock_symbols),mock.patch.object(profile,'prepare_recovery_vdso',side_effect=self.mock_vdso),mock.patch.object(profile,'logged_command',side_effect=command),mock.patch.object(profile,'BENCHMARK_DSO','binary'),mock.patch.object(profile,'preflight') as preflight:
                 result=profile.run_recovery(original,output)
             self.assertTrue(result['qualified']);preflight.assert_not_called()
             self.assertEqual(snapshot,{p.name:profile.sha256(p) for p in original.iterdir()})
@@ -607,7 +607,7 @@ class RecoveryTests(unittest.TestCase):
     def test_failed_offline_command_retains_failure_and_never_retries(self):
         with tempfile.TemporaryDirectory() as directory:
             original,output,pins,identity,calls,command=self.run_fixture(Path(directory),'failed_command')
-            with pins,mock.patch.object(profile.platform,'system',return_value='Linux'),mock.patch.object(profile.shutil,'which',return_value='/existing/tool'),mock.patch.object(profile,'recovery_analysis_identity',return_value=identity),mock.patch.object(profile,'prepare_recovery_symbols',side_effect=self.mock_symbols),mock.patch.object(profile,'logged_command',side_effect=command):
+            with pins,mock.patch.object(profile.platform,'system',return_value='Linux'),mock.patch.object(profile.shutil,'which',return_value='/existing/tool'),mock.patch.object(profile,'recovery_analysis_identity',return_value=identity),mock.patch.object(profile,'prepare_recovery_symbols',side_effect=self.mock_symbols),mock.patch.object(profile,'prepare_recovery_vdso',side_effect=self.mock_vdso),mock.patch.object(profile,'logged_command',side_effect=command):
                 with self.assertRaisesRegex(profile.QualificationError,'phase-2-script failed'):profile.run_recovery(original,output)
             manifest=json.loads((output/'derived-manifest.json').read_text())
             self.assertFalse(manifest['qualified']);self.assertTrue(manifest['original_verified_after'])
@@ -618,7 +618,7 @@ class RecoveryTests(unittest.TestCase):
     def test_analysis_change_in_final_recheck_cannot_leave_success_report(self):
         with tempfile.TemporaryDirectory() as directory:
             original,output,pins,identity,calls,command=self.run_fixture(Path(directory))
-            with pins,mock.patch.object(profile.platform,'system',return_value='Linux'),mock.patch.object(profile.shutil,'which',return_value='/existing/tool'),mock.patch.object(profile,'recovery_analysis_identity',side_effect=[identity,identity,{**identity,'source_sha':'d'*40}]),mock.patch.object(profile,'prepare_recovery_symbols',side_effect=self.mock_symbols),mock.patch.object(profile,'logged_command',side_effect=command),mock.patch.object(profile,'BENCHMARK_DSO','binary'):
+            with pins,mock.patch.object(profile.platform,'system',return_value='Linux'),mock.patch.object(profile.shutil,'which',return_value='/existing/tool'),mock.patch.object(profile,'recovery_analysis_identity',side_effect=[identity,identity,{**identity,'source_sha':'d'*40}]),mock.patch.object(profile,'prepare_recovery_symbols',side_effect=self.mock_symbols),mock.patch.object(profile,'prepare_recovery_vdso',side_effect=self.mock_vdso),mock.patch.object(profile,'logged_command',side_effect=command),mock.patch.object(profile,'BENCHMARK_DSO','binary'):
                 with self.assertRaises(profile.QualificationError):profile.run_recovery(original,output)
             self.assertFalse(json.loads((output/'derived-manifest.json').read_text())['qualified'])
             self.assertFalse(json.loads((output/'qualification.json').read_text())['qualified'])
@@ -650,13 +650,13 @@ class RecoveryTests(unittest.TestCase):
                 self.assertIn(path,used);self.assertEqual(symbols[label]['path'],str(path))
 
     def test_mutated_actual_symbol_copies_cannot_qualify(self):
-        for label in ('libc','debug','benchmark'):
+        for label in ('libc','debug','benchmark','vdso'):
             with self.subTest(label=label),tempfile.TemporaryDirectory() as directory:
                 original,output,pins,identity,calls,command=self.run_fixture(Path(directory))
                 def mutate(argv,dest,command_label,env=None):
                     command(argv,dest,command_label,env)
                     if command_label=='script':Path(self.current_symbols[label]['path']).write_bytes(b'changed')
-                with pins,mock.patch.object(profile.platform,'system',return_value='Linux'),mock.patch.object(profile.shutil,'which',return_value='/existing/tool'),mock.patch.object(profile,'recovery_analysis_identity',return_value=identity),mock.patch.object(profile,'prepare_recovery_symbols',side_effect=self.mock_symbols),mock.patch.object(profile,'logged_command',side_effect=mutate),mock.patch.object(profile,'BENCHMARK_DSO','binary'):
+                with pins,mock.patch.object(profile.platform,'system',return_value='Linux'),mock.patch.object(profile.shutil,'which',return_value='/existing/tool'),mock.patch.object(profile,'recovery_analysis_identity',return_value=identity),mock.patch.object(profile,'prepare_recovery_symbols',side_effect=self.mock_symbols),mock.patch.object(profile,'prepare_recovery_vdso',side_effect=self.mock_vdso),mock.patch.object(profile,'logged_command',side_effect=mutate),mock.patch.object(profile,'BENCHMARK_DSO','binary'):
                     with self.assertRaises(profile.QualificationError):profile.run_recovery(original,output)
                 self.assertFalse(json.loads((output/'qualification.json').read_text())['qualified'])
                 self.assertFalse(json.loads((output/'derived-manifest.json').read_text())['qualified'])
@@ -671,7 +671,7 @@ class RecoveryTests(unittest.TestCase):
                 if path.name=='qualification.json' and value.get('qualified') is True and not failed:
                     failed=True;raise OSError('injected success report write failure')
                 actual_save(path,value)
-            with pins,mock.patch.object(profile.platform,'system',return_value='Linux'),mock.patch.object(profile.shutil,'which',return_value='/existing/tool'),mock.patch.object(profile,'recovery_analysis_identity',return_value=identity),mock.patch.object(profile,'prepare_recovery_symbols',side_effect=self.mock_symbols),mock.patch.object(profile,'logged_command',side_effect=command),mock.patch.object(profile,'BENCHMARK_DSO','binary'),mock.patch.object(profile,'save_json',side_effect=save):
+            with pins,mock.patch.object(profile.platform,'system',return_value='Linux'),mock.patch.object(profile.shutil,'which',return_value='/existing/tool'),mock.patch.object(profile,'recovery_analysis_identity',return_value=identity),mock.patch.object(profile,'prepare_recovery_symbols',side_effect=self.mock_symbols),mock.patch.object(profile,'prepare_recovery_vdso',side_effect=self.mock_vdso),mock.patch.object(profile,'logged_command',side_effect=command),mock.patch.object(profile,'BENCHMARK_DSO','binary'),mock.patch.object(profile,'save_json',side_effect=save):
                 with self.assertRaisesRegex(OSError,'success report write failure'):profile.run_recovery(original,output)
             self.assertFalse(json.loads((output/'qualification.json').read_text())['qualified'])
             self.assertFalse(json.loads((output/'derived-manifest.json').read_text())['qualified'])
@@ -688,10 +688,102 @@ class RecoveryTests(unittest.TestCase):
             def mutate(argv,dest,label,env=None):
                 command(argv,dest,label,env)
                 if label=='script':(dest/'perf.data').write_bytes(b'changed recording metadata')
-            with pins,mock.patch.object(profile.platform,'system',return_value='Linux'),mock.patch.object(profile.shutil,'which',return_value='/existing/tool'),mock.patch.object(profile,'recovery_analysis_identity',return_value=identity),mock.patch.object(profile,'prepare_recovery_symbols',side_effect=self.mock_symbols),mock.patch.object(profile,'logged_command',side_effect=mutate),mock.patch.object(profile,'BENCHMARK_DSO','binary'):
+            with pins,mock.patch.object(profile.platform,'system',return_value='Linux'),mock.patch.object(profile.shutil,'which',return_value='/existing/tool'),mock.patch.object(profile,'recovery_analysis_identity',return_value=identity),mock.patch.object(profile,'prepare_recovery_symbols',side_effect=self.mock_symbols),mock.patch.object(profile,'prepare_recovery_vdso',side_effect=self.mock_vdso),mock.patch.object(profile,'logged_command',side_effect=mutate),mock.patch.object(profile,'BENCHMARK_DSO','binary'):
                 with self.assertRaises(profile.QualificationError):profile.run_recovery(original,output)
             self.assertFalse(json.loads((output/'qualification.json').read_text())['qualified'])
             self.assertFalse(json.loads((output/'derived-manifest.json').read_text())['qualified'])
+
+
+    def test_recorded_vdso_id_is_exact_and_unique(self):
+        self.assertEqual(profile.recorded_vdso_id(profile.VDSO_ID+' [vdso]\n'),profile.VDSO_ID)
+        for text in ('','a'*40+' [vdso]\n',(profile.VDSO_ID+' [vdso]\n')*2):
+            with self.subTest(text=text),self.assertRaises(profile.QualificationError):profile.recorded_vdso_id(text)
+
+    def vdso_fixture(self, output, candidate_id=None, outside=False):
+        candidate=output/'vdso-candidate.elf';candidate.write_bytes(b'ELF-vdso')
+        expected=profile.VDSO_ID if candidate_id is None else candidate_id
+        def command(argv,dest,label,env=None):
+            value=''
+            if label=='vdso-buildids':value=profile.VDSO_ID+' [vdso]\n'
+            elif label=='vdso-cache-add':
+                cache=dest/'symfs'/'.debug';target=cache/'objects'/profile.VDSO_ID
+                if outside:target=dest/'outside-cache'
+                target.mkdir(parents=True,exist_ok=True);(target/'elf').write_bytes(candidate.read_bytes())
+                link=cache/'.build-id'/profile.VDSO_ID[:2]/profile.VDSO_ID[2:]
+                link.parent.mkdir(parents=True,exist_ok=True);link.symlink_to(target)
+            elif label.endswith('-elf'):value='Build ID: '+expected+'\n'
+            profile.save_json(dest/f'{label}-command.json',argv);profile.save_json(dest/f'{label}-status.json',{'exit_code':0})
+            (dest/f'{label}.stdout').write_text(value);(dest/f'{label}.stderr').write_text('')
+        return candidate,command
+
+    def test_exact_vdso_candidate_and_actual_cache_copies_are_verified(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output=Path(directory);candidate,command=self.vdso_fixture(output)
+            with mock.patch.object(profile,'capture_self_vdso',return_value=candidate),mock.patch.object(profile,'logged_command',side_effect=command):
+                metadata=profile.prepare_recovery_vdso(output)
+            self.assertEqual(metadata.get('build_id'),profile.VDSO_ID)
+            self.assertTrue(Path(metadata['path']).is_file())
+            self.assertEqual(Path(metadata['path']).name,'vdso')
+            for name in ('path','candidate_path','cache_elf_path'):
+                self.assertEqual(profile.sha256(Path(metadata[name])),metadata['sha256'])
+            argv=json.loads((output/'vdso-cache-add-command.json').read_text())
+            self.assertEqual(argv[:4],['perf','--buildid-dir',str(output/'symfs'/'.debug'),'buildid-cache'])
+
+    def test_vdso_candidate_mismatch_or_cache_escape_is_refused(self):
+        for wrong,escape in (('a'*40,False),(None,True)):
+            with self.subTest(wrong=wrong,escape=escape),tempfile.TemporaryDirectory() as directory:
+                output=Path(directory);candidate,command=self.vdso_fixture(output,wrong,escape)
+                with mock.patch.object(profile,'capture_self_vdso',return_value=candidate),mock.patch.object(profile,'logged_command',side_effect=command):
+                    with self.assertRaises(profile.QualificationError):profile.prepare_recovery_vdso(output)
+
+    def test_vdso_resolution_count_uses_only_original_measured_vdso_leaves(self):
+        before=profile.parse_samples(sample(5_100_000_000,leaf='[unknown]').replace('(binary)','([vdso])')+sample(5_200_000_000,leaf='[unknown]').replace('(binary)','(libc)')+sample(1_000_000_000,leaf='[unknown]').replace('(binary)','([vdso])'))
+        after=copy.deepcopy(before)
+        for item in after:item['leaf']=('clock_gettime',item['leaf'][1])
+        self.assertEqual(profile.resolved_vdso_leaves(before,after,profile.parse_intervals(stdout(),SHA)),1)
+
+
+    def mock_vdso(self, output):
+        link=output/'symfs'/'.debug'/'.build-id'/profile.VDSO_ID[:2]/profile.VDSO_ID[2:]
+        link.mkdir(parents=True,exist_ok=True)
+        for name in ('elf','vdso'):(link/name).write_bytes(b'vdso')
+        candidate=output/'vdso-candidate.elf';candidate.write_bytes(b'vdso')
+        metadata={'path':str(link/'vdso'),'sha256':profile.sha256(link/'vdso'),'build_id':profile.VDSO_ID,
+                  'candidate_path':str(candidate),'cache_elf_path':str(link/'elf'),'resolved_path':str(link/'vdso'),
+                  'cache_add_elf_path':str(link/'elf'),'cache_link':str(link),'cache_root':str(output/'symfs'/'.debug'),
+                  'cache_target':str(link.resolve())}
+        self.current_symbols['vdso']=metadata
+        return metadata
+
+
+    def test_capture_reads_only_own_vdso_mapping(self):
+        data=b'\x7fELF'+bytes(60)
+        with tempfile.TemporaryDirectory() as directory,mock.patch.object(profile.Path,'read_text',return_value='1000-1040 r-xp 00000000 00:00 0 [vdso]\n'),mock.patch.object(profile.os,'open',return_value=77) as opened,mock.patch.object(profile.os,'pread',return_value=data) as read,mock.patch.object(profile.os,'close') as close:
+            output=Path(directory);candidate=profile.capture_self_vdso(output)
+            self.assertEqual(candidate.read_bytes(),data)
+            opened.assert_called_once_with('/proc/self/mem',profile.os.O_RDONLY)
+            read.assert_called_once_with(77,64,0x1000);close.assert_called_once_with(77)
+
+    def test_vdso_lookup_topology_and_all_supplied_files_are_rechecked(self):
+        for change in ('retarget','unexpected','candidate','cache_elf'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as directory:
+                output=Path(directory);symbols=self.mock_symbols(Path('/original'),output,{})
+                symbols['vdso']=self.mock_vdso(output);metadata=symbols['vdso']
+                if change=='retarget':
+                    link=Path(metadata['cache_link']);replacement=output/'replacement';link.rename(replacement);link.symlink_to(replacement)
+                elif change=='unexpected':(Path(metadata['cache_link'])/'debug').write_bytes(b'unapproved')
+                else:Path(metadata['candidate_path' if change=='candidate' else 'cache_elf_path']).write_bytes(b'changed')
+                with self.assertRaises(profile.QualificationError):profile.recheck_recovery_symbols(symbols)
+
+
+    def test_vdso_preparation_failure_remains_primary_reason(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original,output,pins,identity,calls,command=self.run_fixture(Path(directory))
+            with pins,mock.patch.object(profile.platform,'system',return_value='Linux'),mock.patch.object(profile.shutil,'which',return_value='/existing/tool'),mock.patch.object(profile,'recovery_analysis_identity',return_value=identity),mock.patch.object(profile,'prepare_recovery_symbols',side_effect=self.mock_symbols),mock.patch.object(profile,'prepare_recovery_vdso',side_effect=profile.QualificationError('exact candidate vDSO ID mismatch')),mock.patch.object(profile,'logged_command',side_effect=command):
+                with self.assertRaisesRegex(profile.QualificationError,'exact candidate vDSO ID mismatch'):profile.run_recovery(original,output)
+            qualification=json.loads((output/'qualification.json').read_text());manifest=json.loads((output/'derived-manifest.json').read_text())
+            self.assertFalse(qualification['qualified']);self.assertEqual(qualification['reason'],'exact candidate vDSO ID mismatch')
+            self.assertFalse(manifest['qualified']);self.assertEqual(manifest['primary_failure'],'exact candidate vDSO ID mismatch')
 
 
 if __name__ == '__main__':

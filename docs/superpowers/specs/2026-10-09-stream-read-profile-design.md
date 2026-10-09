@@ -189,7 +189,7 @@ that failed only symbol resolution. It does not authorize a benchmark rerun.
    retain download provenance and hashes, and isolate the symbol root/cache.
    Official Ubuntu packages contain the recorded debug-ID file; executable/debug
    ELF-ID and hash checks remain mandatory. Keep the exact retained benchmark; never
-   substitute the analysis host's libc or vDSO.
+   substitute the analysis host's libc or an unmatched vDSO.
 3. Re-extract only the existing perf.data using the original extraction options
    plus the approved symbol-root/cache configuration. No benchmark, perf record,
    perf stat, cargo build, or sysctl change is part of recovery.
@@ -203,7 +203,8 @@ that failed only symbol resolution. It does not authorize a benchmark rerun.
    extraction commands/statuses. Never flip the original qualified/complete flags.
 6. Apply all original thresholds unchanged: at least 300 pooled samples, nonzero
    samples per phase, no loss/throttling/unwind failures, and at most 10% unknown
-   leaves. Unresolved vDSO leaves remain unknown. At least 352 unknown leaves must
+   leaves. Unresolved vDSO leaves remain unknown unless the exact recorded ELF ID is verified
+   under the metadata amendment below. At least 352 unknown leaves must
    resolve. Missing matching symbols or another quality failure remains a failure.
 
 Original perf.data SHA256:
@@ -230,8 +231,8 @@ Those tools must already exist; missing tools stop with an install request.
 Archive download URLs/status/headers, package/file hashes and ELF-ID tool output.
 
 Require perf6.17.13, an isolated global build-ID cache and symfs. Disable automatic
-debuginfod access. Only exact retained benchmark and matching libc may supply symbols;
-vDSO/other unresolved external frames must remain unresolved. Preserve every ordered
+debuginfod access. Only exact retained benchmark, matching libc and the independently verified
+recorded vDSO may supply symbols; other unresolved external frames remain unresolved. Preserve every ordered
 sample's PID/TID/ns/event/period/leafIP and each callchain IP/DSO identity. New unwind
 or inline frame identities stop for review; no silent normalization. All original
 quality rules apply to the derived result. Keep original paths/source distinct from
@@ -241,3 +242,34 @@ Add an isolated `stream-read-symbols` Actions probe with job-local actions:read,
 pinned run37909749321/artifactsource06965f2, no Rust setup/build or CPU collection,
 ordinary jobs excluded and always-upload derived output. Print retained error on
 failure while preserving its exit code in both profile/recovery steps.
+
+
+### Reviewed metadata correction after first offline extraction
+
+Run [37916402867](https://github.com/prk-Jr/prkdb/actions/runs/37916402867)
+resolved libc but failed strict physical-stack identity. Preserve that failure.
+Debug symbols enabled inline expansion (including one duplicate physical IP),
+and the isolated cache lacked the recorded vDSO needed to unwind twelve samples.
+No samples were recollected. The original recording and manifests stayed unchanged.
+
+Explicitly use `--no-inline` in script/report extraction to retain physical rather
+than logical inline frames. Keep exact ordered sample, leaf IP, callchain IP/DSO,
+period, event, process/thread, timestamp and interval comparisons; never drop or
+normalize missing stacks. Recovery may also resolve `[vdso]` symbols only after
+read-only `perf buildid-list` identifies exactly the recorded GNU ELF ID
+`f0566cac49ca64809e998c75b1373572e3fbc598`. A candidate copied from the analysis
+process's own vDSO mapping is eligible only when `readelf` verifies that exact ID.
+Missing or mismatched candidates stop; no arbitrary host symbol fallback.
+
+Perf's symfs configuration changes its build-ID lookup root to `symfs/.debug`.
+Use that actual owned cache consistently, retain and verify the exact vDSO lookup
+copy under its build-ID path, and confine any cache symlinks to the generated
+symbol root. Hash supplied and actual-used ELF/cache files before and after
+extraction. Retain commands, statuses, candidate/recorded IDs and source provenance.
+No benchmark, build, CPU recording, sysctl change or quality-limit amendment.
+
+The first offline downloaded artifact has 374 present files with matching hashes
+and 274 missing hidden `.build-id` files; no present hash mismatches. The upload
+must explicitly include hidden files only inside the generated offline evidence
+directory. Do not rewrite the old bundle or claim its missing files verified.
+Independent test-first implementation and review precede the next offline dispatch.

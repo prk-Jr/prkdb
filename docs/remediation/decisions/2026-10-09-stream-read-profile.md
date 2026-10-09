@@ -83,7 +83,7 @@ failed evidence, exact symbol-file identities, unchanged sample cohort and every
 original quality rule. Incomplete, failed-command or lossy recordings remain
 ineligible; ordinary failed-manifest rejection stays unchanged. Implementation
 and test-first verification are complete:73Python tests, independent review,
-actionlint and fullprepush pass. No offline extraction has run yet.
+actionlint and fullprepush pass. The first offline extraction result is recorded below.
 
 Only a qualified profile can support the next production change. Validated-frame
 reuse remains a reviewed candidate, without an implemented or measured speedup.
@@ -106,3 +106,24 @@ remains unable to modify host settings. Setup and restoration logs must be retai
 and a restoration failure must fail the job. The first attempt recorded no CPU samples; a subsequent run
 after approved host provisioning would be the first actual fixed profiling round,
 not a retry to obtain favorable measured data.
+
+
+## First offline extraction and metadata correction
+
+[Run37916402867](https://github.com/prk-Jr/prkdb/actions/runs/37916402867), analysis
+revision4ba16f7, fetched the exact glibc symbols, then failed strict physical-stack
+identity. Inline expansion changed presentation; twelve vDSO-led stacks also failed
+to unwind without the recorded vDSO ELF. This is an analysis-metadata failure,
+not a product regression or mutation-survivor result. No new CPU samples were taken.
+All original hashes remained unchanged. Preserve this derived failed qualification.
+
+The downloaded derived bundle contains 374 verified present files and 274 missing
+hidden `.build-id` files (no present hash mismatches). Future generated evidence
+uploads explicitly retain hidden files; the old bundle remains incomplete as saved.
+
+The bounded reviewed correction uses explicit `--no-inline`, the exact recorded
+vDSO GNU ID f0566cac49ca64809e998c75b1373572e3fbc598, and the actual perf cache
+under symfs/.debug. Candidate, actual lookup copy and all used symbols must be
+verified, confined and hashed. Exact ordered physical stack/sample comparison and
+all original quality thresholds remain unchanged. No qualified CPU cost or speed
+claim is made until the corrected offline extraction passes those checks.

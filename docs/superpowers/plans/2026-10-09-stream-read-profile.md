@@ -98,7 +98,7 @@ No Rust/production changes. Use executing-plans with independent review.
   Preserve errors/raw output with always-upload. Expose retained step errors.
 - [x] Independent protocol/code review, actionlint, diff/doc checks and required
   pre-push checks; commit small checkpoints and update handoff each time.
-- [ ] Publish one reviewed milestone and dispatch offline probe at exact analysis
+- [x] Publish one reviewed milestone and dispatch offline probe at exact analysis
   SHA. Preserve original/derived artifacts and statuses; no measured-round retry.
 - [ ] Report qualified derived CPU costs only if fixed original rules pass;
   otherwise report remaining blocker. Production correction stays separately scoped.
@@ -112,5 +112,25 @@ Implementation checkpoint:73Python tests pass, actionlint/diff/doc-claim checks
 pass, independent final helper/workflow review has no HIGH/MEDIUM blockers.
 Fullprepush passes:1509nextest/10skipped, concurrentworkspace tests/doctests,
 200seeds68256checks eachmode and every script/ledger/status/doc gate.
-No production/hot-path change; Criterion does not apply. Actual offline Actions
-extraction is pending; original failure remains immutable.
+No production/hot-path change; Criterion does not apply. First offline extraction
+ran at4ba16f7 and failed metadata/stack qualification; original failure remains
+immutable. The bounded correction is recorded below.
+
+
+## Bounded metadata correction, same recording
+
+First offline run37916402867 failed the strict stack comparison; preserve it.
+The reviewed design amendment permits explicit no-inline extraction and only the
+exact recorded vDSO ELF, with actual symfs/.debug cache binding. No CPU round rerun.
+
+- [x] RED tests: no-inline commands, exact recorded/candidate vDSO build IDs,
+  mismatched/missing/duplicate IDs, actual-used cache confinement and hashes.
+- [x] Implement the bounded metadata fix; keep all physical stack/cohort and
+  frozen qualification checks unchanged. Missing matching vDSO remains STOP.
+- [x] Include hidden files only in generated offline evidence upload; retain
+  original and first offline failures without rewriting their manifests.
+- [ ] Focused Python, actionlint, diff/doc checks and independent review; publish
+  one metadata milestone and dispatch only the offline probe at its exact SHA.
+  Fullprepush passed on4ba16f7; Rust sources remain unchanged, owned target cleaned.
+- [ ] Download all result artifacts, verify every hash including hidden files,
+  and report either qualified CPU attribution or the precise remaining blocker.
