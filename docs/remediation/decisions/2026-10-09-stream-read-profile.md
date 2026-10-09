@@ -1,4 +1,4 @@
-# Stream read profile: recording retained, qualification failed
+# Stream read profile: saved recording recovered and qualified
 
 Date: 2026-10-09. Base: `797f8c679b1d9f6922f4afb1fe0fff4ba928735e`.
 Branch: `wip-2.15b.8-read-profile`.
@@ -141,3 +141,49 @@ and recheck it. Refuse nonempty probes, additional ELF/debug sources, symlinks o
 escaping paths. The actual materialized lookup remains exactly `elf` and `vdso`.
 Physical stack/sample identity and every frozen quality check remain unchanged.
 This is offline metadata handling; no new CPU recording or database change.
+
+
+## Qualified same-recording result
+
+[Run37922246060](https://github.com/prk-Jr/prkdb/actions/runs/37922246060) passed
+at analysis/workflow3fa91aa93e2c7efc6ce3c95b8d5ce9fd3a807fbb. The benchmark
+recording remains source06965f2; recovery recorded no CPU samples. All83 Python
+tests passed in Actions. All678 derived artifact hashes verify, including hidden
+symbol/cache files; none missing or mismatched. Original43 hashes and failed
+flags remain unchanged. Exact ordered physical sample/stack comparison passes
+for all1910 samples. Measured counts remain1310, split446/427/437. Unknown leaves
+are7/1310 (0.534351%), below the unchanged10% limit; those seven vDSO leaves remain
+unknown. Original loss/throttle/unwind checks and all extraction statuses pass.
+Source/parser, recording and supplied/actual-used symbols verify before and after.
+
+Period-weighted exclusive CPU leaves in this fixed workload:
+
+| Leaf | Sampled userspace CPU |
+|---|---:|
+| CRC32 AVX2 calculation |32.75%|
+| libc memmove |27.25%|
+| Records body decode |9.54%|
+| libc memset |9.08%|
+
+CRC leaves whose physical stack contains segment::read_frame account for20.08
+percentage points of the total sampled CPU; scanner CRC leaves account for12.67.
+These are attribution evidence, not predicted speedups. Inclusive costs overlap
+and must not be summed. The data supports evaluating the already-reviewed
+validated hinted-frame reuse candidate: eliminate duplicate reading/checking of
+the same immutable validated bytes while preserving CRC/decode checks for every
+unseen frame and all existing fallback/cap/snapshot invariants. Production work
+requires its own claim, safety review, deterministic RED/GREEN and unchanged
+paired performance gates. No production change or speedup was delivered here.
+
+Qualification is pooled CPU attribution only. Repetition stability, blocked time,
+physical bytes, allocation counts, unprofiled throughput and competitive timing
+remain unqualified/unmeasured. Prior T1/T3/T4/T5 misses stay open; A/B frozen,
+C retired. Failed original and both failed offline analyses are retained.
+
+Final metadata checks:83Python tests, actionlint, diff/docclaim checks and
+independent review pass. Fullprepush passed at4ba16f7 (1509 nextest,10skipped,
+concurrent workspace tests/doctests, both200seed crash modes, ledger/status/script
+checks); subsequent changes are Python/workflow/docs only with unchanged Rust.
+Criterion and instruction-count comparisons do not apply to this infrastructure
+change. The owned Mac target was cleaned (11387files,6.3GiB logical), with other
+build directories left untouched. Task branch remains separate from phase-2.

@@ -100,7 +100,7 @@ No Rust/production changes. Use executing-plans with independent review.
   pre-push checks; commit small checkpoints and update handoff each time.
 - [x] Publish one reviewed milestone and dispatch offline probe at exact analysis
   SHA. Preserve original/derived artifacts and statuses; no measured-round retry.
-- [ ] Report qualified derived CPU costs only if fixed original rules pass;
+- [x] Report qualified derived CPU costs only if fixed original rules pass;
   otherwise report remaining blocker. Production correction stays separately scoped.
 
 Commits: `test: pin offline profile recovery provenance and sample identities`;
@@ -129,10 +129,10 @@ exact recorded vDSO ELF, with actual symfs/.debug cache binding. No CPU round re
   frozen qualification checks unchanged. Missing matching vDSO remains STOP.
 - [x] Include hidden files only in generated offline evidence upload; retain
   original and first offline failures without rewriting their manifests.
-- [ ] Focused Python, actionlint, diff/doc checks and independent review; publish
+- [x] Focused Python, actionlint, diff/doc checks and independent review; publish
   one metadata milestone and dispatch only the offline probe at its exact SHA.
   Fullprepush passed on4ba16f7; Rust sources remain unchanged, owned target cleaned.
-- [ ] Download all result artifacts, verify every hash including hidden files,
+- [x] Download all result artifacts, verify every hash including hidden files,
   and report either qualified CPU attribution or the precise remaining blocker.
 
 
@@ -148,3 +148,10 @@ and recheck it. Refuse nonempty probes, additional ELF/debug sources, symlinks o
 escaping paths. The actual materialized lookup remains exactly `elf` and `vdso`.
 Physical stack/sample identity and every frozen quality check remain unchanged.
 This is offline metadata handling; no new CPU recording or database change.
+
+
+Final offline validation37922246060 at3fa91aa passes:83Python tests in Linux,
+all678 hashes verified, strict1910physicalstack/sample identities unchanged,
+1310measured446/427/437, sevenunknownleaves0.534351%. Originalfailurepreserved.
+See decision record for CPU attribution and limits. No production optimization,
+throughput improvement or broader phase-gate acceptance is claimed.

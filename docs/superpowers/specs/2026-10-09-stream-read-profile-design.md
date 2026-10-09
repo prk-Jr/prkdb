@@ -287,3 +287,13 @@ and recheck it. Refuse nonempty probes, additional ELF/debug sources, symlinks o
 escaping paths. The actual materialized lookup remains exactly `elf` and `vdso`.
 Physical stack/sample identity and every frozen quality check remain unchanged.
 This is offline metadata handling; no new CPU recording or database change.
+
+
+### Recovery execution outcome
+
+Offline run37922246060 at3fa91aa qualifies the same recording: all678 artifact
+hashes match and all1910 ordered physical stacks/samples remain identical.
+Measured counts1310 (446/427/437), unknown7 (0.534351%); originalfailedflags and
+43originalhashes remain unchanged. Frozen quality rules passed without a CPU
+recording rerun. The decision record retains attribution and unmeasured limits.
+Production correction and unchanged performance acceptance remain separate work.
