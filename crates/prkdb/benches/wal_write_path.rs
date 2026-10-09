@@ -47,6 +47,7 @@
 
 mod support {
     pub mod stream_measurement;
+    pub mod stream_read_profile;
 }
 
 use prkdb::storage::WalStorageAdapter;
@@ -431,11 +432,16 @@ async fn stream_read_cell(
     measure: Duration,
 ) -> (CellResult, StreamCounts, bool) {
     const FILL: usize = 256 * 1024 * 1024;
-    let log = StreamLog::open(stream_config(dir, SyncMode::Fast))
-        .await
-        .expect("stream open");
     let per_append = (1024 * 1024 / value_size).max(1);
     let value = vec![0x42u8; value_size];
+    let mut profile =
+        support::stream_read_profile::ReadProfiler::from_env(&value, per_append, cold)
+            .expect("profile configuration");
+    let mut cfg = stream_config(dir, SyncMode::Fast);
+    if let Some(probe) = &profile {
+        cfg.clock = probe.clock.clone();
+    }
+    let log = StreamLog::open(cfg).await.expect("stream open");
     let mut written = 0;
     while written < FILL {
         let records = (0..per_append)
@@ -445,10 +451,17 @@ async fn stream_read_cell(
                 headers: vec![],
             })
             .collect();
-        log.append(records).await.expect("fill append");
+        let ack = log.append(records).await.expect("fill append");
+        if let Some(probe) = &mut profile {
+            probe.record_append(ack).expect("profile append inputs");
+        }
         written += per_append * value_size;
     }
     log.sync().await.expect("fill sync");
+    if let Some(probe) = &profile {
+        probe.verify(&log).await.expect("profile fixture integrity");
+    }
+
     let segments: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
         .expect("read stream dir")
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -472,10 +485,20 @@ async fn stream_read_cell(
     let mut records_read = 0usize;
     let mut dropped = cold && drop_all(&segments);
     let mut from = StartAt::Earliest;
+    let mut phase_started = false;
     loop {
         let t0 = Instant::now();
         if t0 >= end {
             break;
+        }
+        if option_env!("PRKDB_STREAM_PROFILE_SOURCE_SHA").is_some()
+            && !phase_started
+            && t0 >= measure_start
+        {
+            if let Some(probe) = &profile {
+                probe.begin().expect("profile begin clock");
+            }
+            phase_started = true;
         }
         let batch = log.read_from(from, limits).await.expect("stream read");
         if t0 >= measure_start {
@@ -490,6 +513,11 @@ async fn stream_read_cell(
         } else {
             StartAt::Offset(batch.next)
         };
+    }
+    if phase_started {
+        if let Some(probe) = &profile {
+            probe.end().expect("profile end clock");
+        }
     }
     log.close().expect("stream close");
     lat.sort_unstable();
