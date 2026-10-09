@@ -127,3 +127,17 @@ under symfs/.debug. Candidate, actual lookup copy and all used symbols must be
 verified, confined and hashed. Exact ordered physical stack/sample comparison and
 all original quality thresholds remain unchanged. No qualified CPU cost or speed
 claim is made until the corrected offline extraction passes those checks.
+
+
+### Empty perf probe-cache metadata
+
+Offline run [37918798049](https://github.com/prk-Jr/prkdb/actions/runs/37918798049)
+verified the exact recorded/candidate vDSO ID, then refused an unexpected cache
+entry: an empty regular `probes` file beside the ELF. Perf's SDT cache creation
+commits this auxiliary metadata even when there are zero tracepoint definitions.
+Preserve that failed extraction. Allow only an optional owned, regular,
+non-symlink, zero-byte probes file (SHA256 of the empty file), retain its path/hash
+and recheck it. Refuse nonempty probes, additional ELF/debug sources, symlinks or
+escaping paths. The actual materialized lookup remains exactly `elf` and `vdso`.
+Physical stack/sample identity and every frozen quality check remain unchanged.
+This is offline metadata handling; no new CPU recording or database change.

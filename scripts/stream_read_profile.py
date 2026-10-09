@@ -562,6 +562,16 @@ def recheck_recovery_symbols(symbols):
                     and link.resolve().is_relative_to(Path(metadata["cache_root"]).resolve()),
                     "vDSO cache binding changed")
             require({path.name for path in link.iterdir()} == {"elf", "vdso"}, "unexpected vDSO cache entry")
+            source = Path(metadata["cache_add_target"])
+            require(str(source.resolve()) == metadata["cache_add_target"]
+                    and source.resolve().is_relative_to(Path(metadata["cache_root"]).resolve()),
+                    "vDSO cache-add target changed")
+            auxiliary = metadata.get("auxiliary_probes")
+            require({path.name for path in source.iterdir()} == ({"elf", "probes"} if auxiliary else {"elf"}),
+                    "unexpected retained vDSO cache-add entry")
+            if auxiliary is not None:
+                require(empty_probe_metadata(Path(auxiliary["path"]), Path(metadata["cache_root"])) == auxiliary,
+                        "retained probe metadata changed")
             for name in ("candidate_path", "cache_elf_path", "resolved_path", "cache_add_elf_path"):
                 path = Path(metadata[name])
                 require(not path.is_symlink() and sha256(path) == metadata["sha256"], "vDSO supplied file changed")
@@ -729,6 +739,13 @@ def capture_self_vdso(output):
     return candidate
 
 
+def empty_probe_metadata(path, cache):
+    digest = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    require(path.is_file() and not path.is_symlink() and path.resolve().is_relative_to(cache.resolve())
+            and path.stat().st_size == 0 and sha256(path) == digest, "unexpected vDSO probe metadata")
+    return {"path": str(path.resolve()), "bytes": 0, "sha256": digest}
+
+
 def prepare_recovery_vdso(output):
     cache = recovery_cache(output)
     cache.mkdir(parents=True, exist_ok=True)
@@ -744,7 +761,9 @@ def prepare_recovery_vdso(output):
     link = cache / ".build-id" / VDSO_ID[:2] / VDSO_ID[2:]
     require(link.is_symlink() and link.is_dir() and link.resolve().is_relative_to(cache.resolve()),
             "vDSO build-ID cache link escapes owned cache")
-    require({path.name for path in link.iterdir()} == {"elf"}, "unexpected vDSO cache symbol source")
+    entries = {path.name for path in link.iterdir()}
+    require(entries in ({"elf"}, {"elf", "probes"}), "unexpected vDSO cache symbol source")
+    auxiliary = empty_probe_metadata(link / "probes", cache) if "probes" in entries else None
     cached_elf = link / "elf"
     require(cached_elf.resolve().is_relative_to(cache.resolve()), "cached vDSO ELF escapes owned cache")
     verify_elf(cached_elf, digest, VDSO_ID, output, "vdso-cache-elf")
@@ -765,6 +784,8 @@ def prepare_recovery_vdso(output):
                     resolved_path=str(used.resolve()), cache_link=str(link), cache_add_link_target=cache_add_link_target, cache_add_target=cache_add_target,
                     cache_add_elf_path=str(cache_add_elf), cache_layout="materialized build-ID directory",
                     cache_root=str(cache), cache_target=str(link.resolve()), recorded_build_id=VDSO_ID)
+    if auxiliary is not None:
+        metadata["auxiliary_probes"] = auxiliary
     return metadata
 
 

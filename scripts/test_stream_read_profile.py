@@ -699,7 +699,7 @@ class RecoveryTests(unittest.TestCase):
         for text in ('','a'*40+' [vdso]\n',(profile.VDSO_ID+' [vdso]\n')*2):
             with self.subTest(text=text),self.assertRaises(profile.QualificationError):profile.recorded_vdso_id(text)
 
-    def vdso_fixture(self, output, candidate_id=None, outside=False):
+    def vdso_fixture(self, output, candidate_id=None, outside=False, probes=None):
         candidate=output/'vdso-candidate.elf';candidate.write_bytes(b'ELF-vdso')
         expected=profile.VDSO_ID if candidate_id is None else candidate_id
         def command(argv,dest,label,env=None):
@@ -709,6 +709,9 @@ class RecoveryTests(unittest.TestCase):
                 cache=dest/'symfs'/'.debug';target=cache/'objects'/profile.VDSO_ID
                 if outside:target=dest/'outside-cache'
                 target.mkdir(parents=True,exist_ok=True);(target/'elf').write_bytes(candidate.read_bytes())
+                if probes == 'symlink':(target/'probes').symlink_to(target/'elf')
+                elif probes == 'debug':(target/'debug').write_bytes(b'')
+                elif probes is not None:(target/'probes').write_bytes(probes)
                 link=cache/'.build-id'/profile.VDSO_ID[:2]/profile.VDSO_ID[2:]
                 link.parent.mkdir(parents=True,exist_ok=True);link.symlink_to(target)
             elif label.endswith('-elf'):value='Build ID: '+expected+'\n'
@@ -748,9 +751,10 @@ class RecoveryTests(unittest.TestCase):
         link.mkdir(parents=True,exist_ok=True)
         for name in ('elf','vdso'):(link/name).write_bytes(b'vdso')
         candidate=output/'vdso-candidate.elf';candidate.write_bytes(b'vdso')
+        source=output/'symfs'/'.debug'/'original-cache';source.mkdir();(source/'elf').write_bytes(b'vdso')
         metadata={'path':str(link/'vdso'),'sha256':profile.sha256(link/'vdso'),'build_id':profile.VDSO_ID,
                   'candidate_path':str(candidate),'cache_elf_path':str(link/'elf'),'resolved_path':str(link/'vdso'),
-                  'cache_add_elf_path':str(link/'elf'),'cache_link':str(link),'cache_root':str(output/'symfs'/'.debug'),
+                  'cache_add_elf_path':str(source/'elf'),'cache_add_target':str(source.resolve()),'cache_link':str(link),'cache_root':str(output/'symfs'/'.debug'),
                   'cache_target':str(link.resolve())}
         self.current_symbols['vdso']=metadata
         return metadata
@@ -784,6 +788,48 @@ class RecoveryTests(unittest.TestCase):
             qualification=json.loads((output/'qualification.json').read_text());manifest=json.loads((output/'derived-manifest.json').read_text())
             self.assertFalse(qualification['qualified']);self.assertEqual(qualification['reason'],'exact candidate vDSO ID mismatch')
             self.assertFalse(manifest['qualified']);self.assertEqual(manifest['primary_failure'],'exact candidate vDSO ID mismatch')
+
+
+    def test_empty_owned_probe_metadata_is_retained_without_entering_lookup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output=Path(directory);candidate,command=self.vdso_fixture(output,probes=b'')
+            with mock.patch.object(profile,'capture_self_vdso',return_value=candidate),mock.patch.object(profile,'logged_command',side_effect=command):
+                try:metadata=profile.prepare_recovery_vdso(output)
+                except profile.QualificationError as error:self.fail(f'empty perf SDT metadata refused: {error}')
+            auxiliary=metadata.get('auxiliary_probes',{})
+            self.assertEqual(auxiliary.get('sha256'),'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
+            self.assertEqual(Path(auxiliary['path']).read_bytes(),b'')
+            self.assertEqual({p.name for p in Path(metadata['cache_link']).iterdir()},{'elf','vdso'})
+            self.assertIn(str(Path(auxiliary['path']).relative_to(output.resolve())),profile.recovery_artifacts(output))
+
+    def test_probe_metadata_nonempty_symlink_or_extra_symbol_source_is_refused(self):
+        for probes in (b'nonempty','symlink','debug'):
+            with self.subTest(probes=probes),tempfile.TemporaryDirectory() as directory:
+                output=Path(directory);candidate,command=self.vdso_fixture(output,probes=probes)
+                with mock.patch.object(profile,'capture_self_vdso',return_value=candidate),mock.patch.object(profile,'logged_command',side_effect=command):
+                    with self.assertRaises(profile.QualificationError):profile.prepare_recovery_vdso(output)
+
+
+    def test_post_extraction_probe_metadata_mutation_refuses_qualification(self):
+        for change in ('nonempty','symlink','extra'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as directory:
+                original,output,pins,identity,calls,command=self.run_fixture(Path(directory))
+                def prepare(dest):
+                    metadata=self.mock_vdso(dest);probe=Path(metadata['cache_add_target'])/'probes';probe.write_bytes(b'')
+                    metadata['auxiliary_probes']=profile.empty_probe_metadata(probe,Path(metadata['cache_root']))
+                    return metadata
+                def mutate(argv,dest,label,env=None):
+                    command(argv,dest,label,env)
+                    if label=='script':
+                        metadata=self.current_symbols['vdso'];probe=Path(metadata['auxiliary_probes']['path'])
+                        if change=='nonempty':probe.write_bytes(b'changed')
+                        elif change=='symlink':
+                            target=Path(metadata['cache_root'])/'empty-target';target.write_bytes(b'');probe.unlink();probe.symlink_to(target)
+                        else:(probe.parent/'debug').write_bytes(b'')
+                with pins,mock.patch.object(profile.platform,'system',return_value='Linux'),mock.patch.object(profile.shutil,'which',return_value='/existing/tool'),mock.patch.object(profile,'recovery_analysis_identity',return_value=identity),mock.patch.object(profile,'prepare_recovery_symbols',side_effect=self.mock_symbols),mock.patch.object(profile,'prepare_recovery_vdso',side_effect=prepare),mock.patch.object(profile,'logged_command',side_effect=mutate),mock.patch.object(profile,'BENCHMARK_DSO','binary'):
+                    with self.assertRaises(profile.QualificationError):profile.run_recovery(original,output)
+                self.assertFalse(json.loads((output/'qualification.json').read_text())['qualified'])
+                self.assertFalse(json.loads((output/'derived-manifest.json').read_text())['qualified'])
 
 
 if __name__ == '__main__':
