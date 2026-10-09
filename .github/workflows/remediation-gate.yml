@@ -26,7 +26,7 @@ on:
         required: false
         default: none
         type: choice
-        options: [none, wal-bench, iai]
+        options: [none, wal-bench, iai, stream-read-profile]
       base_ref:
         description: "wal-bench only: also bench this ref first, in the same job"
         required: false
@@ -347,3 +347,91 @@ jobs:
           python3 scripts/perf_gate_deltas.py list-names target/gungraun
           python3 scripts/perf_gate_deltas.py floors target/gungraun scripts/perf_gate_floors.toml \
             | tee -a "$GITHUB_STEP_SUMMARY"
+
+  probe-stream-read-profile:
+    name: Probe — measured-phase stream CPU profile (Linux)
+    needs: resolve
+    if: ${{ inputs.probe == 'stream-read-profile' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '2'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install Protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: stream-read-profile
+          save-if: false
+      - name: Qualify tools and kernel before building
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/stream-profile-evidence"
+          echo '**CPU PROFILE PROBE — not gate or competitive timing evidence**' >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/stream_read_profile.py preflight \
+            --output "$RUNNER_TEMP/stream-profile-evidence/preflight.json" \
+            > "$RUNNER_TEMP/stream-profile-evidence/preflight.stdout" \
+            2> "$RUNNER_TEMP/stream-profile-evidence/preflight.stderr"
+      - name: Test profile evidence parser
+        run: python3 -m unittest discover -s scripts -p test_stream_read_profile.py -v
+      - name: Build pinned profiling binary and manifest
+        env:
+          PROFILE_SOURCE_SHA: ${{ needs.resolve.outputs.sha }}
+          RUSTFLAGS: '-C debuginfo=1 -C force-frame-pointers=yes'
+        run: |
+          set -euo pipefail
+          export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
+          export PRKDB_STREAM_PROFILE_SOURCE_SHA="$PROFILE_SOURCE_SHA"
+          cargo bench -p prkdb --bench wal_write_path --no-run --message-format=json \
+            > "$RUNNER_TEMP/stream-profile-evidence/build.jsonl" \
+            2> "$RUNNER_TEMP/stream-profile-evidence/build.stderr"
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          out = Path(os.environ['RUNNER_TEMP']) / 'stream-profile-evidence'
+          artifacts = []
+          for line in (out / 'build.jsonl').read_text().splitlines():
+              item = json.loads(line)
+              if (item.get('reason') == 'compiler-artifact'
+                  and item.get('target', {}).get('name') == 'wal_write_path'
+                  and 'bench' in item.get('target', {}).get('kind', [])
+                  and item.get('executable')):
+                  artifacts.append(Path(item['executable']).resolve())
+          if len(artifacts) != 1:
+              raise SystemExit(f'expected one benchmark executable, found {artifacts}')
+          binary = artifacts[0]
+          digest = hashlib.file_digest(binary.open('rb'), 'sha256').hexdigest()
+          manifest = dict(source_sha=os.environ['PROFILE_SOURCE_SHA'], binary_sha256=digest,
+                          rustflags=os.environ['RUSTFLAGS'], profile='bench', toolchain='1.98.1')
+          (out / 'build-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          (out / 'binary-path.txt').write_text(str(binary) + '\n')
+          PY
+      - name: Record one fixed three-repetition measured-phase profile
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/stream-profile-evidence"
+          binary="$(cat "$evidence/binary-path.txt")"
+          python3 scripts/stream_read_profile.py run --binary "$binary" \
+            --output "$evidence/profile" --build-manifest "$evidence/build-manifest.json" \
+            > "$evidence/run.stdout" 2> "$evidence/run.stderr"
+      - name: Retain raw evidence even when qualification fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stream-read-profile-${{ needs.resolve.outputs.sha }}
+          path: ${{ runner.temp }}/stream-profile-evidence/
+          if-no-files-found: error
+          retention-days: 30

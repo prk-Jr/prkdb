@@ -49,13 +49,23 @@ affinity/cpuset and before/after process checks. Do not dump credentials/environ
 Record the full process to retain original evidence, then filter samples using
 the exact three marker intervals and perf's matching monotonic timestamps.
 Extraction is `perf script --ns --show-lost-events -F pid,tid,time,event,period,ip,sym,dso`.
-Use integer nanoseconds and [begin,end) bounds. Samples must belong to the marker's
+Keep a separate `perf script -D` raw-event audit, because ordinary script output
+can omit throttle records. Reject LOST, LOST_SAMPLES, THROTTLE and UNTHROTTLE
+in that audit. Isolate all perf commands with `PERF_CONFIG=/dev/null` so a user
+configuration cannot reverse call-chain order. Support the real multiline sample
+header and stack grammar; the first callee frame supplies the exclusive leaf.
+Use integer nanoseconds and [begin,end) bounds. Since perf interval commands
+include their end, retain their end timestamp as marker end minus one nanosecond;
+requalification validates every interval command against the markers. Samples must belong to the marker's
 process; record every thread represented. Keep per-phase sample/period totals,
 classify unresolved/hex-only leaves as unknown, weight by sampled period, and
 count a recursive symbol only once per sample for inclusive attribution. Reject
 loss/unwind/throttling diagnostics in retained raw/stderr. Pooled300sample quality
 does not prove repetition stability; all three counts are reported individually.
-Retain unfiltered data/script plus interval-specific perf report/script output.
+Retain unfiltered data/script/raw-event audit plus interval-specific perf
+report/script output and exit statuses. Requalification requires every expected
+command to have succeeded and every phase artifact to be present and hashed;
+a failed recording round must never become qualified by reparsing incomplete files.
 Parser rejects missing/reordered/overlapping intervals, false fixture verification,
 unexpected cell, malformed timestamps, sample periods, source or hashes, missing
 repetitions, lost records or unreadable stacks. Before results, freeze quality:
