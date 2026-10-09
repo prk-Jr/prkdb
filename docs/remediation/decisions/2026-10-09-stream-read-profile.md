@@ -1,4 +1,4 @@
-# Stream read profile: prepared checkpoint
+# Stream read profile: recording retained, qualification failed
 
 Date: 2026-10-09. Base: `797f8c679b1d9f6922f4afb1fe0fff4ba928735e`.
 Branch: `wip-2.15b.8-read-profile`.
@@ -40,38 +40,53 @@ binary/source hashes and phase artifacts are mandatory; failed evidence stays
 unqualified. Tests and logs live in the main checkout's ignored
 `.agents/verification/stream-read-profile-2026-10-09/`.
 
-## Required next step
+## Actual fixed round and failure classification
 
-Actions was selected and its temporary permission amendment was explicitly
-approved. The next steps are to commit/publish the validated amendment and
-dispatch the first actual fixed CPU profiling round. The hosted VM's wall time
-remains CI trend evidence.
-The helper checks perf availability and kernel permissions. Missing tools or
-permissions stop execution with a maintainer installation/host request. The helper
-never installs perf or changes sysctl settings; the approved workflow provisioning
-amendment is documented below. It never substitutes Mac timing or retries a round
-for favorable samples.
+[Run 37909749321](https://github.com/prk-Jr/prkdb/actions/runs/37909749321)
+used workflow and source `06965f2cbad61628488a423106084fdc34fe0be4`.
+Host qualification, all 53 Python tests and the pinned Linux release build passed.
+Recording and all eight extraction commands returned zero. The final evidence
+qualification failed because 483 of 1,310 measured leaf samples were unresolved
+(36.870229%), exceeding the unchanged 10% limit. Phase counts are 446, 427 and 437;
+the unfiltered recording contains 1,910 samples. Of the unresolved leaves, 476
+belong to libc and seven to vDSO. This does not support qualified CPU attribution
+or a production optimization decision.
 
-After host selection, reviewed local checks, and a milestone push, the Actions
-option can use these commands from the task worktree:
+The run is red because of symbol-resolution quality, rather than known mutation
+survivors or an observed product regression. Ordinary gates were skipped for this
+isolated probe. The approved permission step changed the original value 4 to 2,
+and the always-run restoration successfully restored 4 before artifact upload.
 
-```bash
-profile_sha=$(git rev-parse HEAD)
-git push origin wip-2.15b.8-read-profile
-gh workflow run remediation-gate.yml --ref wip-2.15b.8-read-profile \
-  -f ref="$profile_sha" -f phase=2 -f probe=stream-read-profile
-```
+Run/job metadata, complete Actions logs, the exact benchmark and raw recording
+are retained under the main checkout's ignored
+`.agents/verification/stream-read-profile-2026-10-09/actions-37909749321/`.
+All 43 original artifact hashes match, all nine retained command statuses are
+zero, and the raw loss/throttle and stderr diagnostic checks pass. The original
+`qualification.json` and source manifest remain failed and unchanged.
+The perf.data SHA256 is
+`11e4022abb2edcc29aaef169b39eb6d4796f775a7e65f3a848de36e1a203eb3b`.
+The source-manifest SHA256 is
+`d120181c09c8452f5b54649da8bb43f65877601f93860ce4970e52f06429fa7a`.
 
-Record the run ID, workflow definition SHA, resolved source SHA, artifact hashes
-and actual qualification result. Do not dispatch another same-ref run concurrently.
-One execution round means three chronological repetitions, not three attempts to
-get a good result. `qualify` may reparse retained files without rerunning perf.
+## Required decision before recovery
+
+Do not rerun this measured round. Exact-build-ID glibc debug symbols may recover
+the same recording, but their availability is not yet verified. An independent
+read-only review supports this technical approach while confirming that the
+current failed-manifest policy forbids qualifying it through the existing helper.
+
+The design now contains a concrete **proposed, awaiting approval** amendment:
+separate offline derived analysis, immutable original failed evidence, exact
+symbol-file identities, unchanged sample cohort and every original quality rule.
+Incomplete, failed-command or lossy recordings remain ineligible. No recovery
+implementation or execution has occurred. Maintainer approval is required before
+changing this reviewed policy; the earlier sysctl approval covers only permission
+provisioning.
 
 Only a qualified profile can support the next production change. Validated-frame
-reuse is a reviewed candidate, not an implemented or measured speedup. If the
-profile does not support it, return that evidence before choosing a different
-design. Preserve all existing durability checks and performance floors. A/B stay
-frozen and C stays retired.
+reuse remains a reviewed candidate, without an implemented or measured speedup.
+Prior benchmark misses and thresholds remain unchanged. A/B stay frozen and C
+stays retired. No task integration or production correction occurred.
 
 ## Approved temporary permission amendment
 

@@ -30,10 +30,10 @@ Read AGENTS/spec/plan Conventions; all output retained, no production changes.
   Criterion is not applicable to profiling-only bench/CI code (no production paths).
 - [x] Commit tested milestone and update handoff on every commit. No publication
   until reviewed source and existing authorization confirmed; no main/PR changes.
-- [ ] After host selection, qualify Linux tools/kernel/permissions/source/workflow,
+- [x] After host selection, qualify Linux tools/kernel/permissions/source/workflow,
   build first, perform one fixed three-repetition profile round. Do not retry for
   favorable data or claim instrumented throughput acceptance.
-- [ ] Preserve raw results/hashes and report causal cost or unqualified reason.
+- [x] Preserve raw results/hashes and report causal cost or unqualified reason.
   STOP before production correction unless qualified profile and safety review pass.
 - [x] Report AGENTS§7; clean only owned target, retain source/evidence. If host
   remains unknown, finish reviewable infrastructure and explicitly pause dispatch.
@@ -61,3 +61,16 @@ remain unchecked; original failure artifacts and hashes are retained. See the pe
 checkpoint decision record and handoff for commands and the complete report.
 
 Permission amendment explicitly approved: temporary level2 only in the disposable profile job, restore original in always() cleanup with setup/restore logs. Workflow amended before the first actual CPU recording round; helper/workload/quality thresholds unchanged.
+
+## Fixed-round result, 2026-10-09
+
+Run37909749321 at06965f2 built and recorded successfully, then failed the fixed
+unknown-leaf rule (483/1310, 36.870229%; limit10%). All three phase counts are
+nonzero (446/427/437), all43original artifact hashes match, all9commands returned
+zero, and raw loss/throttle/stderr diagnostic checks pass. The permission policy
+was restored to its original4. Original failure and full recording are retained.
+
+STOP: no qualified CPU cost or production correction. The proposed separate
+offline symbol recovery in the design is awaiting maintainer approval. It would
+decode the same recording with exact-build-ID symbols and unchanged rules;
+it would not rerun the workload or edit the failed original manifests.

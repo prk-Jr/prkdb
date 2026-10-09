@@ -164,3 +164,49 @@ the profiling helper itself never modifies host settings. No persistent sysctl
 configuration, elevated benchmark process, event/workload/quality/gate change,
 or favorable-data retry is authorized. Record setup and restore logs alongside
 raw artifacts; restore failure must fail the job and remain visible.
+
+
+## Proposed recovery of the existing stream CPU recording
+
+Status: awaiting maintainer approval; no recovery implementation or execution.
+
+Run [37909749321](https://github.com/prk-Jr/prkdb/actions/runs/37909749321)
+captured the one fixed round at source `06965f2cbad61628488a423106084fdc34fe0be4`.
+It failed the unchanged unknown-leaf limit: 483 of 1,310 measured samples
+(36.8702%) were unresolved. Of those, 476 belong to libc and seven to vDSO.
+The original failure is retained. Temporary perf permission was restored to 4.
+
+The current protocol prohibits qualifying a failed manifest. This proposal asks
+for a narrow amendment allowing separate derived analysis of a complete recording
+that failed only symbol resolution. It does not authorize a benchmark rerun.
+
+1. Preserve the original failed qualification, source manifest and 43 hashed
+   artifacts byte-for-byte. Independently validate all nine command exit statuses,
+   raw loss/throttle/unwind checks, fixture, source and interval contracts.
+2. Retrieve the recorded libc executable and debug symbols only by exact ELF
+   build ID `a4a7992a8e66555c8141ab2a08a8465ff6e0ea65`. Verify both build IDs,
+   retain download provenance and hashes, and isolate the symbol root/cache.
+   Availability remains unverified. Keep the exact retained benchmark; never
+   substitute the analysis host's libc or vDSO.
+3. Re-extract only the existing perf.data using the original extraction options
+   plus the approved symbol-root/cache configuration. No benchmark, perf record,
+   perf stat, cargo build, or sysctl change is part of recovery.
+4. Require unchanged ordered sample identities, addresses, periods, events,
+   process/thread IDs and timestamps. Verify all 1,910 samples and the 1,310
+   measured samples split 446/427/437 across the original intervals. Symbol names
+   may change; changes to unwind frames need explicit review and cannot silently
+   change the sampled cohort or leaf identity.
+5. Write a separate derived manifest and report referencing the original failed
+   manifest, perf.data hash, analysis revision, tool versions, symbol files and
+   extraction commands/statuses. Never flip the original qualified/complete flags.
+6. Apply all original thresholds unchanged: at least 300 pooled samples, nonzero
+   samples per phase, no loss/throttling/unwind failures, and at most 10% unknown
+   leaves. Unresolved vDSO leaves remain unknown. At least 352 unknown leaves must
+   resolve. Missing matching symbols or another quality failure remains a failure.
+
+Original perf.data SHA256:
+`11e4022abb2edcc29aaef169b39eb6d4796f775a7e65f3a848de36e1a203eb3b`.
+
+The implementation must be test-first and independently reviewed before offline
+Actions execution. Incomplete, failed-command or lossy rounds remain ineligible.
+No production correction or performance acceptance is authorized by this proposal.
