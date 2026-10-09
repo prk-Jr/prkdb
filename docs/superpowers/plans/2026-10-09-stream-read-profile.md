@@ -54,6 +54,10 @@ suite cover that guard. No production hot path changed and Criterion was not
 applicable. No Linux CPU result is claimed.
 
 The verified task-owned Mac target was cleaned (8.0 GiB logical files removed);
-source, RED/GREEN logs and handoff remain. Host selection is still pending, so the
-execution/profile/correction steps above remain unchecked. See the pending
+source, RED/GREEN logs and handoff remain. GitHub Actions was subsequently selected;
+run37908155101 failed qualification because perf_event_paranoid=4 blocks userspace
+perf. No build or CPU recording occurred. The profile/correction steps above
+remain unchecked; original failure artifacts and hashes are retained. See the pending
 checkpoint decision record and handoff for commands and the complete report.
+
+Permission amendment explicitly approved: temporary level2 only in the disposable profile job, restore original in always() cleanup with setup/restore logs. Workflow amended before the first actual CPU recording round; helper/workload/quality thresholds unchanged.

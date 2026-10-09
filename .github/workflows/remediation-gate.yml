@@ -376,6 +376,13 @@ jobs:
         with:
           key: stream-read-profile
           save-if: false
+      - name: Permit userspace profiling on this disposable runner
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/stream-profile-evidence"
+          mkdir -p "$evidence"
+          cat /proc/sys/kernel/perf_event_paranoid > "$evidence/perf-paranoid-before.txt"
+          sudo sysctl -w kernel.perf_event_paranoid=2 2>&1 | tee "$evidence/perf-permission-change.log"
       - name: Qualify tools and kernel before building
         run: |
           set -euo pipefail
@@ -427,6 +434,16 @@ jobs:
           python3 scripts/stream_read_profile.py run --binary "$binary" \
             --output "$evidence/profile" --build-manifest "$evidence/build-manifest.json" \
             > "$evidence/run.stdout" 2> "$evidence/run.stderr"
+      - name: Restore the runner profiling policy
+        if: always()
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/stream-profile-evidence"
+          if [ -f "$evidence/perf-paranoid-before.txt" ]; then
+            original="$(cat "$evidence/perf-paranoid-before.txt")"
+            [[ "$original" =~ ^-?[0-9]+$ ]]
+            sudo sysctl -w "kernel.perf_event_paranoid=$original" 2>&1 | tee "$evidence/perf-permission-restore.log"
+          fi
       - name: Retain raw evidence even when qualification fails
         if: always()
         uses: actions/upload-artifact@v4

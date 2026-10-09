@@ -152,3 +152,15 @@ maintainer instead of starting another rewrite. A/B frozen, C retired.
 - docs/remediation/decisions/2026-10-09-stream-read-profile.md (when results available)
 
 Future production files require a separate claim; none are edited by this task.
+
+## Approved Actions permission provisioning, 2026-10-09
+
+Run37908155101 at77af282 refused cpu-clock:u because the runner's
+perf_event_paranoid was4. No build or CPU recording happened. The maintainer
+explicitly approved setting kernel.perf_event_paranoid=2 only on the disposable
+profile job, retaining its original value and restoring it in an always() step.
+The workflow performs this provisioning openly before the unchanged preflight;
+the profiling helper itself never modifies host settings. No persistent sysctl
+configuration, elevated benchmark process, event/workload/quality/gate change,
+or favorable-data retry is authorized. Record setup and restore logs alongside
+raw artifacts; restore failure must fail the job and remain visible.
