@@ -68,20 +68,22 @@ The perf.data SHA256 is
 The source-manifest SHA256 is
 `d120181c09c8452f5b54649da8bb43f65877601f93860ce4970e52f06429fa7a`.
 
-## Required decision before recovery
+## Authorized recovery in progress
 
 Do not rerun this measured round. Exact-build-ID glibc debug symbols may recover
-the same recording, but their availability is not yet verified. An independent
+the same recording. Ubuntu debuginfod returned404; official libc6/libc6-dbg
+2.39-0ubuntu8.9 amd64 packages contain the recorded debug-ID file. Recovery must
+verify executable/debug ELF IDs and pinned hashes before using them. An independent
 read-only review supports this technical approach while confirming that the
 current failed-manifest policy forbids qualifying it through the existing helper.
 
-The design now contains a concrete **proposed, awaiting approval** amendment:
-separate offline derived analysis, immutable original failed evidence, exact
-symbol-file identities, unchanged sample cohort and every original quality rule.
-Incomplete, failed-command or lossy recordings remain ineligible. No recovery
-implementation or execution has occurred. Maintainer approval is required before
-changing this reviewed policy; the earlier sysctl approval covers only permission
-provisioning.
+The maintainer instructed "Do the needful" after the concrete proposal, authorizing
+the separate offline derived analysis. The design preserves immutable original
+failed evidence, exact symbol-file identities, unchanged sample cohort and every
+original quality rule. Incomplete, failed-command or lossy recordings remain
+ineligible; ordinary failed-manifest rejection stays unchanged. Implementation
+and test-first verification are complete:73Python tests, independent review,
+actionlint and fullprepush pass. No offline extraction has run yet.
 
 Only a qualified profile can support the next production change. Validated-frame
 reuse remains a reviewed candidate, without an implemented or measured speedup.

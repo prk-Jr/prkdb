@@ -26,7 +26,7 @@ on:
         required: false
         default: none
         type: choice
-        options: [none, wal-bench, iai, stream-read-profile]
+        options: [none, wal-bench, iai, stream-read-profile, stream-read-symbols]
       base_ref:
         description: "wal-bench only: also bench this ref first, in the same job"
         required: false
@@ -431,9 +431,15 @@ jobs:
           set -euo pipefail
           evidence="$RUNNER_TEMP/stream-profile-evidence"
           binary="$(cat "$evidence/binary-path.txt")"
-          python3 scripts/stream_read_profile.py run --binary "$binary" \
+          if python3 scripts/stream_read_profile.py run --binary "$binary" \
             --output "$evidence/profile" --build-manifest "$evidence/build-manifest.json" \
-            > "$evidence/run.stdout" 2> "$evidence/run.stderr"
+            > "$evidence/run.stdout" 2> "$evidence/run.stderr"; then
+            cat "$evidence/run.stdout"
+          else
+            result=$?
+            cat "$evidence/run.stderr" >&2
+            exit "$result"
+          fi
       - name: Restore the runner profiling policy
         if: always()
         run: |
@@ -450,5 +456,64 @@ jobs:
         with:
           name: stream-read-profile-${{ needs.resolve.outputs.sha }}
           path: ${{ runner.temp }}/stream-profile-evidence/
+          if-no-files-found: error
+          retention-days: 30
+
+
+  probe-stream-read-symbols:
+    name: Probe — saved stream recording symbol recovery (no benchmark rerun)
+    needs: resolve
+    if: ${{ inputs.probe == 'stream-read-symbols' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Retain analysis source identity
+        env:
+          ANALYSIS_SOURCE_SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/stream-symbol-evidence"
+          git rev-parse HEAD > "$RUNNER_TEMP/stream-symbol-evidence/analysis-sha.txt"
+          test "$(cat "$RUNNER_TEMP/stream-symbol-evidence/analysis-sha.txt")" = "$ANALYSIS_SOURCE_SHA"
+          echo '**OFFLINE SYMBOL RECOVERY — same recording; no benchmark or gate timing**' >> "$GITHUB_STEP_SUMMARY"
+      - name: Download the fixed original recording
+        uses: actions/download-artifact@v4
+        with:
+          name: stream-read-profile-06965f2cbad61628488a423106084fdc34fe0be4
+          run-id: 37909749321
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/original-stream-profile
+      - name: Test original and derived evidence validation
+        run: python3 -m unittest discover -s scripts -p test_stream_read_profile.py -v
+      - name: Recover exact symbols from the saved recording only
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/stream-symbol-evidence"
+          if python3 scripts/stream_read_profile.py recover \
+            --original "$RUNNER_TEMP/original-stream-profile/profile" \
+            --output "$evidence/derived" \
+            > "$evidence/recover.stdout" 2> "$evidence/recover.stderr"; then
+            cat "$evidence/recover.stdout"
+          else
+            result=$?
+            cat "$evidence/recover.stderr" >&2
+            exit "$result"
+          fi
+      - name: Retain derived evidence even when recovery fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stream-read-symbols-${{ needs.resolve.outputs.sha }}
+          path: ${{ runner.temp }}/stream-symbol-evidence/
           if-no-files-found: error
           retention-days: 30

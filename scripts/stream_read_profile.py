@@ -17,6 +17,8 @@ import shlex
 import shutil
 import subprocess
 import sys
+import urllib.request
+import urllib.error
 
 CELL = "stream_read/tail/1k"
 PREFIX = "# STREAM_PROFILE "
@@ -112,7 +114,8 @@ def parse_samples(text):
             require(integer(stamp) and int(pid) > 0 and int(tid) > 0, "invalid sample timestamp/process/thread")
             current = {"pid": int(pid), "tid": int(tid), "mono_ns": stamp, "period": period,
                        "event": event, "ip": ip,
-                       "leaf": (symbol.strip(), dso.strip()) if symbol is not None else None, "chain": []}
+                       "leaf": (symbol.strip(), dso.strip()) if symbol is not None else None,
+                       "chain": [], "chain_ips": [], "chain_dsos": []}
             samples.append(current)
             continue
         match = CHAIN_RE.fullmatch(line)
@@ -121,6 +124,8 @@ def parse_samples(text):
         # perf emits '(inlined)' without a DSO for an inlined frame.
         frame = (symbol.strip(), None if dso == "inlined" else dso.strip())
         current["chain"].append(frame)
+        current["chain_ips"].append(ip)
+        current["chain_dsos"].append(frame[1])
         if current["leaf"] is None:
             current["leaf"], current["ip"] = frame, ip
     return samples
@@ -293,15 +298,14 @@ def logged_command(command, output, label, env=None):
     require(result.returncode == 0, f"{label} failed ({result.returncode}); raw files retained")
 
 
-def qualify_retained(output):
+def validate_retained_provenance(output, expected_parser):
     manifest = read_json((output / "source-manifest.json").read_text())
-    require(manifest.get("qualified") is not False and manifest.get("complete_round") is True,
-            "failed or incomplete round cannot be requalified")
+    require(isinstance(manifest, dict), "source manifest must be an object")
     require(type(manifest.get("schema")) is int and manifest["schema"] == 1,
             "unsupported provenance schema")
     require(type(manifest.get("execution_rounds")) is int and manifest["execution_rounds"] == 1,
             "one execution round required")
-    require(manifest.get("parser_sha256") == sha256(Path(__file__)), "stale parser hash")
+    require(manifest.get("parser_sha256") == expected_parser, "stale parser hash")
     required = {"perf.data", "benchmark-profiled", "build-manifest.json",
                 "profile-settings.json", "host-before.json", "host-after.json"}
     labels = ["record", "script", "dump"] + [f"phase-{identity}-{suffix}" for identity in range(1,4)
@@ -313,7 +317,7 @@ def qualify_retained(output):
     require(all(path.name in manifest["artifacts"] for path in output.glob("*.stderr")),
             "unhashed diagnostic file")
     for name, wanted in manifest["artifacts"].items():
-        require(Path(name).name == name and sha256(output / name) == wanted, f"artifact hash differs: {name}")
+        require(Path(name).name == name and (output / name).is_file() and sha256(output / name) == wanted, f"artifact hash differs: {name}")
     for label in labels:
         status = read_json((output / f"{label}-status.json").read_text())
         require(type(status.get("exit_code")) is int and status["exit_code"] == 0,
@@ -339,6 +343,14 @@ def qualify_retained(output):
     require(read_json((output / "build-manifest.json").read_text()) == manifest["build"],
             "build provenance differs")
     validate_build_manifest(manifest["build"], manifest["source_sha"], output / "benchmark-profiled")
+    return manifest
+
+
+def qualify_retained(output):
+    manifest = read_json((output / "source-manifest.json").read_text())
+    require(manifest.get("qualified") is not False and manifest.get("complete_round") is True,
+            "failed or incomplete round cannot be requalified")
+    manifest = validate_retained_provenance(output, sha256(Path(__file__)))
     diagnostics = "\n".join(path.read_text() for path in output.glob("*.stderr"))
     return qualify((output / "record.stdout").read_text(), (output / "script.stdout").read_text(),
                    manifest["source_sha"], diagnostics, (output / "dump.stdout").read_text())
@@ -400,6 +412,278 @@ def run_profile(binary, output, build_manifest):
         raise
 
 
+# This recovery is intentionally pinned to one failed recording, with no bypass flag.
+ORIGINAL_MANIFEST_SHA = "d120181c09c8452f5b54649da8bb43f65877601f93860ce4970e52f06429fa7a"
+ORIGINAL_PERF_SHA = "11e4022abb2edcc29aaef169b39eb6d4796f775a7e65f3a848de36e1a203eb3b"
+ORIGINAL_SOURCE = "06965f2cbad61628488a423106084fdc34fe0be4"
+ORIGINAL_PARSER = "f1dfd77d57ab029cea162232ce936fddc6f2b56bce0cc522d6c9273013b28909"
+ORIGINAL_ARTIFACT_COUNT = 43
+ORIGINAL_FULL_SAMPLES = 1910
+ORIGINAL_PHASE_SAMPLES = (446, 427, 437)
+ORIGINAL_UNKNOWN = 483
+
+UNKNOWN_FAILURE = "more than 10 percent unknown leaf samples"
+LIBC_ID = "a4a7992a8e66555c8141ab2a08a8465ff6e0ea65"
+BENCHMARK_ID = "ae824675e91ad3102468a2d3a6ca1c3a0487ca97"
+LIBC_DSO = "/usr/lib/x86_64-linux-gnu/libc.so.6"
+BENCHMARK_DSO = "/home/runner/work/prkdb/prkdb/target/release/deps/wal_write_path-7dc6268dee3e4454"
+LIBC_SHA = "3a15d66867d83762c7f2f1e37359cb8f6c5743edb369c65285cb0b1c4f7498bf"
+DEBUG_SHA = "93213939b6f3f01720b8c336143fc405999109d18b64b195a99e1a0c4301214b"
+DEBUG_PATH = Path("usr/lib/debug/.build-id") / LIBC_ID[:2] / (LIBC_ID[2:] + ".debug")
+PACKAGES = (
+    ("libc6", "https://security.ubuntu.com/ubuntu/pool/main/g/glibc/libc6_2.39-0ubuntu8.9_amd64.deb",
+     "ff5557d99b51f761c4b7c92368b9cc45565eda17df9bf9eb4b134d09825008be"),
+    ("libc6-dbg", "https://security.ubuntu.com/ubuntu/pool/main/g/glibc/libc6-dbg_2.39-0ubuntu8.9_amd64.deb",
+     "c4b086cef3a6bbb6a90299969b3c0bf3867f40cb8e9bbbb0edfe5ae23f2c04f0"))
+
+
+def compare_recovery_samples(before, after, allowed_dsos):
+    require(len(before) == len(after), "recovery sample count changed")
+    fields = ("pid", "tid", "mono_ns", "event", "period", "ip", "chain_ips", "chain_dsos")
+    for index, (original, derived) in enumerate(zip(before, after)):
+        require(all(original[key] == derived[key] for key in fields),
+                f"sample/stack identity changed at {index}; stop for review")
+        require(original["leaf"][1] == derived["leaf"][1]
+                and len(original["chain"]) == len(derived["chain"]),
+                f"leaf/stack identity changed at {index}; stop for review")
+        for old, new in zip([original["leaf"]] + original["chain"], [derived["leaf"]] + derived["chain"]):
+            require(old[1] == new[1], f"stack DSO changed at {index}")
+            require(old == new or old[1] in allowed_dsos,
+                    f"unapproved external symbol resolution at {index}: {old[1]}")
+
+
+def validate_recovery_original(output):
+    require(sha256(output / "source-manifest.json") == ORIGINAL_MANIFEST_SHA, "original manifest pin differs")
+    require(sha256(output / "perf.data") == ORIGINAL_PERF_SHA, "original perf.data pin differs")
+    manifest = validate_retained_provenance(output, ORIGINAL_PARSER)
+    require(manifest["source_sha"] == ORIGINAL_SOURCE, "original source pin differs")
+    require(manifest.get("qualified") is False and manifest.get("complete_round") is False,
+            "only the pinned failed recording is eligible")
+    require(len(manifest["artifacts"]) == ORIGINAL_ARTIFACT_COUNT, "original artifact count differs")
+    failure = read_json((output / "qualification.json").read_text())
+    require(failure == {"qualified": False, "reason": UNKNOWN_FAILURE,
+                        "retry_permitted": False, "timing_claim": False}, "original failure differs")
+    diagnostics = "\n".join(path.read_text() for path in output.glob("*.stderr"))
+    try:
+        qualify((output / "record.stdout").read_text(), (output / "script.stdout").read_text(),
+                ORIGINAL_SOURCE, diagnostics, (output / "dump.stdout").read_text())
+    except QualificationError as error:
+        require(str(error) == UNKNOWN_FAILURE, "recording has another qualification failure: " + str(error))
+    else:
+        raise QualificationError("original no longer has its sole unknown-leaf failure")
+    intervals = parse_intervals((output / "record.stdout").read_text(), ORIGINAL_SOURCE)
+    samples = parse_samples((output / "script.stdout").read_text())
+    counts = tuple(sum(i["begin_ns"] <= s["mono_ns"] < i["end_ns"] for s in samples) for i in intervals)
+    measured = [s for s in samples if any(i["begin_ns"] <= s["mono_ns"] < i["end_ns"] for i in intervals)]
+    require(len(samples) == ORIGINAL_FULL_SAMPLES and counts == ORIGINAL_PHASE_SAMPLES,
+            "original full/measured cohort counts differ")
+    require(sum(unknown(s["leaf"][0]) for s in measured) == ORIGINAL_UNKNOWN, "original unknown cohort differs")
+    return manifest
+
+
+def recovery_env(base):
+    return {**profile_env(base), "DEBUGINFOD_URLS": ""}
+
+
+def recovery_command(command, output):
+    require(command[:1] == ["perf"] and len(command) > 3 and command[1] in {"script", "report"},
+            "only offline extraction commands are allowed")
+    relocated = list(command[1:])
+    require(relocated[1] == "-i", "offline command input differs")
+    relocated[2] = str(output / "perf.data")
+    return ["perf", "--buildid-dir", str(output / "cache")] + relocated + ["--symfs", str(output / "symfs")]
+
+
+def verify_elf(path, expected_hash, expected_id, output, label):
+    require(path.is_file() and sha256(path) == expected_hash, f"ELF file hash differs: {label}")
+    logged_command(["readelf", "--notes", str(path)], output, label, recovery_env(os.environ))
+    ids = re.findall(r"Build ID:\s*([0-9a-fA-F]+)", (output / f"{label}.stdout").read_text())
+    require(ids == [expected_id], f"ELF GNU build ID differs: {label}")
+    return {"path": str(path), "sha256": expected_hash, "build_id": expected_id}
+
+
+def download_package(label, url, expected_hash, output):
+    package = output / (label + ".deb")
+    provenance = {"url": url, "expected_sha256": expected_hash}
+    try:
+        with urllib.request.urlopen(url, timeout=60) as response:
+            provenance.update(status=response.status, final_url=response.geturl(), headers=list(response.headers.items()))
+            save_json(output / f"{label}-download.json", provenance)
+            require(response.status == 200 and response.geturl() == url, "package download response differs")
+            with package.open("xb") as file:
+                shutil.copyfileobj(response, file)
+        provenance["sha256"] = sha256(package)
+        require(provenance["sha256"] == expected_hash, f"package hash differs: {label}")
+    except urllib.error.HTTPError as error:
+        provenance.update(status=error.code, headers=list(error.headers.items()), error=str(error))
+        raise QualificationError(f"matching symbols unavailable: {label} HTTP {error.code}") from error
+    except Exception as error:
+        provenance["error"] = str(error)
+        raise
+    finally:
+        save_json(output / f"{label}-download.json", provenance)
+    return package
+
+
+def prepare_recovery_symbols(original, output, manifest):
+    symbols = {}
+    for label, url, digest in PACKAGES:
+        package = download_package(label, url, digest, output)
+        extracted = output / (label + "-extracted")
+        logged_command(["dpkg-deb", "--extract", str(package), str(extracted)], output,
+                       label + "-extract", recovery_env(os.environ))
+    libc = output / "libc6-extracted" / LIBC_DSO.lstrip("/")
+    debug = output / "libc6-dbg-extracted" / DEBUG_PATH
+    symbols["libc"] = verify_elf(libc, LIBC_SHA, LIBC_ID, output, "libc-elf")
+    symbols["debug"] = verify_elf(debug, DEBUG_SHA, LIBC_ID, output, "debug-elf")
+    symbols["benchmark"] = verify_elf(original / "benchmark-profiled", manifest["build"]["binary_sha256"],
+                                       BENCHMARK_ID, output, "benchmark-elf")
+    symfs = output / "symfs"
+    for label, source, relative in (("libc", libc, Path(LIBC_DSO.lstrip("/"))), ("debug", debug, DEBUG_PATH),
+                                    ("benchmark", original / "benchmark-profiled", Path(BENCHMARK_DSO.lstrip("/")))):
+        destination = symfs / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        symbols[label] = verify_elf(destination, symbols[label]["sha256"], symbols[label]["build_id"],
+                                    output, label + "-used-elf")
+    # symfs contains only the exact two ELF objects and matching libc debug file.
+    # A fresh empty global cache prevents access to ambient build-ID entries.
+    (output / "cache").mkdir()
+    return symbols
+
+
+def recheck_recovery_symbols(symbols):
+    require(set(symbols) == {"libc", "debug", "benchmark"}, "exact used symbol objects required")
+    for label, metadata in symbols.items():
+        require(sha256(Path(metadata["path"])) == metadata["sha256"], f"used symbol file changed: {label}")
+
+
+def recheck_recovery_recording(output):
+    require((output / "perf.data").is_file() and sha256(output / "perf.data") == ORIGINAL_PERF_SHA,
+            "used recording copy differs from pinned perf.data")
+
+
+def recovery_analysis_identity():
+    require(not capture(["git", "status", "--porcelain"]).strip(), "analysis checkout must be clean")
+    return {"source_sha": capture(["git", "rev-parse", "HEAD"]).strip(),
+            "source_tree": capture(["git", "rev-parse", "HEAD^{tree}"]).strip(),
+            "parser_sha256": sha256(Path(__file__))}
+
+
+def recovery_artifacts(output):
+    return {str(path.relative_to(output)): sha256(path) for path in sorted(output.rglob("*"))
+            if path.is_file() and path.name != "derived-manifest.json"}
+
+
+def run_recovery(original, output):
+    require(not output.exists(), "recovery output already exists; no overwrite or retry")
+    require(not output.resolve().is_relative_to(REPO) and not output.resolve().is_relative_to(original.resolve()),
+            "derived output must be outside source and original directories")
+    output.mkdir(parents=True, mode=0o700)
+    derived = {"schema": 1, "operation": "same-recording symbol recovery", "qualified": False,
+               "original_manifest_sha256": ORIGINAL_MANIFEST_SHA, "original_perf_sha256": ORIGINAL_PERF_SHA,
+               "original_source_sha": ORIGINAL_SOURCE, "original_parser_sha256": ORIGINAL_PARSER,
+               "original_path": str(original), "recording_attempts": 0, "recovery_attempts": 1,
+               "timing_claim": False, "retry_permitted": False}
+    try:
+        manifest = validate_recovery_original(original)
+        derived["original_verified_before"] = True
+        for name in ("source-manifest.json", "qualification.json"):
+            shutil.copyfile(original / name, output / ("original-" + name))
+        require(platform.system() == "Linux", "offline recovery requires the original Linux perf version")
+        for tool, install in (("perf", "sudo apt-get install linux-tools-common linux-tools-generic"),
+                              ("readelf", "sudo apt-get install binutils"),
+                              ("dpkg-deb", "sudo apt-get install dpkg"), ("git", "sudo apt-get install git")):
+            require(shutil.which(tool), f"missing {tool}; maintainer install command: {install}")
+        derived["analysis"] = recovery_analysis_identity()
+        environment = recovery_env(os.environ)
+        save_json(output / "recovery-settings.json", {"PERF_CONFIG": environment["PERF_CONFIG"],
+                  "DEBUGINFOD_URLS": environment["DEBUGINFOD_URLS"], "buildid_dir": str(output / "cache"),
+                  "symfs": str(output / "symfs")})
+        for tool, command in (("perf", ["perf", "--version"]), ("readelf", ["readelf", "--version"]),
+                              ("dpkg-deb", ["dpkg-deb", "--version"]), ("git", ["git", "--version"])):
+            logged_command(command, output, tool + "-version", environment)
+        require((output / "perf-version.stdout").read_text().strip() == "perf version 6.17.13",
+                "offline perf version differs from recorded 6.17.13")
+        derived["symbols"] = prepare_recovery_symbols(original, output, manifest)
+        shutil.copyfile(original / "perf.data", output / "perf.data")
+        recheck_recovery_recording(output)
+        derived["recording_verified_before"] = True
+        shutil.copyfile(original / "record.stdout", output / "record.stdout")
+        labels = ["script"] + [f"phase-{identity}-{suffix}" for identity in range(1,4)
+                                 for suffix in ("script", "report")]
+        for label in labels:
+            command = recovery_command(read_json((original / f"{label}-command.json").read_text()), output)
+            logged_command(command, output, label, environment)
+        recheck_recovery_symbols(derived["symbols"])
+        recheck_recovery_recording(output)
+        before = parse_samples((original / "script.stdout").read_text())
+        after = parse_samples((output / "script.stdout").read_text())
+        compare_recovery_samples(before, after, {BENCHMARK_DSO, LIBC_DSO})
+        # Every interval extraction is also the exact ordered subset of the full script.
+        intervals = parse_intervals((original / "record.stdout").read_text(), ORIGINAL_SOURCE)
+        for interval in intervals:
+            expected = [s for s in after if interval["begin_ns"] <= s["mono_ns"] < interval["end_ns"]]
+            actual = parse_samples((output / f"phase-{interval['id']}-script.stdout").read_text())
+            compare_recovery_samples(expected, actual, set())
+        result = qualify((original / "record.stdout").read_text(), (output / "script.stdout").read_text(),
+                         ORIGINAL_SOURCE, "\n".join(p.read_text() for p in output.glob("*.stderr")),
+                         (original / "dump.stdout").read_text())
+        require([p["samples"] for p in result["phases"]] == list(ORIGINAL_PHASE_SAMPLES), "derived phase counts differ")
+        require(recovery_analysis_identity() == derived["analysis"], "analysis source/parser changed during recovery")
+        validate_recovery_original(original)
+        derived.update(qualified=True, original_verified_after=True, full_samples=len(after), measured_samples=result["samples"])
+        result.update(derived_analysis=True, original_failure_retained=True, original_manifest_sha256=ORIGINAL_MANIFEST_SHA,
+                      original_unknown_leaf_samples=ORIGINAL_UNKNOWN)
+        save_json(output / "qualification.json", result)
+        return result
+    except (QualificationError, OSError, KeyError, ValueError) as error:
+        derived["qualified"] = False
+        derived["reason"] = str(error)
+        save_json(output / "qualification.json", {"qualified": False, "reason": str(error),
+                  "timing_claim": False, "retry_permitted": False, "original_failure_retained": True})
+        raise
+    finally:
+        try:
+            validate_recovery_original(original)
+            derived["original_verified_after"] = True
+        except (QualificationError, OSError, KeyError, ValueError) as error:
+            derived["original_verified_after"] = False
+            derived["original_recheck_error"] = str(error)
+            derived["qualified"] = False
+            save_json(output / "qualification.json", {"qualified": False, "reason": str(error),
+                      "timing_claim": False, "retry_permitted": False})
+        if "analysis" in derived:
+            try:
+                require(recovery_analysis_identity() == derived["analysis"], "analysis source/parser changed during recovery")
+                derived["analysis_verified_after"] = True
+            except (QualificationError, OSError, KeyError, ValueError) as error:
+                derived.update(qualified=False, analysis_verified_after=False, analysis_recheck_error=str(error), reason=str(error))
+                save_json(output / "qualification.json", {"qualified": False, "reason": str(error),
+                          "timing_claim": False, "retry_permitted": False, "original_failure_retained": True})
+        if "symbols" in derived:
+            try:
+                recheck_recovery_symbols(derived["symbols"])
+                derived["symbols_verified_after"] = True
+            except (QualificationError, OSError, KeyError, ValueError) as error:
+                derived.update(qualified=False, symbols_verified_after=False, symbol_recheck_error=str(error), reason=str(error))
+                save_json(output / "qualification.json", {"qualified": False, "reason": str(error),
+                          "timing_claim": False, "retry_permitted": False, "original_failure_retained": True})
+        if derived.get("recording_verified_before"):
+            try:
+                recheck_recovery_recording(output)
+                derived["recording_verified_after"] = True
+            except (QualificationError, OSError, KeyError, ValueError) as error:
+                derived.update(qualified=False, recording_verified_after=False, recording_recheck_error=str(error), reason=str(error))
+                save_json(output / "qualification.json", {"qualified": False, "reason": str(error),
+                          "timing_claim": False, "retry_permitted": False, "original_failure_retained": True})
+        derived["artifacts"] = recovery_artifacts(output)
+        save_json(output / "derived-manifest.json", derived)
+        require(derived.get("original_verified_after") is True and derived.get("analysis_verified_after", True) is True
+                and derived.get("symbols_verified_after", True) is True and derived.get("recording_verified_after", True) is True,
+                derived.get("reason", "original, analysis or symbol provenance changed; derived evidence refused"))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -411,6 +695,9 @@ def main():
     run.add_argument("--build-manifest", type=Path, required=True)
     retained = commands.add_parser("qualify", help="reparse retained evidence without running perf")
     retained.add_argument("--output", type=Path, required=True)
+    recovery = commands.add_parser("recover", help="offline symbols for the pinned original recording; no collection/retry")
+    recovery.add_argument("--original", type=Path, required=True)
+    recovery.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
         if args.command == "preflight":
@@ -420,6 +707,8 @@ def main():
                 save_json(args.output, result)
         elif args.command == "run":
             result = run_profile(args.binary.resolve(), args.output.resolve(), args.build_manifest.resolve())
+        elif args.command == "recover":
+            result = run_recovery(args.original.resolve(), args.output.resolve())
         else:
             result = qualify_retained(args.output.resolve())
         print(json.dumps(result, indent=2, sort_keys=True))
