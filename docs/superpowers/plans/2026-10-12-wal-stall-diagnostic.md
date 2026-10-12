@@ -17,25 +17,25 @@ Files: exactly the spec scope. Set CARGO_INCREMENTAL=0 and own CARGO_TARGET_DIR.
 
 ### Task2: evidence runner test-first
 Files: scripts/test_wal_stall_diagnostic.py, scripts/wal_stall_diagnostic.py.
-- [ ] Add negative and positive provenance fixtures, fixed36-run schedule tests,
+- [x] Add negative and positive provenance fixtures, fixed36-run schedule tests,
   native exact3-rep/4-worker/1s+3s/positive-cell parser and diagnostic-only verdict tests.
-- [ ] Run python3 -m unittest discover -s scripts -p test_wal_stall_diagnostic.py -v;
+- [x] Run python3 -m unittest discover -s scripts -p test_wal_stall_diagnostic.py -v;
   record genuine missing-module RED separately from runtime negative controls.
-- [ ] Implement verify_artifact, schedule, parse_native, summarize, fixed_environment,
+- [x] Implement verify_artifact, schedule, parse_native, summarize, fixed_environment,
   host_snapshot, Linux preflight/run and exact trace commands with stdlib only.
-- [ ] Tests must reject modified binaries, manifest identities/path traversal/symlinks,
+- [x] Tests must reject modified binaries, manifest identities/path traversal/symlinks,
   wrong/missing/duplicate cells/reps/header, nonpositive/NaN metrics and traced timing
   inclusion. No perf fallback or variable sequence. Save partial results on error.
-- [ ] Review runner, run tests and real original-artifact offline validation; commit
+- [x] Review runner, run tests and real original-artifact offline validation; commit
   test: pin bounded WAL diagnostic evidence (tests) then ci: add fixed WAL stall runner.
 
 ### Task3: isolated dispatch and complete local gate
 File: .github/workflows/remediation-gate.yml.
-- [ ] Add choice wal-stall-diagnostic and one30-minute Ubuntu24.04 job, actions read,
+- [x] Add choice wal-stall-diagnostic and one30-minute Ubuntu24.04 job, actions read,
   exact cross-run artifact download, parser tests, run with no build, always upload.
   Existing jobs/choices/gates/commands unchanged except adding choice.
-- [ ] actionlint; full bash scripts/pre-push-check.sh on own target, no parallel build.
-- [ ] Independent quality review, commit ci: dispatch retained-binary WAL stall diagnostic.
+- [x] actionlint; full bash scripts/pre-push-check.sh on own target, no parallel build.
+- [x] Independent quality review, commit ci: dispatch retained-binary WAL stall diagnostic.
 - [ ] One milestone push and dispatch probe=wal-stall-diagnostic at immutable task head;
   phase=2/ref=head. No PR, default gate or optimization acceptance claim.
 
@@ -47,3 +47,10 @@ Files: docs/remediation/decisions/2026-10-12-wal-stall-diagnostic.md and own han
 - [ ] Record cause if demonstrated, otherwise inconclusive. Original failed gate stays
   failed; no new optimization, rerun or architectural adoption in this task.
 - [ ] Commit report, update exact handoff, clean owned target after evidence retention.
+
+Local checkpoint:36diagnostic testsPASS, independent protocol/implementation/CI
+reviewAPPROVED after sampleCPU/root-session/failure-snapshot fixes. Actual leaked
+child on witness-write failure was runtimeRED thenGREEN; real TERM-ignoring
+descendant containment also passes. Default pinned original28-file provenance
+passes and6original native filtered cells parse3rows each. FullprepushEXIT0;
+no Rust/benchmark/gate changes, no Criterion warranted. Linuxexecution pending.
