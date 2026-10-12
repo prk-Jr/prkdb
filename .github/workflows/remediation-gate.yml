@@ -28,7 +28,7 @@ on:
         type: choice
         options: [none, wal-bench, iai, stream-read-profile, stream-read-symbols]
       base_ref:
-        description: "wal-bench only: also bench this ref first, in the same job"
+        description: "wal-bench or iai: also bench this ref first, in the same job"
         required: false
         default: ""
 
@@ -313,6 +313,9 @@ jobs:
     if: ${{ inputs.probe == 'iai' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: '0'
+      GUNGRAUN_COLOR: never
     steps:
       # CI preamble (plan Conventions)
       - name: Free disk space
@@ -324,6 +327,7 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.sha }}
           persist-credentials: false
+          fetch-depth: 0
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       - uses: dtolnay/rust-toolchain@1.98.1
@@ -331,22 +335,254 @@ jobs:
       - run: |
           echo "**PROBE — not gate evidence**" >> "$GITHUB_STEP_SUMMARY"
       - run: sudo apt-get install -y valgrind
-      - run: cargo install gungraun-runner --version 0.19.4 --locked
-      - name: Instruction counts, one thread per summary
-        env:
-          GUNGRAUN_COLOR: never
+      - name: Install pinned gungraun runner
         run: |
-          set -o pipefail
-          # rust-cache (above) may restore a stale target/gungraun/ from a previous
-          # probe run on the same cache key; a leftover summary.json under an old
-          # benchmark name would otherwise sit alongside this run's summaries (see
-          # perf-gate.yml's "Bench base SHA" step for the same issue in the PR gate).
-          rm -rf target/gungraun
-          cargo bench -p prkdb --bench iai_hot_paths -- --save-summary=json \
-            --callgrind-args='--separate-threads=yes' | tee iai.log
-          python3 scripts/perf_gate_deltas.py list-names target/gungraun
-          python3 scripts/perf_gate_deltas.py floors target/gungraun scripts/perf_gate_floors.toml \
+          set -euo pipefail
+          export CARGO_INCREMENTAL=0
+          CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/target"
+          export CARGO_TARGET_DIR
+          cargo install gungraun-runner --version 0.19.4 --locked
+      - name: Pin source identities and preserve head validation scripts
+        id: sources
+        env:
+          BASE_REF: ${{ inputs.base_ref }}
+          HEAD_SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          export CARGO_INCREMENTAL=0
+          CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/target"
+          export CARGO_TARGET_DIR
+          evidence="$RUNNER_TEMP/iai-evidence"
+          mkdir -p "$evidence"
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          echo "$HEAD_SHA" > "$evidence/head-sha.txt"
+          # Validation always comes from the reviewed head, including while at base.
+          cp scripts/perf_gate_deltas.py scripts/perf_gate_floors.toml "$evidence/"
+          # This helper is frozen from the reviewed workflow before checking out base.
+          cat > "$evidence/binary_provenance.py" <<'PYTHON'
+          import hashlib, json, os, shutil, subprocess, sys
+          from pathlib import Path
+
+          def digest(path):
+              with path.open('rb') as stream:
+                  return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+          mode, label, directory = sys.argv[1:]
+          evidence = Path(directory)
+          manifest_path = evidence / f'{label}-binary-manifest.json'
+          saved_binary = evidence / f'{label}-benchmark-executable'
+          if mode == 'capture':
+              artifacts = []
+              for line in (evidence / f'{label}-build.jsonl').read_text().splitlines():
+                  item = json.loads(line)
+                  if (item.get('reason') == 'compiler-artifact'
+                      and item.get('target', {}).get('name') == 'iai_hot_paths'
+                      and 'bench' in item.get('target', {}).get('kind', [])
+                      and item.get('executable')):
+                      artifacts.append(Path(item['executable']).resolve(strict=True))
+              if len(artifacts) != 1:
+                  raise SystemExit(f'expected one iai_hot_paths executable, found {artifacts}')
+              binary = artifacts[0]
+              shutil.copy2(binary, saved_binary)
+              manifest = dict(source_sha=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+                              executable=str(binary), binary_sha256=digest(binary),
+                              saved_binary_sha256=digest(saved_binary), profile='bench',
+                              environment={key: os.environ.get(key) for key in
+                                           ('CARGO_TARGET_DIR', 'CARGO_INCREMENTAL', 'RUSTFLAGS', 'RUSTUP_TOOLCHAIN')})
+              manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+          elif mode == 'verify':
+              manifest = json.loads(manifest_path.read_text())
+              binary = Path(manifest['executable'])
+              expected = manifest['binary_sha256']
+              if digest(binary) != expected or digest(saved_binary) != expected:
+                  raise SystemExit('benchmark executable changed after artifact capture')
+              summaries = sorted((Path(os.environ['CARGO_TARGET_DIR']) / 'gungraun').rglob('summary.json'))
+              if not summaries:
+                  raise SystemExit('no benchmark summaries to verify')
+              for path in summaries:
+                  summary = json.loads(path.read_text())
+                  if Path(summary['benchmark_exe']).resolve(strict=True) != binary:
+                      raise SystemExit(f'{path}: measured executable does not match Cargo artifact')
+              (evidence / f'{label}-binary-verified.txt').write_text(expected + '\n')
+          else:
+              raise SystemExit(f'unknown provenance mode: {mode}')
+          PYTHON
+          rustc -Vv > "$evidence/rustc-version.txt"
+          cargo -V > "$evidence/cargo-version.txt"
+          valgrind --version > "$evidence/valgrind-version.txt"
+          cargo install --list > "$evidence/installed-tools.txt"
+          uname -a > "$evidence/host.txt"
+          if [ -n "$BASE_REF" ]; then
+            base_sha="$(git rev-parse --verify --end-of-options "${BASE_REF}^{commit}")"
+            echo "base=$base_sha" >> "$GITHUB_OUTPUT"
+            echo "$base_sha" > "$evidence/base-sha.txt"
+            git cat-file -e "$base_sha:crates/prkdb/benches/iai_hot_paths.rs"
+            echo "Same-runner iai comparison: $base_sha -> $HEAD_SHA" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # A restored cache must never supply a baseline or a stale summary.
+          rm -rf "$CARGO_TARGET_DIR/gungraun"
+      - name: Bench immutable base SHA (optional)
+        if: ${{ inputs.base_ref != '' }}
+        env:
+          BASE_SHA: ${{ steps.sources.outputs.base }}
+          HEAD_SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          export CARGO_INCREMENTAL=0
+          CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/target"
+          export CARGO_TARGET_DIR
+          evidence="$RUNNER_TEMP/iai-evidence"
+          # Restore exact head even if the base build, benchmark or inventory fails.
+          trap 'git checkout --detach "$HEAD_SHA"' EXIT
+          git checkout --detach "$BASE_SHA"
+          {
+            git rev-parse HEAD 'HEAD^{tree}'
+            sha256sum Cargo.lock Cargo.toml rust-toolchain.toml crates/prkdb/Cargo.toml \
+              crates/prkdb/benches/iai_hot_paths.rs
+            echo 'cargo bench -p prkdb --bench iai_hot_paths -- --save-baseline=base --save-summary=json --callgrind-args=--separate-threads=yes'
+            echo "CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
+          } > "$evidence/base-build-manifest.txt"
+          set +e
+          cargo bench -p prkdb --bench iai_hot_paths --no-run --message-format=json \
+            > "$evidence/base-build.jsonl" 2> "$evidence/base-build.stderr"
+          build_code=$?
+          set -e
+          echo "$build_code" > "$evidence/base-build-exit-code.txt"
+          if [ "$build_code" -ne 0 ]; then
+            cat "$evidence/base-build.stderr" >&2
+            exit "$build_code"
+          fi
+          python3 "$evidence/binary_provenance.py" capture base "$evidence"
+          set +e
+          cargo bench -p prkdb --bench iai_hot_paths -- \
+            --save-baseline=base --save-summary=json \
+            --callgrind-args='--separate-threads=yes' 2>&1 | tee "$evidence/base.log"
+          codes=("${PIPESTATUS[@]}")
+          set -e
+          echo "${codes[0]}" > "$evidence/base-exit-code.txt"
+          echo "${codes[1]}" > "$evidence/base-log-exit-code.txt"
+          test "${codes[0]}" = 0 || exit "${codes[0]}"
+          test "${codes[1]}" = 0 || exit "${codes[1]}"
+          python3 "$evidence/binary_provenance.py" verify base "$evidence"
+          # Preserve base summaries before head overwrites summaries with the same name.
+          cp -a "$CARGO_TARGET_DIR/gungraun" "$evidence/base-gungraun"
+          python3 "$evidence/perf_gate_deltas.py" list-names "$CARGO_TARGET_DIR/gungraun" \
+            > "$evidence/base-benchmarks.txt"
+          # Keep gungraun's *.out.base@base files for the native head comparison.
+          find "$CARGO_TARGET_DIR/gungraun" -name summary.json -delete
+      - name: Instruction counts, one thread per summary
+        id: head_bench
+        env:
+          BASE_REF: ${{ inputs.base_ref }}
+          HEAD_SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          export CARGO_INCREMENTAL=0
+          CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/target"
+          export CARGO_TARGET_DIR
+          evidence="$RUNNER_TEMP/iai-evidence"
+          git checkout --detach "$HEAD_SHA"
+          comparison=()
+          if [ -n "$BASE_REF" ]; then
+            comparison=(--baseline=base --callgrind-limits='ir=5%')
+          fi
+          {
+            git rev-parse HEAD 'HEAD^{tree}'
+            sha256sum Cargo.lock Cargo.toml rust-toolchain.toml crates/prkdb/Cargo.toml \
+              crates/prkdb/benches/iai_hot_paths.rs
+            echo "cargo bench -p prkdb --bench iai_hot_paths -- ${comparison[*]} --save-summary=json --callgrind-args=--separate-threads=yes"
+            echo "CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
+          } > "$evidence/head-build-manifest.txt"
+          set +e
+          cargo bench -p prkdb --bench iai_hot_paths --no-run --message-format=json \
+            > "$evidence/head-build.jsonl" 2> "$evidence/head-build.stderr"
+          build_code=$?
+          set -e
+          echo "$build_code" > "$evidence/head-build-exit-code.txt"
+          if [ "$build_code" -ne 0 ]; then
+            cat "$evidence/head-build.stderr" >&2
+            exit "$build_code"
+          fi
+          python3 "$evidence/binary_provenance.py" capture head "$evidence"
+          set +e
+          cargo bench -p prkdb --bench iai_hot_paths -- "${comparison[@]}" \
+            --save-summary=json --callgrind-args='--separate-threads=yes' \
+            2>&1 | tee "$evidence/head.log"
+          codes=("${PIPESTATUS[@]}")
+          code="${codes[0]}"
+          set -e
+          echo "${codes[1]}" > "$evidence/head-log-exit-code.txt"
+          echo "$code" > "$evidence/head-exit-code.txt"
+          test "${codes[1]}" = 0 || exit "${codes[1]}"
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          # Exit 3 is a regression verdict; all other errors fail unconditionally.
+          if [ "$code" -ne 0 ]; then
+            if [ "$code" -ne 3 ] || [ -z "$BASE_REF" ]; then
+              exit "$code"
+            fi
+          fi
+          python3 "$evidence/binary_provenance.py" verify head "$evidence"
+          python3 "$evidence/perf_gate_deltas.py" list-names "$CARGO_TARGET_DIR/gungraun" \
+            | tee "$evidence/head-benchmarks.txt"
+      - name: Enforce same-runner 5 percent instruction-count regression limit
+        if: ${{ !cancelled() && inputs.base_ref != '' && steps.head_bench.outcome == 'success' }}
+        env:
+          HEAD_EXIT_CODE: ${{ steps.head_bench.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          export CARGO_INCREMENTAL=0
+          CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/target"
+          export CARGO_TARGET_DIR
+          evidence="$RUNNER_TEMP/iai-evidence"
+          python3 "$evidence/perf_gate_deltas.py" extract "$CARGO_TARGET_DIR/gungraun" \
+            --base-list "$evidence/base-benchmarks.txt" > "$evidence/deltas.json"
+          python3 "$evidence/perf_gate_deltas.py" --summary "$evidence/deltas.json" \
             | tee -a "$GITHUB_STEP_SUMMARY"
+          test "$HEAD_EXIT_CODE" = 0
+      - name: Enforce unchanged head instruction-count floors
+        if: ${{ !cancelled() && steps.head_bench.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          export CARGO_INCREMENTAL=0
+          CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/target"
+          export CARGO_TARGET_DIR
+          evidence="$RUNNER_TEMP/iai-evidence"
+          python3 "$evidence/perf_gate_deltas.py" floors "$CARGO_TARGET_DIR/gungraun" \
+            "$evidence/perf_gate_floors.toml" | tee "$evidence/floors.txt" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Retain instruction-count evidence even on failure
+        if: always()
+        run: |
+          set -euo pipefail
+          export CARGO_INCREMENTAL=0
+          CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/target"
+          export CARGO_TARGET_DIR
+          evidence="$RUNNER_TEMP/iai-evidence"
+          mkdir -p "$evidence"
+          if [ -d "$CARGO_TARGET_DIR/gungraun" ]; then
+            cp -a "$CARGO_TARGET_DIR/gungraun" "$evidence/final-gungraun"
+          fi
+          python3 - "$evidence" <<'PYTHON'
+          import hashlib, sys
+          from pathlib import Path
+          evidence = Path(sys.argv[1])
+          inventory = evidence / 'SHA256SUMS'
+          rows = []
+          for path in sorted(evidence.rglob('*')):
+              if path.is_file() and path != inventory:
+                  with path.open('rb') as stream:
+                      digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+                  rows.append(f'{digest}  {path.relative_to(evidence)}\n')
+          inventory.write_text(''.join(rows))
+          PYTHON
+      - name: Upload raw instruction counts, summaries and source manifests
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iai-${{ needs.resolve.outputs.sha }}
+          path: ${{ runner.temp }}/iai-evidence/
+          if-no-files-found: error
+          retention-days: 30
 
   probe-stream-read-profile:
     name: Probe — measured-phase stream CPU profile (Linux)
