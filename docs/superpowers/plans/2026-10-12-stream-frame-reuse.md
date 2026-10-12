@@ -53,3 +53,8 @@ comparison-37.633%time,+60.342%throughput; fixeduncompressedsyncedFastfixture.
 IndependentSPEC/QUALITY/CIreviewsAPPROVED. Linuxpairedexecutionpending; noT3/phase
 completionclaim. Newmalformedtest expectation corrected onlyafterexplicitmaintainer
 approval; exactlegacyInternalerror+fullrecorddiagnostic pinned, mappingunchanged.
+
+Throughputprobe necessaryscope refinement: preserveactualbase/headbinaries/raw
+files/provenance inalways-upload artifact whilekeepingexactexistingcommands,
+SPIKE_REPS=3,Fast/compactionrulesandallcells. IndependentCIreviewbeforenext
+milestone. This changesworkflow/docs only; alreadymeasuredRustsnapshot unchanged.

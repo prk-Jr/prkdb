@@ -243,6 +243,8 @@ jobs:
     if: ${{ inputs.probe == 'wal-bench' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: '0'
     steps:
       # CI preamble (plan Conventions), with checkout `ref: ${{ needs.resolve.outputs.sha }}`
       - name: Free disk space
@@ -259,27 +261,167 @@ jobs:
         run: sudo apt-get install -y protobuf-compiler
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
+      - name: Pin WAL sources and prepare executable evidence
+        id: wal_sources
+        env:
+          BASE_REF: ${{ inputs.base_ref }}
+          HEAD_SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          export CARGO_INCREMENTAL=0
+          CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/target"
+          export CARGO_TARGET_DIR
+          evidence="$RUNNER_TEMP/wal-bench-evidence"
+          mkdir -p "$evidence"
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          echo "$HEAD_SHA" > "$evidence/head-sha.txt"
+          cp scripts/wal_fast_rule.py "$evidence/"
+          uname -a > "$evidence/host.txt"
+          lscpu > "$evidence/lscpu.txt"
+          if [ -n "$BASE_REF" ]; then
+            base_sha="$(git rev-parse --verify --end-of-options "${BASE_REF}^{commit}")"
+            echo "base=$base_sha" >> "$GITHUB_OUTPUT"
+            echo "$base_sha" > "$evidence/base-sha.txt"
+            echo "Same-runner WAL comparison: $base_sha -> $HEAD_SHA" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # Freeze the helper from reviewed head before switching the disposable checkout.
+          cat > "$evidence/binary_provenance.py" <<'PYTHON'
+          import hashlib, json, os, shutil, subprocess, sys
+          from pathlib import Path
+
+          def digest(path):
+              with path.open('rb') as stream:
+                  return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+          mode, label, bench, directory = sys.argv[1:]
+          evidence = Path(directory)
+          manifest_path = evidence / f'{label}-binary-manifest.json'
+          saved_binary = evidence / f'{label}-benchmark-executable'
+          if mode == 'capture':
+              artifacts = []
+              for line in (evidence / f'{label}-build.jsonl').read_text().splitlines():
+                  item = json.loads(line)
+                  if (item.get('reason') == 'compiler-artifact'
+                      and item.get('target', {}).get('name') == bench
+                      and 'bench' in item.get('target', {}).get('kind', [])
+                      and item.get('executable')):
+                      artifacts.append(Path(item['executable']).resolve(strict=True))
+              if len(artifacts) != 1:
+                  raise SystemExit(f'expected one {bench} executable, found {artifacts}')
+              binary = artifacts[0]
+              shutil.copy2(binary, saved_binary)
+              manifest = dict(source_sha=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+                              executable=str(binary), binary_sha256=digest(binary),
+                              saved_binary_sha256=digest(saved_binary), profile='bench', benchmark=bench,
+                              command=f'SPIKE_REPS=3 cargo bench -p prkdb --bench {bench}',
+                              rustc=subprocess.check_output(['rustc', '-Vv'], text=True),
+                              cargo=subprocess.check_output(['cargo', '-V'], text=True),
+                              environment={key: os.environ.get(key) for key in
+                                           ('CARGO_TARGET_DIR', 'CARGO_INCREMENTAL', 'RUSTFLAGS', 'RUSTUP_TOOLCHAIN')})
+              manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+          elif mode == 'verify':
+              manifest = json.loads(manifest_path.read_text())
+              if (digest(Path(manifest['executable'])) != manifest['binary_sha256']
+                  or digest(saved_binary) != manifest['binary_sha256']):
+                  raise SystemExit('benchmark executable changed after artifact capture')
+              (evidence / f'{label}-binary-verified.txt').write_text(manifest['binary_sha256'] + '\n')
+          else:
+              raise SystemExit(f'unknown provenance mode: {mode}')
+          PYTHON
       - name: Bench base ref (optional)
         if: ${{ inputs.base_ref != '' }}
         env:
-          BASE_REF: ${{ inputs.base_ref }}
+          BASE_SHA: ${{ steps.wal_sources.outputs.base }}
+          HEAD_SHA: ${{ needs.resolve.outputs.sha }}
         run: |
-          set -o pipefail
-          git checkout "$BASE_REF"
+          set -euo pipefail
+          export CARGO_INCREMENTAL=0
+          CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/target"
+          export CARGO_TARGET_DIR
+          evidence="$RUNNER_TEMP/wal-bench-evidence"
+          trap 'git checkout --detach "$HEAD_SHA"' EXIT
+          git checkout --detach "$BASE_SHA"
           # Refs before Task 2.9 name the bench `wal_write_path_spike`.
           bench=wal_write_path
           [ -f crates/prkdb/benches/wal_write_path.rs ] || bench=wal_write_path_spike
-          SPIKE_REPS=3 cargo bench -p prkdb --bench "$bench" | tee base.md
-          git checkout "${{ needs.resolve.outputs.sha }}"
+          {
+            git rev-parse HEAD 'HEAD^{tree}'
+            sha256sum Cargo.lock Cargo.toml rust-toolchain.toml crates/prkdb/Cargo.toml \
+              "crates/prkdb/benches/$bench.rs"
+          } > "$evidence/base-source-manifest.txt"
+          set +e
+          SPIKE_REPS=3 cargo bench -p prkdb --bench "$bench" --no-run --message-format=json \
+            > "$evidence/base-build.jsonl" 2> "$evidence/base-build.stderr"
+          build_code=$?
+          set -e
+          echo "$build_code" > "$evidence/base-build-exit-code.txt"
+          if [ "$build_code" -ne 0 ]; then
+            cat "$evidence/base-build.stderr" >&2
+            exit "$build_code"
+          fi
+          python3 "$evidence/binary_provenance.py" capture base "$bench" "$evidence"
+          set +e
+          SPIKE_REPS=3 cargo bench -p prkdb --bench "$bench" \
+            2> "$evidence/base.stderr" | tee base.md
+          codes=("${PIPESTATUS[@]}")
+          set -e
+          echo "${codes[0]}" > "$evidence/base-exit-code.txt"
+          echo "${codes[1]}" > "$evidence/base-log-exit-code.txt"
+          cp base.md "$evidence/"
+          if [ "${codes[0]}" -ne 0 ]; then
+            cat "$evidence/base.stderr" >&2
+            exit "${codes[0]}"
+          fi
+          test "${codes[1]}" = 0 || exit "${codes[1]}"
+          python3 "$evidence/binary_provenance.py" verify base "$bench" "$evidence"
       - name: Bench ref
+        env:
+          HEAD_SHA: ${{ needs.resolve.outputs.sha }}
         run: |
-          set -o pipefail
-          SPIKE_REPS=3 cargo bench -p prkdb --bench wal_write_path | tee head.md
+          set -euo pipefail
+          export CARGO_INCREMENTAL=0
+          CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/target"
+          export CARGO_TARGET_DIR
+          evidence="$RUNNER_TEMP/wal-bench-evidence"
+          git checkout --detach "$HEAD_SHA"
+          {
+            git rev-parse HEAD 'HEAD^{tree}'
+            sha256sum Cargo.lock Cargo.toml rust-toolchain.toml crates/prkdb/Cargo.toml \
+              crates/prkdb/benches/wal_write_path.rs
+          } > "$evidence/head-source-manifest.txt"
+          set +e
+          SPIKE_REPS=3 cargo bench -p prkdb --bench wal_write_path --no-run --message-format=json \
+            > "$evidence/head-build.jsonl" 2> "$evidence/head-build.stderr"
+          build_code=$?
+          set -e
+          echo "$build_code" > "$evidence/head-build-exit-code.txt"
+          if [ "$build_code" -ne 0 ]; then
+            cat "$evidence/head-build.stderr" >&2
+            exit "$build_code"
+          fi
+          python3 "$evidence/binary_provenance.py" capture head wal_write_path "$evidence"
+          set +e
+          SPIKE_REPS=3 cargo bench -p prkdb --bench wal_write_path \
+            2> "$evidence/head.stderr" | tee head.md
+          codes=("${PIPESTATUS[@]}")
+          set -e
+          echo "${codes[0]}" > "$evidence/head-exit-code.txt"
+          echo "${codes[1]}" > "$evidence/head-log-exit-code.txt"
+          cp head.md "$evidence/"
+          if [ "${codes[0]}" -ne 0 ]; then
+            cat "$evidence/head.stderr" >&2
+            exit "${codes[0]}"
+          fi
+          test "${codes[1]}" = 0 || exit "${codes[1]}"
+          python3 "$evidence/binary_provenance.py" verify head wal_write_path "$evidence"
       - name: Apply the Fast rule and publish the tables
         env:
           BASE_REF: ${{ inputs.base_ref }}
         run: |
           set -o pipefail
+          export CARGO_INCREMENTAL=0
+          CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/target"
+          export CARGO_TARGET_DIR
           {
             echo "**PROBE — not gate evidence**"
             echo "## Host"; echo; nproc; lscpu | grep 'Model name'; df -hT . | tail -1
@@ -301,11 +443,47 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -o pipefail
+          export CARGO_INCREMENTAL=0
+          CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/target"
+          export CARGO_TARGET_DIR
           # p99 of compaction_concurrent_put <= K x p99 of adapter_put, per cell, in the
           # head run (Task 2.15). K lives in scripts/wal_fast_rule.py with its calibration
           # status. Runs even when the Fast rule failed, so both verdicts are visible.
           { echo; echo "## Compaction tail rule"; } >> "$GITHUB_STEP_SUMMARY"
           python3 scripts/wal_fast_rule.py --reps 3 --compaction-tail --head head.md | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Inventory WAL evidence even on failure
+        if: always()
+        run: |
+          set -euo pipefail
+          export CARGO_INCREMENTAL=0
+          CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/target"
+          export CARGO_TARGET_DIR
+          evidence="$RUNNER_TEMP/wal-bench-evidence"
+          mkdir -p "$evidence"
+          for table in base.md head.md; do
+            if [ -f "$table" ]; then cp "$table" "$evidence/"; fi
+          done
+          python3 - "$evidence" <<'PYTHON'
+          import hashlib, sys
+          from pathlib import Path
+          evidence = Path(sys.argv[1])
+          inventory = evidence / 'SHA256SUMS'
+          rows = []
+          for path in sorted(evidence.rglob('*')):
+              if path.is_file() and path != inventory:
+                  with path.open('rb') as stream:
+                      digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+                  rows.append(f'{digest}  {path.relative_to(evidence)}\n')
+          inventory.write_text(''.join(rows))
+          PYTHON
+      - name: Retain raw WAL tables, executables and manifests
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wal-bench-${{ needs.resolve.outputs.sha }}
+          path: ${{ runner.temp }}/wal-bench-evidence/
+          if-no-files-found: error
+          retention-days: 30
 
   probe-iai:
     name: Probe — instruction counts (Linux)

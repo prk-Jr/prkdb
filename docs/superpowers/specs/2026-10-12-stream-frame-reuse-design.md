@@ -116,8 +116,20 @@ alone does not complete T3 or Phase2. No automatic production merge is authorize
 - docs/superpowers/specs/2026-10-12-stream-frame-reuse-design.md
 - docs/superpowers/plans/2026-10-12-stream-frame-reuse.md
 - docs/remediation/decisions/2026-10-12-stream-frame-reuse.md
-- .github/workflows/remediation-gate.yml (optional paired iai baseline only)
+- .github/workflows/remediation-gate.yml (optional paired iai and WAL evidence retention)
 
 No other files without a documented necessary scope update. No new correctness
 finding claimed by this performance correction; ledger changes only if a new
 independent defect is reproduced. Profile/audit evidence remains immutable.
+
+
+### Throughput evidence retention
+
+The existing WAL probe prints base/head tables but previously did not retain
+actual executable identities or raw files as artifacts. Extend only its evidence
+handling: immutable baseline/head, compiler-artifact executable hash/copy before
+each run, unchangedSPIKE_REPS=3 andallworkloads/rules, rawtables/nativeexitcodes,
+source/build/hostmetadata andalways-upload hashinventory. Restore head onfailure.
+This is necessarymeasurementprovenance, not an additional optimization or a change
+to timing/qualityacceptance. The alreadydispatched40c2968IAIpair measures identical
+Rustsources; any laterCI-onlycommit mustproveRusttreeidentity beforeusingthatresult.
