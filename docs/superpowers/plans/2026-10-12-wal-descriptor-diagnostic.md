@@ -14,33 +14,36 @@ Files: exactly spec scope. BothCargo env variables explicit, own target, no rele
 - [x] Copied 36 Python tests and baseline actionlint pass.
 - [x] Independent protocol review approved after byte containment, full-chain
   smoke and timestamped thread-name coverage were added in response to review.
-- [ ] Commit docs: define descriptor-qualified WAL diagnostic.
+- [x] Commit 4b6f089: define descriptor-qualified WAL diagnostic.
 
 ### Task2: portable segment-handle witness
 File: crates/prkdb-core/tests/wal_descriptor_budget.rs only.
-- [ ] Write assertions for live segment-lease growth and release, directory-sync
+- [x] Write assertions for live segment-lease growth and release, directory-sync
   temporary headroom/refusal, acknowledged payload recovery after budget fault,
   and gated snapshot-retention ownership. Characterize current behavior; no fixclaim.
-- [ ] Implement test-only RAII budgetStdVfs adapter after test/helper compileRED;
+- [x] Implement test-only RAII budgetStdVfs adapter after test/helper compileRED;
   root runs focused nextest. Compare refusal without injected cap as negativecontrol.
-- [ ] Independent review; decide confirmed finding versus operational resource limit.
-- [ ] Commit test: characterize WAL segment descriptor budgets; update handoff.
+- [x] Independent review approved: operational resource characterization, no
+  demonstrated contract defect or new finding ID.
+- [x] Commit 8dafe50: characterize WAL segment descriptor budgets; handoff updated.
 
 ### Task3: descriptor-qualified trace runner test-first
 Files: scripts/wal_descriptor_diagnostic.py and test_wal_descriptor_diagnostic.py.
-- [ ] New tests RED: exact limits/noordinaryincrease, inherited mismatch refusal,
+- [x] New tests RED: exact limits/noordinaryincrease, inherited mismatch refusal,
   root-before/after proof, ordinary final identity, fixed4controls/4profiles,
   environment/3recorders/filters/readsyscalls/nontraced-ineligible boundaries.
-- [ ] Implement stdlib runner using pinned artifact verification and root supervisor.
-- [ ] Add real child/witness fault controls and explicit lifecycle/FD sampler coverage.
-- [ ] Tests GREEN; independent implementationreview; commit ci: qualify WAL trace
-  descriptor budgets and scope recorder events.
+- [x] Implement stdlib runner using pinned artifact verification and root supervisor.
+- [x] Add real child/witness fault controls and explicit lifecycle/FD sampler coverage.
+- [x] Root verifies 71 Python tests GREEN, zero skips. Independent implementation
+  review approved; e1b1237 commits descriptor qualification and scoped events.
 
 ### Task4: one isolated job
 File: remediation-gate.yml.
-- [ ] Add wal-descriptor-diagnostic choice/new20minute job; originalartifactdownload,
+- [x] Add wal-descriptor-diagnostic choice/new20minute job; originalartifactdownload,
   current source proof, newtests, run, alwaysupload. Existing jobs/gates unchanged.
-- [ ] actionlint/Python/newRust/full scripts/pre-push-check.sh; record counts.
+- [x] actionlint and diff checks pass; 71 Python controls pass; 4 focused Rust
+  witnesses pass. Full pre-push: 1513 tests pass, 10 skips, concurrent tests and
+  doctests, both 200-seed modes, floors/ledger/render/status/docs all green.
 - [ ] Reviewedmilestonepush+oneexactSHAjob, no PR or optimizationmerge.
 
 ### Task5: qualified result and stop

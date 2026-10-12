@@ -26,7 +26,7 @@ on:
         required: false
         default: none
         type: choice
-        options: [none, wal-bench, iai, stream-read-profile, stream-read-symbols]
+        options: [none, wal-bench, iai, stream-read-profile, stream-read-symbols, wal-descriptor-diagnostic]
       base_ref:
         description: "wal-bench only: also bench this ref first, in the same job"
         required: false
@@ -518,3 +518,72 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 30
+
+  probe-wal-descriptor-diagnostic:
+    name: Probe — descriptor-qualified WAL diagnostic (not a gate)
+    needs: resolve
+    if: ${{ inputs.probe == 'wal-descriptor-diagnostic' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Retain diagnostic source identity
+        env:
+          ANALYSIS_SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/wal-descriptor-evidence"
+          mkdir -p "$evidence"
+          git rev-parse HEAD > "$evidence/analysis-sha.txt"
+          test "$(cat "$evidence/analysis-sha.txt")" = "$ANALYSIS_SHA"
+          sha256sum scripts/wal_stall_diagnostic.py scripts/test_wal_stall_diagnostic.py \
+            scripts/wal_descriptor_diagnostic.py scripts/test_wal_descriptor_diagnostic.py \
+            .github/workflows/remediation-gate.yml > "$evidence/analysis-files.sha256"
+          cp scripts/wal_stall_diagnostic.py scripts/test_wal_stall_diagnostic.py \
+            scripts/wal_descriptor_diagnostic.py scripts/test_wal_descriptor_diagnostic.py "$evidence/"
+          cp .github/workflows/remediation-gate.yml "$evidence/workflow.yml"
+          echo '**RESOURCE DIAGNOSTIC — original failed acceptance is unchanged**' >> "$GITHUB_STEP_SUMMARY"
+      - name: Download exact original benchmark binaries and evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: wal-bench-a64f774f965806fb2cd93c91b276d504ec92208a
+          run-id: 38206215742
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/wal-descriptor-evidence/original
+      - name: Test resource qualification and fail-closed capture
+        run: |
+          python3 -m unittest discover -s scripts -p test_wal_stall_diagnostic.py -v
+          python3 -m unittest discover -s scripts -p test_wal_descriptor_diagnostic.py -v
+      - name: Run one bounded resource and scoped-trace cycle without rebuilding
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/wal-descriptor-evidence"
+          if python3 scripts/wal_descriptor_diagnostic.py run \
+            --artifact "$evidence/original" --output "$evidence/diagnostic" \
+            > "$evidence/run.stdout" 2> "$evidence/run.stderr"; then
+            cat "$evidence/run.stdout" >> "$GITHUB_STEP_SUMMARY"
+          else
+            code=$?
+            cat "$evidence/run.stderr" >&2
+            echo 'Diagnostic incomplete or unqualified; no performance acceptance granted.' >> "$GITHUB_STEP_SUMMARY"
+            exit "$code"
+          fi
+      - name: Retain diagnostic evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wal-descriptor-diagnostic-${{ needs.resolve.outputs.sha }}
+          path: ${{ runner.temp }}/wal-descriptor-evidence/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 1
