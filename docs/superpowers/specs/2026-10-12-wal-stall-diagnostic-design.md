@@ -90,3 +90,13 @@ a cold cell whose native output reports cache drop unavailable. Known ELF symbol
 and unwind sections exist but debug sections do not: symbol-level attribution only,
 no claimed source-line/inline precision. No concurrent native/trace processes other
 than the two intentional recorders enclosing the one traced benchmark.
+
+Implementation review refinements: inner CPU recording explicitly requests
+--sample-cpu. A root supervisor inside sudo starts and records the actual privileged
+command session/group, owns the120s limit and kills all group members after TERM
+even when the parent already exits. Stat/render/record all use it; outer containment
+uses the recorded root group rather than assuming sudo's PTY group. Real userland
+process-model tests exercise a TERM-ignoring descendant; privileged Linux execution
+remains separately qualified. Before/after snapshots survive invocation failure,
+metadata failure does not replace primary failure. Exact current-cgroup counters
+and dynamic linked-library qualification are retained. No additional timing runs.
