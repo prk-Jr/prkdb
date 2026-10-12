@@ -14,6 +14,7 @@ use crate::wal::WalError;
 use std::io;
 use std::ops::ControlFlow;
 use std::path::Path;
+use std::sync::Arc;
 
 pub const SEGMENT_MAGIC: [u8; 8] = *b"PRKDBWAL";
 pub const SEGMENT_HEADER_LEN: u64 = 24;
@@ -84,6 +85,15 @@ pub struct RecordLoc {
 
 fn read_header(file: &dyn VfsFile, path: &Path, first_lsn: Lsn) -> Result<(), WalError> {
     let file_len = file.len()?;
+    read_header_at_len(file, path, first_lsn, file_len)
+}
+
+fn read_header_at_len(
+    file: &dyn VfsFile,
+    path: &Path,
+    first_lsn: Lsn,
+    file_len: u64,
+) -> Result<(), WalError> {
     if file_len < SEGMENT_HEADER_LEN {
         return Err(WalError::CorruptSegment {
             path: path.to_path_buf(),
@@ -364,6 +374,15 @@ fn scan_frames(
 /// `CorruptSegment`; [`crate::wal::Wal::read`] turns it into `Moved` when compaction
 /// rewrote the segment since the log was opened.
 pub fn read_frame(file: &dyn VfsFile, path: &Path, loc: RecordLoc) -> Result<Vec<u8>, WalError> {
+    let (bytes, _, frame_len) = read_validated_frame_bytes(file, path, loc)?;
+    Ok(bytes[FRAME_HEADER_LEN..frame_len].to_vec())
+}
+
+fn read_validated_frame_bytes(
+    file: &dyn VfsFile,
+    path: &Path,
+    loc: RecordLoc,
+) -> Result<(Vec<u8>, FrameKind, usize), WalError> {
     let mismatch = |reason: String| WalError::CorruptSegment {
         path: path.to_path_buf(),
         offset: loc.offset,
@@ -404,7 +423,8 @@ pub fn read_frame(file: &dyn VfsFile, path: &Path, loc: RecordLoc) -> Result<Vec
     match decode_frame(&buf) {
         Decoded::Frame {
             lsn: found_lsn,
-            payload,
+            kind,
+            frame_len,
             ..
         } => {
             if found_lsn != loc.lsn {
@@ -413,13 +433,116 @@ pub fn read_frame(file: &dyn VfsFile, path: &Path, loc: RecordLoc) -> Result<Vec
                     loc.lsn
                 )));
             }
-            Ok(payload.to_vec())
+            Ok((buf, kind, frame_len))
         }
         Decoded::Fault(FrameFault::UnsupportedKind(kind)) => {
             Err(unsupported_kind(path, loc.offset, kind))
         }
         Decoded::Fault(fault) => Err(mismatch(format!("{fault:?}"))),
     }
+}
+
+/// One successful hint validation, bound to its original file and captured extent.
+/// Fields are private so only the checked constructor can create a scan seed.
+pub(super) struct ValidatedFrame {
+    bytes: Vec<u8>,
+    kind: FrameKind,
+    loc: RecordLoc,
+    end: u64,
+    file_len: u64,
+    file: Arc<dyn VfsFile>,
+}
+
+impl ValidatedFrame {
+    pub(super) fn read(
+        file: Arc<dyn VfsFile>,
+        path: &Path,
+        loc: RecordLoc,
+    ) -> Result<Self, WalError> {
+        if loc.payload_len as usize > MAX_PAYLOAD_LEN {
+            return Err(WalError::RecordTooLarge {
+                path: path.to_path_buf(),
+                len: loc.payload_len as usize,
+                max: MAX_PAYLOAD_LEN,
+            });
+        }
+        let file_len = file.len()?;
+        let end = loc
+            .offset
+            .checked_add(FRAME_HEADER_LEN as u64 + loc.payload_len as u64);
+        if loc.lsn < loc.segment
+            || loc.offset < SEGMENT_HEADER_LEN
+            || end.is_none_or(|end| end > file_len)
+        {
+            return Err(WalError::CorruptSegment {
+                path: path.to_path_buf(),
+                offset: loc.offset,
+                reason: "hint frame lies outside its captured segment extent".into(),
+            });
+        }
+        let end = end.expect("extent was checked");
+        let (bytes, kind, frame_len) = read_validated_frame_bytes(&*file, path, loc)?;
+        if frame_len != bytes.len() {
+            return Err(WalError::CorruptSegment {
+                path: path.to_path_buf(),
+                offset: loc.offset,
+                reason: format!(
+                    "expected a {}-byte payload at this offset, decoded a {}-byte payload",
+                    loc.payload_len,
+                    frame_len - FRAME_HEADER_LEN,
+                ),
+            });
+        }
+        Ok(Self {
+            bytes,
+            kind,
+            loc,
+            end,
+            file_len,
+            file,
+        })
+    }
+}
+
+/// Consume the validated hint once, then continue the unchanged frame loop on the
+/// same captured file and length. No caller can supply another file for the seed.
+pub(super) fn scan_segment_seeded(
+    seed: ValidatedFrame,
+    path: &Path,
+    first_lsn: Lsn,
+    visit: &mut ScanFlowVisitor<'_>,
+) -> Result<SegmentScan, WalError> {
+    let ValidatedFrame {
+        bytes,
+        kind,
+        loc,
+        end,
+        file_len,
+        file,
+    } = seed;
+    read_header_at_len(&*file, path, first_lsn, file_len)?;
+    if loc.segment != first_lsn || loc.lsn < first_lsn || end > file_len {
+        return Err(WalError::CorruptSegment {
+            path: path.to_path_buf(),
+            offset: loc.offset,
+            reason: "validated hint does not belong to the requested segment".into(),
+        });
+    }
+    let flow = visit(loc, kind, &bytes[FRAME_HEADER_LEN..])?;
+    let next_lsn = loc.lsn + 1;
+    // Release the seed buffer before the continuation allocates its own scan window.
+    drop(bytes);
+    if flow.is_break() {
+        return Ok(SegmentScan {
+            first_lsn,
+            next_lsn,
+            valid_len: end,
+            file_len,
+            stopped: None,
+            stopped_by_visitor: true,
+        });
+    }
+    scan_frames(&*file, path, file_len, (next_lsn, end), first_lsn, visit)
 }
 
 /// Reads up to `buf.len()` bytes at `offset`, looping over short reads; returns how many
@@ -439,6 +562,375 @@ fn read_full(file: &dyn VfsFile, offset: u64, buf: &mut [u8]) -> io::Result<usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vfs::{StdVfs, Vfs};
+    use crate::wal::frame::encode_frame;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    struct ProbeFile {
+        inner: Arc<dyn VfsFile>,
+        reads: Mutex<Vec<(u64, usize)>>,
+        len_calls: AtomicUsize,
+        max_read: usize,
+        fail_at: AtomicU64,
+    }
+    impl VfsFile for ProbeFile {
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+            if offset >= self.fail_at.load(Ordering::SeqCst) {
+                return Err(io::Error::other("seed continuation read failure"));
+            }
+            let size = buf.len().min(self.max_read);
+            let n = self.inner.read_at(offset, &mut buf[..size])?;
+            self.reads.lock().unwrap().push((offset, n));
+            Ok(n)
+        }
+        fn write_at(&self, offset: u64, buf: &[u8]) -> io::Result<()> {
+            self.inner.write_at(offset, buf)
+        }
+        fn set_len(&self, len: u64) -> io::Result<()> {
+            self.inner.set_len(len)
+        }
+        fn len(&self) -> io::Result<u64> {
+            self.len_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.len()
+        }
+        fn sync_data(&self) -> io::Result<()> {
+            self.inner.sync_data()
+        }
+    }
+
+    fn seeded_fixture(path: &Path, max_read: usize) -> (Arc<ProbeFile>, Vec<RecordLoc>) {
+        let inner = StdVfs.create(path).unwrap();
+        write_segment_header(&*inner, 1).unwrap();
+        let mut frames = Vec::new();
+        let mut locations = Vec::new();
+        for (i, payload) in [b"first".as_slice(), b"second".as_slice()]
+            .iter()
+            .enumerate()
+        {
+            locations.push(RecordLoc {
+                lsn: i as u64 + 1,
+                segment: 1,
+                offset: SEGMENT_HEADER_LEN + frames.len() as u64,
+                payload_len: payload.len() as u32,
+            });
+            encode_frame(&mut frames, i as u64 + 1, FrameKind::Records, payload);
+        }
+        inner.write_at(SEGMENT_HEADER_LEN, &frames).unwrap();
+        (
+            Arc::new(ProbeFile {
+                inner,
+                reads: Mutex::new(Vec::new()),
+                len_calls: AtomicUsize::new(0),
+                max_read,
+                fail_at: AtomicU64::new(u64::MAX),
+            }),
+            locations,
+        )
+    }
+
+    struct ChangesOnSecondRead {
+        inner: Arc<dyn VfsFile>,
+        replacement: Vec<u8>,
+        reads: AtomicUsize,
+    }
+    impl VfsFile for ChangesOnSecondRead {
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+            if self.reads.fetch_add(1, Ordering::SeqCst) == 1 {
+                self.inner.write_at(SEGMENT_HEADER_LEN, &self.replacement)?;
+            }
+            self.inner.read_at(offset, buf)
+        }
+        fn write_at(&self, offset: u64, buf: &[u8]) -> io::Result<()> {
+            self.inner.write_at(offset, buf)
+        }
+        fn set_len(&self, len: u64) -> io::Result<()> {
+            self.inner.set_len(len)
+        }
+        fn len(&self) -> io::Result<u64> {
+            self.inner.len()
+        }
+        fn sync_data(&self) -> io::Result<()> {
+            self.inner.sync_data()
+        }
+    }
+
+    fn changing_frame_fixture(path: &Path) -> (Arc<ChangesOnSecondRead>, RecordLoc) {
+        let (file, locs) = seeded_fixture(path, usize::MAX);
+        let mut replacement = Vec::new();
+        encode_frame(&mut replacement, 1, FrameKind::Records, b"x");
+        (
+            Arc::new(ChangesOnSecondRead {
+                inner: file.inner.clone(),
+                replacement,
+                reads: AtomicUsize::new(0),
+            }),
+            locs[0],
+        )
+    }
+
+    #[test]
+    fn read_frame_preserves_decoded_payload_slice_after_second_read_changes_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(segment_file_name(1));
+        let (file, loc) = changing_frame_fixture(&path);
+        // The public API historically returns the second read's CRC-verified payload
+        // slice, rather than the rest of the originally sized read buffer.
+        assert_eq!(read_frame(&*file, &path, loc).unwrap(), b"x");
+    }
+
+    #[test]
+    fn seed_rejects_changed_decoded_payload_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(segment_file_name(1));
+        let (file, loc) = changing_frame_fixture(&path);
+        let result = ValidatedFrame::read(file, &path, loc);
+        assert!(
+            matches!(result, Err(WalError::CorruptSegment { offset, .. }) if offset == loc.offset),
+            "a seed must bind the decoded frame's payload length to the original location"
+        );
+    }
+
+    #[test]
+    fn seed_break_advances_scan_metadata_without_continuation_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(segment_file_name(1));
+        let (file, locs) = seeded_fixture(&path, usize::MAX);
+        let len = file.inner.len().unwrap();
+        let seed = ValidatedFrame::read(file.clone(), &path, locs[0]).unwrap();
+        file.reads.lock().unwrap().clear();
+        let mut seen = Vec::new();
+        let scan = scan_segment_seeded(seed, &path, 1, &mut |loc, kind, payload| {
+            seen.push((loc, kind, payload.to_vec()));
+            Ok(ControlFlow::Break(()))
+        })
+        .unwrap();
+        assert_eq!(seen, [(locs[0], FrameKind::Records, b"first".to_vec())]);
+        assert_eq!(
+            scan,
+            SegmentScan {
+                first_lsn: 1,
+                next_lsn: 2,
+                valid_len: locs[1].offset,
+                file_len: len,
+                stopped: None,
+                stopped_by_visitor: true
+            }
+        );
+        assert_eq!(
+            *file.reads.lock().unwrap(),
+            [(0, SEGMENT_HEADER_LEN as usize)]
+        );
+    }
+
+    #[test]
+    fn seed_checks_all_segment_header_fields_before_visiting() {
+        for field in 0..3 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(segment_file_name(1));
+            let (file, locs) = seeded_fixture(&path, usize::MAX);
+            let seed = ValidatedFrame::read(file.clone(), &path, locs[0]).unwrap();
+            match field {
+                0 => file.write_at(0, b"BROKEN!!").unwrap(),
+                1 => file
+                    .write_at(8, &(FORMAT_VERSION + 1).to_le_bytes())
+                    .unwrap(),
+                _ => file.write_at(16, &2u64.to_le_bytes()).unwrap(),
+            }
+            let mut visits = 0;
+            let error = scan_segment_seeded(seed, &path, 1, &mut |_, _, _| {
+                visits += 1;
+                Ok(ControlFlow::Continue(()))
+            })
+            .unwrap_err();
+            assert_eq!(visits, 0);
+            match field {
+                0 => assert!(matches!(error, WalError::CorruptSegment { offset: 0, .. })),
+                1 => assert!(matches!(
+                    error,
+                    WalError::UnsupportedFormat {
+                        frame_kind: None,
+                        ..
+                    }
+                )),
+                _ => assert!(matches!(error, WalError::CorruptSegment { offset: 16, .. })),
+            }
+        }
+    }
+
+    #[test]
+    fn seed_continuation_uses_captured_length_without_another_len_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(segment_file_name(1));
+        let (file, locs) = seeded_fixture(&path, usize::MAX);
+        let len = file.inner.len().unwrap();
+        let seed = ValidatedFrame::read(file.clone(), &path, locs[0]).unwrap();
+        let mut newer = Vec::new();
+        encode_frame(&mut newer, 3, FrameKind::Records, b"outside snapshot");
+        file.write_at(len, &newer).unwrap();
+        file.reads.lock().unwrap().clear();
+        let mut seen = Vec::new();
+        let scan = scan_segment_seeded(seed, &path, 1, &mut |loc, kind, payload| {
+            seen.push((loc, kind, payload.to_vec()));
+            Ok(ControlFlow::Continue(()))
+        })
+        .unwrap();
+        assert_eq!(
+            seen,
+            [
+                (locs[0], FrameKind::Records, b"first".to_vec()),
+                (locs[1], FrameKind::Records, b"second".to_vec())
+            ]
+        );
+        assert_eq!(scan.file_len, len);
+        assert_eq!(scan.valid_len, len);
+        assert_eq!(scan.next_lsn, 3);
+        assert_eq!(scan.stopped, None);
+        assert!(!scan.stopped_by_visitor);
+        assert_eq!(file.len_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *file.reads.lock().unwrap(),
+            [(0, 24), (locs[1].offset, (len - locs[1].offset) as usize)]
+        );
+    }
+
+    #[test]
+    fn seed_and_continuation_remain_on_old_inode_after_rename_and_unlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(segment_file_name(1));
+        let (file, locs) = seeded_fixture(&path, usize::MAX);
+        let seed = ValidatedFrame::read(file.clone(), &path, locs[0]).unwrap();
+        let replacement = dir.path().join("replacement.wal.tmp");
+        let new_file = StdVfs.create(&replacement).unwrap();
+        write_segment_header(&*new_file, 1).unwrap();
+        let mut frames = Vec::new();
+        encode_frame(&mut frames, 1, FrameKind::Records, b"changed seed");
+        encode_frame(&mut frames, 2, FrameKind::Records, b"changed continuation");
+        new_file.write_at(SEGMENT_HEADER_LEN, &frames).unwrap();
+        StdVfs.rename(&replacement, &path).unwrap();
+        StdVfs.remove(&path).unwrap();
+        let mut seen = Vec::new();
+        let scan = scan_segment_seeded(seed, &path, 1, &mut |loc, _, payload| {
+            seen.push((loc, payload.to_vec()));
+            Ok(ControlFlow::Continue(()))
+        })
+        .unwrap();
+        assert_eq!(
+            seen,
+            [(locs[0], b"first".to_vec()), (locs[1], b"second".to_vec())]
+        );
+        assert_eq!(scan.stopped, None);
+        assert_eq!(scan.valid_len, file.inner.len().unwrap());
+    }
+
+    #[test]
+    fn seed_continuation_preserves_crc_gap_and_truncation_fault_offsets() {
+        for fault in [
+            FrameFault::BadCrc,
+            FrameFault::LsnGap {
+                expected: 2,
+                found: 9,
+            },
+            FrameFault::Truncated,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(segment_file_name(1));
+            let (file, locs) = seeded_fixture(&path, usize::MAX);
+            match fault {
+                FrameFault::BadCrc => file
+                    .write_at(locs[1].offset + 8, &9u64.to_le_bytes())
+                    .unwrap(),
+                FrameFault::LsnGap { .. } => {
+                    let mut frame = Vec::new();
+                    encode_frame(&mut frame, 9, FrameKind::Records, b"second");
+                    file.write_at(locs[1].offset, &frame).unwrap();
+                }
+                _ => file
+                    .set_len(locs[1].offset + FRAME_HEADER_LEN as u64 - 1)
+                    .unwrap(),
+            }
+            let seed = ValidatedFrame::read(file.clone(), &path, locs[0]).unwrap();
+            let mut seen = Vec::new();
+            let scan = scan_segment_seeded(seed, &path, 1, &mut |loc, _, _| {
+                seen.push(loc);
+                Ok(ControlFlow::Continue(()))
+            })
+            .unwrap();
+            assert_eq!(seen, [locs[0]]);
+            assert_eq!(scan.stopped, Some((locs[1].offset, fault)));
+            assert_eq!(scan.valid_len, locs[1].offset);
+            assert_eq!(scan.next_lsn, 2);
+            assert!(!scan.stopped_by_visitor);
+        }
+    }
+
+    #[test]
+    fn seed_continuation_refuses_crc_valid_unknown_kind_at_its_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(segment_file_name(1));
+        let (file, locs) = seeded_fixture(&path, usize::MAX);
+        let mut frame = Vec::new();
+        encode_frame(&mut frame, 2, FrameKind::Records, b"second");
+        frame[16] = 255;
+        let crc = crc32fast::hash(&frame[8..]);
+        frame[4..8].copy_from_slice(&crc.to_le_bytes());
+        file.write_at(locs[1].offset, &frame).unwrap();
+        let seed = ValidatedFrame::read(file.clone(), &path, locs[0]).unwrap();
+        let mut seen = Vec::new();
+        let error = scan_segment_seeded(seed, &path, 1, &mut |loc, _, _| {
+            seen.push(loc);
+            Ok(ControlFlow::Continue(()))
+        })
+        .unwrap_err();
+        assert_eq!(seen, [locs[0]]);
+        assert!(matches!(error, WalError::UnsupportedFormat { path: found,
+            frame_kind: Some((offset, 255)), .. } if found == path && offset == locs[1].offset));
+    }
+
+    #[test]
+    fn seed_validation_and_continuation_progress_through_short_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(segment_file_name(1));
+        let (file, locs) = seeded_fixture(&path, 7);
+        let seed = ValidatedFrame::read(file.clone(), &path, locs[0]).unwrap();
+        let mut seen = Vec::new();
+        let scan = scan_segment_seeded(seed, &path, 1, &mut |loc, _, payload| {
+            seen.push((loc, payload.to_vec()));
+            Ok(ControlFlow::Continue(()))
+        })
+        .unwrap();
+        assert_eq!(
+            seen,
+            [(locs[0], b"first".to_vec()), (locs[1], b"second".to_vec())]
+        );
+        assert_eq!(scan.stopped, None);
+        assert_eq!(scan.next_lsn, 3);
+        assert!(file
+            .reads
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, n)| *n > 0 && *n <= 7));
+    }
+
+    #[test]
+    fn seed_continuation_propagates_later_io_failure_after_seed_visit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(segment_file_name(1));
+        let (file, locs) = seeded_fixture(&path, 7);
+        let seed = ValidatedFrame::read(file.clone(), &path, locs[0]).unwrap();
+        file.fail_at.store(locs[1].offset + 7, Ordering::SeqCst);
+        let mut seen = Vec::new();
+        let error = scan_segment_seeded(seed, &path, 1, &mut |loc, _, _| {
+            seen.push(loc);
+            Ok(ControlFlow::Continue(()))
+        })
+        .unwrap_err();
+        assert_eq!(seen, [locs[0]]);
+        assert!(
+            matches!(error, WalError::Io(ref e) if e.to_string() == "seed continuation read failure")
+        );
+    }
 
     #[test]
     fn segment_file_name_and_parse_round_trip() {

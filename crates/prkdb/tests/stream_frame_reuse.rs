@@ -293,9 +293,13 @@ async fn hinted_delivered_batch_refuses_malformed_skipped_and_unreturned_records
                 },
             )
             .await;
+        // The maintainer approved pinning the existing live-read classification:
+        // Serialization maps to Internal. Preserve the exact refusal diagnostic.
+        let expected_reason = format!(
+            "Serialization error: record batch: record {bad_record}: reserved flag bits set (0x80)"
+        );
         assert!(
-            matches!(result, Err(StorageError::Corruption(ref reason))
-            if reason.contains("reserved") && reason.contains(&format!("record {bad_record}"))),
+            matches!(result, Err(StorageError::Internal(ref reason)) if reason == &expected_reason),
             "malformed record {bad_record} was not refused: {result:?}"
         );
         assert_eq!(std::fs::read(&path).unwrap(), bytes);

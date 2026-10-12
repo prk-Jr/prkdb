@@ -16,8 +16,9 @@ use crate::wal::config::{FrontRelease, SyncMode, WalConfig};
 use crate::wal::frame::{encode_frame, FrameKind, Lsn, MAX_PAYLOAD_LEN};
 use crate::wal::log_state::LogState;
 use crate::wal::segment::{
-    read_frame, scan_segment, scan_segment_flow, scan_segment_from, segment_file_name,
-    write_segment_header, RecordLoc, ScanFlowVisitor, ScanVisitor, SegmentScan, SEGMENT_HEADER_LEN,
+    read_frame, scan_segment, scan_segment_flow, scan_segment_seeded, segment_file_name,
+    write_segment_header, RecordLoc, ScanFlowVisitor, ScanVisitor, SegmentScan, ValidatedFrame,
+    SEGMENT_HEADER_LEN,
 };
 use crate::wal::WalError;
 use std::collections::BTreeMap;
@@ -1037,14 +1038,15 @@ impl Wal {
             }
             let is_last = idx == last_idx;
             let path = self.shared.dir.join(segment_file_name(*first_lsn));
-            let hint = start.filter(|loc| {
-                idx == 0
-                    && loc.segment == *first_lsn
-                    && loc.lsn >= *first_lsn
-                    && loc.lsn <= from
-                    && loc.offset >= SEGMENT_HEADER_LEN
-                    && read_frame(&**file, &path, *loc).is_ok()
-            });
+            let seed = start
+                .filter(|loc| {
+                    idx == 0
+                        && loc.segment == *first_lsn
+                        && loc.lsn >= *first_lsn
+                        && loc.lsn <= from
+                        && loc.offset >= SEGMENT_HEADER_LEN
+                })
+                .and_then(|loc| ValidatedFrame::read(file.clone(), &path, loc).ok());
             let mut visitor_broke = false;
             let mut cap_reached = false;
             let mut capped_visit = |loc: RecordLoc, kind, payload: &[u8]| {
@@ -1066,14 +1068,8 @@ impl Wal {
                 }
                 Ok(ControlFlow::Continue(()))
             };
-            let scan = match hint {
-                Some(loc) => scan_segment_from(
-                    &**file,
-                    &path,
-                    *first_lsn,
-                    (loc.lsn, loc.offset),
-                    &mut capped_visit,
-                )?,
+            let scan = match seed {
+                Some(seed) => scan_segment_seeded(seed, &path, *first_lsn, &mut capped_visit)?,
                 None => scan_segment_flow(&**file, &path, *first_lsn, &mut capped_visit)?,
             };
             if visitor_broke {
@@ -2397,6 +2393,216 @@ mod tests {
             .unwrap();
         assert!(flow.is_continue(), "the cap is not the visitor stopping");
         assert_eq!(seen, vec![1, 2], "no frame above the sampled cap");
+        wal.close().unwrap();
+    }
+
+    struct ScanReadFile {
+        inner: Arc<dyn VfsFile>,
+        reads: std::sync::Mutex<Vec<(u64, usize)>>,
+    }
+    impl VfsFile for ScanReadFile {
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.inner.read_at(offset, buf)?;
+            self.reads.lock().unwrap().push((offset, n));
+            Ok(n)
+        }
+        fn write_at(&self, offset: u64, buf: &[u8]) -> std::io::Result<()> {
+            self.inner.write_at(offset, buf)
+        }
+        fn set_len(&self, len: u64) -> std::io::Result<()> {
+            self.inner.set_len(len)
+        }
+        fn len(&self) -> std::io::Result<u64> {
+            self.inner.len()
+        }
+        fn sync_data(&self) -> std::io::Result<()> {
+            self.inner.sync_data()
+        }
+    }
+
+    fn track_scan_reads(wal: &Wal, first_lsn: Lsn) -> Arc<ScanReadFile> {
+        let mut segments = wal.shared.segments.write().unwrap();
+        let handle = segments.get_mut(&first_lsn).unwrap();
+        let file = Arc::new(ScanReadFile {
+            inner: handle.file.clone(),
+            reads: std::sync::Mutex::new(Vec::new()),
+        });
+        handle.file = file.clone();
+        file
+    }
+
+    fn open_scan_witness(dir: &Path) -> Wal {
+        Wal::open(
+            Arc::new(StdVfs),
+            dir,
+            opts(SyncMode::Durable),
+            1,
+            &mut |_, _, _| Ok(()),
+        )
+        .unwrap()
+        .0
+    }
+
+    #[test]
+    fn validated_seed_above_the_captured_cap_is_not_delivered() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = open_scan_witness(dir.path());
+        wal.append_blocking(b"first".to_vec(), None).unwrap();
+        let hint = wal.append_blocking(b"second".to_vec(), None).unwrap();
+        assert_eq!(wal.acked_lsn(), 2);
+        let file = track_scan_reads(&wal, 1);
+        let mut seen = Vec::new();
+        let flow = wal
+            .scan_from_loc_capped(2, 1, Some(hint), &mut |loc, _, _| {
+                seen.push(loc);
+                Ok(ControlFlow::Continue(()))
+            })
+            .unwrap();
+        assert!(seen.is_empty());
+        assert!(
+            flow.is_continue(),
+            "the cap, rather than the user visitor, stopped the scan"
+        );
+        // This proves a valid seed was used above the cap, rather than a header fallback.
+        assert_eq!(
+            *file.reads.lock().unwrap(),
+            [
+                (hint.offset, crate::wal::frame::FRAME_HEADER_LEN),
+                (
+                    hint.offset,
+                    crate::wal::frame::FRAME_HEADER_LEN + hint.payload_len as usize
+                ),
+                (0, SEGMENT_HEADER_LEN as usize),
+            ]
+        );
+        wal.close().unwrap();
+    }
+
+    #[test]
+    fn seeded_scan_preserves_sealed_and_active_continuation_fault_policy() {
+        for sealed in [false, true] {
+            for fault in ["BadCrc", "Truncated", "clean boundary"] {
+                let dir = tempfile::tempdir().unwrap();
+                let wal = open_scan_witness(dir.path());
+                let first = wal.append_blocking(b"first".to_vec(), None).unwrap();
+                let second = wal.append_blocking(b"second".to_vec(), None).unwrap();
+                if sealed {
+                    assert_eq!(wal.roll_blocking().unwrap(), Some(3));
+                    wal.append_blocking(b"next segment".to_vec(), None).unwrap();
+                }
+                let path = wal.segment_path(1);
+                let file = StdVfs.open(&path, OpenMode::ReadWrite).unwrap();
+                match fault {
+                    "BadCrc" => file
+                        .write_at(second.offset + 8, &9u64.to_le_bytes())
+                        .unwrap(),
+                    "Truncated" => file.set_len(second.offset + 3).unwrap(),
+                    _ => file.set_len(second.offset).unwrap(),
+                }
+                let mut seen = Vec::new();
+                let result =
+                    wal.scan_from_loc_capped(1, wal.acked_lsn(), Some(first), &mut |loc, _, _| {
+                        seen.push(loc);
+                        Ok(ControlFlow::Continue(()))
+                    });
+                assert_eq!(seen, [first], "sealed={sealed}, fault={fault}");
+                if sealed {
+                    let Err(WalError::CorruptSegment {
+                        path: found,
+                        offset,
+                        reason,
+                    }) = result
+                    else {
+                        panic!("sealed {fault} was not refused: {result:?}");
+                    };
+                    assert_eq!(found, path);
+                    assert_eq!(offset, second.offset);
+                    if fault == "clean boundary" {
+                        assert!(reason.contains("next segment starts at 3"), "{reason}");
+                    } else {
+                        assert!(reason.contains(fault), "{reason}");
+                    }
+                } else {
+                    assert!(
+                        result.unwrap().is_continue(),
+                        "active tail fault remains tolerated"
+                    );
+                }
+                wal.close().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_seed_identity_and_length_fall_back_to_the_header_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal = open_scan_witness(dir.path());
+        let locs: Vec<_> = (0..3)
+            .map(|i| wal.append_blocking(vec![i; 8], None).unwrap())
+            .collect();
+        let file = track_scan_reads(&wal, 1);
+        for hint in [
+            RecordLoc {
+                payload_len: MAX_PAYLOAD_LEN as u32 + 1,
+                ..locs[1]
+            },
+            RecordLoc { lsn: 1, ..locs[1] },
+            RecordLoc {
+                payload_len: 7,
+                ..locs[1]
+            },
+            RecordLoc {
+                offset: u64::MAX,
+                ..locs[1]
+            },
+        ] {
+            file.reads.lock().unwrap().clear();
+            let mut seen = Vec::new();
+            let flow = wal
+                .scan_from_loc_capped(2, 3, Some(hint), &mut |loc, _, _| {
+                    seen.push(loc);
+                    Ok(ControlFlow::Continue(()))
+                })
+                .unwrap();
+            assert_eq!(seen, locs[1..]);
+            assert!(flow.is_continue());
+            assert!(
+                file.reads
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(offset, _)| *offset == 0),
+                "invalid hint must reach fallback header validation"
+            );
+        }
+        // A CRC-valid unknown kind rejects token construction, then fallback controls
+        // the public UnsupportedFormat error, including its original frame offset.
+        let mut frame = Vec::new();
+        encode_frame(&mut frame, 1, FrameKind::Batch, &[0; 8]);
+        frame[16] = 255;
+        let crc = crc32fast::hash(&frame[8..]);
+        frame[4..8].copy_from_slice(&crc.to_le_bytes());
+        file.write_at(locs[0].offset, &frame).unwrap();
+        for hint in [None, Some(locs[0])] {
+            file.reads.lock().unwrap().clear();
+            let mut seen = Vec::new();
+            let result = wal.scan_from_loc_capped(2, 3, hint, &mut |loc, _, _| {
+                seen.push(loc);
+                Ok(ControlFlow::Continue(()))
+            });
+            assert!(seen.is_empty());
+            assert!(
+                matches!(result, Err(WalError::UnsupportedFormat { path: found,
+                frame_kind: Some((offset, 255)), .. })
+                if found == wal.segment_path(1) && offset == locs[0].offset)
+            );
+            assert!(file
+                .reads
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(offset, _)| *offset == 0));
+        }
         wal.close().unwrap();
     }
 }
