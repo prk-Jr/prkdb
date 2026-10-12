@@ -73,24 +73,33 @@ Three separate recorders: process-targeted CPU sampling99Hz/DWARF8192; process-
 targeted syscall entry/exit for futex,write,pwrite64,read,pread64,fdatasync,fsync,
 with no callgraphs on syscall records; outer system scheduler/block/lifecycle.
 Only scheduler switch/wakeup is kernel-filtered to native program aliaseswal-diag-*
-and recorded Tokio/WAL thread-name patterns(tokio*,prkdb-wal-*). Lifecycleexec/fork/
-exit and blockissue/complete remain available for unsampled-thread identity and
+and recorded Tokio/WAL thread-name patterns(tokio*,prkdb-wal-*). Lifecycle exec/fork/exit, task:task_rename and block issue/complete remain available for unsampled-thread identity and
 kernel-worker completions. No system-wide hot futex/write syscall feedback.
 Filter syntax documented by docs.kernel.org/trace/events.html; fail preflight if
 unsupported. Render perf metadata with --show-task-events --ns and require timestamped
 PERF_RECORD_COMM/FORK/EXIT identity for native threads, including threads without
 CPU samples and every intermediate rename. Check each native name interval
-against scheduler filters;
+against scheduler filters. Linux changes the name between task_rename and
+PERF_RECORD_COMM, so retain both endpoints: within that exact bracket only the
+old or new covered name is allowed; outside it names must match the established
+identity. Require every native rename to have both endpoints, including no-op
+renames. Unknown intermediate names and overlapping unsupported chains fail
+qualification rather than being hidden by a tolerance;
 unrecognized/missing native-thread coverage means incomplete accounting, not zero
 wait. Keep systemblock data separate unless request correspondence is established.
 Explicit CPU sample field and monotonic clocks; preserve exact allowlisted environment
-through sudo. Raw recordings remain untouched; rendered loss/throttle/unknown/parse
-quality checks fail closed. Fixed byte containment limits, selected before capture: each profile may produce
+through sudo. Raw recordings remain untouched. Loss, throttle, unknown event or identity,
+and parse errors fail qualification. Retain unresolved native CPU symbols and
+record their presence; they make CPU symbol attribution incomplete, so a causal
+claim cannot depend on assigning that unknown weight. Qualify TIME/TID/CPU,
+monotonic clock, tracking and inheritance attributes on all three recorders. Fixed byte containment limits, selected before capture: each profile may produce
 at most 64 MiB CPU, 128 MiB syscall and 128 MiB scheduler raw data; the entire
 cycle has a stricter 1 GiB aggregate raw limit. Rendered outputs are limited to
 512 MiB per file and 2 GiB for the cycle. These allow considerably more than
 the expected scoped data while bounding disk use; they are diagnostic limits,
-not performance gates. Check sizes every 100 ms. On breach, terminate the actual
+not performance gates. Check observer sizes every 100 ms. Exclude native runtime/WAL data and copied
+binaries from observer byte accounting; never constrain the workload to fit a
+trace budget. On breach, terminate the actual
 owned recorder/render group, preserve the written prefix and report inconclusive.
 Apply caps to smoke, all render copies and error/stdout files, including a final
 post-exit size check for the last sampling interval. Do not drop events, truncate
@@ -99,7 +108,9 @@ observed overshoot, data size and perturbation limitations.
 
 Whole native process remains the only qualified attribution window: archive lacks
 internal write/cold measured-phase markers. Exclude wrapper startup by native exec
-lifecycle timestamp; do not call setup/fill/warmup/close weights exact3s attribution.
+lifecycle timestamp. Retain an explicitly contextual unfiltered CPU report and
+a second report filtered by native TGID and exact exec/exit timestamps, with a
+relative denominator. Do not call setup/fill/warmup/close weights exact 3 s attribution.
 Archived ELF has symbols/unwind metadata, no debugsections; no source-line promise.
 No p99 or throughput adoption inference from traced rows. If original stalls do not
 occur or traces cannot establish linkage, report inconclusive, preserve coldp99
