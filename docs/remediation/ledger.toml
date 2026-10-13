@@ -517,8 +517,8 @@ area = "tests"
 severity = "low"
 phase = 2
 status = "fixed"
-regression_tests = ["test:crates/prkdb-verify/tests/fuzz_corpus.rs::fuzz_entries_accept_their_seed_corpus", "ci-job:ci.yml/fuzz"]
-changes = ["62f6ef9"]
+regression_tests = ["test:crates/prkdb-verify/tests/fuzz_corpus.rs::fuzz_entries_accept_their_seed_corpus", "ci-job:ci.yml/fuzz", "test:crates/prkdb-verify/tests/fuzz_corpus.rs::consumer_position_fuzz_decoder_exercises_actual_legacy_and_versioned_storage", "test:crates/prkdb-verify/tests/fuzz_corpus.rs::consumer_position_fuzz_decoder_refuses_malformed_positions", "test:crates/prkdb-verify/tests/fuzz_corpus.rs::nightly_fuzz_loop_covers_every_registered_target"]
+changes = ["62f6ef9", "0c863fe5b459113e2b7d13517ce962304bc7810b"]
 
 # ---------------------------------------------------------------------------
 # 3.8 Documentation (DOC)
@@ -1169,3 +1169,14 @@ sources = ["stream-format-review-b107521"]
 evidence = ["crates/prkdb/src/stream_log/partitioned.rs", "crates/prkdb/src/stream_log/manifest.rs"]
 regression_tests = ["test:crates/prkdb/tests/stream_partitions.rs::raw_byte_routing_golden_vectors_survive_reopen", "test:crates/prkdb/tests/stream_partitions.rs::legacy_routing_manifest_is_refused_before_partition_recovery"]
 changes = ["d3ae8c98b748b26c2af9d2828beb05c63cf80a15"]
+
+
+[[finding]]
+id = "EVT-08"
+title = "Versioned group offset decoding changed the public error classification"
+area = "events"
+severity = "low"
+phase = 2
+status = "fixed"
+regression_tests = ["test:crates/prkdb/tests/consumer_tests.rs::offset_group_decode_errors_preserve_deserialization_classification", "test:crates/prkdb/tests/consumer_tests.rs::offset_group_backend_scan_errors_preserve_storage_classification"]
+changes = ["9ff52fda117c3944deac1b0c88f5bd8b9d4f42ad"]

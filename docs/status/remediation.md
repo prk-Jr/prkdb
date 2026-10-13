@@ -10,7 +10,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 |---|---|---|---|
 | 0 | Honesty and tracking | gate_passed | 6/6 |
 | 1 | Harness and baseline | gate_passed | 2/2 |
-| 2 | Format v2 and single-node root fixes | in_progress | 0/40 |
+| 2 | Format v2 and single-node root fixes | in_progress | 0/41 |
 | 3 | Semantics | not_started | 0/9 |
 | 4 | Raft | not_started | 0/15 |
 | 5 | Documentation and release | not_started | 0/9 |
@@ -89,6 +89,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | TTL-01 | medium | 3 | open | Expiry deletes without re-checking the version; value and TTL metadata written non-atomically |
 | TXN-04 | medium | 3 | open | Default isolation is ReadCommitted; D5 makes Serializable the default |
 | DOC-10 | low | 5 | open | ignoreDeadLinks: true hides orphaned methodology/status pages |
+| EVT-08 | low | 2 | fixed | Versioned group offset decoding changed the public error classification |
 | STO-08 | low | 2 | fixed | WalConfig::segment_bytes ignored by the mmap WAL (segment size hardcoded to 64 MB) |
 | STO-09 | low | 2 | fixed | WalStorageAdapter::new_with_config ignores StorageConfig::cache_capacity (hard-coded 100,000 entries) |
 | TST-07 | low | 2 | fixed | No fuzzing of WAL record, segment, snapshot, and proto decoding |

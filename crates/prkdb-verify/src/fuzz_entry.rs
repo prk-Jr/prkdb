@@ -25,7 +25,7 @@ use std::path::Path;
 pub type EntryPoint = fn(&[u8]);
 
 /// Every entry point, by the name of its cargo-fuzz target and seed-corpus directory.
-pub const TARGETS: [(&str, EntryPoint); 12] = [
+pub const TARGETS: [(&str, EntryPoint); 13] = [
     ("frame_decode", frame_decode),
     ("batch_decode", batch_decode),
     ("segment_scan", segment_scan),
@@ -38,6 +38,7 @@ pub const TARGETS: [(&str, EntryPoint); 12] = [
     ("snapshot_entries", snapshot_entries),
     ("records_decode", records_decode),
     ("stream_manifest_parse", stream_manifest_parse),
+    ("consumer_position", consumer_position),
 ];
 
 /// Decodes a frame's payload as its kind says, as recovery (`Batch`) and a stream
@@ -269,4 +270,71 @@ pub fn stream_manifest_parse(data: &[u8]) {
             );
         }
     });
+}
+
+/// Exercise the actual stored offset parser, then normalize any accepted position
+/// through its writer and require lossless semantic roundtrip. No second decoder.
+pub async fn decode_consumer_position(
+    data: &[u8],
+) -> Result<prkdb_types::consumer::Position, prkdb_types::error::Error> {
+    use prkdb::consumer::StorageOffsetStore;
+    use prkdb::storage::InMemoryAdapter;
+    use prkdb_types::consumer::OffsetStore;
+    use prkdb_types::storage::StorageAdapter;
+    use std::sync::Arc;
+
+    let storage = Arc::new(InMemoryAdapter::new());
+    let key = b"__consumer_offset:fuzz:topic:0";
+    storage.put(key, data).await?;
+    let store = StorageOffsetStore::new(storage.clone());
+    let position = match store.get_position("fuzz", "topic", 0).await {
+        Ok(position) => position.expect("the input value was inserted"),
+        Err(error) => {
+            assert!(
+                matches!(
+                    store.get_group_offsets("fuzz").await,
+                    Err(prkdb_types::error::Error::Deserialization(_))
+                ),
+                "malformed group offsets changed public error classification"
+            );
+            return Err(error);
+        }
+    };
+    let group = store.get_group_offsets("fuzz").await?;
+    assert_eq!(
+        *group
+            .get("__consumer_offset:fuzz:topic:0")
+            .expect("stored group offset"),
+        position.offset
+    );
+    assert_eq!(
+        store.get_offset("fuzz", "topic", 0).await?,
+        Some(position.offset)
+    );
+    store.save_position("fuzz", "topic", 0, position).await?;
+    assert_eq!(
+        store.get_position("fuzz", "topic", 0).await?,
+        Some(position)
+    );
+    assert_eq!(
+        storage
+            .get(key)
+            .await?
+            .expect("normalized position exists")
+            .len(),
+        14
+    );
+    Ok(position)
+}
+
+/// Mutate legacy and versioned offset bytes through public storage APIs. A single
+/// current-thread runtime avoids per-input runtime construction or worker threads.
+pub fn consumer_position(data: &[u8]) {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    let runtime = RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("fuzz runtime")
+    });
+    let _ = runtime.block_on(decode_consumer_position(data));
 }

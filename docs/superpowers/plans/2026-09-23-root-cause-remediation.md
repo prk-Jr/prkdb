@@ -5931,7 +5931,17 @@ Note §7.1–7.3.
 
 **Files:** `crates/prkdb-types/src/consumer.rs` (`Position` and compatible trait defaults), `crates/prkdb/src/consumer.rs` (`StorageOffsetStore` record encoding), `crates/prkdb/src/stream_log/{mod.rs,partitioned.rs}` (consumer/default offset-store wiring), `crates/prkdb/src/stream_log/consumer.rs (create)`, `crates/prkdb/tests/{consumer_tests.rs,stream_consumer.rs (create)}`
 
-- [ ] **Step 1 (*before Task 2.24*): versioned offset record.**
+**Step 1 decoder verification scope:** `crates/prkdb-verify/src/{fuzz_entry.rs,bin/fuzz_seeds.rs}`,
+`crates/prkdb-verify/tests/fuzz_corpus.rs`, `fuzz/{Cargo.toml,fuzz_targets/consumer_position.rs,corpus/consumer_position/seed-*}`,
+`.github/workflows/ci.yml` (register the new target; preserve every prior target, 180-second
+limit and 60-minute job cap). Stable checks invoke the actual public StorageOffsetStore
+parser and roundtrip accepted Positions; legacy, v1, Some(0), max offset and malformed
+cases are required. Nightly fuzz uses scratch corpus, not mutation of committed seeds.
+This independent Step 1 does not resolve the existing §7.3 one-header CRC-reader STOP
+or complete consumer resume/EVT-07. Core changes wait for a maintainer-approved
+resolution of that separate design discrepancy.
+
+- [x] **Step 1 (*before Task 2.24*): versioned offset record.**
   - `StorageOffsetStore` writes `version u8 (=1) | offset u64 | check_kind u8 | check u32`.
   - It reads that, and the old bincode `Offset`, as `check_kind = 0`.
   - `OffsetStore` gains `get_position`/`save_position` with a `Position { offset, check:
@@ -5961,6 +5971,14 @@ Note §7.1–7.3.
 - [ ] **Step 5: Ledger + commit.** Add the EVT-07 stream test to EVT-07's
   `regression_tests` (EVT-07 becomes `fixed` only after 2.15b.10). Commit
   `feat: stream consumers on the existing offset store`.
+
+**Step 1 completion (2026-10-13):** `Position`/default methods and fixed14-byte codec
+verified; legacy values remain readable and Some(0) survives. EVT-08 tracks the
+reviewed/fixed group decoder error-class regression. Production parser fuzz entry,
+eight valid seeds and stable/nightly registry checks expand TST-07; limits unchanged.
+Steps 2/3 remain unimplemented. Maintainer approved the separately reviewed bounded
+header-seek proposal on 2026-10-13; accessor implementation still requires the
+quiet matched Criterion, counted-I/O tests and source reviews before consumer work.
 
 ### Task 2.15b.7: Harness for streams
 

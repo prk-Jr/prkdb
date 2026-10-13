@@ -114,3 +114,10 @@ path = "fuzz_targets/stream_manifest_parse.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "consumer_position"
+path = "fuzz_targets/consumer_position.rs"
+test = false
+doc = false
+bench = false

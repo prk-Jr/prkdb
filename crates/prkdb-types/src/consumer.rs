@@ -78,6 +78,16 @@ impl From<u64> for Offset {
     }
 }
 
+/// A committed next-to-read offset and an optional last-consumed frame check.
+///
+/// Offset-only stores remain compatible through the default [`OffsetStore`] methods.
+/// They do not retain the check unless they override both position methods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Position {
+    pub offset: Offset,
+    pub check: Option<u32>,
+}
+
 /// A record received by a consumer
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsumerRecord<C> {
@@ -289,6 +299,34 @@ pub trait OffsetStore: Send + Sync {
         partition: u32,
         offset: Offset,
     ) -> Result<(), Error>;
+
+    /// Read a position. Legacy stores supply an offset without a divergence check.
+    async fn get_position(
+        &self,
+        group_id: &str,
+        topic: &str,
+        partition: u32,
+    ) -> Result<Option<Position>, Error> {
+        Ok(self
+            .get_offset(group_id, topic, partition)
+            .await?
+            .map(|offset| Position {
+                offset,
+                check: None,
+            }))
+    }
+
+    /// Save a position. Legacy stores preserve the offset and discard its check.
+    async fn save_position(
+        &self,
+        group_id: &str,
+        topic: &str,
+        partition: u32,
+        position: Position,
+    ) -> Result<(), Error> {
+        self.save_offset(group_id, topic, partition, position.offset)
+            .await
+    }
 
     /// List all consumer groups
     async fn list_groups(&self) -> Result<Vec<ConsumerGroupId>, Error>;
