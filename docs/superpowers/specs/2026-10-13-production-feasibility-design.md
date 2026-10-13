@@ -1,357 +1,239 @@
-# Production feasibility: separate stream and indexed gates
+# Feasibility requirements, revision 2: GitHub screening first
 
-Date: 2026-10-13. Status: DRAFT requirements awaiting maintainer approval.
-The maintainer selected BOTH lanes, with separate gates. This task defines the
-concrete gate; it does not authorize shipment, another architecture prototype,
-benchmark reruns or implementation on ineligible source.
+Date: 2026-10-13. Status: DRAFT revised requirements awaiting maintainer review.
+Approved direction: BOTH streams and indexed data, separate gates; GitHub Actions
+SCREENING ONLY for now. The maintainer requested revisions to memory, recovery
+and workload requirements and did not adopt revision 1 numerical requirements.
 
-## Authority and goal
+Revision 1 remains immutable at commit
+754d05a6c90c8a30403da1891617feca2a655383 and in the main checkout's
+.agents/verification/production-feasibility-2026-10-13/proposal/ snapshots.
+This revision replaces its proposed immediate workload/resource/recovery profile.
+It does not approve its other numbers or authorize its 125-hour qualification run.
 
-The remediation spec, plan and ledger win. This concretizes the accepted evaluation
-direction at wip-perf-architecture-eval commit8eab7519e2e8510c606098e5d6d8c22a46cea5e7
-(docs/superpowers/specs/2026-10-09-competitive-architecture-evaluation-design.md).
-That source remains recoverable from its preserved branch; its report snapshot is
-in main .agents/verification/worktree-cleanup-2026-10-13/reports/.
-No old experiment is reopened. Keep B/C retired, frame reuse unmerged and all
-original failures visible. A lane cannot offset another lane's failed criteria.
+## Authority, claim and eligibility
 
-Goal: decide whether an explicitly supported production profile has correct
-semantics, bounded latency/resources and sufficient sustained capacity. Passing
-microbenchmarks, Rust memory safety or high batch throughput cannot certify it.
-The gate is additional to T1-T5, Task2.17 Fast>=95%/Durable>=97%, its InMemory
-requirement, the unchanged 5% instruction rule and full remediation gates.
+The remediation spec, plan and ledger win. Existing T1-T5, Task 2.17
+Fast >= 95% / Durable >= 97% and InMemory requirements, the 5% instruction gate,
+crash seed counts and deadline/settlement guarantees remain independent and
+unchanged. Smaller CI datasets or shorter screens cannot replace those checks.
+The existing evaluation direction at 8eab751 is retained; B/C remain retired,
+frame reuse remains unmerged and old failed evidence remains visible.
 
-## P0: eligibility before timings
+This milestone asks whether an explicitly scoped supported API has correctness
+or gross resource/recovery problems under reproducible bounded engineering
+workloads. A SCREEN PASS does not certify production, sustained capacity, p99.9,
+competitive speed, multi-node resilience or AI checkpoint/event atomicity.
+Production requirements need a declared deployment and later approval.
 
-Pin the entire assembled source, feature flags, regression tests and APIs actually
-advertised. Check relevant ledger findings and required phase gates on that source,
-not historical passing worktrees. Performance never clears a correctness blocker.
+Current assembled phase-2 source 9b88229 is BLOCKED for full indexed and consumer
+profiles: KEY-02 / Task 2.17, TXN-01..04, Task 2.15b.6 and relevant EVT guarantees
+remain unresolved. P0 maps each claimed operation to its actual source/regressions.
+Unmerged branches and passing microbenchmarks cannot clear shipping findings.
+Narrow raw StreamLog append/read evidence may be scoped explicitly; consumer
+resume stays BLOCKED until its prerequisites land. Indexed writes/index queries
+wait for acknowledged consistent real index maintenance; they are not replaced
+with raw KV. Atomic indexed transactions, outbox/change feed and multi-node claims
+are excluded from this initial engineering profile, remain roadmap blockers for
+any product that advertises them, and cannot be declared production ready here.
 
-| Profile requirement | Current blocker / required destination |
-| --- | --- |
-| Indexed unique constraints, acknowledged index publication, RMW | KEY-02 and Task2.17 unmerged; verify every relevant KEY finding and reviewed regression suite |
-| Atomic indexed transactions and serializable default | TXN-01..04, Phase3 tasks3.1..3.3; current source is not eligible |
-| Resumable stream consumers/offsets and loss/divergence handling | Task2.15b.6, EVT-07, and exact consumer API's generation/assignment requirements (EVT-06 if that API is used) |
-| Atomic outbox/change feed | EVT-01..05, Task2.19/Phase3; optional only if excluded from the declared profile and public claims |
-| Multi-node persistence/availability | Phase4 Raft gates; explicitly outside initial single-node gate |
-| Atomic AI checkpoint/events/idempotency | Shared Phase6 M1 plus relevant Phase2-3 prerequisites; not established by separate stream and KV writes |
+No new harness or timing starts before this revised protocol is approved and the
+specific measured operations have passed eligibility. Existing task owners keep
+their correctness work; this document does not claim or redesign their code.
 
-At phase-2 HEAD9b88229, indexed transactions and the full consumer profile are
-BLOCKED. Fixes that exist only on branches cannot certify phase-2. A narrower
-operation may produce explicitly scoped engineering evidence, never product-wide
-production readiness. All critical/high findings in shipping surfaces must be
-resolved and verified; unsupported operations must be explicitly excluded from
-capability claims, not silently omitted from the test matrix.
+## GitHub runner qualification
 
-Current verdict: STREAM full profile BLOCKED; INDEXED full profile BLOCKED.
-No throughput run is needed to establish these current blockers. Eligibility is
-rechecked after integration before building the production feasibility harness.
+Use a pinned Linux runner image and immutable source/binary/manifest digests.
+Record actual CPU affinity/topology/quota, memory and cgroup limits, free disk,
+filesystem/mount options, kernel, Rust 1.98.1 and durability configuration.
+The historical run 38391818290 recorded four available CPUs and about 15.6 GiB
+physical RAM; that is historical evidence, not a promise about future runners.
 
-## P1: approve workload, hardware and requirements
+Proposed minimum usable environment: four available CPUs, 6 GiB available RAM
+within the effective host/cgroup limits and 8 GiB free disk AFTER build. Pin two
+engine CPUs, one client CPU and one observer CPU in the approved manifest; do not
+pretend the runner has the proposed production host's four plus four CPUs.
+If affinity/isolation/counter requirements cannot be qualified, mark the affected
+measurement UNJUDGEABLE or host BLOCKED. Do not shrink data or increase limits.
+No compilation/profiling in timing. Diagnostics and faults run separately.
 
-These numbers are PROPOSALS for a four-core single-node embedded production-health
-profile. They are not measured ability, competitive targets or adopted exceptions.
-The maintainer must approve or replace them BEFORE measurement; record that decision
-and immutable manifest. Never fit budgets to an implementation's results.
+Every proposed screening job has a 90-minute wall-clock deadline including build,
+preflight, fixtures, native work and artifact publication. Missing build/host
+qualification is infrastructure BLOCKED, not a database regression. Archive
+available partial evidence on failure; incomplete cells cannot pass.
 
-### Proposed hardware and resource envelope
+## Revised workload proposals
 
-Dedicated x86_64 Linux, four allocated engine CPUs, four separate client CPUs,
-16 GiB engine RAM, local NVMe, explicit filesystem/mount/durability policy. Pin CPU
-model, physical/logical topology, kernel, allocator, Rust1.98.1, governor, device,
-FD limits, CPU quota and RAM. Shared Actions runners provide screening evidence;
-production qualification needs an approved reproducible host/resource envelope.
-If unavailable, report BLOCKED rather than substitute Mac or uncontrolled numbers.
-Client threads/processes, generators and data-validation probes have separate
-budgets; a Rust runtime cannot consume unbounded machine CPUs.
+All datasets are deterministic, uncompressed and validated byte-for-byte. Record
+logical values, encoded key/header/index bytes, retained WAL bytes and total files
+separately; sparse file size or compressible filler is not a working set.
 
-Use Durable and Fast separately; uncompressed first. Durable success means the
-specified durable commit, Fast means written plus exact durable_lsn semantics.
-Fast sync_interval is a target, not a power-loss bound. No fake fsync/empty hooks,
-relaxed unique checks, unindexed substitutes or mock backends.
-
-### Proposed end-to-end latency ceilings
-
-Measure scheduled arrival to terminal response, including producer/client queue,
-admission, key reservations, storage, index publication and callback work declared
-inside the operation. Reader row excludes deliberate empty-poll wait but reports
-consumer lag separately. Ordinary read/secondary-query requests fully materialize
-exactly one matching record of the declared value size; predicates/unique indexed
-values ensure that cardinality. Ordinary stream reads also return one record with
-an approved byte limit including key and metadata. Multi-record reader batches
-are not certified by this initial latency table; they need a separately approved
-rows/bytes/SLO entry. Warm/cold and record/batch sizes remain distinct.
-
-| Operation | p99 | p99.9 |
-| --- | ---: | ---: |
-| Fast write,1 KiB |10 ms|25 ms|
-| Fast write,64 KiB |20 ms|50 ms|
-| Durable write,1 KiB |25 ms|75 ms|
-| Durable write,64 KiB |50 ms|150 ms|
-| Ready warm read/query,1 KiB returned |5 ms|20 ms|
-| Ready warm read/query,64 KiB returned |20 ms|50 ms|
-| Cold64 KiB read |50 ms|150 ms|
-| Consumer lag since write acknowledgement, healthy poller |100 ms|250 ms|
-
-Apply identical approved write ceilings during actual retention/compaction.
-Index query includes complete materialization; document result rows/bytes. Large
-range requests have separate approved work/byte caps, not this small-read budget.
-Report all outcomes, queue delay, deadline expirations and unresolved writes;
-successful-only quantiles cannot pass. Errors/timeouts at declared normal load
-fail the lane. The API's configured client/settlement bounds remain unchanged;
-propose Fast client deadline 250 ms and Durable 750 ms. StreamLog's public
-`append_timeout` accepts one duration covering admission and response. The indexed
-WAL adapter derives `client_bound` from `max_flush_ms * 128` and separately bounds
-admission and acknowledgement; its default is 6.4 seconds per step. It does not
-establish the proposed indexed end-to-end deadline. That indexed request profile
-is BLOCKED pending a separately reviewed contract. Do not tune `max_flush_ms`,
-wrap/cancel writes, change settlement bounds or widen this requirement to fake
-support. See `stream_log/log.rs`, `storage/writer_liveness.rs` and
-`storage/wal_adapter.rs` on the pinned source.
-
-Consumer lag starts at the operation's acknowledgement in both modes; record
-append, visibility and durable-horizon timestamps separately. Fast acknowledgement
-is not durable acknowledgement. A lag-since-durability result requires an actual
-observable durable horizon, otherwise that additional metric is BLOCKED.
-
-### Proposed minimum sustained capacity (aggregate per node)
-
-Keep single-writer latency/scaling screens separate from the following multi-client
-capacity requirements. These minima are product-health proposals, not Kafka/Iggy
-parity. Existing relative targets remain independently necessary.
-
-| Required cell,8 producers or clients | Fast | Durable |
-| --- | ---: | ---: |
-| Stream append,b1,1 KiB |100000 records/s|1000 records/s|
-| Stream append,b100,1 KiB |250000 records/s|150000 records/s|
-| Stream append,b1,64 KiB |2500 records/s|500 records/s|
-| Stream append,b100,64 KiB |5000 records/s|2500 records/s|
-| Indexed write component of mixed workload,1 KiB |25000 writes/s|1000 writes/s|
-| Indexed write component of mixed workload,64 KiB |1000 writes/s|250 writes/s|
-
-Same payload, real indexes, live cardinality and durability throughout. Offered
-read/query rates are additional to the write rate; never label total requests/s
-as writes/s. Absolute rates, aggregate memory/storage budgets and deadlines all
-need maintainer approval. If a requirement is unattainable, report FAIL; do not
-lower it during the run. Different product aspirations require a new requirement
-revision and decision, not a retroactive pass.
-
-## P2: first bounded screen, then sustained gate
-
-Build a separate noninstrumented timing binary and diagnostic/fault binary from
-the eligible assembled source, with source/binary/manifest digests and real-path
-attestation. Correctness checks outside timing still cover exact values, keys,
-headers, indexes, unique claims, ordered offsets, native rebuild and reopened data.
-No profiler/compiler/symbol repair work belongs in this product workload.
-
-First screen: predefined120-second warmup and300-second measurement for each
-mandatory cell, three fixed alternating reference/candidate blocks when evaluating
-an optimization. Reference must itself satisfy correctness and qualifying protocol;
-be28e42's known qualifications cannot be waived. No extension for inconclusive
-results, dropped outliers or favorable retry. Stop a lane on its first required
-failure; preserve its complete prefix. Do not begin one-hour runs on a failed screen.
-
-### Finite required matrix and execution caps
-
-The matrix below is exhaustive for this initial single-node profile, not a
-Cartesian product of every knob. A wider claim requires a new approved manifest.
-
-| Stage | Required cells | Fixed native timing cap |
+| Lane | Initial ordinary screen | Resource state |
 | --- | --- | --- |
-| Ordinary capacity screen | The six capacity-table rows, each in Fast and Durable, 8 clients, 1 stream partition, uniform keys | 12 cells, 120 s warmup + 300 s measurement each |
-| Scaling/contention screen | Each lane and mode: 1 client/uniform and 32 clients/90% hot partition or key; 1 KiB, stream b1, 4 partitions only in the 32-client stream case | 8 additional cells, same duration |
-| Growing indexed screen | 1 KiB, 8 clients, uniform new keys, each mode; 200,000 to 1,000,000 records, fixed count and 300 s deadline | 2 additional cells, 120 s warmup + at most 300 s measurement |
-| Qualified capacity staircase | Each of the 12 ordinary cells, offered rates at 1, 1.25, 1.5, 2 and 3 times its absolute minimum; fixed corresponding read/query rates | At most 60 cells, same duration; stop each staircase at first failure |
-| Capacity verification | Each of the 12 ordinary cells at its frozen 100% screening capacity, one independent one-hour run | 12 measurements, 120 s warmup and at most 30 s drain each |
-| Sustained qualification | Each of the 12 ordinary cells at 70%, 90% and 110% of its frozen qualified capacity, 3 independent Linux repetitions | 108 one-hour measurements, 120 s warmup and at most 30 s drain each |
+| Streams | 8 producers; b1 and b100; 1 KiB and 64 KiB values; Fast and Durable separately: 8 cells | One partition; retention target 1 GiB, 128 MiB segments; exact floor and per-partition ordering |
+| Indexed | 8 clients; 1 KiB and 64 KiB values; Fast and Durable separately: 4 cells | 100,000 live 1 KiB records OR 10,000 live 64 KiB records; one unique, one nonunique and the production version index |
 
-Screen-only scaling cells diagnose and gate their declared liveness/latency; they
-do not expand the certified sustained-capacity profile to 32 clients/4 partitions.
-The growing screen has its own count/time completion verdict, not a stationary
-capacity result. Timing work stops on the first required failure of a lane.
-For initial qualification, 22 screens plus at most 60 staircase cells cost at most
-9 hours 34 minutes of native measurement/warmup, capped at 10 hours including drain.
-When comparing an optimization, three alternating reference/candidate blocks
-replace the 22 screens: at most 23 hours including the same staircase and drain.
-No optimization comparison is authorized here. Capacity verification plus sustained qualification has
-an independent 125-hour native cap (120 measured hours plus warmup/drain). Every
-stage cap is aggregate and nonresetting: calibration, warmup and incomplete
-measurement still consume it. A cap exhaustion yields UNJUDGEABLE; it is not a
-promise that every worst-case drain will finish. Rare
-failure/recovery probes have a separate proposed 2-hour cap and bounded inventories
-that must be reviewed in P1. Across stages, no favorable rerun or cell extension.
-These are separate scheduled jobs on the approved host, not one giant Actions job.
-The first failing screen provides an early answer; a full production certificate
-necessarily takes longer than that screen.
+Indexed value populations are approximately 97.7 MiB and 625 MiB, before metadata
+or copies. These are distinct CI working sets, not substitutes for revision 1's
+200,000 / 50,000-record production proposals or original historical bench cells.
+Indexed ordinary mix: 60% overwrite/RMW writes, 30% point reads, 10% secondary
+queries. Each ordinary read/query fully materializes exactly one matching record.
+New inserts/growth and bulk transactions are not claimed by this steady-state
+mix. Separate blind writes from RMW in results; an unsupported RMW path blocks
+that cell rather than silently converting it to put.
 
-### Sampling and capacity policy
+Each stream record has a deterministic key, one 16-byte header name and a 64-byte
+header value. Readers consume and verify the stream continuously using explicitly
+fixed record/byte caps in the manifest. Proposed ordinary read cap is one record,
+including encoded metadata in the byte limit. Never treat b100 as 100 independent
+append-latency observations. Large reader batches need their own approved budgets.
+A 16 KiB encoded-header stress record is a separate diagnostic workload proposal,
+not a codec limit and not an ordinary throughput cell.
 
-The screening capacity reference is the highest passing fixed staircase rate
-meeting observed normal-load latency, errors and absolute minima. Its source,
-workload and schedule are frozen before any candidate run. A staircase alone does
-not statistically qualify capacity: the separate fixed one-hour 100% verification
-must meet final sample/latency/error criteria at that frozen rate, and therefore
-also the absolute minimum. Failure does not select a lower staircase rung or
-trigger recalibration; it stops the lane. Only after that verification is the
-capacity qualified for the sustained 70%/90%/110% tiers. Failure at the first absolute-minimum step is FAIL. If the top
-step passes, capacity/saturation is UNJUDGEABLE, not permission to extend the
-staircase. At 70% and 90%, completed ordinary operations must sustain their frozen
-offered rates with zero errors; those rates need not themselves exceed the
-capacity minimum. The absolute minimum applies to qualified capacity separately.
-At 110%, report admitted work, rejection outcomes and all-request latency separately
-so fast rejections cannot mask slow writes. Actual saturation is required for an
-overload verdict. The 70%/90% and 110% stages have separate outcome rules.
+Resource stage per lane: one fixed 10-minute steady-state measurement PER MODE, following
+a fixed 2-minute warmup for each (24 minutes combined), at a prespecified offered load (pending separately;
+not derived from favorable results). Indexed uses 1 KiB / 100,000-live state and
+keeps one cold live key near the leading WAL segment; the remaining state is
+updated cyclically. Include 90% hot-key traffic, conflicting unique updates and
+cancellation in separate deterministic diagnostic subphases with exact outcomes.
+Streams use 1 KiB / b100 with active consumers and real retention. Preload to the
+1 GiB retention target with sealed 128 MiB segments before the warmup. The fixed
+approved arrival count must roll at least one further segment during measurement;
+verify actual reclaimed segments/bytes and documented slow-consumer out-of-range
+behavior if eligible. No reclamation at all is incomplete coverage, not PASS.
+Range interference is limited to 1,000 and 10,000 exact rows of the 1 KiB indexed
+population. The former 100,000-row query is deferred, not silently replaced with
+fewer results. No unrelated-collection independence claim without a separate
+same-storage-identity probe. Offsets/consumer guarantees still require eligibility.
 
-A latency sample is one terminal request: a batch of 100 records supplies ONE
-append sample and 100 throughput records. Point reads, secondary queries and
-writes each have distinct populations; no record duplication or pooling classes.
-A 300-second screen reports sample counts, observed tails and clear failures, but
-cannot certify final p99.9 when its counts are insufficient. Passing it means
-eligible for the sustained stage, not a production PASS.
+## Revised memory and storage proposals
 
-Proposed final minimum: 50,000 terminal outcomes per ordinary-operation class in
-EACH fixed one-hour normal-load repetition, about 50 expected tail observations
-at p99.9. Also require a prespecified one-sided 95% exact binomial upper bound on
-the probability of exceeding each approved latency ceiling to be at most 0.01 for
-p99 and 0.001 for p99.9. This is a per-cell statistical qualification, not a 95%
-simultaneous confidence claim across the whole matrix. Report all counts and
-observed quantiles alongside the bound. Independence assumptions must be stated;
-correlated/burst phases are reported separately with contiguous-window worst
-latencies, not concealed behind a binomial inference. If the approved statistical
-model is unsupported, the confidence claim is UNJUDGEABLE even with enough rows.
+| Quantity | Proposed screening ceiling / obligation |
+| --- | --- |
+| Engine process RSS high-water mark | 2 GiB, including startup, data loading, index rebuild and operation buffers |
+| Client/generator RSS high-water mark | 256 MiB, separate process/cgroup accounting |
+| Engine cgroup memory peak | 4 GiB including charged file cache; observe with recorded isolation semantics |
+| Client cgroup memory peak | 512 MiB including file cache; distinct from client RSS |
+| Outstanding generator requests | At most 16; scheduled backlog, timeouts and refusals counted separately |
+| WAL queued bytes / max batch | 64 MiB / 16 MiB, matching current defaults; not the whole memory budget |
+| Fixed-live engine RSS growth | At most 64 MiB between the median of minutes 1-2 and minutes 9-10 of the resource measurement |
+| Retained bytes | Streams: 1 GiB + one 128 MiB active segment + fixed manifest allowance; deleted-but-open reader-pinned bytes separately capped at 1 GiB + 128 MiB in the declared one-delayed-snapshot diagnostic |
+| Indexed disk after drain | At most 4x exact live encoded state + two 128 MiB segments; total job database files capped at 6 GiB |
 
-At the slowest proposed normal cell, Durable 64 KiB b100 at 70% of the minimum
-capacity gives 17.5 append calls/s, or 63,000 terminal samples/hour. Indexed Durable
-64 KiB secondary queries give 105,000/hour at that load. Manifest preflight must
-verify rate * duration PER operation class and allow for its declared interference
-schedule. Insufficient actual samples are UNJUDGEABLE; do not raise load, pool
-repetitions or extend the hour. Rare range/fault classes report exact observed
-latencies and bounded completion, with p99.9 explicitly unqualified unless a
-separate feasible count/duration plan was approved before execution.
+These are proposed requirements, not observed ability or gate exceptions. Account
+for every waiting caller, decoded batch, index delta, key reservation, future,
+receipt, generator buffer and storage queue. The 64 MiB WAL admission cap does not
+bound allocations made before admission. OS high-water counters must capture
+between-sample peaks; report periodic samples/gaps and memory.events/oom counts.
+If cgroup isolation/peak accounting is unavailable, that memory claim is
+UNJUDGEABLE; do not substitute RSS and call it equivalent. A 10-minute stable
+result cannot establish absence of leaks over hours or at larger working sets.
 
-Use deterministic offered-arrival schedules with per-operation IDs/timestamps,
-separate client CPU, fixed bounded outstanding requests and all outcomes retained.
-The loader must prove it generated the schedule; a client-side bottleneck is
-UNJUDGEABLE, not an engine pass. Client queue/admission delay is included to avoid
-coordinated omission. Closed-loop throughput cells remain separate.
+Real compaction/retention must make progress, reclaim actual bytes and respect
+bounds. Do not delete the cold live key, remove indexes, disable consumers or
+shrink a dataset to pass. Stop on a resource limit; drain admitted work under the
+existing settlement policy. Maintenance drain is separately proposed at 30 seconds
+and cannot extend write settlement. Streams with delayed pinned readers must
+account for the extra pinned bytes and prove release within the approved policy.
+Pinning is segment/snapshot granular: core `Wal::scan_from_loc_capped` clones file
+handle Arcs from the selected start through the tail. A one-record read can retain
+many 128 MiB files; there is no proposed 32 MiB physical-pinning limit. The controlled
+scenario holds one snapshot spanning the declared retention window, measures ALL
+deleted-but-open files across holders, and requires release within 30 seconds after
+the read finishes or cancellation settles. Existing per-write bounds are unchanged.
+If that actual state cannot be observed through a reviewed real-path probe, pinning
+is BLOCKED, not measured as zero or approximated by decoded record length.
 
-### STREAM workload
+## Revised recovery proposals
 
-Actual StreamLog, with client/partition/skew cells enumerated above; batches 1/100
-and 1/64 KiB values remain separate. Ordinary records carry one 16-byte name and
-64-byte header value. A diagnostic metadata stress case uses a proposed 16 KiB
-aggregate encoded-header-bytes workload cap per record; this is NOT a codec/API
-limit. Validate it against actual per-batch header count, per-record name/count
-and 64 MiB frame bounds; no format change. Pin record/byte read
-limits and consumer counts. Partition scaling preserves total load, not per-partition
-work multiplication. Ordering guarantees are per partition; no global-order claim.
-Concurrent producers/consumers plus actual retention at approved byte limit. Verify
-no silent gaps/duplicates/divergence, committed consumer resume after retention,
-reader lag, per-partition throughput and old-segment lifetime. Slow/stopped consumers
-must report documented retention out-of-range behavior, not block unrelated producers.
-Any consumer API still waiting on2.15b.6 stays BLOCKED.
+Recovery is measured in distinct phases, not one ambiguous open time:
+1. WAL open/replay and acknowledged durable state verified.
+2. All declared indexes rebuilt and correct, constraints enforced, query service ready.
+3. Stream resume/retention-floor/divergence checks complete, only if that API is eligible.
 
-### INDEXED workload
+Fixtures contain 128 MiB and 1 GiB of ACTUAL retained WAL bytes, including encoded
+records, with exact manifests of live keys/indexes/offsets. Construct indexed checkpoint-near-tail and no-checkpoint fixtures in Fast and
+Durable: eight indexed cells (2 sizes x 2 checkpoint states x 2 modes), three
+fresh-process repetitions per cell. Raw StreamLog has no checkpoint operation or
+key index; it reconstructs its actual sparse read index on open. Stream recovery
+uses four cells (2 sizes x 2 modes), three fresh-process repetitions each, with
+sparse-index/offset integrity probes. Never construct a stream checkpoint via a
+keyed adapter or invent a checkpoint API to satisfy the matrix. Preserve guarantees; Fast reissue/loss checks require the appropriate
+fault model and consumer capability, not just a kill/reopen.
 
-Real primary keys, one unique and one nonunique secondary index; production version
-index also retained. Initial200000 live records for1 KiB,50000 for64 KiB; fixed
-live population during soak. Separate grow/insert screen200000->1000000 records,
-which must report its different final size instead of replacing the fixed-population
-screen. Verify data and every index after each phase and close/reopen.
-Mixed workload60% overwrite/update writes,30% point reads,10% secondary queries;
-write-rate table denotes the60% component. Uniform and90% hot-key skew,1/8/32 writers,
-conflicting unique updates, cancellation and callback-at-most-once semantics.
-Keep blind insert, RMW and eligible transactions separate. Transaction cell performs
-an atomic two-key transfer with invariant checking, read set conflicts and readers.
-Within every ordinary indexed soak, use a fixed interference schedule: minutes
-10-20 and 40-50 add one same-collection range query/s returning 1,000 rows; minutes
-20-30 and 50-60 add one query/5 s returning 10,000 rows. In the 1 KiB population
-only, minutes 30-40 add one query/20 s returning 100,000 rows. The 50,000-record
-64 KiB population never substitutes fewer rows for a 100,000-row query. Keep
-ordinary class offered rates unchanged. Proposed maximum completion times for
-these rare range operations are 150 ms, 750 ms and 3 s respectively; report every
-completion and maximum, not qualified p99.9 from sparse samples. Range probes must
-return exact values from the same indexes contended by foreground writers.
-Unrelated-collection point reads/writes add a fixed 10% of the ordinary request
-rate throughout the measurement, split 50% writes and 50% point reads, with the
-same applicable latency ceilings. At the lowest proposed 70% indexed 64 KiB
-load this supplies 52,500 terminal samples per unrelated operation class/hour;
-actual counts still need to qualify independently.
-Every interference operation has its own outcome/sample accounting and bounded
-client allocation. Both collections use the declared common storage identity and
-single WAL. Do not hide interference by giving unrelated collections an
-extra independent storage engine. Fair same-key FIFO and multi-key starvation
-must be tested; approved source liveness requirements remain in force.
+| Recovery phase | 128 MiB | 1 GiB |
+| --- | ---: | ---: |
+| WAL open/replay, data available | 1 s | 5 s |
+| Indexed fully ready, including rebuild/constraint probes | 5 s | 20 s |
+| Stream consumer-ready, including resume probes | 2 s | 10 s |
 
-### Maintenance, overload and failure stages shared by both lanes
+Clocks all start when the fresh process enters the public open/recovery operation;
+phase ceilings are cumulative from that origin, not added to each other. Outside-
+timing exact-data probes are still required before a result is accepted. Fixture
+construction uses explicit recovery populations: indexed 50,000 live 1 KiB
+records for 128 MiB and 100,000 live 1 KiB records for 1 GiB; stream 1 KiB records
+with exact retained offsets/bytes. The ordinary 10,000 x 64 KiB working set is not
+forced into the smaller recovery fixture. Use overwritten indexed generations to
+reach retained size; no sparse padding or fake replay. Fixture generation cost is
+recorded, not hidden as recovery. Construction uses public stream append batches
+of 100 records and, when eligible, real IndexedStorage insert_batch/upsert_batch
+with at most 100 records. The generator must calculate and freeze encoded bytes,
+operation counts, overwrite generations, batches and finite duration BEFORE run,
+including WAL control frames and checkpoint effects. Public capability or fixture
+math that cannot meet the declared size/cardinality blocks construction; no direct
+raw-KV bypass or invented stream checkpoint. Ten minutes is a fixed generation
+allowance for the complete per-lane inventory, not permission to use fewer records. Every fixture must satisfy payload/live-state
+requirements before timing; impossible combinations block, not truncate data.
 
-Require real reclaimed segments and bytes/s; a no-op compact/retention run cannot
-pass. Pin log-state checkpoints, retained bytes and progress measurements.
-Indexed overwrite soak includes one cold live key near the leading log segment;
-measure disk/live-byte amplification over time. Proposed bound: on-disk bytes <=
-4x approved live bytes +2 configured segment sizes after maintenance drain, with
-no increasing dead-byte backlog. Stop on bound violation; do not delete the cold
-key to enable reclamation. Stream retention bound: limit + active segment + fixed
-manifest allowance, with deferred pinned-reader bytes independently bounded and
-released within approved client/drain policy.
+Fresh-process restart on a runner with a warm OS page cache is explicitly labeled
+WARM-FILESYSTEM recovery. True cold-storage recovery needs a separately approved
+and attested cache/device procedure; do not label process restart as cold disk.
+Process SIGKILL is not physical power-loss proof. Existing FaultFs/full crash
+harness and production deployment recovery remain independent. T5's matched keyed
+1 GiB comparison and Task 2.25's 1/4/16 GiB requirements are unchanged; this first
+screen is not their replacement. The 4/16 GiB deployment suite remains deferred.
 
-Proposed engine RSS cap8 GiB on16 GiB host and additional steady-state growth <=
-256 MiB from the post-warmup sample over the final30 minutes at fixed live state.
-Separate data/index/cache baseline from queued-request memory and bound the client
-memory independently. `max_queued_bytes` bounds WAL admission, not every allocated
-caller/index/key-wait state; attest every queue/backlog. Retain maxima, FD/thread
-counts and all sampling gaps. A rising outstanding/unresolved backlog fails.
+## Bounded schedule and result
 
-At110% of qualified capacity, prove actual admission saturation, bounded queues,
-backpressure/typed outcomes and bounded drain. If not saturated, do not call it an
-overload pass; use only the approved finite load staircase, without retargeting the
-normal SLO/minimum. Queue budget64 MiB and batch16 MiB are initial proposals matching
-current defaults, not a full-process memory guarantee. After offered load stops,
-all admitted write outcomes must settle within 2x configured client_bound, and
-maintenance must separately finish within its declared drain bound. Do not add
-the maintenance allowance to extend the existing write-settlement requirement. Proposed maintenance drain30 seconds; uncertain writes
-remain fenced or explicitly quarantined per approved implementation. Quarantine is
-not successful recovery; operator reopen and exact state checks are separate.
+Ordinary cells: proposed 30-second warmup + 120-second measurement each; one source
+per dispatch, no implicit candidate/baseline comparison. Stream ordinary native cap
+25 minutes, indexed cap 15 minutes. Short screens report actual terminal counts and
+observed tails; they cannot certify p99.9 or the unapproved capacity minima.
+Preserve the entire original benchmark grid when running its independent gates.
 
-Inject deterministic delayed IO, partial reads/writes, failed sync, cancelled and
-never-polled callers, publication panic and process/power loss in fault-capable
-runs. Preserve actual Durable/Fast loss guarantees. Prove an affected-key conflict
-cannot hold unrelated operations indefinitely; shared storage failure may fail
-closed across its dependents and must be observable, not disguised as latency.
-No accepted callback may run twice. Fault runs may produce specified errors; normal
-SLO success percentiles cannot hide those outcomes. No timeout widening/retry fix.
+Resource/recovery runs use separate per-lane jobs, each with a 55-minute native
+cap. The maximum schedule is predeclared: fixture generation 10 minutes; resource
+warmup/measurement 24 minutes for BOTH modes; recovery attempts at most 30 seconds
+each (24 indexed attempts = 12 minutes; 12 stream attempts = 6 minutes); diagnostics
+6 minutes; drain/validation 3 minutes. Thus indexed maximum 55 minutes, stream
+49 minutes. Recovery's 30-second process guard is an execution limit, never a
+replacement for the tighter phase ceilings. Build/preflight have a separate
+25-minute job allowance and artifact publication 10 minutes, fitting the total
+90-minute job deadline. These maxima include failed attempts; no reset. A manifest must prove the complete proposed schedule fits before dispatch;
+otherwise refine the pending schedule BEFORE approval, not during execution.
+All caps are aggregate/nonresetting. Deadline exhaustion is UNJUDGEABLE, not a
+favorable retry or permission to skip a required cell. Stop a lane at its first
+required failure. One separately reviewed cause-backed correction is allowed by
+the existing direction; this draft authorizes no rewrite or successor prototype.
 
-Recovery: cold start retained logs1/4/16 GiB with checkpoint near tail; proposed
-ready-to-serve/index-ready budgets5/20/80 seconds respectively. Verify exact
-recovered state, cursor divergence/floors, unique/index consistency and readable
-receipt status before readiness. Lazy incomplete indexes do not meet readiness.
-Stream T5's matched keyed1 GiB comparison remains independently required.
-A process crash is not a faithful power cut; require existing FaultFs/harness
-coverage plus separately declared deployment recovery tests, no invented proof.
+Report SCREEN PASS / FAIL / BLOCKED / UNJUDGEABLE by lane, capability and metric.
+Do not average away failed cells or let the stream result offset indexed failures.
+Rates/latencies, overload admission, malformed data, unique conflicts and recovery
+must retain typed outcomes. An unsupported indexed 250/750 ms end-to-end deadline
+remains BLOCKED: current WAL adapter has per-step bounds with 6.4 s default, unlike
+StreamLog append_timeout's single duration. No wrapper cancellation or flush tuning
+may fake a new contract.
 
-## P3: result and finite engineering decision
+## Pending decisions and next step
 
-Lane results PASS/FAIL/BLOCKED/UNJUDGEABLE, with completeness and exact supported
-profile. All required cells must pass; no averaging or selected winning cells.
-Open correctness blockers, missing host/approved requirements or incomplete data
-prevent certification. A normal screen failure permits at most one reviewed,
-cause-backed correction within its separate task before reevaluation; correctness
-violations stop immediately and require a ledger finding/regression. No new B/C
-or broad architecture prototype from this document. Failed correction returns the
-choice to maintainer: targeted architecture change, narrower explicit product
-profile, or stop that lane. Never silently narrow both-lane product requirement.
+The maintainer has selected both lanes and GitHub SCREENING ONLY, and specified
+revision priorities. All new workload counts, memory/storage/recovery ceilings,
+offered loads, read limits, native schedules and statistical claims are proposals
+awaiting review. Revision 1 throughput and latency numbers remain unapproved, not
+silently adopted or lowered. No native timing, production qualification or harness
+implementation follows automatically from this documentation task.
 
-Competitive comparison is a later independent gate: actual equivalent public
-server/embedded transport, replicas, fsync/ack guarantees, clients, batching, indexes
-and workload. Kafka/Iggy/PostgreSQL versions/configs need primary documentation at
-execution; embedded StreamLog versus network broker remains noncomparable.
-No vector/GPU/AI-platform capability or universal production-readiness claim follows
-from these two gates. Only the approved tested capabilities can be claimed.
-
-## Approval and current status
-
-Both lanes selected by maintainer. Latency, throughput, host, hour-tier workload,
-resource and recovery values above are PENDING. No native timings or new harness
-implementation starts until those requirements and source eligibility are settled.
-Current blocked findings remain assigned to existing roadmap tasks; this document
-changes no ledger status, phase gate, thresholds, API or on-disk format.
+Next: review these concrete revisions, then separately specify/test-first the P0
+eligibility manifest. Full production host, memory efficiency at larger cardinality,
+cold recovery, sustained load, transaction/event guarantees and competitor parity
+remain explicit future requirements, not screening passes.

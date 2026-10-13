@@ -1,33 +1,26 @@
-# Production feasibility requirements: maintainer decisions
+# Feasibility decisions: revision 2
 
-Status: proposed concrete requirements; no performance or shipment approval.
-The maintainer selected BOTH streams and indexed data with independent gates.
-Existing evaluation8eab751 is retained and concretized, not restarted.
+Date:2026-10-13. Status: revised proposals, numerical requirements not approved.
+R1 is preserved at754d05a and original root evidence snapshots; no old result is
+reclassified. The maintainer requested memory/recovery/workload revisions.
 
-Current source9b88229 cannot qualify broad production profiles: KEY-02,
-TXN-01..04 and relevant consumer/offset findings/prerequisites remain unresolved.
-Eligibility must precede timing. Correctness work has its own existing claims and
-STOP decisions; this task does not take them over or waive their checks.
+| Decision | Current state |
+| --- | --- |
+| Separate streams and indexed lanes | Maintainer selected both |
+| Immediate environment | Maintainer selected GitHub Actions SCREENING ONLY |
+| R1 numerical production requirements | Not approved; revision requested |
+| Revision priorities | Memory, recovery and workload requirements |
+| Full production host/qualification | Deferred; no executable125h qualification authorization |
+| Source correctness eligibility | Required; broad current phase2 profiles BLOCKED |
+| Revised indexed working sets | Proposed100k1KiB /10k64KiB, real indexes, fixed60/30/10 mix |
+| Revised stream working set | Proposed1GiB retention,128MiB segments, actual consumers/retention where eligible |
+| Memory | Proposed engineRSS2GiB/clientRSS256MiB; separate cgroup peaks4GiB/512MiB; fixed-live growth64MiB over10min |
+| Recovery | Proposed128MiB/1GiB, indexed checkpoint/no-checkpoint, rawstream actual sparse-index rebuild, both modes,3 fresh-process repetitions; separately timed WAL, index, consumer readiness |
+| Recovery ceilings | Proposed WAL1/5s, indexed ready5/20s, consumer ready2/10s, cumulative; warm filesystem explicitly labeled |
+| Screening schedule | Proposed ordinary30+120s cells, separate resource/recovery native55min jobs (both-mode resource probes;24 indexed/12 stream recovery attempts);90min perjob including build |
+| Offered loads / latency / throughput minima | Still pending; R1 values not silently adopted or changed |
+| Existing perf/crash/phase gates | Required unchanged; shorter/smaller screens never replace them |
 
-| Decision | Concrete proposal | Status |
-| --- | --- | --- |
-| Supported lanes | Streams AND indexed, independently assessed | approved |
-| Source eligibility | Assembled regression/gate-qualified source; all shipping critical/high issues resolved; capabilities explicit | required, currently BLOCKED |
-| Latency | Fast1/64KiB p99 10/20ms,p99.9 25/50ms; Durable25/50ms,75/150ms; actual maintenance has same bounds | pending maintainer |
-| Read/lag | warm1KiB5/20ms,warm64KiB20/50ms,cold64KiB50/150ms; consumer lag from mode-specific acknowledgement100/250ms; durable-horizon timing separately observed | pending maintainer |
-| Throughput | exact per-mode/value/batch stream and indexed-write minima in design; no competitive claim | pending maintainer |
-| Host | dedicated x86_64 Linux; engine4CPUs/client4CPUs;16GiB engine RAM/localNVMe; exact model/device pinned | pending maintainer/availability |
-| Memory/storage | engineRSS8GiB cap,<=256MiB last30min growth; indexed disk<=4xlive+2segments after maintenance | pending maintainer |
-| Client/drain | stream append_timeout: proposed250msFast/750msDurable; indexed end-to-end profile BLOCKED pending reviewed API; original settlement bounds retained; maintenance drain30s | pending maintainer/source capability |
-| Runtime | <=10h initial screens/calibration; <=125h capacity verification/sustained; <=2h bounded failure/recovery; stop lane on first failure | pending maintainer |
-| Sustained/recovery | finite22-cell screen first; 12 ordinary cells, frozen100% capacity verification then hour tiers70/90/110%,3 repetitions,>=50k samples per ordinary class/repetition plus confidence; cold1/4/16GiB ready5/20/80s | pending maintainer |
-
-All proposals need explicit review before measuring; absence of approval is not
-consent. Numbers are requirements proposals, not measured ability. Old floors/
-Fast loss guarantees remain unchanged. Any decision to change a requirement is a
-new versioned product decision, never a reclassification of old failed rows.
-
-Seven completed clean worktrees retired without force. Branches/exact heads,
-report snapshots/notes/restore commands and original benchmark evidence retained
-in main .agents/verification/worktree-cleanup-2026-10-13/. Paused/in-progress
-worktrees preserved. No production/CI/benchmark change or new native run.
+No code, CI, API, disk format, ledger status, seed count or existing floor changes.
+No new timing is authorized. Maintainer must review the concrete revised design
+and remaining offered loads; later P0/harness tasks are separate reviewed claims.
