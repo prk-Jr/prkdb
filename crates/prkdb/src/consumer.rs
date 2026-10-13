@@ -177,7 +177,7 @@ impl OffsetStore for StorageOffsetStore {
         let offsets = DashMap::new();
         for (key, value) in entries {
             if let Ok(key_str) = String::from_utf8(key) {
-                let position = Self::decode_position(&value)?;
+                let position = Self::decode_position(&value).map_err(StorageError::into_error)?;
                 offsets.insert(key_str, position.offset);
             }
         }

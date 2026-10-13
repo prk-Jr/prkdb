@@ -681,3 +681,86 @@ async fn offset_store_position_defaults_keep_legacy_implementors_compatible() {
         })
     );
 }
+
+#[tokio::test]
+async fn offset_group_decode_errors_preserve_deserialization_classification() {
+    use prkdb::consumer::StorageOffsetStore;
+    use prkdb_types::consumer::OffsetStore;
+    use prkdb_types::error::{Error, StorageError};
+    use prkdb_types::storage::StorageAdapter;
+    use std::sync::Arc;
+    let storage = Arc::new(InMemoryAdapter::new());
+    let store = StorageOffsetStore::new(storage.clone());
+    let mut unknown_version = vec![0; 14];
+    unknown_version[0] = 2;
+    let mut unknown_kind = vec![0; 14];
+    unknown_kind[0] = 1;
+    unknown_kind[9] = 2;
+    for bytes in [vec![1, 0], unknown_version, unknown_kind] {
+        storage
+            .put(b"__consumer_offset:group:events:0", &bytes)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.get_group_offsets("group").await.unwrap_err(),
+            Error::Deserialization(_)
+        ));
+        assert!(matches!(
+            store.get_offset("group", "events", 0).await.unwrap_err(),
+            Error::Storage(StorageError::Deserialization(_))
+        ));
+    }
+}
+
+#[tokio::test]
+async fn offset_group_backend_scan_errors_preserve_storage_classification() {
+    use prkdb::consumer::StorageOffsetStore;
+    use prkdb_types::consumer::OffsetStore;
+    use prkdb_types::error::{Error, StorageError};
+    use prkdb_types::storage::StorageAdapter;
+    use std::sync::Arc;
+    struct FailingScan {
+        inner: InMemoryAdapter,
+        decode_error: bool,
+    }
+    #[async_trait::async_trait]
+    impl StorageAdapter for FailingScan {
+        async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+            self.inner.get(key).await
+        }
+        async fn put(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
+            self.inner.put(key, value).await
+        }
+        async fn delete(&self, key: &[u8]) -> Result<(), StorageError> {
+            self.inner.delete(key).await
+        }
+        async fn scan_prefix(
+            &self,
+            _prefix: &[u8],
+        ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+            Err(if self.decode_error {
+                StorageError::Deserialization("injected scan decode failure".into())
+            } else {
+                StorageError::BackendError("injected scan failure".into())
+            })
+        }
+    }
+    for decode_error in [false, true] {
+        let store = StorageOffsetStore::new(Arc::new(FailingScan {
+            inner: InMemoryAdapter::new(),
+            decode_error,
+        }));
+        let error = store.get_group_offsets("group").await.unwrap_err();
+        if decode_error {
+            assert!(matches!(
+                error,
+                Error::Storage(StorageError::Deserialization(_))
+            ));
+        } else {
+            assert!(matches!(
+                error,
+                Error::Storage(StorageError::BackendError(_))
+            ));
+        }
+    }
+}
