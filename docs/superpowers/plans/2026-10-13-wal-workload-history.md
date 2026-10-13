@@ -1,0 +1,46 @@
+# Baseline invocation-envelope implementation plan
+
+> For agentic workers: root executes using executing-plans; controlled independent
+> agents review design/code/evidence read-only. Root is sole build/mutation owner.
+
+Goal: one fixed baseline-only history control, explicit outcome and stop.
+Architecture: immutable closed helpers plus thin parser/classifier and separate
+unprivileged executor; isolated Actions probe. Python stdlib, retained Rust ELF.
+
+## 1. Claim and reviewed protocol
+- [x] Dedicated phase-2 worktree, immediate note, unchanged helper copies.
+- [x] Independent design review approved, then commit docs: define baseline envelope control.
+- [x] Baseline80 tests PASS: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_wal*py'.
+
+## 2. Test-first parser and classifier
+Files scripts/wal_workload_history.py and test_wal_workload_history.py.
+- [ ] Tests RED: missing module; schedule has9 calls/459 rows; golden original
+  base.md parses147; reject modified config/count/order/unknown/nonfinite/cache;
+  separate ceiling output; conservative ratio and complete-schedule classifiers.
+- [ ] Implement grid_order()->list[(cell,writers,value)], schedule()->list[dict],
+  parse_output(text,kind)->all rows, summarize(runs)->per-block full/isolated
+  medians/envelopes/classification. Alternate trust fixtures only in unit tests,
+  CLI pinned trust fixed. Never infer equivalence from nonclassification.
+- [ ] GREEN all controls; commit test: add fail-closed workload history controls.
+
+## 3. One bounded executor and workflow
+Files same scripts plus .github/workflows/remediation-gate.yml isolated new choice.
+- [ ] RED boundary controls: inherited identity failure launches nothing; fresh
+  output; fixed budgets/aggregate deadline; failure retains prefix and result;
+  only baseline copied/launched; every call uses same config/temp filesystem.
+- [ ] Implement qualify_host(runtime), execute(command,env,directory,output,
+  timeout_s), run(artifact,output), main(). Reuse unchanged artifact proof/scoped
+  launcher/CaptureWatch/host snapshot helpers; unprivileged process groups only.
+- [ ] One50min workflow job records7 tool/workflow hashes, runs Python controls,
+  downloads pinned run38206215742 artifact, runs schedule once, always uploads.
+- [ ] Independent code review; full own-target pre-push,85+new Python/actionlint.
+  CARGO_INCREMENTAL=0,CARGO_TARGET_DIR=worktree/target,CARGO_BUILD_JOBS=2.
+- [ ] Commit ci: run bounded baseline workload history control; milestone push.
+
+## 4. Linux evidence and closure
+- [ ] Dispatch exactly once at full reviewed SHA; collect complete artifact.
+- [ ] Independent inventory/source/resource/row/classifier audit and interpretation.
+- [ ] Result doc docs/remediation/decisions/2026-10-13-wal-workload-history.md,
+  explicit original gates unchanged, exact next decision and stop. No retry.
+- [ ] Commit docs: record baseline invocation envelope evidence; update note each
+  commit, clean only owned target after verification, full AGENTS section7 report.
