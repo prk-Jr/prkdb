@@ -62,6 +62,33 @@ recorders, rendering errors, source proof and SHA256SUMS. Restore ownership only
 within the fresh owned output so artifacts remain downloadable. No event dropping,
 truncation or partial-success report. Workflow always uploads evidence.
 
+## Demonstrated Linux 6.17 format compatibility
+
+Qualification run 38369782043 retained its failed prefix before any database run.
+For the system-wide outer recorder, `inherit=0` is expected: require the raw
+THREAD_MAP's single global task (-1) and CPU_MAP exactly matching the four ordinary
+CPUs instead. CPU/syscall per-task recorders still require inheritance. All three
+retain TIME/TID/CPU, sample_id_all, comm/task and CLOCK_MONOTONIC attributes.
+
+Linux task_rename can lack a target PID. Never use its caller TID as the target.
+Pair it one-to-one with the timed COMM transition: matching caller sample IDs,
+old/new names and non-overlapping time bracket; the COMM body supplies target PID/
+TID. Explicit-PID formats remain supported. Missing/ambiguous pairs, unknown names
+and corrupted native target groups fail closed, including no-op renames.
+
+libtraceevent may render scheduler bodies as `comm:pid [prio] state ==> ...` or
+`comm:pid [prio] CPU:cpu`. Accept these and the existing keyed format only through
+anchored parsers; preserve colon/space-containing names, exact target IDs and
+states. Malformed bodies fail; unsuccessful wakeups do not become runnable waits.
+Tests reproduce all three defects against the first captured prefix, followed by
+complete offline smoke analysis on a copy. This is the one allowed tooling
+correction; it authorizes no additional benchmark or qualification retry.
+
+Primary format sources: Linux v6.17 tools/perf/util/evsel.c, kernel/events/core.c,
+include/trace/events/task.h and tools/perf/builtin-script.c; libtraceevent's
+plugins/plugin_sched_switch.c. Source proof and unmodified failed artifacts remain
+in the main checkout's .agents/verification/wal-trace-qualification-2026-10-13/.
+
 ## Decision boundary
 
 The final report separates database performance evidence from diagnostic failures.

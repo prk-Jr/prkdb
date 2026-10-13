@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import resource
+import re
 import subprocess
 import sys
 import tempfile
@@ -190,6 +191,41 @@ class CoverageTests(unittest.TestCase):
         waits, calls, cpu = traces() if values is None else values
         return d.analyze_traces(waits, calls, cpu, '/tmp/wal-diag-base', 10)
 
+    def test_compact_scheduler_plugin_preserves_target_ids_and_intervals(self):
+        waits, calls, cpu = traces()
+        waits = waits.replace('prev_comm=tokio-short prev_pid=11 prev_prio=120 prev_state=S ==> next_comm=swapper next_pid=0 next_prio=120',
+                              'tokio-short:11 [120] S ==> swapper:0 [120]')
+        waits = waits.replace('comm=tokio-short pid=11 prio=120 target_cpu=002', 'tokio-short:11 [120] CPU:002')
+        waits = waits.replace('prev_comm=swapper prev_pid=0 prev_prio=120 prev_state=R ==> next_comm=tokio-short next_pid=11 next_prio=120',
+                              'swapper:0 [120] R ==> tokio-short:11 [120]')
+        result = self.analyze((waits, calls, cpu))
+        self.assertEqual(result['offcpu_by_state']['S']['total_ms'], 20)
+        self.assertEqual(result['wakeup_to_run']['total_ms'], 10)
+        row = d.parse_records(sample('1.000000000', 'sched:sched_switch', 'kworker/0:0:9 [120] R+ ==> name with space:20 [100]'))[0]
+        self.assertEqual(row['fields']['prev_comm'], 'kworker/0:0')
+        self.assertEqual(row['fields']['prev_pid'], '9')
+        self.assertEqual(row['fields']['next_comm'], 'name with space')
+        wake = d.parse_records(sample('1.000000000', 'sched:sched_wakeup', 'kworker/0:0:9 [120] success=1 CPU:002'))[0]
+        self.assertEqual(wake['fields']['pid'], '9')
+
+    def test_malformed_scheduler_payloads_fail_closed(self):
+        for event, detail in (
+                ('sched:sched_switch', 'tokio-short:11 [120] S ==> swapper:0'),
+                ('sched:sched_switch', 'tokio-short:11 [120] S ==> swapper:0 [120] garbage'),
+                ('sched:sched_wakeup', 'tokio-short:11 [120] CPU:bad'),
+                ('sched:sched_wakeup', 'tokio-short:11 [120] CPU:002 garbage'),
+                ('sched:sched_switch', 'prev_comm=tokio-short prev_pid=11'),
+                ('sched:sched_wakeup', 'comm=tokio-short pid=11')):
+            with self.subTest(detail=detail), self.assertRaises(d.DiagnosticError):
+                d.parse_records(sample('1.000000000', event, detail))
+
+    def test_native_comm_corrupted_target_group_is_rejected(self):
+        for body in ('PERF_RECORD_COMM exec: wal-diag-base:10/10', 'PERF_RECORD_COMM: tokio-short:10/11'):
+            waits, calls, cpu = traces()
+            waits = waits.replace(body, body.replace(':10/', ':999/'))
+            with self.subTest(body=body), self.assertRaises(d.DiagnosticError):
+                self.analyze((waits, calls, cpu))
+
     def test_body_metadata_ids_unsampled_thread_and_rename_are_covered(self):
         result = self.analyze()
         self.assertEqual(result['thread_ids'], [10, 11])
@@ -291,8 +327,50 @@ class CoverageTests(unittest.TestCase):
                 for kind in ('cpu', 'syscalls', 'waits'):
                     (root / f'render-{kind}-attributes').mkdir()
                     (root / f'render-{kind}-attributes/stdout.txt').write_text(good.replace('TIME', '') if kind == missing else good)
-                with self.subTest(missing=missing), self.assertRaises(d.DiagnosticError):
-                    d.validate_recording_attributes(root)
+                (root / 'render-waits-raw-events').mkdir()
+                (root / 'render-waits-raw-events/stdout.txt').write_text('PERF_RECORD_THREAD_MAP nr: 1 thread: -1\nPERF_RECORD_CPU_MAP: 0-3\n')
+                with self.subTest(missing=missing), self.assertRaisesRegex(d.DiagnosticError, 'attributes'):
+                    d.validate_recording_attributes(root, [0, 1, 2, 3])
+
+    def test_system_recorder_requires_all_cpu_global_attachment_instead_of_inheritance(self):
+        attrs = 'sample_type: IP|TID|TIME|CPU, sample_id_all: 1, comm: 1, task: 1, use_clockid: 1, clockid: 1'
+        d.validate_attributes(attrs, require_inherit=False)
+        maps = 'PERF_RECORD_THREAD_MAP nr: 1 thread: -1\nPERF_RECORD_CPU_MAP: 0-3\n'
+        d.validate_system_attachment(maps, [0, 1, 2, 3])
+        for bad in (maps.replace('0-3', '0-2'), maps.replace('thread: -1', 'thread: 123'),
+                    maps.replace('0-3', '0-4294967295'), maps + maps):
+            with self.subTest(bad=bad), self.assertRaises(d.DiagnosticError):
+                d.validate_system_attachment(bad, [0, 1, 2, 3])
+        with self.assertRaises(d.DiagnosticError):
+            d.validate_attributes(attrs)  # CPU/syscalls still need inherited child coverage.
+
+    def test_global_thread_map_rejects_trailing_targets(self):
+        raw = 'PERF_RECORD_THREAD_MAP nr: 1 thread: -1 thread: 123\nPERF_RECORD_CPU_MAP: 0-3\n'
+        with self.assertRaises(d.DiagnosticError):
+            d.validate_system_attachment(raw, [0, 1, 2, 3])
+
+    def test_pidless_rename_uses_target_comm_identity_not_caller_tid(self):
+        waits, calls, cpu = traces()
+        waits = re.sub(r'(task:task_rename: )pid=11 ', r'\1', waits)
+        # Caller is TID 10, target is TID 11; metadata body is authoritative.
+        waits = re.sub(r'perf\s+77/88\s+(\[002\].*PERF_RECORD_COMM:)', r'perf 10/10 \1', waits)
+        result = self.analyze((waits, calls, cpu))
+        self.assertEqual(result['thread_names']['11'], ['wal-diag-base', 'tokio-short', 'prkdb-wal-short'])
+        self.assertTrue(result['name_coverage_complete'])
+
+    def test_pidless_rename_ambiguity_and_unpaired_events_fail_closed(self):
+        waits, calls, cpu = traces()
+        waits = re.sub(r'(task:task_rename: )pid=11 ', r'\1', waits)
+        waits = re.sub(r'perf\s+77/88\s+(\[002\].*PERF_RECORD_COMM:)', r'perf 10/10 \1', waits)
+        line = next(line for line in waits.splitlines(True) if 'task:task_rename:' in line)
+        duplicate = waits.replace(line, line + line)
+        extra = sample('1.070000000', 'task:task_rename', 'oldcomm=wal-diag-base newcomm=tokio-lost oom_score_adj=0')
+        lines = waits.splitlines(True)
+        at = next(i for i,line in enumerate(lines) if '2.000000000' in line)
+        unpaired = ''.join(lines[:at]) + extra + ''.join(lines[at:])
+        for invalid in (duplicate, unpaired):
+            with self.subTest(invalid=invalid[-100:]), self.assertRaises(d.DiagnosticError):
+                self.analyze((invalid, calls, cpu))
 
     def test_attrproof_requires_sample_id_all_time_and_cpu(self):
         good = 'sched:sched_switch: sample_type: IP|TID|TIME|CPU, sample_id_all: 1, inherit: 1, comm: 1, task: 1, use_clockid: 1, clockid: 1\n'

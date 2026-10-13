@@ -35,9 +35,10 @@ File: .github/workflows/remediation-gate.yml; original gates unchanged.
   Python78/actionlint and independent review pass. Milestone push follows.
 
 ### 4. Finite Linux checks
-- [ ] Dispatch qualifier once. Download/hash/review result, live /proc, identity,
+- [x] Dispatch qualifier once (38369782043: tooling format failure, no database). Download/hash/review result, live /proc, identity,
   root child limits, full smoke clock/events/thread/loss records independently.
-- [ ] If demonstrated tooling bug, one test-first correction and one further
+- [x] Demonstrated Linux 6.17 compatibility bugs reproduced test-first;85 tests
+  and offline saved-smoke analysis pass. One correction and one further
   qualification-only dispatch; stop custom tracing if it still fails.
 - [ ] Only on success: one reviewed exact-head capture dispatch, fresh-host smoke
   first, then original fixed four controls/four profiles. No retry or gate waiver.

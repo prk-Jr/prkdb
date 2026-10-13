@@ -448,6 +448,27 @@ TASK = re.compile(r'^PERF_RECORD_(FORK|EXIT)\((\d+):(\d+)\):\((\d+):(\d+)\)$')
 SAMPLE = re.compile(r'^([\w:-]+):\s+(.*)$')
 
 
+def scheduler_fields(event, detail):
+    # libtraceevent's sched plugin prints compact bodies, overriding TP_printk.
+    if event == 'sched:sched_switch':
+        patterns = (
+            r'prev_comm=(.+) prev_pid=(\d+) prev_prio=(\d+) prev_state=(\S+) ==> next_comm=(.+) next_pid=(\d+) next_prio=(\d+)',
+            r'(.+):(\d+) \[(\d+)\] (\S+) ==> (.+):(\d+) \[(\d+)\]',
+        )
+        names = ('prev_comm', 'prev_pid', 'prev_prio', 'prev_state', 'next_comm', 'next_pid', 'next_prio')
+    else:
+        patterns = (
+            r'comm=(.+) pid=(\d+) prio=(\d+)(?: success=([01]))? target_cpu=(\d+)',
+            r'(.+):(\d+) \[(\d+)\](?: success=([01]))? CPU:(\d+)',
+        )
+        names = ('comm', 'pid', 'prio', 'success', 'target_cpu')
+    for pattern in patterns:
+        match = re.fullmatch(pattern, detail)
+        if match:
+            return {name: value for name, value in zip(names, match.groups()) if value is not None}
+    raise DiagnosticError(f'unparsed scheduler payload: {event}')
+
+
 def parse_records(text, task_events=False):
     require(not LOSS.search(text), 'lost/throttled trace')
     rows = []
@@ -469,7 +490,7 @@ def parse_records(text, task_events=False):
         else:
             require(sm is not None and not body.startswith('PERF_RECORD_'), 'unknown/unparsed trace event')
             event, detail = sm.groups()
-            fields = dict(re.findall(r'(\w+)=([^\s]+)', detail))
+            fields = scheduler_fields(event, detail) if event in ('sched:sched_switch', 'sched:sched_wakeup') else dict(re.findall(r'(\w+)=([^\s]+)', detail))
             row.update(event=event, fields=fields, detail=detail)
         rows.append(row)
     require(rows and all(a['stamp'] <= b['stamp'] for a, b in zip(rows, rows[1:])), 'empty/out-of-order trace')
@@ -531,34 +552,47 @@ def analyze_traces(waits_text, syscall_text, cpu_text, binary, native_pid):
             tid = r['body_tid']
             require(r['stamp'] > 0, 'native COMM rename lacks timestamp coverage')
             if births[tid] <= r['stamp'] <= deaths[tid]:
+                require(r['body_pid'] == native_pid, 'native COMM target group mismatch')
                 names[tid].append((r['stamp'], r['name']))
     native_comms = [r for r in waits if r['event'] == 'COMM' and r['comm_exec'] and r['body_tid'] == native_pid
-                    and r['name'] == Path(binary).name and 0 < r['stamp'] <= end]
+                    and r['body_pid'] == native_pid and r['name'] == Path(binary).name and 0 < r['stamp'] <= end]
     require(len(native_comms) == 1, 'missing timed native exec COMM coverage')
-    rename_brackets = {}
-    for tid, history in names.items():
-        brackets = []
-        for (previous_stamp, old), (stamp, new) in zip(history, history[1:]):
-            if old == new:
-                continue
-            changes = [r for r in relevant if r['event'] == RENAME and int(r['fields'].get('pid', -1)) == tid
-                       and r['fields'].get('oldcomm') == old and r['fields'].get('newcomm') == new
-                       and previous_stamp <= r['stamp'] <= stamp]
-            require(len(changes) == 1, 'native rename transition lacks tracepoint/COMM bracket coverage')
-            brackets.append(dict(begin_ns=changes[0]['stamp'], end_ns=stamp, old=old, new=new))
-        rename_brackets[tid] = brackets
-    for r in relevant:
-        if r['event'] == RENAME and int(r['fields'].get('pid', -1)) in births:
-            tid, f = int(r['fields']['pid']), r['fields']
-            require(covered(f['oldcomm']) and covered(f['newcomm']), 'uncovered native rename name')
-            if f['oldcomm'] == f['newcomm']:
-                metadata = [c for c in waits if c['event'] == 'COMM' and c['body_tid'] == tid
-                            and c['name'] == f['newcomm'] and r['stamp'] <= c['stamp'] <= deaths[tid]]
-                require(metadata, 'native no-op rename lacks timed COMM coverage')
-                rename_brackets[tid].append(dict(begin_ns=r['stamp'], end_ns=metadata[0]['stamp'], old=f['oldcomm'], new=f['newcomm']))
-            else:
-                require(any(b['begin_ns'] == r['stamp'] and b['old'] == f['oldcomm'] and b['new'] == f['newcomm']
-                            for b in rename_brackets[tid]), 'native rename lacks timed COMM coverage')
+    # COMM bodies identify the target. PID-less task_rename records identify
+    # only the caller; sample_id_all preserves that caller in the COMM prefix.
+    renames = [r for r in relevant if r['event'] == RENAME and
+               (int(r['fields'].get('pid', -1)) in births or
+                ('pid' not in r['fields'] and r['pid'] == native_pid and r['tid'] in births))]
+    for r in renames:
+        require(covered(r['fields'].get('oldcomm', '')) and covered(r['fields'].get('newcomm', '')),
+                'uncovered native rename name')
+    rename_brackets, consumed = {tid: [] for tid in births}, set()
+    previous = {tid: (born, names[tid][0][1]) for tid, born in births.items()}
+    for comm in waits:
+        if comm['event'] != 'COMM' or comm['body_tid'] not in births:
+            continue
+        tid, stamp = comm['body_tid'], comm['stamp']
+        if not births[tid] <= stamp <= deaths[tid]:
+            continue
+        if comm['comm_exec']:
+            previous[tid] = (stamp, comm['name'])
+            continue  # native exec identity is proven separately above
+        old_stamp, old = previous[tid]
+        candidates = []
+        for index, rename in enumerate(renames):
+            fields = rename['fields']
+            explicit = fields.get('pid')
+            target_matches = int(explicit) == tid if explicit is not None else (
+                rename['pid'] == comm['pid'] and rename['tid'] == comm['tid'])
+            if target_matches and fields['oldcomm'] == old and fields['newcomm'] == comm['name'] and old_stamp <= rename['stamp'] <= stamp:
+                candidates.append(index)
+        require(len(candidates) == 1, 'native rename transition lacks unique tracepoint/COMM bracket coverage')
+        index = candidates[0]
+        require(index not in consumed, 'native rename record consumed twice')
+        consumed.add(index)
+        rename_brackets[tid].append(dict(begin_ns=renames[index]['stamp'], end_ns=stamp,
+                                        old=old, new=comm['name'], target_tid=tid))
+        previous[tid] = (stamp, comm['name'])
+    require(len(consumed) == len(renames), 'unpaired native rename lacks timed COMM coverage')
     for brackets in rename_brackets.values():
         ordered = sorted(brackets, key=lambda b: b['begin_ns'])
         require(all(a['end_ns'] <= b['begin_ns'] for a, b in zip(ordered, ordered[1:])),
@@ -579,6 +613,8 @@ def analyze_traces(waits_text, syscall_text, cpu_text, binary, native_pid):
         if event in BLOCK:
             blocks[event] += 1
         if event == 'sched:sched_wakeup':
+            if f.get('success') == '0':
+                continue
             tid = int(f['pid'])
             if inside(r, tid):
                 check_name(tid, stamp, f['comm'])
@@ -626,18 +662,39 @@ def analyze_traces(waits_text, syscall_text, cpu_text, binary, native_pid):
                 limits='Matched intervals only. System block events have no established request linkage. Archive has no measured-phase markers or source-line debug sections.')
 
 
-def validate_attributes(text):
+def validate_attributes(text, require_inherit=True):
     # All fields must describe one tracking event, not be collected from separate
     # entries. evlist omits zero fields, so absence also fails qualification.
     require(any(all(re.search(rf'\b{field}\s*:\s*1\b', line) for field in
-                        ('inherit', 'comm', 'task', 'sample_id_all', 'use_clockid', 'clockid'))
+                        (('inherit',) if require_inherit else ()) + ('comm', 'task', 'sample_id_all', 'use_clockid', 'clockid'))
                 and all(token in line for token in ('TIME', 'TID', 'CPU')) for line in text.splitlines()),
             'missing complete monotonic lifecycle tracking attributes')
 
 
-def validate_recording_attributes(directory):
-    for kind in ('cpu', 'syscalls', 'waits'):
-        validate_attributes((Path(directory) / f'render-{kind}-attributes/stdout.txt').read_text())
+def validate_system_attachment(raw, expected_cpus):
+    require(expected_cpus and len(expected_cpus) == len(set(expected_cpus)), 'missing expected CPU coverage')
+    threads = re.findall(r'PERF_RECORD_THREAD_MAP nr: (\d+) thread: (-?\d+)[ \t]*$', raw, re.MULTILINE)
+    require(threads == [('1', '-1')], 'system recorder lacks global thread attachment')
+    maps = re.findall(r'PERF_RECORD_CPU_MAP: ([^\n]+)', raw)
+    require(len(maps) == 1 and re.fullmatch(r'\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*', maps[0].strip()),
+            'missing or ambiguous saved CPU map')
+    cpus = []
+    for token in maps[0].strip().split(','):
+        ends = [int(n) for n in token.split('-')]
+        start, end = ends[0], ends[-1]
+        require(0 <= start <= end <= max(expected_cpus), 'saved CPU map out of expected range')
+        cpus.extend(range(start, end + 1))
+    require(len(cpus) == len(set(cpus)) and sorted(cpus) == sorted(expected_cpus), 'system recorder CPU coverage mismatch')
+
+
+def validate_recording_attributes(directory, expected_cpus=None):
+    directory = Path(directory)
+    for kind in ('cpu', 'syscalls'):
+        validate_attributes((directory / f'render-{kind}-attributes/stdout.txt').read_text())
+    # Per-CPU system events intentionally have inherit=0; prove actual global
+    # thread/all-CPU attachment instead. Task-scoped recorders still inherit.
+    validate_attributes((directory / 'render-waits-attributes/stdout.txt').read_text(), require_inherit=False)
+    validate_system_attachment((directory / 'render-waits-raw-events/stdout.txt').read_text(), expected_cpus)
 
 
 def cpu_symbol_quality(text):
@@ -672,7 +729,7 @@ def render(directory, output, ordinary_path):
         with (child / 'stdout.txt').open() as source:
             require(not any(LOSS.search(line) for line in source), 'lost/throttled trace')
     require(not LOSS.search(diagnostics), 'lost/throttled recorder/rendering diagnostics')
-    validate_recording_attributes(directory)
+    validate_recording_attributes(directory, json.loads((Path(output) / 'preflight.json').read_text())['host']['affinity'])
     launch = validate_native_evidence(directory)
     summary = analyze_traces(*( (directory / f'render-{kind}-script/stdout.txt').read_text()
                                for kind in ('waits', 'syscalls', 'cpu')), launch['binary'], launch['pid'])
