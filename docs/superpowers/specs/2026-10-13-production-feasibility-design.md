@@ -1,6 +1,6 @@
 # Feasibility requirements, revision 2: GitHub screening first
 
-Date: 2026-10-13. Status: DRAFT revised requirements awaiting maintainer review.
+Date: 2026-10-13. Status: Revised screening requirements APPROVED by the maintainer.
 Approved direction: BOTH streams and indexed data, separate gates; GitHub Actions
 SCREENING ONLY for now. The maintainer requested revisions to memory, recovery
 and workload requirements and did not adopt revision 1 numerical requirements.
@@ -227,13 +227,15 @@ may fake a new contract.
 ## Pending decisions and next step
 
 The maintainer has selected both lanes and GitHub SCREENING ONLY, and specified
-revision priorities. All new workload counts, memory/storage/recovery ceilings,
-offered loads, read limits, native schedules and statistical claims are proposals
-awaiting review. Revision 1 throughput and latency numbers remain unapproved, not
+revision priorities. The maintainer approved the revised screening protocol, working sets,
+memory/storage/recovery ceilings and fixed execution envelopes on 2026-10-13.
+The approval explicitly leaves offered loads to be set and production qualification
+deferred. The protocol must still pin exact read byte limits and fixture/capability
+attestations before dispatch; it makes no qualified statistical tail claim. Revision 1 throughput and latency numbers remain unapproved, not
 silently adopted or lowered. No native timing, production qualification or harness
 implementation follows automatically from this documentation task.
 
-Next: review these concrete revisions, then separately specify/test-first the P0
-eligibility manifest. Full production host, memory efficiency at larger cardinality,
+Next: separately specify/test-first the P0 eligibility manifest. It must reject
+missing offered loads or exact read/fixture/host evidence before any run. Full production host, memory efficiency at larger cardinality,
 cold recovery, sustained load, transaction/event guarantees and competitor parity
 remain explicit future requirements, not screening passes.

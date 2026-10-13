@@ -23,8 +23,10 @@ Files:
 - [x] Both independent reviewers approved R2 workload, source contracts and schedule
   arithmetic after two rounds.
 - [ ] Verify docs, commit checkpoint, update notes, preserve reports and clean worktree.
-- [ ] Maintainer reviews revised numerical requirements and offered loads. No assumed
-  approval; no harness/timing before applicable eligibility prerequisites.
+- [x] Maintainer approved revised screening protocol/working sets/memory/recovery
+  and execution caps on2026-10-13 ("Use the revised screening requirements").
+- [ ] Set offered loads and pin exact manifest/read/fixture/host evidence; no timings
+  before source eligibility. Full production qualification remains deferred.
 
 ## P0: eligibility and immutable schema, NO timings
 Separate claim only after this protocol is approved. Proposed files:
