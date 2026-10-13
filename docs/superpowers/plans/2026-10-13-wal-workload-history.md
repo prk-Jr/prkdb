@@ -33,7 +33,7 @@ Files same scripts plus .github/workflows/remediation-gate.yml isolated new choi
   launcher/CaptureWatch/host snapshot helpers; unprivileged process groups only.
 - [x] One50min workflow job records7 tool/workflow hashes, runs Python controls,
   downloads pinned run38206215742 artifact, runs schedule once, always uploads.
-- [ ] Independent code review; full own-target pre-push,85+new Python/actionlint.
+- [x] Independent code review approved; full own-target pre-push PASS,93 Python/actionlint PASS.
   CARGO_INCREMENTAL=0,CARGO_TARGET_DIR=worktree/target,CARGO_BUILD_JOBS=2.
 - [ ] Commit ci: run bounded baseline workload history control; milestone push.
 
@@ -48,3 +48,8 @@ Files same scripts plus .github/workflows/remediation-gate.yml isolated new choi
 Original golden independently parses147 canonical cells,6ceilings,21 commentary.
 Independent final implementation review approved after RED/GREEN host-after and
 final-deadline controls. Full own-target pre-push is running before the milestone.
+
+Fresh full pre-push exit0:1509 nextest PASS/10 existing skips, concurrent workspace
+/doctests PASS, both200seed modes/68256checks each, lint/ledger/docs all green.
+Final Python93 PASS with process-inspection permission; restricted ps access
+caused one sandbox-only check failure, resolved without a code/test change.

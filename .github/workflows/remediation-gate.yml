@@ -26,7 +26,7 @@ on:
         required: false
         default: none
         type: choice
-        options: [none, wal-bench, iai, stream-read-profile, stream-read-symbols]
+        options: [none, wal-bench, iai, stream-read-profile, stream-read-symbols, wal-workload-history]
       base_ref:
         description: "wal-bench only: also bench this ref first, in the same job"
         required: false
@@ -518,3 +518,72 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 30
+
+  probe-wal-workload-history:
+    name: Probe — baseline invocation envelope (not a gate)
+    needs: resolve
+    if: ${{ inputs.probe == 'wal-workload-history' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    permissions:
+      contents: read
+      actions: read
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Retain exact diagnostic source and workflow
+        env:
+          ANALYSIS_SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/wal-history-evidence"
+          mkdir -p "$evidence"
+          git rev-parse HEAD > "$evidence/analysis-sha.txt"
+          test "$(cat "$evidence/analysis-sha.txt")" = "$ANALYSIS_SHA"
+          sha256sum scripts/wal_stall_diagnostic.py scripts/test_wal_stall_diagnostic.py \
+            scripts/wal_descriptor_diagnostic.py scripts/test_wal_descriptor_diagnostic.py \
+            scripts/wal_workload_history.py scripts/test_wal_workload_history.py \
+            .github/workflows/remediation-gate.yml > "$evidence/analysis-files.sha256"
+          cp scripts/wal_stall_diagnostic.py scripts/test_wal_stall_diagnostic.py \
+            scripts/wal_descriptor_diagnostic.py scripts/test_wal_descriptor_diagnostic.py \
+            scripts/wal_workload_history.py scripts/test_wal_workload_history.py "$evidence/"
+          cp .github/workflows/remediation-gate.yml "$evidence/workflow.yml"
+          echo '**BASELINE DIAGNOSTIC ONLY — original candidate gate remains FAILED**' >> "$GITHUB_STEP_SUMMARY"
+      - name: Test parsing and finite failure controls
+        run: python3 -m unittest discover -s scripts -p 'test_wal*py' -v
+      - name: Download pinned original binaries and provenance
+        uses: actions/download-artifact@v4
+        with:
+          name: wal-bench-a64f774f965806fb2cd93c91b276d504ec92208a
+          run-id: 38206215742
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/wal-history-evidence/original
+      - name: Execute the declared baseline schedule once
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/wal-history-evidence"
+          if python3 scripts/wal_workload_history.py \
+            --artifact "$evidence/original" --output "$evidence/history" \
+            > "$evidence/history.stdout" 2> "$evidence/history.stderr"; then
+            cat "$evidence/history.stdout" >> "$GITHUB_STEP_SUMMARY"
+          else
+            code=$?
+            cat "$evidence/history.stderr" >&2
+            echo 'Incomplete/unqualified schedule; no retry or acceptance replacement.' >> "$GITHUB_STEP_SUMMARY"
+            exit "$code"
+          fi
+      - name: Retain the complete outcome or failed prefix
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wal-history-${{ needs.resolve.outputs.sha }}
+          path: ${{ runner.temp }}/wal-history-evidence/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 1
