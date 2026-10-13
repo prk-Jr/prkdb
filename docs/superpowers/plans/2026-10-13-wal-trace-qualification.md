@@ -12,24 +12,27 @@ Tech stack: Python stdlib, Linux perf, Actions; Rust 1.98.1 checks only.
 
 ### 1. Claim and review
 - [x] New phase-2 worktree and immediate handoff; closed-task tools copied unchanged.
-- [ ] Baseline 73 Python tests, actionlint; independent spec/plan review.
-- [ ] Commit docs: define finite live Linux trace qualification.
+- [x] Baseline73 and final78 Python tests pass; actionlint passes; independent
+  spec/plan/code/workflow review approved.
+- [x] b65836f commits finite live Linux trace qualification protocol.
 
 ### 2. Test-first qualifier
 Files: scripts/wal_trace_qualification.py and test_wal_trace_qualification.py.
-- [ ] RED: live /proc proof runs before smoke; failed parser launches nothing;
+- [x] RED: five new tests fail before qualifier implementation; live /proc proof runs before smoke; failed parser launches nothing;
   fresh output, exact recorder reuse, result/inventory/ownership on failure.
-- [ ] GREEN: implement qualify(output) using live ordinary records and existing
+- [x] GREEN: implement qualify(output) using live ordinary records and existing
   profile_command/execute/render/qualify_smoke. Never call benchmark run().
-- [ ] Tests and independent implementation review; commit ci: qualify live Linux
-  resource records before trace capture.
+- [x] 13eb10e commits live Linux resource qualification;78 tests and independent
+  implementation review pass.
 
 ### 3. Isolated workflow
 File: .github/workflows/remediation-gate.yml; original gates unchanged.
-- [ ] Add wal-trace-qualification and wal-trace-capture choices, one 20-minute job.
+- [x] Add wal-trace-qualification and wal-trace-capture choices, one 20-minute job.
   Qualifier always first; artifact download and benchmark command only in capture.
-- [ ] Retain exact resolved source SHA/hashes, tools/tests, errors and always artifact.
-- [ ] Full own-target pre-push, Python/actionlint; review; one milestone push.
+- [x] Retain exact resolved source SHA/hashes, tools/tests, errors and always artifact.
+- [x] Full own-target pre-push passes:1509 nextest tests/10 skips, concurrent
+  tests/doctests, both200seed modes/68256checks each, lint/format/ledger/docs.
+  Python78/actionlint and independent review pass. Milestone push follows.
 
 ### 4. Finite Linux checks
 - [ ] Dispatch qualifier once. Download/hash/review result, live /proc, identity,
