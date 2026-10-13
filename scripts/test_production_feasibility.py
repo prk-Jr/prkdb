@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Static eligibility tests. Synthetic controls never certify a database."""
 import copy
+from contextlib import contextmanager
+import hashlib
 import importlib.util
 import json
 import math
@@ -245,24 +247,20 @@ class InventoryTests(unittest.TestCase):
 
     def test_cli_nonfinite_invalid_source_never_breaks_json(self):
         self.module()
-        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
-            path = Path(tmp)/"bad.toml"
-            original = (ROOT/"docs/benchmarks/production-feasibility.toml").read_text()
-            path.write_text(original.replace('source_sha = ""', 'source_sha = [nan]'))
-            result = subprocess.run([sys.executable, str(SCRIPT), "inventory", "--repo", str(ROOT),
-                                     "--manifest", str(path)], capture_output=True, text=True)
+        with clean_git_control() as (repo, path, m):
+            m["source_sha"] = [math.nan]; path.write_text(toml_control(m))
+            result = subprocess.run([sys.executable, str(SCRIPT), "inventory", "--repo", str(repo),
+                                     "--run-manifest", str(path)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 2, result.stderr)
-            self.assertEqual(json.loads(result.stdout)["status"], "BLOCKED")
+            self.blocked(json.loads(result.stdout), "MANIFEST_INVALID")
 
     def test_huge_integer_rate_fails_closed_in_pure_and_actual_cli(self):
         m, l, c = fixture(); m["loads"]["streams_fast"] = 10 ** 400
         self.blocked(self.result(m, l, c), "LOADS_UNSET")
-        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
-            path = Path(tmp)/"huge.toml"
-            original = (ROOT/"docs/benchmarks/production-feasibility.toml").read_text()
-            path.write_text(original.replace("streams_fast = 0", "streams_fast = " + str(10 ** 400)))
-            result = subprocess.run([sys.executable, str(SCRIPT), "inventory", "--repo", str(ROOT),
-                                     "--manifest", str(path)], capture_output=True, text=True)
+        with clean_git_control() as (repo, path, m):
+            m["loads"]["streams_fast"] = 10 ** 400; path.write_text(toml_control(m))
+            result = subprocess.run([sys.executable, str(SCRIPT), "inventory", "--repo", str(repo),
+                                     "--run-manifest", str(path)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 2, result.stderr)
             self.blocked(json.loads(result.stdout), "LOADS_UNSET")
 
@@ -341,6 +339,154 @@ class InventoryTests(unittest.TestCase):
                                      "--output", str(out)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 2)
             self.assertEqual(json.loads(out.read_text()), json.loads(result.stdout))
+
+
+def toml_control(data):
+    """Small serializer for controlled test inputs, not the production parser."""
+    scalar = lambda value: json.dumps(value).replace("NaN", "nan") if not isinstance(value, float) else str(value).lower()
+    lines = [f"{key} = {scalar(value)}" for key, value in data.items() if not isinstance(value, dict)]
+    for key, value in data.items():
+        if isinstance(value, dict):
+            lines += [f"[{key}]"] + [f"{k} = {scalar(v)}" for k, v in value.items()]
+    return "\n".join(lines) + "\n"
+
+
+@contextmanager
+def clean_git_control():
+    """REAL descendant history; synthetic closure/evidence, never qualification."""
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = (Path(tmp)/"repo").resolve()
+        subprocess.run(["git", "clone", "--shared", "--quiet", str(ROOT), str(repo)], check=True, capture_output=True)
+        m, ledger, _ = fixture()
+        text = ""
+        for phase in ledger["phase"]:
+            text += "[[phase]]\n" + toml_control(phase)
+        for finding in ledger["finding"]:
+            text += "[[finding]]\n" + toml_control(finding)
+        (repo/"docs/remediation/ledger.toml").write_text(text)
+        (repo/"checks").mkdir(exist_ok=True)
+        (repo/"checks/synthetic.sh").write_text("# SYNTHETIC regression-presence control\n")
+        (repo/"checks/synthetic.txt").write_text("SYNTHETIC ONLY: not CI, perf, host or qualification evidence\n")
+        subprocess.run(["git", "-C", str(repo), "add", "docs/remediation/ledger.toml", "checks"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                        "commit", "-qm", "test: synthetic source eligibility control"], check=True, capture_output=True)
+        head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"]).decode().strip()
+        m["source_sha"] = head
+        m["prerequisites"] = dict.fromkeys(m["prerequisites"], "064b7e0dc180ab27e72811bdfab191386ac0989c")
+        m["template_sha256"] = hashlib.sha256((repo/"docs/benchmarks/production-feasibility.toml").read_bytes()).hexdigest()
+        run = repo/".agents/verification/control/run.toml"
+        run.parent.mkdir(parents=True); run.write_text(toml_control(m))
+        yield repo, run, m
+
+
+class SourcePinTests(unittest.TestCase):
+    def cli(self, repo, run):
+        result = subprocess.run([sys.executable, str(SCRIPT), "inventory", "--repo", str(repo),
+                                 "--run-manifest", str(run)], capture_output=True, text=True)
+        self.assertTrue(result.stdout.strip().startswith("{"), "Run-artifact CLI must emit JSON: " + result.stderr)
+        return result.returncode, json.loads(result.stdout)
+
+    def clean(self, repo):
+        self.assertEqual(subprocess.check_output(["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all"]), b"")
+
+    def blocked(self, repo, run, code=None):
+        rc, report = self.cli(repo, run)
+        self.assertEqual(rc, 2); self.assertEqual(report["status"], "BLOCKED")
+        for flag in ("timing_authorized", "production_qualified", "measurements_performed"):
+            self.assertIs(report[flag], False)
+        if code:
+            self.assertIn(code, [r["code"] for c in report["capabilities"].values() for r in c["reasons"]])
+        return report
+
+    def test_real_clean_git_positive_retains_approved_history_and_snapshot(self):
+        with clean_git_control() as (repo, run, m):
+            self.clean(repo)
+            before = run.read_bytes()
+            rc, report = self.cli(repo, run)
+            self.assertEqual(rc, 0, report)
+            self.assertEqual(report["status"], "READY_FOR_REVIEW")
+            self.assertEqual(report["source"]["observed_sha"], m["source_sha"])
+            self.assertEqual(report["source"]["template_sha256"], m["template_sha256"])
+            self.assertEqual(report["source"]["run_manifest_sha256"], hashlib.sha256(before).hexdigest())
+            self.assertEqual(report["run_manifest_snapshot"]["content_utf8"].encode(), before)
+            self.assertEqual(report["run_manifest_snapshot"]["sha256"], hashlib.sha256(before).hexdigest())
+            for flag in ("timing_authorized", "production_qualified", "measurements_performed"):
+                self.assertIs(report[flag], False)
+            self.assertEqual(run.read_bytes(), before)
+            self.clean(repo)
+
+    def test_wrong_exact_source_and_template_hash_are_blocked(self):
+        with clean_git_control() as (repo, run, m):
+            for key, value, code in (("source_sha", "064b7e0dc180ab27e72811bdfab191386ac0989c", "SOURCE_MISMATCH"),
+                                     ("template_sha256", "0" * 64, "TEMPLATE_MISMATCH")):
+                modified = copy.deepcopy(m); modified[key] = value; run.write_text(toml_control(modified))
+                self.blocked(repo, run, code)
+            self.clean(repo)
+
+    def test_dirty_source_and_template_cannot_be_bypassed(self):
+        with clean_git_control() as (repo, run, m):
+            source = repo/"checks/synthetic.txt"; source.write_text("dirty\n")
+            self.blocked(repo, run, "SOURCE_DIRTY")
+            subprocess.run(["git", "-C", str(repo), "restore", "checks/synthetic.txt"], check=True)
+            template = repo/"docs/benchmarks/production-feasibility.toml"
+            template.write_bytes(template.read_bytes() + b"# dirty template\n")
+            m["template_sha256"] = hashlib.sha256(template.read_bytes()).hexdigest()
+            run.write_text(toml_control(m))
+            self.blocked(repo, run)
+
+    def test_run_budget_schema_loads_and_evidence_remain_enforced(self):
+        with clean_git_control() as (repo, run, m):
+            for kind, code in (("budget", "MANIFEST_INVALID"), ("unknown", "MANIFEST_INVALID"),
+                               ("unset", "LOADS_UNSET"), ("huge", "LOADS_UNSET"),
+                               ("evidence", "EVIDENCE_REFERENCE_INVALID"), ("bad_source", "MANIFEST_INVALID")):
+                with self.subTest(kind=kind):
+                    modified = copy.deepcopy(m)
+                    if kind == "budget": modified["requirements"]["engine_rss_bytes"] *= 2
+                    elif kind == "unknown": modified["extra"] = True
+                    elif kind == "unset": modified["loads"]["streams_fast"] = 0
+                    elif kind == "huge": modified["loads"]["streams_fast"] = 10 ** 400
+                    elif kind == "bad_source": modified["source_sha"] = [math.nan]
+                    else: modified["evidence"]["host"] = "absent.txt"
+                    run.write_text(toml_control(modified))
+                    self.blocked(repo, run, code)
+
+    def test_artifact_outside_unignored_tracked_and_symlink_paths_are_refused(self):
+        with clean_git_control() as (repo, run, m):
+            original = run.read_bytes()
+            outside = repo.parent/"outside.toml"; outside.write_bytes(original)
+            unignored = repo/"unignored.toml"; unignored.write_bytes(original)
+            tracked = repo/"docs/benchmarks/production-feasibility.toml"
+            alias = run.parent/"alias.toml"; alias.symlink_to(run)
+            parent_alias = run.parent/"alias-dir"; parent_alias.symlink_to(run.parent, target_is_directory=True)
+            for path in (outside, unignored, tracked, alias, parent_alias/"run.toml"):
+                with self.subTest(path=str(path)):
+                    report = self.blocked(repo, path)
+                    self.assertIn("input_error", report)
+            unignored.unlink()
+            self.clean(repo)
+
+    def test_tracked_artifact_below_ignored_directory_is_refused(self):
+        with clean_git_control() as (repo, run, m):
+            subprocess.run(["git", "-C", str(repo), "add", "-f", str(run)], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                            "commit", "-qm", "test: tracked run artifact negative control"], check=True)
+            self.clean(repo)
+            self.assertIn("input_error", self.blocked(repo, run))
+
+    def test_unignored_artifact_below_verification_is_refused(self):
+        with clean_git_control() as (repo, run, m):
+            (repo/".gitignore").write_text("# no run artifact exclusion\n")
+            self.assertIn("input_error", self.blocked(repo, run))
+
+    def test_output_cannot_replace_run_artifact(self):
+        with clean_git_control() as (repo, run, m):
+            before = run.read_bytes()
+            result = subprocess.run([sys.executable, str(SCRIPT), "inventory", "--repo", str(repo),
+                                     "--run-manifest", str(run), "--output", str(run)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("OUTPUT_UNSAFE", result.stdout)
+            self.assertEqual(run.read_bytes(), before)
+            self.clean(repo)
 
 
 if __name__ == "__main__":
