@@ -74,3 +74,19 @@ performance acceptance or task completion. P1/P2 must qualify actual evidence.
 No ledger findings/status changes, no API/on-disk/hot-path edits, no old threshold,
 seed count or durability relaxation. P0 produces findings/ineligibility evidence,
 not a new architectural verdict or permission to ship.
+
+## Source-pin correction approved by maintainer
+
+The tracked requirements template cannot contain its own clean commit SHA. The
+maintainer approved a separate Git-ignored run artifact on 2026-10-13. Select it
+explicitly with --run-manifest .agents/verification/<run>/run.toml. It contains the
+full schema1 values plus template_sha256, which must equal the SHA256 of the fixed
+tracked template blob at exact observed HEAD. Its source_sha must equal that HEAD.
+The checker validates the tracked template independently and refuses dirty template
+bytes, tracked/unignored/outside run files, and symlink leaf or parent paths. It
+records separate template/run hashes and a hashed UTF8 snapshot of the run bytes
+actually parsed; this snapshot is evidence of inputs, never a certificate. Default
+source/loads/task/evidence remain unset and BLOCKED. All budgets/findings/reference
+checks and the three false flags remain required. Synthetic clean-Git controls
+retain the real approved protocol history, but their closure/evidence is explicitly
+synthetic and never qualifies current source. No new native performance result.

@@ -158,3 +158,46 @@ independent code quality review approved. Full pre-push check exit0:1509nextest
 pass/10existing skipped, concurrent workspace tests/doctests,200blocking seeds
 per mode, format/lint/ledger/render/static rules/README/doc claims. Root owns these
 checks; reviewers did not execute builds/tests. No new benchmark/CI/native run.
+
+## Historical STOP: source-pin fixed point discovered after integration
+
+Tracked manifest source_sha cannot equal its own clean commit SHA. Implementation
+stopped; proposal at main .agents/verification/feasibility-eligibility-2026-10-13/SOURCE-PIN-PROPOSAL.md.
+Keep approved requirements tracked and propose separate exact-source ignored run
+artifact, pinned back to the tracked template. This was the STOP state before approval;
+the maintainer-approved resolution and implementation contract follow below.
+
+## Approved correction: exact source identity without self-reference
+
+The maintainer approved a separate Git-ignored, untracked run artifact on
+2026-10-13, resolving the source-pin STOP above. R2 product requirements remain
+unchanged. Keep --manifest at the fixed tracked template path; add explicit
+--run-manifest <relative-path> for a per-run full schema1 TOML plus exactly one
+additional key, template_sha256. The template is validated separately. Bind its
+checkout bytes to the actual observed HEAD blob, and bind the run file to that
+template digest and exact HEAD. Only a regular untracked AND ignored file physically
+under .agents/verification is eligible; reject leaf/ancestor symlinks and external
+paths. Read/hash/parse one bytes snapshot per input. Include template/run hashes
+separately and the parsed run bytes as a content-addressed snapshot in the report.
+Default template remains unset and BLOCKED. Preserve all prior static checks and
+three false flags. Source/template/ledger/reference checks are not certificates.
+
+Test-first: a disposable local shared clone retaining real 064b7e0 approval
+history, with committed synthetic ledger/evidence and run file generated AFTER
+its source commit. Require clean Git before/after, READY_FOR_REVIEW only, separate
+hashes and snapshot; negative controls cover stale/dirty source, dirty template,
+wrong digest, changed/unknown budgets, missing evidence, unset loads, tracked,
+unignored, outside and symlinked artifacts. Review read-only, verify, commit on
+existing task branch, integrate, regenerate actual-source BLOCKED inventory, and
+remove only the completed worktree/cache. No native measurements or CI dispatch.
+
+## Correction implementation and review checkpoint
+
+40 Python controls pass, including the real clean-Git descendant positive,
+artifact/input negative controls and retained original inventory checks. An
+isolated template-binding-disabled mutation is killed by the exact negative
+assertion without test errors or source edits. Independent contract and quality
+reviewers approve the four-file correction read-only, with no blockers. The
+requirements template itself remains byte-identical. Full local checks and
+post-integration source inventory are recorded in the task handoff/evidence.
+The source model is resolved; actual database eligibility remains BLOCKED.

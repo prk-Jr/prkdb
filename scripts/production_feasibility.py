@@ -139,6 +139,8 @@ def inventory(manifest, ledger, context):
         validate_manifest(manifest)
     except ValueError as error:
         valid = False; global_reasons.append(reason("MANIFEST_INVALID", str(error)))
+    if context.get("template_binding_valid") is False:
+        global_reasons.append(reason("TEMPLATE_MISMATCH", "Run artifact is not bound to the observed HEAD template"))
     if valid:
         if (manifest["protocol_sha256"] != PROTOCOL_SHA256 or
                 context.get("protocol_sha256") != PROTOCOL_SHA256 or
@@ -151,7 +153,7 @@ def inventory(manifest, ledger, context):
         if context.get("dirty") is not False:
             global_reasons.append(reason("SOURCE_DIRTY", "Source has uncommitted or untracked changes"))
         if context.get("manifest_tracked") is not True:
-            global_reasons.append(reason("MANIFEST_UNTRACKED", "Manifest is not tracked in observed source"))
+            global_reasons.append(reason("MANIFEST_UNTRACKED", "Requirements template is not tracked in observed source"))
         if manifest["loads_approved"] is not True:
             global_reasons.append(reason("LOADS_UNAPPROVED", "Offered rates have not been approved"))
         for name, value in sorted(manifest["loads"].items()):
@@ -236,11 +238,39 @@ def integrated(repo, commit, head):
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
 
+def nonsymlink_file(repo, path):
+    """Check lexical containment and every component before resolving/reading."""
+    candidate = repo/path
+    if not candidate.is_relative_to(repo):
+        return None
+    relative = candidate.relative_to(repo)
+    if ".." in relative.parts:
+        return None
+    current = repo
+    for part in relative.parts:
+        current = current/part
+        if current.is_symlink():
+            return None
+    return candidate if candidate.is_file() else None
+
+
+def run_file(repo, path, tracked):
+    candidate = nonsymlink_file(repo, path)
+    if candidate is None or not candidate.is_relative_to(repo/".agents/verification"):
+        raise ValueError("Run artifact must be a nonsymlink file below .agents/verification")
+    relative = candidate.relative_to(repo).as_posix()
+    ignored = subprocess.run(["git", "-C", str(repo), "check-ignore", "--quiet", "--", relative],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    if relative in tracked or not ignored:
+        raise ValueError("Run artifact must be untracked AND Git-ignored")
+    return candidate
+
+
 def repo_file(repo, path, tracked):
     if not relative_path(path) or path not in tracked:
         return None
-    candidate = repo/path
-    if candidate.is_symlink():
+    candidate = nonsymlink_file(repo, Path(path))
+    if candidate is None:
         return None
     resolved = candidate.resolve()
     if (not resolved.is_relative_to(repo) or not resolved.is_file() or
@@ -314,6 +344,7 @@ def main():
     p = sub.add_parser("inventory")
     p.add_argument("--repo", type=Path, default=Path(__file__).resolve().parent.parent)
     p.add_argument("--manifest", type=Path, default=Path(DEFAULT_MANIFEST))
+    p.add_argument("--run-manifest", type=Path, help="Explicit ignored per-run TOML below .agents/verification")
     p.add_argument("--output", type=Path)
     args = parser.parse_args()
     repo = args.repo; tracked = set(); inputs = set()
@@ -322,20 +353,44 @@ def main():
         root = Path(git(repo, "rev-parse", "--show-toplevel").decode().strip()).resolve()
         if root != repo:
             raise ValueError("--repo must be the worktree root")
-        manifest_path = (repo/args.manifest).resolve()
-        if not manifest_path.is_relative_to(repo):
-            raise ValueError("Manifest must be inside the repository")
+        head = git(repo, "rev-parse", "HEAD").decode().strip()
         tracked = set(git(repo, "ls-files", "-z").decode().split("\0")) - {""}
+        if repo/args.manifest != repo/DEFAULT_MANIFEST:
+            raise ValueError("--manifest must select the fixed tracked requirements template")
+        manifest_path = repo_file(repo, DEFAULT_MANIFEST, tracked)
         ledger_path = repo_file(repo, "docs/remediation/ledger.toml", tracked)
-        if ledger_path is None:
-            raise ValueError("Ledger must be a tracked nonsymlink repository file")
-        inputs = {manifest_path, ledger_path.resolve(), (repo/PROTOCOL).resolve()}
-        manifest_bytes, ledger_bytes = manifest_path.read_bytes(), ledger_path.read_bytes()
-        manifest = tomllib.loads(manifest_bytes.decode()); ledger = tomllib.loads(ledger_bytes.decode())
-        context = context_from_repo(repo, manifest_path, manifest, ledger); tracked = context["tracked_files"]
+        if manifest_path is None or ledger_path is None:
+            raise ValueError("Template and ledger must be tracked nonsymlink repository files")
+        inputs = {manifest_path, ledger_path, (repo/PROTOCOL).resolve()}
+        template_bytes = manifest_path.read_bytes()
+        template_blob = git(repo, "show", head + ":" + DEFAULT_MANIFEST)
+        if template_bytes != template_blob:
+            raise ValueError("Template checkout differs from exact HEAD blob")
+        template = tomllib.loads(template_bytes.decode())
+        validate_manifest(template)
+        manifest_bytes = template_bytes; manifest = template; run_bytes = None
+        template_hash = digest(template_blob); binding_valid = True
+        if args.run_manifest is not None:
+            path = run_file(repo, args.run_manifest, tracked)
+            inputs.add(path)
+            run_bytes = path.read_bytes()
+            manifest_bytes = run_bytes
+            manifest = tomllib.loads(run_bytes.decode())
+            binding = manifest.pop("template_sha256", None)
+            binding_valid = sha(binding, 64) and binding == template_hash
+        ledger_bytes = ledger_path.read_bytes()
+        ledger = tomllib.loads(ledger_bytes.decode())
+        context = context_from_repo(repo, manifest_path, manifest, ledger)
+        if context["head"] != head or git(repo, "rev-parse", "HEAD").decode().strip() != head:
+            raise ValueError("Source HEAD changed during snapshot")
+        context["dirty"] = bool(git(repo, "status", "--porcelain", "--untracked-files=all"))
+        context["template_binding_valid"] = binding_valid
         report = inventory(manifest, ledger, context)
         report["source"].update(manifest_sha256=digest(manifest_bytes), ledger_sha256=digest(ledger_bytes),
-                                protocol_sha256=context["protocol_sha256"])
+                                protocol_sha256=context["protocol_sha256"], template_sha256=template_hash,
+                                run_manifest_sha256=digest(run_bytes) if run_bytes is not None else None)
+        if run_bytes is not None:
+            report["run_manifest_snapshot"] = {"sha256": digest(run_bytes), "content_utf8": run_bytes.decode()}
     except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
         report = inventory({}, {}, {})
         report["input_error"] = type(error).__name__ + ": repository/manifest/ledger input unavailable or invalid"
