@@ -14,24 +14,24 @@ unprivileged executor; isolated Actions probe. Python stdlib, retained Rust ELF.
 
 ## 2. Test-first parser and classifier
 Files scripts/wal_workload_history.py and test_wal_workload_history.py.
-- [ ] Tests RED: missing module; schedule has9 calls/459 rows; golden original
+- [x] Tests RED: missing module; schedule has9 calls/459 rows; golden original
   base.md parses147; reject modified config/count/order/unknown/nonfinite/cache;
   separate ceiling output; conservative ratio and complete-schedule classifiers.
-- [ ] Implement grid_order()->list[(cell,writers,value)], schedule()->list[dict],
+- [x] Implement grid_order()->list[(cell,writers,value)], schedule()->list[dict],
   parse_output(text,kind)->all rows, summarize(runs)->per-block full/isolated
   medians/envelopes/classification. Alternate trust fixtures only in unit tests,
   CLI pinned trust fixed. Never infer equivalence from nonclassification.
-- [ ] GREEN all controls; commit test: add fail-closed workload history controls.
+- [x] GREEN all93 controls; commit test: add fail-closed workload history controls.
 
 ## 3. One bounded executor and workflow
 Files same scripts plus .github/workflows/remediation-gate.yml isolated new choice.
-- [ ] RED boundary controls: inherited identity failure launches nothing; fresh
+- [x] RED boundary controls: inherited identity failure launches nothing; fresh
   output; fixed budgets/aggregate deadline; failure retains prefix and result;
   only baseline copied/launched; every call uses same config/temp filesystem.
-- [ ] Implement qualify_host(runtime), execute(command,env,directory,output,
+- [x] Implement qualify_host(runtime), execute(command,env,directory,output,
   timeout_s), run(artifact,output), main(). Reuse unchanged artifact proof/scoped
   launcher/CaptureWatch/host snapshot helpers; unprivileged process groups only.
-- [ ] One50min workflow job records7 tool/workflow hashes, runs Python controls,
+- [x] One50min workflow job records7 tool/workflow hashes, runs Python controls,
   downloads pinned run38206215742 artifact, runs schedule once, always uploads.
 - [ ] Independent code review; full own-target pre-push,85+new Python/actionlint.
   CARGO_INCREMENTAL=0,CARGO_TARGET_DIR=worktree/target,CARGO_BUILD_JOBS=2.
@@ -44,3 +44,7 @@ Files same scripts plus .github/workflows/remediation-gate.yml isolated new choi
   explicit original gates unchanged, exact next decision and stop. No retry.
 - [ ] Commit docs: record baseline invocation envelope evidence; update note each
   commit, clean only owned target after verification, full AGENTS section7 report.
+
+Original golden independently parses147 canonical cells,6ceilings,21 commentary.
+Independent final implementation review approved after RED/GREEN host-after and
+final-deadline controls. Full own-target pre-push is running before the milestone.
