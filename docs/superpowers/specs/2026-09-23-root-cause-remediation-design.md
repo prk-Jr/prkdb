@@ -129,6 +129,7 @@ Sources: **A** = 2026-09-23 correctness audit (A#n), **R** = 2026-09-07 senior r
 | EVT-05 | HIGH | Any `put_with_outbox` error falls back to a non-atomic path; real errors hidden. | `collection_handle.rs:282-299,608-625` (R07) | Reported | 3 |
 | EVT-06 | HIGH | Auto-commit commits inside `poll()` before processing (at-most-once); no generation fencing; unassigned consumer falls back to partition 0; `let _ = self.commit()`. | `consumer.rs:71,422,435,667` (A#16) | Reported | 3 |
 | EVT-07 | MED | In `Fast` mode a power loss can drop acked frames, and the next appends reissue their LSNs. A change-feed consumer (`get_changes_since`, `changes_in_collection`) that read the lost frames and committed past them holds a cursor that looks valid once the log refills, and silently skips the new records. Fix: the cursor carries a divergence check (the CRC of the last consumed frame for streams; for the keyed feed, whose frames compaction rewrites, the open-boundary check of the streaming design note §7.4), and a mismatch is `OffsetDiverged`. Plan Tasks 2.15b.6 and 2.15b.10. | `storage/wal_adapter.rs:1739-1741`, `storage/collection_partitioned_adapter.rs:457-460`, `wal/log.rs:790-792` (Task 2.15b design, 2026-10-02) | Verified (code read) | 2 |
+| EVT-08 | LOW | The unmerged versioned group-offset reader changed malformed-data errors from `Error::Deserialization` to storage-wrapped errors. Preserve the existing group API while leaving backend errors storage-wrapped. | `consumer.rs::StorageOffsetStore::get_group_offsets` (Task 2.15b.6 review) | Fixed (runtime regression) | 2 |
 
 ### 3.4 Transactions and TTL (TXN, TTL)
 
@@ -547,6 +548,7 @@ No unrelated refactoring.
 
 | Rev | Date | Change |
 |---|---|---|
+| 34 | 2026-10-13 | Execution: Task 2.15b.6 offset codec Step 1 verified; EVT-08 fixed with API error-class regressions; production-path consumer-position fuzz coverage added to TST-07 without changing limits. EVT-07 and consumer resume remain open. |
 | 1 | 2026-09-23 | Initial spec from the 2026-09-23 audits and the 2026-09-07 review; decisions D1–D9 (D9: publishing policy). |
 | 2 | 2026-09-23 | Spec review pass 1: `Vfs` seam defined in Phase 1, WAL routed through it in 2a; per-area `verified`; tripwires instead of expected-failure lists; single-phase IDs (DOC-11, DOC-12, TST-05..07 split out); harness op profiles per phase (§7.1); Fast mode from 2a; commit-based workflow with phase-PR CI sequence; private backup repo with Actions off; storage-compat timing; single globally ordered WAL; like-for-like Raft gate; madsim budget; DOC-11 interim wording. |
 | 28 | 2026-10-02 | Execution: STO-19 adds counted WAL header/refill reads after a deterministic short-read recovery data-loss reproduction; fixed by d688c82. TST-12 inventory validation and exact shutdown mutation coverage extended without weakening thresholds. |
