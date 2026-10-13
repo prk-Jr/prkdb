@@ -15,13 +15,55 @@ python3 scripts/perf_gate_deltas.py justify --self-test
 python3 scripts/perf_gate_deltas.py floors --validate scripts/perf_gate_floors.toml
 missing=0
 
-# Every `bench_wal_*` function has a `[floors.*]` entry (a renamed/added WAL benchmark
-# with no floor would silently escape the gate).
-for b in $(grep -oE '^fn (bench_wal_[a-z0-9_]+)' crates/prkdb/benches/iai_hot_paths.rs | awk '{print $2}'); do
-  if ! grep -q "^\[floors\.$b\]" scripts/perf_gate_floors.toml; then
-    echo "no floor for $b in scripts/perf_gate_floors.toml"; missing=1
+# This check is also exercised against fixtures below: adding a stream benchmark
+# must not let it silently escape mandatory instruction-count floors.
+required_floors() {
+  local source_file="$1" floors_file="$2" absent=0
+  for b in $(grep -oE '^fn (bench_(wal|stream)_[a-z0-9_]+)' "$source_file" | awk '{print $2}'); do
+    if ! grep -q "^\[floors\.$b\]" "$floors_file"; then
+      echo "no floor for $b in $floors_file"; absent=1
+    fi
+  done
+  return "$absent"
+}
+
+required_floors_self_test() {
+  local fixture_dir
+  fixture_dir=$(mktemp -d)
+  cat > "$fixture_dir/benches.rs" <<'SOURCE'
+fn bench_wal_existing() {}
+fn bench_stream_new() {}
+SOURCE
+  cat > "$fixture_dir/floors.toml" <<'FLOORS'
+[floors.bench_wal_existing]
+[floors.bench_stream_new]
+FLOORS
+  if ! required_floors "$fixture_dir/benches.rs" "$fixture_dir/floors.toml"; then
+    rm -rf "$fixture_dir"
+    echo "mandatory-floor self-test: complete floors rejected"; return 1
   fi
-done
+  cat > "$fixture_dir/floors.toml" <<'FLOORS'
+[floors.bench_wal_existing]
+FLOORS
+  if required_floors "$fixture_dir/benches.rs" "$fixture_dir/floors.toml" > /dev/null; then
+    rm -rf "$fixture_dir"
+    echo "mandatory-floor self-test: missing stream floor accepted"; return 1
+  fi
+  cat > "$fixture_dir/floors.toml" <<'FLOORS'
+[floors.bench_stream_new]
+FLOORS
+  if required_floors "$fixture_dir/benches.rs" "$fixture_dir/floors.toml" > /dev/null; then
+    rm -rf "$fixture_dir"
+    echo "mandatory-floor self-test: missing WAL floor accepted"; return 1
+  fi
+  rm -rf "$fixture_dir"
+  echo "mandatory-floor self-test: ok"
+}
+
+required_floors_self_test
+if ! required_floors crates/prkdb/benches/iai_hot_paths.rs scripts/perf_gate_floors.toml; then
+  missing=1
+fi
 
 # Every `[floors.*]` entry names a function that still exists (a stale entry left behind
 # by a rename would otherwise report "missing benchmark" against a name nothing ever

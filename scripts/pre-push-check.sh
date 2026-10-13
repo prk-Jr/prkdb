@@ -13,8 +13,12 @@ step clippy;       cargo clippy --workspace --all-targets -- -D warnings
 step tests
 if command -v cargo-nextest >/dev/null; then
   cargo nextest run --workspace
-  # nextest does not run doctests; cover them separately.
-  step doctests; cargo test --workspace --doc
+  # Also exactly what the remediation gate runs ("Ledger and Tests"), which the Coverage
+  # job's `cargo llvm-cov` matches: libtest runs each binary's tests concurrently in one
+  # process, while nextest isolates them and serializes the serial-servers group. A test
+  # that only fails concurrently (shared ports, shared state) reached CI that way
+  # (http_authz on 0d1ca02). This also covers the doctests nextest does not run.
+  step tests-concurrent; cargo test --workspace --no-fail-fast
 else
   cargo test --workspace
 fi

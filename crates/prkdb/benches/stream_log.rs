@@ -1,6 +1,7 @@
 //! Local StreamLog cost measurements. Durability is explicit; Linux competitive
 //! targets and retention/cold-read cells remain Task 2.15b.8.
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use prkdb::stream_log::partitioned::{PartitionedStream, Route};
 use prkdb::stream_log::{ReadLimits, Record, StartAt, StreamConfig, StreamLog};
 use prkdb_core::vfs::StdVfs;
 use prkdb_core::wal::{CompressionConfig, SyncMode, Wal, WalConfig, WalOptions};
@@ -122,5 +123,45 @@ fn benches(c: &mut Criterion) {
     group.finish();
     log.close().unwrap();
 }
-criterion_group!(stream, wal_benches, benches);
+
+fn keyed_append(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    for (mode_name, mode) in [("fast", SyncMode::Fast), ("durable", SyncMode::Durable)] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("orders");
+        let mut cfg = StreamConfig::new(&root);
+        cfg.wal.sync_mode = mode;
+        cfg.wal.compression = CompressionConfig::none();
+        let stream = rt.block_on(PartitionedStream::open(&root, 3, cfg)).unwrap();
+        let mut group = c.benchmark_group(format!("stream_keyed_append/{mode_name}"));
+        group
+            .sample_size(30)
+            .warm_up_time(Duration::from_secs(2))
+            .measurement_time(Duration::from_secs(5));
+        for count in [1usize, 100] {
+            let records = vec![
+                Record {
+                    value: vec![7; 1024],
+                    ..Record::default()
+                };
+                count
+            ];
+            group.throughput(Throughput::Elements(count as u64));
+            group.bench_with_input(BenchmarkId::new("1KiB", count), &records, |b, records| {
+                b.to_async(&rt).iter(|| async {
+                    std::hint::black_box(
+                        stream
+                            .append(Route::Key(b"benchmark-key"), records.clone())
+                            .await
+                            .expect("keyed stream append"),
+                    );
+                });
+            });
+        }
+        group.finish();
+        stream.close().unwrap();
+    }
+}
+
+criterion_group!(stream, wal_benches, benches, keyed_append);
 criterion_main!(stream);

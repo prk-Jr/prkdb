@@ -1,6 +1,26 @@
 //! Versioned, checksummed codec for a partitioned stream's `STREAM` manifest.
 
-pub const STREAM_MANIFEST_VERSION: u32 = 1;
+/// Version 2 binds key routing to SeaHash over raw bytes. Version 1 used Rust Hash
+/// framing and is refused rather than silently changing existing partition routing.
+pub const STREAM_MANIFEST_VERSION: u32 = 2;
+/// Per-stream resource guard: each partition eagerly owns an OS writer and file handles.
+pub const MAX_STREAM_PARTITIONS: u32 = 256;
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StreamManifestError {
+    #[error("{0}")]
+    Invalid(String),
+    #[error("unsupported STREAM manifest version {found}; this build reads {supported}")]
+    UnsupportedVersion { found: u32, supported: u32 },
+    #[error("stream partition count {found} exceeds the supported maximum of {maximum}")]
+    PartitionLimit { found: u32, maximum: u32 },
+}
+
+impl From<&str> for StreamManifestError {
+    fn from(message: &str) -> Self {
+        Self::Invalid(message.into())
+    }
+}
 
 const MAGIC: &[u8; 8] = b"PRKSTRM\0";
 const HEADER_LEN: usize = 20;
@@ -25,6 +45,9 @@ impl StreamManifest {
         if self.partitions == 0 {
             return Err("STREAM manifest must contain at least one partition".into());
         }
+        if self.partitions > MAX_STREAM_PARTITIONS {
+            return Err(format!("stream partition count {} exceeds the supported maximum of {MAX_STREAM_PARTITIONS}", self.partitions));
+        }
         let name = self.created_by.as_bytes();
         if name.len() > MAX_MANIFEST_BYTES - HEADER_LEN - CHECKSUM_LEN {
             return Err("STREAM manifest exceeds 4096 bytes".into());
@@ -40,7 +63,7 @@ impl StreamManifest {
         Ok(bytes)
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, StreamManifestError> {
         if !(HEADER_LEN + CHECKSUM_LEN..=MAX_MANIFEST_BYTES).contains(&bytes.len()) {
             return Err("STREAM manifest length must be between 24 and 4096 bytes".into());
         }
@@ -54,11 +77,20 @@ impl StreamManifest {
         }
         let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
         if version != STREAM_MANIFEST_VERSION {
-            return Err(format!("unsupported STREAM manifest version {version}"));
+            return Err(StreamManifestError::UnsupportedVersion {
+                found: version,
+                supported: STREAM_MANIFEST_VERSION,
+            });
         }
         let partitions = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
         if partitions == 0 {
             return Err("STREAM manifest must contain at least one partition".into());
+        }
+        if partitions > MAX_STREAM_PARTITIONS {
+            return Err(StreamManifestError::PartitionLimit {
+                found: partitions,
+                maximum: MAX_STREAM_PARTITIONS,
+            });
         }
         let name_len = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
         if name_len as u64 != (crc_at - HEADER_LEN) as u64 {
@@ -134,12 +166,12 @@ mod tests {
     #[test]
     fn unknown_version_is_named_after_crc_validation() {
         let mut bytes = GOLDEN.to_vec();
-        replace_u32(&mut bytes, 8, 2);
+        replace_u32(&mut bytes, 8, STREAM_MANIFEST_VERSION + 1);
         let error = StreamManifest::decode(&bytes).unwrap_err();
-        assert!(error.contains("version 2"), "{error}");
+        assert!(error.to_string().contains("version 3"), "{error}");
         bytes[8] ^= 1;
         let error = StreamManifest::decode(&bytes).unwrap_err();
-        assert!(error.contains("checksum"), "{error}");
+        assert!(error.to_string().contains("checksum"), "{error}");
     }
 
     #[test]
@@ -189,8 +221,24 @@ mod tests {
         assert_eq!(manifest.created_by, env!("CARGO_PKG_VERSION"));
     }
 
+    #[test]
+    fn partition_count_cap_applies_to_encode_and_crc_valid_decode() {
+        let maximum = StreamManifest::current(256);
+        let bytes = maximum.encode().unwrap();
+        assert_eq!(StreamManifest::decode(&bytes).unwrap(), maximum);
+        for count in [257, 65_537, u32::MAX] {
+            assert!(
+                StreamManifest::current(count).encode().is_err(),
+                "count {count}"
+            );
+            let mut bytes = GOLDEN.to_vec();
+            replace_u32(&mut bytes, 12, count);
+            assert!(StreamManifest::decode(&bytes).is_err(), "count {count}");
+        }
+    }
+
     const GOLDEN: &[u8] = &[
-        80, 82, 75, 83, 84, 82, 77, 0, 1, 0, 0, 0, 3, 0, 0, 0, 5, 0, 0, 0, 48, 46, 54, 46, 48, 151,
-        36, 14, 247,
+        80, 82, 75, 83, 84, 82, 77, 0, 2, 0, 0, 0, 3, 0, 0, 0, 5, 0, 0, 0, 48, 46, 54, 46, 48, 19,
+        127, 148, 164,
     ];
 }

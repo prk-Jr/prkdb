@@ -87,8 +87,12 @@ fn spawn_seeded(
     }
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_prkdb-cli"));
+    // `--grpc-port 0`: serve binds gRPC too, and since it fails closed when a listener
+    // cannot be bound, servers sharing the default 50051 would refuse to start whenever
+    // this binary's tests run concurrently (`cargo test`, `cargo llvm-cov`).
     cmd.args(["--database", dir.to_str().unwrap(), "serve", "--port"])
         .arg(port.to_string())
+        .args(["--grpc-port", "0"])
         .args(extra)
         .stdout(Stdio::null())
         .stderr(Stdio::null());

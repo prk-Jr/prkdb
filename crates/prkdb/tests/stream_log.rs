@@ -736,14 +736,18 @@ fn the_stream_manifest_round_trips_and_refuses_bit_flips_and_unknown_versions() 
         );
     }
 
-    // Version 2, correctly checksummed, is refused by its number.
+    // A future version, correctly checksummed, is refused by its number.
     let mut v2 = bytes.clone();
     v2[8..12].copy_from_slice(&(STREAM_MANIFEST_VERSION + 1).to_le_bytes());
     let body = v2.len() - 4;
     let crc = crc32fast::hash(&v2[..body]);
     v2[body..].copy_from_slice(&crc.to_le_bytes());
     let err = StreamManifest::decode(&v2).unwrap_err();
-    assert!(err.contains("version 2"), "{err}");
+    assert!(
+        err.to_string()
+            .contains(&format!("version {}", STREAM_MANIFEST_VERSION + 1)),
+        "{err}"
+    );
 
     // Zero partitions is no stream.
     let zero = StreamManifest {
@@ -1341,5 +1345,59 @@ async fn an_expired_append_deadline_does_not_admit_a_ready_reservation() {
         matches!(result, Err(StorageError::WriteBackpressure(_))),
         "{result:?}"
     );
+    log.close().unwrap();
+}
+
+fn replace_with_future_records_frame(path: &Path, lsn: u64) -> Vec<u8> {
+    let original = std::fs::read(path).unwrap();
+    let mut payload = RecordBatch {
+        append_time_ms: 0,
+        records: recs(&["future"]),
+    }
+    .encode(&CompressionConfig::none())
+    .unwrap();
+    payload[0] = prkdb_core::wal::records::RECORDS_VERSION + 1;
+    let mut bytes = original[..prkdb_core::wal::segment::SEGMENT_HEADER_LEN as usize].to_vec();
+    encode_frame(&mut bytes, lsn, FrameKind::Records, &payload);
+    std::fs::write(path, &bytes).unwrap();
+    bytes
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn future_records_version_is_unsupported_on_open_without_truncation() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = StreamLog::open(cfg(dir.path())).await.unwrap();
+    let ack = log.append(recs(&["old"])).await.unwrap();
+    log.close().unwrap();
+    let path = dir.path().join(segment_file_name(1));
+    let before = replace_with_future_records_frame(&path, ack.lsn);
+    let error = StreamLog::open(cfg(dir.path())).await.err().unwrap();
+    assert!(
+        matches!(error, StorageError::UnsupportedFormat(_)),
+        "{error}"
+    );
+    assert!(error.to_string().contains("newer PrkDB"), "{error}");
+    assert!(error.to_string().contains("Records version 2"), "{error}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn future_records_version_is_unsupported_on_live_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = StreamLog::open(cfg(dir.path())).await.unwrap();
+    let ack = log.append(recs(&["old"])).await.unwrap();
+    let path = dir.path().join(segment_file_name(1));
+    let before = replace_with_future_records_frame(&path, ack.lsn);
+    let error = log
+        .read_from(StartAt::Offset(ack.first()), ReadLimits::default())
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(error, StorageError::UnsupportedFormat(_)),
+        "{error}"
+    );
+    assert!(error.to_string().contains("newer PrkDB"), "{error}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
     log.close().unwrap();
 }

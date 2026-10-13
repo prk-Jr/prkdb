@@ -1,9 +1,9 @@
 //! Fixed-count stream partitions beneath a container directory without a WAL.
 
-use super::manifest::StreamManifest;
+use super::manifest::{StreamManifest, StreamManifestError, MAX_STREAM_PARTITIONS};
 use super::{AppendAck, Record, StreamConfig, StreamLog};
 use crate::catalog::Catalog;
-use crate::partitioning::{DefaultPartitioner, Partitioner};
+use crate::storage::format::{read_format_with, unsupported_format, Kind, FORMAT_VERSION};
 use crate::storage::lock::lock_data_dir;
 use crate::storage::wal_adapter::wal_err;
 use prkdb_core::vfs::{create_dir_all_durable, LockGuard, OpenMode, StdVfs, Vfs};
@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-/// How an append chooses a partition. Key routing uses byte-slice `Hash` through
-/// the same fixed-seed partitioner as partitioned collections.
+/// How an append chooses a partition. Key routing hashes raw bytes with SeaHash,
+/// independent of Rust Hash trait framing, platform width and toolchain.
 #[derive(Debug, Clone, Copy)]
 pub enum Route<'a> {
     Partition(u32),
@@ -67,10 +67,28 @@ fn read_manifest(vfs: &dyn Vfs, path: &Path) -> Result<StreamManifest, StorageEr
     if file.len().map_err(|e| io_error(path, e))? != len {
         return Err(corruption(path, "STREAM manifest changed during read"));
     }
-    StreamManifest::decode(&bytes).map_err(|e| corruption(path, e))
+    StreamManifest::decode(&bytes).map_err(|e| match e {
+        StreamManifestError::UnsupportedVersion { found, supported } => {
+            let creator = if found < supported { "an older" } else { "a newer" };
+            StorageError::UnsupportedFormat(format!(
+                "stream container {} was created by {creator} PrkDB (STREAM version {found}); \
+                 this build reads STREAM version {supported}. Routing schemes cannot be changed on open",
+                path.display()
+            ))
+        }
+        e @ StreamManifestError::PartitionLimit { .. } => StorageError::Validation(format!("{}: {e}", path.display())),
+        e => corruption(path, e),
+    })
 }
 
 fn has_frames(vfs: &dyn Vfs, dir: &Path) -> Result<bool, StorageError> {
+    if prkdb_core::wal::LogState::read(vfs, dir)
+        .map_err(wal_err)?
+        .log_start
+        > 1
+    {
+        return Ok(true);
+    }
     let mut segments: Vec<_> = vfs
         .read_dir(dir)
         .map_err(|e| io_error(dir, e))?
@@ -112,7 +130,7 @@ fn has_frames(vfs: &dyn Vfs, dir: &Path) -> Result<bool, StorageError> {
 
 fn incomplete(nonempty: &[PathBuf]) -> StorageError {
     StorageError::Validation(format!(
-        "STREAM manifest is missing, but these partition directories contain frames: {}",
+        "STREAM manifest is missing, but these partition directories contain frames or retained history: {}",
         nonempty
             .iter()
             .map(|p| p.display().to_string())
@@ -146,6 +164,11 @@ impl PartitionedStream {
                 "stream must have at least one partition".into(),
             ));
         }
+        if partitions > MAX_STREAM_PARTITIONS {
+            return Err(StorageError::Validation(format!(
+                "stream partition count {partitions} exceeds the supported maximum of {MAX_STREAM_PARTITIONS}"
+            )));
+        }
         let root = root.to_path_buf();
         let (lock, creating, existing_locks) = {
             let vfs = vfs.clone();
@@ -162,6 +185,18 @@ impl PartitionedStream {
                 }
                 let manifest_path = root.join("STREAM");
                 let creating = !vfs.exists(&manifest_path).map_err(|e| io_error(&manifest_path, e))?;
+                for path in &entries {
+                    if let Some(number) = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_prefix("partition_")) {
+                        if !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) {
+                            let canonical = number.parse::<u32>().ok().is_some_and(|p| p < partitions && number == p.to_string());
+                            if !canonical {
+                                return Err(StorageError::Validation(format!(
+                                    "unexpected partition directory {} is outside stream's {partitions} partitions or has a noncanonical name", path.display()
+                                )));
+                            }
+                        }
+                    }
+                }
                 let mut existing_locks = Vec::new();
                 if creating {
                     let mut nonempty = Vec::new();
@@ -182,6 +217,23 @@ impl PartitionedStream {
                         let dir = root.join(format!("partition_{p}"));
                         if !vfs.exists(&dir).map_err(|e| io_error(&dir, e))? {
                             return Err(corruption(&manifest_path, format!("missing partition directory {}", dir.display())));
+                        }
+                        let marker = read_format_with(vfs.as_ref(), &dir)?;
+                        let Some(marker) = marker.filter(|m| m.kind == Kind::Stream) else {
+                            return Err(corruption(&manifest_path, format!(
+                                "published partition {} requires a FORMAT marker of kind stream; refusing to recreate it", dir.display()
+                            )));
+                        };
+                        if marker.format != FORMAT_VERSION {
+                            return Err(unsupported_format(&dir, marker.format));
+                        }
+                        // Publication follows every partition's durable initial segment.
+                        // Even with a surviving FORMAT, an empty WAL set is data loss;
+                        // opening it as fresh would reuse offsets starting at LSN 1.
+                        if !vfs.read_dir(&dir).map_err(|e| io_error(&dir, e))?.iter().any(|path| path.file_name().and_then(|name| name.to_str()).and_then(parse_segment_file_name).is_some()) {
+                            return Err(corruption(&manifest_path, format!(
+                                "published partition {} has no WAL segment; refusing to recreate its log", dir.display()
+                            )));
                         }
                     }
                 }
@@ -258,7 +310,7 @@ impl PartitionedStream {
                     "partition {p} is outside stream's {n} partitions"
                 )))
             }
-            Route::Key(key) => DefaultPartitioner::<&[u8]>::new().partition(&key, n),
+            Route::Key(key) => (seahash::hash(key) % u64::from(n)) as u32,
             Route::RoundRobin => self
                 .round_robin
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |p| {

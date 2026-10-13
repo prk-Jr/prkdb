@@ -1,0 +1,54 @@
+# Approved R2 inputs only. Empty pins and zero loads are UNSET, not measured results.
+# P0 is static review inventory. It never authorizes timing or production.
+schema = 1
+profile = "github-screening-r2"
+source_sha = ""
+protocol_sha256 = "202cf458fb7edb297320abfbda2bc2e4d2763a0c272585d4770c767b19a70556"
+loads_approved = false
+modes = ["Fast", "Durable"]
+exclusions = ["transactions", "outbox", "ttl", "cluster", "legacy_event_consumer"]
+
+[requirements]
+engine_rss_bytes = 2147483648
+client_rss_bytes = 268435456
+engine_cgroup_bytes = 4294967296
+client_cgroup_bytes = 536870912
+rss_growth_bytes = 67108864
+queued_bytes = 67108864
+batch_bytes = 16777216
+outstanding_requests = 16
+indexed_1k_count = 100000
+indexed_64k_count = 10000
+stream_retained_bytes = 1073741824
+segment_bytes = 134217728
+pinned_bytes = 1207959552
+resource_seconds_per_mode = 600
+resource_warmup_seconds_per_mode = 120
+ordinary_warmup_seconds = 30
+ordinary_measurement_seconds = 120
+stream_recovery_attempts = 12
+indexed_recovery_attempts = 24
+native_resource_seconds = 3300
+job_seconds = 5400
+wal_ready_128m_ms = 1000
+wal_ready_1g_ms = 5000
+index_ready_128m_ms = 5000
+index_ready_1g_ms = 20000
+consumer_ready_128m_ms = 2000
+consumer_ready_1g_ms = 10000
+
+[loads]
+streams_fast = 0
+streams_durable = 0
+indexed_fast = 0
+indexed_durable = 0
+
+[prerequisites]
+index_maintenance = ""
+stream_consumer = ""
+
+[evidence]
+local_checks = ""
+linux_perf = ""
+host = ""
+fixtures = ""

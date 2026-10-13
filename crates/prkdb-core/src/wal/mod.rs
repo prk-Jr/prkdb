@@ -94,6 +94,11 @@ pub enum WalError {
         frame_kind: Option<(u64, u8)>,
     },
 
+    /// Records payload versions have their own namespace, independent of the WAL
+    /// segment format. A complete frame from a newer encoder must not be corruption.
+    #[error("unsupported Records version {found}; created by a newer PrkDB; this build reads Records version {supported}")]
+    UnsupportedRecordsVersion { found: u8, supported: u8 },
+
     #[error("corrupt WAL: {path} at byte {offset}: {reason}")]
     CorruptSegment {
         path: std::path::PathBuf,
