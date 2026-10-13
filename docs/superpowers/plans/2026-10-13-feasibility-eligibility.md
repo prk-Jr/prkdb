@@ -158,3 +158,11 @@ independent code quality review approved. Full pre-push check exit0:1509nextest
 pass/10existing skipped, concurrent workspace tests/doctests,200blocking seeds
 per mode, format/lint/ledger/render/static rules/README/doc claims. Root owns these
 checks; reviewers did not execute builds/tests. No new benchmark/CI/native run.
+
+## STOP: source-pin fixed point discovered after integration
+
+Tracked manifest source_sha cannot equal its own clean commit SHA. Implementation
+stopped; proposal at main .agents/verification/feasibility-eligibility-2026-10-13/SOURCE-PIN-PROPOSAL.md.
+Keep approved requirements tracked and propose separate exact-source ignored run
+artifact, pinned back to the tracked template. Maintainer decision required before
+changing this source model; no correction code written.
