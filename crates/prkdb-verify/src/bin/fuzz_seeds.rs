@@ -435,6 +435,45 @@ fn format_seeds() -> Result<Vec<Vec<u8>>> {
     ])
 }
 
+/// Both historical bincode offsets and versioned positions from the PUBLIC writer.
+async fn consumer_position_seeds() -> Result<Vec<Vec<u8>>> {
+    use prkdb::consumer::StorageOffsetStore;
+    use prkdb::storage::InMemoryAdapter;
+    use prkdb_types::consumer::{Offset, OffsetStore, Position};
+    let mut seeds = Vec::new();
+    for offset in [0, 1, 250, 251, u64::MAX] {
+        seeds.push(bincode::serde::encode_to_vec(
+            Offset(offset),
+            bincode::config::standard(),
+        )?);
+    }
+    let storage = Arc::new(InMemoryAdapter::new());
+    let store = StorageOffsetStore::new(storage.clone());
+    for (offset, check) in [(0, None), (1, Some(0)), (u64::MAX, Some(u32::MAX))] {
+        store
+            .save_position(
+                "fuzz",
+                "topic",
+                0,
+                Position {
+                    offset: Offset(offset),
+                    check,
+                },
+            )
+            .await?;
+        seeds.push(
+            storage
+                .get(b"__consumer_offset:fuzz:topic:0")
+                .await?
+                .expect("written position"),
+        );
+    }
+    for bytes in &seeds {
+        prkdb_verify::fuzz_entry::decode_consumer_position(bytes).await?;
+    }
+    Ok(seeds)
+}
+
 /// A seed the real decoder rejects only ever exercises an error path, so the generator
 /// checks that the checksummed formats' seeds decode before writing anything.
 fn check_valid(target: &str, seeds: &[Vec<u8>]) -> Result<()> {
@@ -560,6 +599,7 @@ async fn main() -> Result<()> {
                 .encode()
                 .map_err(anyhow::Error::msg)?,
             ],
+            "consumer_position" => consumer_position_seeds().await?,
             other => bail!("no seed generator for fuzz target {other}"),
         };
         check_valid(target, &seeds)?;
