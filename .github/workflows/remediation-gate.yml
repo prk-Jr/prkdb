@@ -626,7 +626,7 @@ jobs:
                       for rel in overlay_paths:
                           dst = tree / rel
                           dst.parent.mkdir(parents=True, exist_ok=True)
-                          shutil.copy2(overlay / rel, dst)
+                          shutil.copyfile(overlay / rel, dst)
                   actual = {rel: sha(tree / rel) for rel in sorted(set(tracked) | (set(overlay_paths) if kind == 'marked' else set()))}
                   expected = dict(snapshots[side])
                   if kind == 'marked':
@@ -638,26 +638,39 @@ jobs:
                   env['CARGO_TARGET_DIR'] = str(tree / 'target')
                   env.pop('RUSTFLAGS', None)
                   stem = 'build-' + kind + '-' + side
+                  clean_command = None
+                  if kind == 'marked':
+                      # Preserve the original executable, but invalidate this package's
+                      # release artifacts so old overlay mtimes cannot reuse them.
+                      clean_command = ['cargo', 'clean', '-p', 'prkdb', '--release',
+                                       '--target-dir', str(tree / 'target')]
+                      with (out / (stem + '.clean.stdout')).open('w') as stdout, (out / (stem + '.clean.stderr')).open('w') as stderr:
+                          cleaned = run(clean_command, cwd=tree, env=env, stdout=stdout, stderr=stderr, check=False)
+                      (out / (stem + '.clean.exit')).write_text(str(cleaned.returncode) + '\n')
+                      if cleaned.returncode:
+                          raise SystemExit('package cache invalidation failed: ' + stem)
                   with (out / (stem + '.jsonl')).open('w') as stdout, (out / (stem + '.stderr')).open('w') as stderr:
                       result = run(command, cwd=tree, env=env, stdout=stdout, stderr=stderr, check=False)
                   (out / (stem + '.exit')).write_text(str(result.returncode) + '\n')
                   if result.returncode:
                       raise SystemExit('build failed: ' + stem)
                   messages = [json.loads(line) for line in (out / (stem + '.jsonl')).read_text().splitlines()]
-                  matches = [m['executable'] for m in messages
+                  matches = [m for m in messages
                              if m.get('reason') == 'compiler-artifact' and m.get('executable')
                              and m.get('target', {}).get('name') == 'wal_write_path'
                              and 'bench' in m.get('target', {}).get('kind', [])]
                   if len(matches) != 1:
                       raise SystemExit('ambiguous benchmark executable: ' + stem)
-                  exe = Path(matches[0]).resolve()
+                  if matches[0].get('fresh') is not False:
+                      raise SystemExit('benchmark was not compiled for this source variant: ' + stem)
+                  exe = Path(matches[0]['executable']).resolve()
                   saved = binaries / ('wal-diag-' + ('o' if kind == 'original' else 'm') + side)
                   shutil.copy2(exe, saved)
                   proof = dict(executable_sha256=sha(saved), source_root=str(tree),
                                cargo_executable=str(exe), source_file_hashes=actual,
                                rustc_vv=check_output(['rustc', '-Vv'], cwd=tree, env=env, text=True),
                                cargo_v=check_output(['cargo', '-V'], cwd=tree, env=env, text=True),
-                               command=command, feature_args=[],
+                               command=command, feature_args=[], clean_command=clean_command,
                                environment={k: env.get(k) for k in ['CARGO_INCREMENTAL', 'CARGO_TARGET_DIR',
                                             'CARGO_BUILD_JOBS', 'RUSTFLAGS', 'RUSTUP_TOOLCHAIN',
                                             'CARGO_ENCODED_RUSTFLAGS', 'TOKIO_WORKER_THREADS']})

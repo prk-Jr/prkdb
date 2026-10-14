@@ -338,6 +338,14 @@ def collect_manifest(args,record_runtime=False,deadline=None):
             artifacts=[m for m in messages if m.get('reason')=='compiler-artifact' and m.get('target',{}).get('name')=='wal_write_path'
                        and 'bench' in m.get('target',{}).get('kind',[]) and m.get('executable')]
             require(len(artifacts)==1 and artifacts[0]['executable']==proof.get('cargo_executable'),'benchmark artifact identity differs')
+            require(artifacts[0].get('fresh') is False,'benchmark must be recompiled; compiler artifact fresh must be false')
+            if variant=='marked':
+                clean=['cargo','clean','-p','prkdb','--release','--target-dir',str(Path(proof['source_root'])/'target')]
+                require(proof.get('clean_command')==clean,'marked package clean command differs from owned source target')
+                clean_paths={suffix:member(evidence/f'build-{key}.clean.{suffix}') for suffix in ('stdout','stderr','exit')}
+                require(clean_paths['exit'].read_text().strip()=='0','marked package clean exit unqualified')
+            else:
+                require('clean_command' in proof and proof['clean_command'] is None,'original build clean provenance must be explicit none')
             target=artifacts[0]['target']
             require(target.get('kind')==['bench'] and target.get('crate_types')==['bin'] and target.get('test') is False and
                     Path(target.get('src_path','')).resolve()==(Path(proof['source_root'])/OVERLAY_FILES[0]).resolve(),
@@ -371,6 +379,9 @@ def collect_manifest(args,record_runtime=False,deadline=None):
         env=dict(p['environment']);env.pop('CARGO_TARGET_DIR',None);common_env.append(env)
     require(all(e==common_env[0] for e in common_env),'build environment differs across sources/variants')
     require(len({item['path'] for item in manifest['binaries'].values()})==4,'four distinct retained executable paths required')
+    for side in SOURCES:
+        require(manifest['binaries']['original-'+side.lower()]['sha256']!=manifest['binaries']['marked-'+side.lower()]['sha256'],
+                'marked executable must differ from original executable for each source')
     return manifest
 
 
@@ -674,14 +685,23 @@ def validate_observations(metadata,events,source,repetition,pid):
                 limits='Sync elapsed overlaps kernel/scheduler waits. Total minus write/sync is a mixed residual, never queue residence.')
 
 
+def cpu_script_fields(callchains=False):
+    # perf-script's documented event-type prefixes keep RAW trace payloads on
+    # tracepoints, without requesting the invalid trace field on software CPU
+    # events. Independent -F requests preserve both kinds in one recording.
+    common='comm,pid,tid,cpu,time,event'
+    software=common+(',ip,sym,dso' if callchains else '')
+    return ['-F','sw:'+software,'-F','trace:'+common+',trace']
+
+
 def render_commands(category,directory):
     data=str(Path(directory)/f'{category}.data')
-    fields='comm,pid,tid,cpu,time,event'+(',trace' if category!='cpu' else '')
-    commands={'script':['perf','script','-i',data,'--ns','--show-task-events','--hide-call-graph','-F',fields],
+    fields=cpu_script_fields() if category=='cpu' else ['-F','comm,pid,tid,cpu,time,event,trace']
+    commands={'script':['perf','script','-i',data,'--ns','--show-task-events','--hide-call-graph',*fields],
               'attributes':['perf','evlist','-i',data,'-v'],
               'raw-events':['perf','script','-i',data,'-D']}
     if category=='cpu':
-        commands['callchains']=['perf','script','-i',data,'--ns','-F','comm,pid,tid,cpu,time,event,ip,sym,dso']
+        commands['callchains']=['perf','script','-i',data,'--ns',*cpu_script_fields(True)]
     return commands
 
 
@@ -717,7 +737,7 @@ def cpu_window_commands(directory,pid,window):
     return dict(report=['perf','report','-i',data,'--stdio','--no-children','--sort','dso,symbol',
                         '--pid',str(pid),'--time',bounds,'--percentage','relative','--percent-limit','0'],
                 callchains=['perf','script','-i',data,'--ns','--pid',str(pid),'--time',bounds,
-                            '-F','comm,pid,tid,cpu,time,event,ip,sym,dso'])
+                            *cpu_script_fields(True)])
 
 
 def measured_cpu_quality(report,chains,count):

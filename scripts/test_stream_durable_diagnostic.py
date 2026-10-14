@@ -30,6 +30,62 @@ class DurableDiagnosticTests(unittest.TestCase):
                 rows.append(f'| {cell} | 1 | 1 KiB | 1000 | 1.0 | 10 | 20 | 30 | 1000 | 1.39 1.61 1.45 |')
         return '\n'.join(rows)
 
+    def test_mixed_cpu_renderer_preserves_tracepoint_bodies_by_event_type(self):
+        commands=d.render_commands('cpu','/tmp/capture')
+        script=commands['script']
+        fields=[script[i+1] for i,w in enumerate(script[:-1]) if w=='-F']
+        self.assertEqual(fields,['sw:comm,pid,tid,cpu,time,event','trace:comm,pid,tid,cpu,time,event,trace'])
+        self.assertIn('--show-task-events',script);self.assertIn('--hide-call-graph',script)
+        for command in (commands['callchains'],d.cpu_window_commands('/tmp/capture',22569,[878356198624,878767589583])['callchains']):
+            typed=[command[i+1] for i,w in enumerate(command[:-1]) if w=='-F']
+            self.assertEqual(typed,['sw:comm,pid,tid,cpu,time,event,ip,sym,dso','trace:comm,pid,tid,cpu,time,event,trace'])
+            self.assertNotIn('--hide-call-graph',command)
+        # Exact retained native exec prefix from failed run38569346117; its raw
+        # event retained the filename/PID which render-script omitted.
+        body='filename=/home/runner/work/_temp/stream-durable-evidence/run/wal-diag-smoke pid=22569 old_pid=22569'
+        header='  wal-diag-smoke   22569/22569   [000]   878.356198624: sched:sched_process_exec: '
+        row=d.legacy.parse_records(header+body,True)[0]
+        self.assertEqual(row['fields']['filename'],'/home/runner/work/_temp/stream-durable-evidence/run/wal-diag-smoke')
+        self.assertEqual(row['fields']['pid'],'22569')
+        missing=d.legacy.parse_records(header,True)[0]
+        self.assertEqual(missing['fields'],{})
+
+    def test_archived_cpu_mixed_trace_has_complete_native_lifetimes(self):
+        # Retained run38569346117 nanosecond prefixes plus trace payloads decoded
+        # from its raw-events export. This is an offline parser fixture, not a
+        # new perf recording or live qualification of the repaired command.
+        binary='/home/runner/work/_temp/stream-durable-evidence/run/wal-diag-smoke'
+        rows=[
+            'wal-diag-smoke 22569/22569 [000] 878.356110820: PERF_RECORD_COMM exec: wal-diag-smoke:22569/22569',
+            f'wal-diag-smoke 22569/22569 [000] 878.356198624: sched:sched_process_exec: filename={binary} pid=22569 old_pid=22569',
+            'wal-diag-smoke 22569/22569 [000] 878.363512303: cpu-clock:u: ',
+            'wal-diag-smoke 22569/22569 [000] 878.408963813: task:task_rename: oldcomm=wal-diag-smoke newcomm=wal-diag-smoke oom_score_adj=500',
+            'wal-diag-smoke 22569/22569 [000] 878.408972880: PERF_RECORD_COMM: wal-diag-smoke:22569/22569',
+            'wal-diag-smoke 22569/22569 [000] 878.409300793: PERF_RECORD_FORK(22569:22571):(22569:22569)',
+            'wal-diag-smoke 22569/22569 [000] 878.409302897: sched:sched_process_fork: comm=wal-diag-smoke pid=22569 child_comm=wal-diag-smoke child_pid=22571',
+            'wal-diag-smoke 22569/22571 [002] 878.409437233: task:task_rename: oldcomm=wal-diag-smoke newcomm=tokio-smoke oom_score_adj=500',
+            'tokio-smoke 22569/22571 [002] 878.409444206: PERF_RECORD_COMM: tokio-smoke:22569/22571',
+            'tokio-smoke 22569/22571 [002] 878.760492964: task:task_rename: oldcomm=tokio-smoke newcomm=prkdb-wal-smoke oom_score_adj=500',
+            'prkdb-wal-smoke 22569/22571 [002] 878.760501920: PERF_RECORD_COMM: prkdb-wal-smoke:22569/22571',
+            'prkdb-wal-smoke 22569/22571 [002] 878.760874276: sched:sched_process_exit: comm=prkdb-wal-smoke pid=22571 prio=120 group_dead=false',
+            'prkdb-wal-smoke 22569/22571 [002] 878.760882792: PERF_RECORD_EXIT(22569:22571):(22566:22566)',
+            'wal-diag-smoke 22569/22569 [000] 878.767589583: sched:sched_process_exit: comm=wal-diag-smoke pid=22569 prio=120 group_dead=true',
+            'wal-diag-smoke 22569/22569 [000] 878.767600463: PERF_RECORD_EXIT(22569:22569):(22566:22566)',
+        ]
+        result=d.analyze_category('cpu','\n'.join(rows),binary,22569)
+        self.assertEqual(result['cpu_sample_count'],1)
+        self.assertEqual(result['thread_ids'],[22569,22571])
+        self.assertEqual(result['thread_names']['22571'],['wal-diag-smoke','tokio-smoke','prkdb-wal-smoke'])
+        empty=[line.split(': sched:sched_process_exec:')[0]+': sched:sched_process_exec: ' if ': sched:sched_process_exec:' in line else line for line in rows]
+        with self.assertRaisesRegex(s.DiagnosticError,'native exec'):d.analyze_category('cpu','\n'.join(empty),binary,22569)
+
+    def test_mixed_cpu_callchain_quality_uses_software_samples_only(self):
+        chains=sample('878.356198624','sched:sched_process_exec','filename=/tmp/wal-diag-smoke pid=22569 old_pid=22569',pid=22569,tid=22569)
+        chains+=sample('878.363512303','cpu-clock:u','7fff measured_hook (app)',pid=22569,tid=22569)
+        chains+=sample('878.767589583','sched:sched_process_exit','comm=wal-diag-smoke pid=22569 prio=120 group_dead=true',pid=22569,tid=22569)
+        quality=d.cpu_quality("# Samples: 1 of event 'cpu-clock:u'\n 100.00% app [.] measured_hook",chains)
+        self.assertEqual(quality['callchain_sample_count'],1)
+
     def test_retained_linux_syscall_exit_hex_returns_are_signed_and_complete(self):
         # Qualified Linux perf-script output retained in actions-38374274969:
         # sys_exit_write: 0x20; sys_exit_futex/fdatasync: 0x0.
@@ -481,14 +537,18 @@ class DurableDiagnosticTests(unittest.TestCase):
                 key=variant+'-'+side.lower();binary=evidence/key;binary.write_bytes(elf+key.encode());args[key.replace('-','_')]=str(binary)
                 expected=dict(snapshots[side]['source_file_hashes'])
                 if variant=='marked':expected.update({name:s.digest(overlay/name) for name in d.OVERLAY_FILES})
-                artifact=dict(reason='compiler-artifact',executable=str(roots[side]/'target'/key),
+                artifact=dict(reason='compiler-artifact',fresh=False,executable=str(roots[side]/'target'/key),
                               target=dict(name='wal_write_path',kind=['bench'],crate_types=['bin'],test=False,src_path=str(roots[side]/d.OVERLAY_FILES[0])),
                               profile=dict(opt_level='3',debuginfo=0,debug_assertions=False,overflow_checks=False,test=True),features=[])
                 (evidence/f'build-{key}.jsonl').write_text(json.dumps(artifact)+'\n'+json.dumps(dict(reason='build-finished',success=True))+'\n')
                 (evidence/f'build-{key}.stderr').write_text('');(evidence/f'build-{key}.exit').write_text('0\n')
                 proof=dict(command=d.BUILD_COMMAND,feature_args=[],rustc_vv='release: 1.98.1\nhost: x86_64-unknown-linux-gnu',cargo_v='cargo 1.98.1',
                            environment=dict(CARGO_INCREMENTAL='0',RUSTFLAGS=None,CARGO_TARGET_DIR=str(roots[side]/'target')),
-                           source_root=str(roots[side]),source_file_hashes=expected,cargo_executable=artifact['executable'],executable_sha256=s.digest(binary))
+                           source_root=str(roots[side]),source_file_hashes=expected,cargo_executable=artifact['executable'],executable_sha256=s.digest(binary),
+                           clean_command=None if variant=='original' else ['cargo','clean','-p','prkdb','--release','--target-dir',str(roots[side]/'target')])
+                if variant=='marked':
+                    for suffix,contents in [('stdout',''),('stderr','Removed package fixture\n'),('exit','0\n')]:
+                        (evidence/f'build-{key}.clean.{suffix}').write_text(contents)
                 (evidence/f'build-{key}.proof.json').write_text(json.dumps(proof))
         for side in sources:
             for name in d.OVERLAY_FILES:
@@ -513,6 +573,42 @@ class DurableDiagnosticTests(unittest.TestCase):
         quality=d.cpu_quality(report,sample('1.200000000','cpu-clock:u','7fff hook (app)'))
         self.assertEqual(quality['unresolved_weight_pct'],50)
         self.assertEqual(len(quality['symbol_rows']),2)
+
+    def test_archived_stale_marked_artifact_cannot_qualify(self):
+        # Run38569346117: originals fresh=false; both marked artifacts
+        # fresh=true, with unchanged copied executable content.
+        with tempfile.TemporaryDirectory() as tmp:
+            sources,args,library=self.provenance_fixture(Path(tmp))
+            real_run=subprocess.run
+            result=SimpleNamespace(returncode=0,stdout=f'libfixture => {library} (0x0)\n',stderr='')
+            def fixture_run(argv,*pos,**kw):return result if argv[0]=='ldd' else real_run(argv,*pos,**kw)
+            log=Path(args.evidence)/'build-marked-a.jsonl'
+            messages=[json.loads(line) for line in log.read_text().splitlines()];messages[0]['fresh']=True
+            log.write_text('\n'.join(json.dumps(m) for m in messages)+'\n')
+            with patch.dict(d.SOURCES,sources,clear=True),patch.object(d.subprocess,'run',side_effect=fixture_run):
+                with self.assertRaisesRegex(s.DiagnosticError,'fresh|recompiled'):d.build_manifest(args)
+                messages[0]['fresh']=False;log.write_text('\n'.join(json.dumps(m) for m in messages)+'\n')
+                Path(args.marked_a).write_bytes(Path(args.original_a).read_bytes())
+                proof=Path(args.evidence)/'build-marked-a.proof.json';fields=json.loads(proof.read_text())
+                fields['executable_sha256']=s.digest(args.marked_a);proof.write_text(json.dumps(fields))
+                with self.assertRaisesRegex(s.DiagnosticError,'marked.*original|original.*marked'):d.build_manifest(args)
+
+    def test_marked_clean_provenance_is_required_and_scoped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sources,args,library=self.provenance_fixture(Path(tmp))
+            real_run=subprocess.run
+            result=SimpleNamespace(returncode=0,stdout=f'libfixture => {library} (0x0)\n',stderr='')
+            def fixture_run(argv,*pos,**kw):return result if argv[0]=='ldd' else real_run(argv,*pos,**kw)
+            proof=Path(args.evidence)/'build-marked-a.proof.json';saved=proof.read_bytes()
+            with patch.dict(d.SOURCES,sources,clear=True),patch.object(d.subprocess,'run',side_effect=fixture_run):
+                fields=json.loads(saved);fields['clean_command'][-1]='/another/task/target';proof.write_text(json.dumps(fields))
+                with self.assertRaisesRegex(s.DiagnosticError,'clean'):d.build_manifest(args)
+                proof.write_bytes(saved)
+                exit_path=Path(args.evidence)/'build-marked-a.clean.exit';exit_path.write_text('1\n')
+                with self.assertRaisesRegex(s.DiagnosticError,'clean'):d.build_manifest(args)
+                exit_path.write_text('0\n')
+                clean_stderr=Path(args.evidence)/'build-marked-a.clean.stderr';clean_stderr.unlink()
+                with self.assertRaises(s.DiagnosticError):d.build_manifest(args)
 
     def test_archived_cargo_harness_false_bench_artifact_contract(self):
         # Exact target/profile shape retained from the qualified Linux artifact:
