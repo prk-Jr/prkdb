@@ -1,7 +1,7 @@
 # Durable append diagnostic: bounded proposal
 
 Date: 2026-10-14. Status: approved by maintainer on 2026-10-14; exact scope, workflow overlap and one bounded dispatch authorized.
-Readiness: implementation in progress; no new diagnostic timing or merge.
+Readiness: sole finite cycle closed as inconclusive; local corrections need fresh Linux qualification. No new database timing or merge.
 
 ## Question and evidence
 
@@ -191,3 +191,19 @@ separately authorized scope. No perf_note exception, weakened gate or production
 qualification. Final report all outcomes/exact identities, limitations, unresolved
 follow-ups with destination and acceptance; clean only this task's cache/worktree
 once no reviewer needs it. Preserve branches/binaries/raw evidence.
+
+
+## 2026-10-14 execution disposition
+
+The sole approved run38569346117 at859b525 failed before any DB invocation;
+CPU rendering omitted recorded exec payloads. Marked Cargo builds also reused
+original executables. The retained failure prefix is independently audited.
+Local repair requires event-type-specific CPU/lifecycle rendering, explicit
+marked-package release-cache invalidation with retained own-target proof,
+`fresh:false` compiler artifacts and different original/marked ELF contents.
+These strengthen the existing compilation/qualification contract without
+changing timings, checks, budgets or the consumed one-run authorization.
+
+No repeat push or dispatch is authorized. Original performance losses remain
+open. Actual Linux qualification of the corrections and complete lifecycle
+coverage is outstanding. See the task decision and ignored verification report.

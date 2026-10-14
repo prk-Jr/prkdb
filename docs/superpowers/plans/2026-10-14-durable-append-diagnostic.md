@@ -33,9 +33,33 @@ Files: .github/workflows/remediation-gate.yml; task spec/plan/decision.
 Commit: ci: run finite Durable append diagnosis on Linux.
 
 ## Task4: evidence and close
-- [ ] One milestone push and one dispatch approved, immutable A/B sourceSHAs from Git. Wait for actual completion, no reruns on failure.
-- [ ] Download all artifacts and verify source/overlay/binary/exit/clock/resource/row/cap/loss/ownership inventories; independent evidence review.
-- [ ] Document complete or prefix/inconclusive outcome in task decision and ignored evidence/report; update handoff per commit.
-- [ ] Keep CRC/task source losses unresolved absent accepted cause; no merge/exception/R2 qualification.
-- [ ] Clean only own target/worktree when reviewers no longer need it; retain branch/evidence/executables.
+- [x] One milestone push and one dispatch approved, immutable A/B sourceSHAs from Git. Wait for actual completion, no reruns on failure.
+- [x] Download all artifacts and verify source/overlay/binary/exit/clock/resource/row/cap/loss/ownership inventories; independent evidence review.
+- [x] Document complete or prefix/inconclusive outcome in task decision and ignored evidence/report; update handoff per commit.
+- [x] Keep CRC/task source losses unresolved absent accepted cause; no merge/exception/R2 qualification.
+- [x] Clean own target and retain branch/evidence/executables; remove the clean source worktree after the final report commit, recording that post-commit action in the handoff.
 Commit: docs: record bounded Durable append diagnostic findings.
+
+
+## Sole-cycle result and local corrections
+
+Run38569346117 at859b525 failed before DB benchmarks: zero calls/rows,
+`missing exact native exec`, inconclusive. Independent audit confirms CPU raw
+events contain the exec while its rendered lifecycle body is empty. Both marked
+Cargo artifacts are `fresh:true` and match their originals byte for byte.
+
+Test-first local corrections preserve all budgets/checks: render CPU software
+and tracepoint fields separately by event type; invalidate only the marked
+source package's release artifacts with its explicit own target; save clean
+logs; require `fresh:false` and different original/marked contents. The actual
+failed run and published milestone are immutable. Local fixes have not been
+pushed or live-qualified; no second push/dispatch is authorized.
+
+Future follow-ups require separately approved scope:
+- Exact CPU/lifecycle/callchain qualification on Linux, including the inherited
+  lifecycle frequency/DWARF configuration concern. No event loss is proved here.
+- Fresh marked compiles with retained clean provenance and actual Linux identity.
+- Original Durable loss investigation after qualification, without a waiver.
+
+See decision `docs/remediation/decisions/2026-10-14-durable-append-diagnostic.md`
+and ignored verification `REPORT.md` / `NEXT.md` for evidence and acceptance.
