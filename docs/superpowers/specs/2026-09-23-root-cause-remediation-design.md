@@ -548,6 +548,7 @@ No unrelated refactoring.
 
 | Rev | Date | Change |
 |---|---|---|
+| 35 | 2026-10-14 | Maintainer approved Task 2.15b.6 bounded stream-only CRC metadata seek: at most 1,873 logical17-byte header fetches /31,841 header bytes, zero payload reads, retention-guarded generation-zero handles; replaces the one-header promise. Commit and resume costs require measurement; all performance/recovery gates remain unchanged. No consumer or EVT-07 closure. |
 | 34 | 2026-10-13 | Execution: Task 2.15b.6 offset codec Step 1 verified; EVT-08 fixed with API error-class regressions; production-path consumer-position fuzz coverage added to TST-07 without changing limits. EVT-07 and consumer resume remain open. |
 | 1 | 2026-09-23 | Initial spec from the 2026-09-23 audits and the 2026-09-07 review; decisions D1–D9 (D9: publishing policy). |
 | 2 | 2026-09-23 | Spec review pass 1: `Vfs` seam defined in Phase 1, WAL routed through it in 2a; per-area `verified`; tripwires instead of expected-failure lists; single-phase IDs (DOC-11, DOC-12, TST-05..07 split out); harness op profiles per phase (§7.1); Fast mode from 2a; commit-based workflow with phase-PR CI sequence; private backup repo with Actions off; storage-compat timing; single globally ordered WAL; like-for-like Raft gate; madsim budget; DOC-11 interim wording. |

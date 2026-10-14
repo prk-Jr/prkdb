@@ -5937,9 +5937,14 @@ Note §7.1–7.3.
 limit and 60-minute job cap). Stable checks invoke the actual public StorageOffsetStore
 parser and roundtrip accepted Positions; legacy, v1, Some(0), max offset and malformed
 cases are required. Nightly fuzz uses scratch corpus, not mutation of committed seeds.
-This independent Step 1 does not resolve the existing §7.3 one-header CRC-reader STOP
-or complete consumer resume/EVT-07. Core changes wait for a maintainer-approved
-resolution of that separate design discrepancy.
+Step 1 does not complete consumer resume/EVT-07. The maintainer approved bounded
+header seek on 2026-10-14, resolving the previous one-header cost STOP with all
+performance/recovery gates unchanged. Before Steps 2/3, implement the prerequisite
+in `2026-10-14-bounded-stream-header-seek.md`: core `wal/{log.rs,segment.rs}`, stream
+`{log.rs,index.rs}`, counted core/stream tests and the streaming design update.
+The stopped frame-reuse optimization remains unadopted; only this accessor overlap
+is authorized. Require quiet matched full Criterion cells, counted1873/31841 bounds,
+retention/cap/extent/generation controls and independent reviews.
 
 - [x] **Step 1 (*before Task 2.24*): versioned offset record.**
   - `StorageOffsetStore` writes `version u8 (=1) | offset u64 | check_kind u8 | check u32`.

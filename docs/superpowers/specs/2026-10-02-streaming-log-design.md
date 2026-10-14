@@ -468,18 +468,43 @@ offsets themselves.
   holds a position that **looks valid** once the log has refilled. It would silently skip
   the new records. Kafka handles the same hazard (truncation after leader change) by
   validating positions against leader epochs. Decided (§13 Q8): for streams, a frame-CRC
-  check, which is cheap:
+  check:
   - A commit stores `(next: EventSeq, last_frame_crc: u32)`: the CRC of the frame holding
     the last consumed record.
   - If the last consumed LSN is below the durable retention floor, its removed frame
     was durable and cannot have been reissued by a Fast power cut. Skip the divergence
     check while retaining the committed next-position range checks. Committing S2.first
     and removing S1 must still resume successfully.
-  - Otherwise on resume, `StreamConsumer` reads that one frame header. A missing frame (past the end)
-    or a different CRC is `StorageError::OffsetDiverged { committed, reason }`, handled like
-    out-of-range (`Error` by default).
-  - In `Durable` mode the check always passes (acked = durable). It costs one header read
-    per partition per consumer start.
+  - Otherwise on resume, `StreamConsumer` performs a bounded header-only seek to the
+    last consumed frame. Historical absence beyond the captured watermark or a
+    different CRC is `StorageError::OffsetDiverged { committed, reason }`, handled like
+    out-of-range (`Error` by default). Corrupt metadata and I/O errors propagate; they
+    must never become an automatic reset or a successful resume.
+  - Maintainer-approved bound (2026-10-14): the nearest sparse hint is less than
+    65,536 bytes before the target header start. Every hop must be Records with a
+    payload of at least 18 bytes, so the minimum advance is 17 + 18 = 35 bytes.
+    Enforce at most floor(65,535 / 35) + 1 = **1,873 logical header fetches**, or
+    **31,841 header bytes**, per checked position, with **zero payload reads**.
+    An exact hint takes one fetch. Check both span and fetch count before each read;
+    never scan/reopen/re-encode as a fallback. A large frame can extend past the span;
+    its successor is indexed exactly when its start crosses the stride.
+  - This replaces the earlier one-header-read promise. Short reads may split a fetch
+    into several physical calls; one separate length sample checks extents. Logical
+    fetches, physical calls and successful header bytes are distinct metrics. There
+    is no syscall-count or wall-clock guarantee from this bound.
+  - Acquire the retention read guard before selecting floor, fixed acknowledged or
+    durable cap, and sparse hint; retain it through blocking I/O. Release the index
+    lock before I/O. Clone only the selected WAL-owned generation-zero handle, with
+    checked hint identity, offsets, payload lengths and contiguous LSNs. Refuse a
+    missing in-range target, stale hint, rewritten generation, truncated extent or
+    non-Records hop, without fallback. Only outside floor/cap yields absence.
+  - A checked commit also needs this lookup: current `ReadBatch` exposes neither CRC
+    nor exact `RecordLoc`. An exact-location reuse design would need separate review.
+    In `Durable` mode acknowledged consumed frames survive a power cut; header CRC
+    acquisition and resume still incur the bounded lookup cost. This accessor reads
+    stored CRC metadata; it does not verify payload integrity or decode Records
+    versions. Ordinary open/read retain their existing validation and typed
+    unsupported-version errors. All performance and recovery gates remain required.
   - The offset store writes a 14-byte versioned record instead of a bare `Offset`. `StorageOffsetStore` stores
     a small versioned record under the same key: `version u8 (=1) | offset u64 |
     check_kind u8 | check u32`, where `check_kind` 0 means no check (a caller-managed

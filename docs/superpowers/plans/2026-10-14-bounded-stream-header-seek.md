@@ -1,0 +1,23 @@
+# Bounded stream header seek implementation plan
+
+> Follow superpowers:executing-plans, test-first and independent source reviews.
+
+**Goal:** provide a strictly bounded, zero-payload stream CRC metadata accessor.
+**Architecture:** retention-guarded sparse seek, selected immutable WAL-owned handle, stack-buffered header traversal.
+**Tech stack:** Rust, existing VFS/WAL/parking_lot/Tokio; no new dependencies.
+
+User-approved contract: .agents/designs/2.15b.6-bounded-header-seek-proposal.md.
+Exact baseline f2a798413b0575abd6416d23a16f417a45aab70b. Isolated wip-2.15b.6-crc.
+Root owns all edits/builds. Reviewers read-only. No weakening of performance/recovery gates.
+
+1. Quiet baseline cargo bench -p prkdb --bench stream_log -- --save-baseline header-before.
+All existing13 cells, sample counts, writer grids, modes preserved (raw WAL1/16, stream1/100, keyed1/100, tail100). CARGO_INCREMENTAL=0, explicit target, buildjobs2. Preserve exact source SHA + raw output/criterion JSON. No other compiler/test during measurement.
+2. Add public Wal::stream_frame_crc_from(target_lsn,cap,hint:RecordLoc)->Result<Option<u32>,WalError> scaffold + private segment helper scaffold. Scaffolds refuse unsupported operation; runtime RED must show valid actual Records CRC lookup missing. Core tests use counted VfsFile, actual encode_frame, minimum18-byte bodies: exacthint1fetch; worst-case1873; beyondstride/hop bound refusal before an extra read; length/LSN/kind/hint/extent/overflow/truncation rejection; split reads with exact bytes; contextual I/O error preserving ErrorKind; no payload/fallback.
+3. Segment helper stack17-byte buffer, capture len once, contiguous LSN expected, validate initial loc payloadlen, offset>=24, hintlsn>=segment and<=target; at every hop payload18..MAX, Records, checked header+payload extents <= capturedfilelen. Loop checks start offset displacement<65536 and fetchcount<1873 BEFORE read. Returns stored header CRC, never claims payload integrity validation. Unknown header kind refused as corrupt metadata, because unsupported-kind classification requires verified CRC (not possible header-only). Existing unsupported Records/version/replay error mapping remains intact. Contextual std::io::Error wrapper preserving originalkind/source into WalError::Io, no new public error variant.
+4. WAL early None ONLY target<floor or target>min(cap,acked). In-range missing segment/hint/target -> CorruptSegment; selected segment must be map.range(..=target).next_back(), require hint.segment equals selected key. Clone exact WAL-owned generation0; drop segment map lock before I/O. Rewritten generation -> Moved with no previous/fallback read. New method documented for Retention append-only Records WAL; refuse other configurations. Raw caller must stabilize retention; Stream wrapper does.
+5. StreamLog::frame_crc(lsn,durable_only:bool) async spawn_blocking. Retention read guard BEFORE floor/cap/index selection through I/O. Capture cap minacked/durable as requested. Out-of-range None. Seek index, drop index lock, call WAL accessor. Expose public documented per-LSN header-only primitive usable by future consumer (no dead unused internal method). STRIDE uses shared segment HEADER_SEEK_STRIDE constant to pin proof. Integration tests cover actual append/reopen storedCRC, caps, retentionfloor, zero payload reads, corrupted-header typed refusals, and deterministic retention race using VFS gate/channels, no sleeps/timeouts widened. Existing append/read implementation unchanged.
+6. Update streaming design7.3 oneheader promise -> approved bounded contract, commit+resume costs, immutable handle/locks/error guarantees and physicalshort-read caveat. Program spec nextrev35, taskplan prerequisite/scope. No ledger closure EVT07, no new finding required for authorized new accessor alone.
+7. Focused GREEN; matched quiet full13-cell Criterion against baseline on same host. Record all cells including adverse/noisy results, baseline+mode+delta in commit body; no positive-only reruns. Full pre-push check (including200seeds/mode), independent spec then quality reviews. New accessor isn't a payloaddecoder; counted fixtures test header arithmetic, existing codecs/fuzz preserved. No new nightlytarget needed for a nonpayload accessor; explain distinction.
+8. Commit small with handoff every commit; integrate reviewed accepted prerequisite, exact tree verification; clean only completed cache/worktree. Whole consumer task remains incomplete until Steps2/3; no production/Linux claims.
+
+Plan review approved read-only against f2a7984. No consumer Steps2/3 implementation or Linux/performance qualification follows from this prerequisite alone.
