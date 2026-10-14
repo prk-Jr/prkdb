@@ -46,6 +46,7 @@
 //!      `SPIKE_REPS` (default 1). (The names predate the rename; CI passes them.)
 
 mod support {
+    pub mod stream_durable_diagnostic;
     pub mod stream_measurement;
     pub mod stream_read_profile;
 }
@@ -60,6 +61,7 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use support::stream_durable_diagnostic::{Diagnostic, ObservedVfs, Session};
 use support::stream_measurement::{
     records_for_append, stream_config, MeasurementWindow, RetentionCounts, StreamCounts,
 };
@@ -189,6 +191,93 @@ async fn run_cell(
         value_size,
         ops: all.len() as u64,
         secs,
+        p50_us: pct(&all, 0.50),
+        p99_us: pct(&all, 0.99),
+        p999_us: pct(&all, 0.999),
+    }
+}
+
+/// Same one-writer t0 selection and payload preparation as run_cell. Only exact b1
+/// selects this separately marked variant; original controls use unmodified sources.
+async fn run_diagnostic_cell(
+    name: String,
+    log: StreamLog,
+    window: MeasurementWindow,
+    diagnostic: Arc<Diagnostic>,
+) -> CellResult {
+    let value: Vec<u8> = (0..1024).map(|i| (i % 251) as u8).collect();
+    let task = tokio::spawn(async move {
+        let mut lat = Vec::with_capacity(1 << 16);
+        let mut i = 0_u64;
+        let mut begun = false;
+        loop {
+            let t0 = Instant::now();
+            if t0 >= window.end || diagnostic.failed() {
+                break;
+            }
+            let phase = u64::from(window.measures(t0));
+            let start_ns = diagnostic.mapped_timestamp(t0);
+            if phase == 1 && !begun {
+                diagnostic.begin_measurement(start_ns);
+                begun = true;
+            }
+            let Some(op) = diagnostic.start_operation(phase, start_ns) else {
+                break;
+            };
+            let key = format!("w{0:03}_k{i:012}", 0).into_bytes();
+            i += 1;
+            let records = records_for_append(key, &value, 1);
+            let append_start_ns = diagnostic.timestamp();
+            // No formatting/record construction or diagnostic bookkeeping between
+            // append-start capture and the original public append call.
+            let result = log.append(records).await;
+            let append_end_ns = diagnostic.timestamp();
+            let elapsed = ns(t0.elapsed());
+            match result {
+                Ok(ack) => diagnostic.finish_operation_at(
+                    op,
+                    append_start_ns,
+                    append_end_ns,
+                    ack.lsn,
+                    ack.count as u64,
+                    0,
+                ),
+                Err(_) => {
+                    diagnostic.finish_operation_at(
+                        op,
+                        append_start_ns,
+                        append_end_ns,
+                        0,
+                        0,
+                        i64::MIN,
+                    );
+                    diagnostic.fail("engine append returned an error");
+                    break;
+                }
+            }
+            if phase == 1 {
+                lat.push(elapsed);
+            }
+        }
+        if begun {
+            diagnostic.end_measurement();
+        } else {
+            diagnostic.fail("no measured operations");
+        }
+        // Finish the delegated operation and close the original engine before export.
+        if log.close().is_err() {
+            diagnostic.fail("engine close returned an error");
+        }
+        lat
+    });
+    let mut all = task.await.expect("diagnostic writer task");
+    all.sort_unstable();
+    CellResult {
+        name,
+        writers: 1,
+        value_size: 1024,
+        ops: all.len() as u64,
+        secs: window.measure.as_secs_f64(),
         p50_us: pct(&all, 0.50),
         p99_us: pct(&all, 0.99),
         p999_us: pct(&all, 0.999),
@@ -564,6 +653,17 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(1);
 
+    let diagnostic_session = Session::from_env().expect("diagnostic configuration");
+    if diagnostic_session.is_some() {
+        assert!(
+            filter == support::stream_durable_diagnostic::CELL
+                && reps == 3
+                && warmup == Duration::from_millis(1000)
+                && measure == Duration::from_millis(3000),
+            "diagnostic requires original exact filter, three repetitions and 1000/3000ms envelope"
+        );
+    }
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -674,7 +774,7 @@ fn main() {
     }
 
     print_stream_header();
-    for _ in 0..reps {
+    for repetition in 0..reps {
         for value_size in [1024usize, 64 * 1024] {
             for writers in [1usize, 64] {
                 for (mode_name, mode) in [("durable", SyncMode::Durable), ("fast", SyncMode::Fast)]
@@ -689,20 +789,63 @@ fn main() {
                         }
                         cell_id += 1;
                         let dir = base.path().join(format!("cell_{cell_id}"));
+                        let observed = diagnostic_session
+                            .as_ref()
+                            .filter(|_| name == support::stream_durable_diagnostic::CELL);
                         let r = rt.block_on(async {
-                            let log = StreamLog::open(stream_config(&dir, mode))
+                            if let Some(session) = observed {
+                                session.diagnostic.reset_cell();
+                                let vfs = Arc::new(ObservedVfs::new(
+                                    Arc::new(StdVfs),
+                                    session.diagnostic.clone(),
+                                ));
+                                let log =
+                                    match StreamLog::open_with_vfs(vfs, stream_config(&dir, mode))
+                                        .await
+                                    {
+                                        Ok(log) => log,
+                                        Err(_) => {
+                                            session
+                                                .diagnostic
+                                                .fail("engine open returned an error");
+                                            let _ = std::fs::remove_dir_all(&dir);
+                                            session
+                                                .diagnostic
+                                                .export(
+                                                    &session
+                                                        .directory
+                                                        .join(format!("rep-{repetition}")),
+                                                    &session.source,
+                                                    repetition,
+                                                    1000,
+                                                    3000,
+                                                )
+                                                .expect("diagnostic failed-open prefix export");
+                                            std::process::exit(1);
+                                        }
+                                    };
+                                run_diagnostic_cell(
+                                    name,
+                                    log,
+                                    MeasurementWindow::new(Instant::now(), warmup, measure),
+                                    session.diagnostic.clone(),
+                                )
                                 .await
-                                .expect("stream open");
-                            let target = Arc::new(Target::Stream { log, batch });
-                            run_cell(
-                                name,
-                                target,
-                                writers,
-                                value_size,
-                                MeasurementWindow::new(Instant::now(), warmup, measure),
-                                None,
-                            )
-                            .await
+                            } else {
+                                let log = StreamLog::open(stream_config(&dir, mode))
+                                    .await
+                                    .expect("stream open");
+                                let target = Arc::new(Target::Stream { log, batch });
+                                run_cell(
+                                    name,
+                                    target,
+                                    writers,
+                                    value_size,
+                                    MeasurementWindow::new(Instant::now(), warmup, measure),
+                                    None,
+                                )
+                                .await
+                            }
                         });
                         print_stream_row(
                             &r,
@@ -712,6 +855,21 @@ fn main() {
                             },
                         );
                         let _ = std::fs::remove_dir_all(&dir);
+                        if let Some(session) = observed {
+                            session
+                                .diagnostic
+                                .export(
+                                    &session.directory.join(format!("rep-{repetition}")),
+                                    &session.source,
+                                    repetition,
+                                    1000,
+                                    3000,
+                                )
+                                .expect("diagnostic prefix export");
+                            if session.diagnostic.failed() {
+                                std::process::exit(1);
+                            }
+                        }
                     }
                 }
             }
