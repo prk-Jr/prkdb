@@ -441,7 +441,11 @@ fn virtual_payload_extent_overflow_is_refused_after_one_header() {
 }
 #[tokio::test]
 async fn wal_refuses_keyed_mode_before_header_lookup() {
-    for retention in [false, true] {
+    for (front_release, append_kind) in [
+        (FrontRelease::ElidedOnly, FrameKind::Batch),
+        (FrontRelease::Retention, FrameKind::Batch),
+        (FrontRelease::ElidedOnly, FrameKind::Records),
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let cfg = WalConfig {
             log_dir: dir.path().into(),
@@ -449,9 +453,8 @@ async fn wal_refuses_keyed_mode_before_header_lookup() {
         };
         let probe = WalProbeFs::default();
         let mut opts = WalOptions::from_config(&cfg);
-        if retention {
-            opts.front_release = FrontRelease::Retention;
-        }
+        opts.front_release = front_release;
+        opts.append_kind = append_kind;
         let (wal, _) = Wal::open(
             Arc::new(probe.clone()),
             dir.path(),
