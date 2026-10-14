@@ -155,7 +155,7 @@ Different recorder invocations cannot be added as one operation's critical path.
 
 ## Caps and interpretation
 
-One nonresetting 20-minute native/smoke/render budget, 120-second per invocation,
+One nonresetting 20-minute aggregate budget: at most 19 minutes for native/smoke/render work, reserving one minute for contained ownership repair, final metadata, inventory and post-write byte accounting. Every invocation is at most 120 seconds,
 and 90-minute total workflow cap including builds/checks. Remaining aggregate
 budget bounds each operation. CPU64MiB, syscall128MiB, scheduler128MiB raw per
 capture; 1GiB total raw, 512MiB per rendered file/2GiB rendered total. Diagnostic
