@@ -3,7 +3,7 @@
 use prkdb_core::wal::{Lsn, RecordLoc};
 use std::collections::BTreeMap;
 
-const STRIDE: u64 = 64 * 1024;
+const STRIDE: u64 = prkdb_core::wal::segment::STREAM_HEADER_SEEK_STRIDE;
 
 #[derive(Default)]
 struct SegmentIndex {

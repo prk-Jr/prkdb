@@ -243,6 +243,7 @@ struct Shared {
     acked_tx: watch::Sender<Lsn>,
     /// Fixed at open (see [`WalOptions::front_release`]).
     front_release: FrontRelease,
+    append_kind: FrameKind,
     health: RwLock<InternalHealth>,
     /// Read handles for `read`/`scan_from`, keyed by each segment's first LSN. Written by
     /// the writer thread (a roll adds the new active segment) and by compaction (a
@@ -678,6 +679,7 @@ impl Wal {
             acked_lsn: AtomicU64::new(next_lsn.saturating_sub(1)),
             acked_tx: watch::Sender::new(next_lsn.saturating_sub(1)),
             front_release: opts.front_release,
+            append_kind: opts.append_kind,
             health: RwLock::new(InternalHealth::Running),
             segments: RwLock::new(segments),
             removed_below: AtomicU64::new(0),
@@ -923,6 +925,67 @@ impl Wal {
             }
             other => other,
         }
+    }
+
+    /// Stored CRC lookup for an append-only Records WAL, bounded by the sparse hint.
+    ///
+    /// `None` means only below the durable retention floor or above `min(cap,acked)`.
+    /// In-range missing/invalid metadata is an error. The caller must stabilize
+    /// retention through this synchronous operation (StreamLog holds its guard).
+    /// Clone the selected WAL-owned generation-zero handle and release its map lock
+    /// before header I/O. Refuse rewritten generations, never retry/reopen/fallback.
+    /// This does not validate payload integrity; see `segment::read_stream_frame_crc`.
+    pub fn stream_frame_crc_from(
+        &self,
+        target: Lsn,
+        cap: Lsn,
+        hint: RecordLoc,
+    ) -> Result<Option<u32>, WalError> {
+        if self.shared.front_release != FrontRelease::Retention
+            || self.shared.append_kind != FrameKind::Records
+        {
+            return Err(WalError::Corruption(
+                "stream header lookup requires an append-only Records WAL".into(),
+            ));
+        }
+        if target < self.log_state().log_start || target > cap.min(self.acked_lsn()) {
+            return Ok(None);
+        }
+        let path = self.shared.dir.join(segment_file_name(hint.segment));
+        let handle =
+            {
+                let segments = self
+                    .shared
+                    .segments
+                    .read()
+                    .map_err(|_| WalError::Poisoned("segment handle map poisoned".into()))?;
+                let (first, handle) = segments.range(..=target).next_back().ok_or_else(|| {
+                    WalError::CorruptSegment {
+                        path: path.clone(),
+                        offset: hint.offset,
+                        reason: "no segment for in-range stream lsn".into(),
+                    }
+                })?;
+                if *first != hint.segment {
+                    return Err(WalError::CorruptSegment {
+                        path,
+                        offset: hint.offset,
+                        reason: format!(
+                            "hint segment {} differs from selected segment {first}",
+                            hint.segment
+                        ),
+                    });
+                }
+                handle.clone()
+            };
+        if handle.generation != 0 {
+            return Err(WalError::Moved {
+                path,
+                offset: hint.offset,
+                lsn: hint.lsn,
+            });
+        }
+        crate::wal::segment::read_stream_frame_crc(&*handle.file, &path, hint, target).map(Some)
     }
 
     /// Visits acked frames with lsn >= `from`, in order (reads through `Vfs`). "Acked"

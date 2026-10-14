@@ -422,6 +422,154 @@ pub fn read_frame(file: &dyn VfsFile, path: &Path, loc: RecordLoc) -> Result<Vec
     }
 }
 
+/// Stream sparse hints are inserted when their header starts cross this stride.
+pub const STREAM_HEADER_SEEK_STRIDE: u64 = 64 * 1024;
+/// Hard logical-fetch limit: each Records frame advances at least 17 + 18 bytes.
+pub const STREAM_HEADER_SEEK_MAX_FETCHES: usize = ((STREAM_HEADER_SEEK_STRIDE - 1)
+    / (FRAME_HEADER_LEN + crate::wal::records::RECORDS_HEADER_LEN) as u64
+    + 1) as usize;
+
+#[derive(Debug, thiserror::Error)]
+#[error("stream header lookup in {path} at byte {offset}: {source}")]
+struct HeaderLookupIo {
+    path: std::path::PathBuf,
+    offset: u64,
+    #[source]
+    source: io::Error,
+}
+
+/// Read the stored CRC of a Records frame, fetching only 17-byte headers.
+///
+/// Requires a validated sparse hint and immutable, generation-zero WAL-owned handle
+/// (see `Wal::stream_frame_crc_from`). This is metadata lookup, not authentication of
+/// arbitrary file offsets or payload integrity/version validation. The target's
+/// header start must be <65,536 bytes after the hint. Enforces at most 1,873 logical
+/// fetches /31,841 header bytes, no payload I/O or fallback. Short reads may split a
+/// fetch into several calls; file length is sampled separately once.
+pub fn read_stream_frame_crc(
+    file: &dyn VfsFile,
+    path: &Path,
+    hint: RecordLoc,
+    target: Lsn,
+) -> Result<u32, WalError> {
+    let corrupt = |offset, reason: String| WalError::CorruptSegment {
+        path: path.to_path_buf(),
+        offset,
+        reason,
+    };
+    let contextual_io = |offset, source: io::Error| {
+        WalError::Io(io::Error::new(
+            source.kind(),
+            HeaderLookupIo {
+                path: path.to_path_buf(),
+                offset,
+                source,
+            },
+        ))
+    };
+    if hint.segment == 0
+        || hint.lsn < hint.segment
+        || hint.lsn > target
+        || hint.offset < SEGMENT_HEADER_LEN
+    {
+        return Err(corrupt(
+            hint.offset,
+            "invalid stream header hint identity".into(),
+        ));
+    }
+    let file_len = file.len().map_err(|e| contextual_io(hint.offset, e))?;
+    let mut offset = hint.offset;
+    let mut expected = hint.lsn;
+    for _ in 0..STREAM_HEADER_SEEK_MAX_FETCHES {
+        if offset - hint.offset >= STREAM_HEADER_SEEK_STRIDE {
+            return Err(corrupt(
+                offset,
+                "stream header hint exceeds sparse seek span".into(),
+            ));
+        }
+        let header_end = offset
+            .checked_add(FRAME_HEADER_LEN as u64)
+            .ok_or_else(|| corrupt(offset, "stream header extent overflow".into()))?;
+        if header_end > file_len {
+            return Err(corrupt(
+                offset,
+                "stream header extends past captured file length".into(),
+            ));
+        }
+        let mut header = [0u8; FRAME_HEADER_LEN];
+        let read = read_full(file, offset, &mut header).map_err(|e| contextual_io(offset, e))?;
+        if read != FRAME_HEADER_LEN {
+            return Err(corrupt(
+                offset,
+                format!("only {read} bytes of stream frame header"),
+            ));
+        }
+        let len = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+        if len as usize > MAX_PAYLOAD_LEN {
+            return Err(WalError::RecordTooLarge {
+                path: path.to_path_buf(),
+                len: len as usize,
+                max: MAX_PAYLOAD_LEN,
+            });
+        }
+        if (len as usize) < crate::wal::records::RECORDS_HEADER_LEN {
+            return Err(corrupt(
+                offset,
+                format!("Records payload length {len} is shorter than its header"),
+            ));
+        }
+        if offset == hint.offset && len != hint.payload_len {
+            return Err(corrupt(
+                offset,
+                format!(
+                    "stream hint payload length {} does not match header {len}",
+                    hint.payload_len
+                ),
+            ));
+        }
+        let lsn = u64::from_le_bytes([
+            header[8], header[9], header[10], header[11], header[12], header[13], header[14],
+            header[15],
+        ]);
+        if lsn != expected {
+            return Err(corrupt(
+                offset,
+                format!("expected stream lsn {expected}, found {lsn}"),
+            ));
+        }
+        if header[16] != FrameKind::Records as u8 {
+            // Unknown kinds cannot be called UnsupportedFormat without verifying a
+            // payload CRC. This unchecked header is corrupt stream metadata.
+            return Err(corrupt(
+                offset,
+                format!("expected Records header, found kind {}", header[16]),
+            ));
+        }
+        let frame_end = header_end
+            .checked_add(u64::from(len))
+            .ok_or_else(|| corrupt(offset, "stream payload extent overflow".into()))?;
+        if frame_end > file_len {
+            return Err(corrupt(
+                offset,
+                "stream payload extends past captured file length".into(),
+            ));
+        }
+        if lsn == target {
+            return Ok(u32::from_le_bytes([
+                header[4], header[5], header[6], header[7],
+            ]));
+        }
+        offset = frame_end;
+        expected = expected
+            .checked_add(1)
+            .ok_or_else(|| corrupt(offset, "stream lsn overflow".into()))?;
+    }
+    Err(corrupt(
+        offset,
+        "stream header hint exceeds logical fetch limit".into(),
+    ))
+}
+
 /// Reads up to `buf.len()` bytes at `offset`, looping over short reads; returns how many
 /// bytes were read (fewer only at the end of the file).
 fn read_full(file: &dyn VfsFile, offset: u64, buf: &mut [u8]) -> io::Result<usize> {

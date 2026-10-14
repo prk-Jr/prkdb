@@ -208,6 +208,49 @@ impl StreamLog {
         })
     }
 
+    /// Read stored CRC metadata for a frame LSN, using a bounded sparse header seek.
+    /// `durable_only` selects the acknowledged, synced prefix; otherwise Fast-acked
+    /// frames are eligible. Absence means below retention or above that fixed cap.
+    /// At most 1,873 logical17-byte header fetches /31,841 bytes, no payload reads;
+    /// physical short-read calls and one file-length sample are separate costs.
+    /// This is not payload integrity/version verification. Corrupt metadata and
+    /// I/O failures propagate. A checked consumer commit and resume each need a lookup.
+    pub async fn frame_crc(
+        &self,
+        lsn: u64,
+        durable_only: bool,
+    ) -> Result<Option<u32>, StorageError> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            // Acquire before floor/cap/hint selection, including after pool queueing.
+            // A cancelled caller leaves this worker and guard alive until I/O settles.
+            let _retained = inner.retention_lock.read();
+            let floor = inner.wal.log_state().log_start;
+            let acked = inner.wal.acked_lsn();
+            let cap = if durable_only {
+                inner.wal.durable_lsn().min(acked)
+            } else {
+                acked
+            };
+            if lsn < floor || lsn > cap {
+                return Ok(None);
+            }
+            let hint = inner.index.read().seek(lsn).ok_or_else(|| {
+                StorageError::Corruption(format!(
+                    "{}: no sparse hint for in-range stream lsn {lsn}",
+                    inner.cfg.path.display()
+                ))
+            })?;
+            // The temporary index guard above is gone before the synchronous accessor.
+            inner
+                .wal
+                .stream_frame_crc_from(lsn, cap, hint)
+                .map_err(wal_err)
+        })
+        .await
+        .map_err(|e| StorageError::Internal(format!("stream header lookup task: {e}")))?
+    }
+
     /// Read from a frozen acknowledged watermark. Fast records can still be lost on
     /// power failure. Returned positions follow `last_record.offset + 1`.
     pub async fn read_from(
@@ -432,5 +475,214 @@ impl StreamLog {
                 result
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod header_seek_tests {
+    use super::*;
+    use prkdb_core::vfs::{OpenMode, VfsFile};
+    use std::{
+        io,
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicBool, Ordering},
+    };
+    #[derive(Default)]
+    struct Gate {
+        armed: AtomicBool,
+        entered: tokio::sync::Notify,
+        released: parking_lot::Mutex<bool>,
+        ready: parking_lot::Condvar,
+    }
+    impl Gate {
+        fn release(&self) {
+            *self.released.lock() = true;
+            self.ready.notify_all();
+        }
+    }
+    struct Release(Arc<Gate>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+    struct GateFs(Arc<Gate>);
+    struct GateFile(Arc<dyn VfsFile>, Arc<Gate>);
+    impl VfsFile for GateFile {
+        fn read_at(&self, o: u64, b: &mut [u8]) -> io::Result<usize> {
+            if self.1.armed.load(Ordering::SeqCst) {
+                self.1.entered.notify_one();
+                let mut released = self.1.released.lock();
+                while !*released {
+                    self.1.ready.wait(&mut released);
+                }
+            }
+            self.0.read_at(o, b)
+        }
+        fn write_at(&self, o: u64, b: &[u8]) -> io::Result<()> {
+            self.0.write_at(o, b)
+        }
+        fn len(&self) -> io::Result<u64> {
+            self.0.len()
+        }
+        fn set_len(&self, n: u64) -> io::Result<()> {
+            self.0.set_len(n)
+        }
+        fn sync_data(&self) -> io::Result<()> {
+            self.0.sync_data()
+        }
+    }
+    impl Vfs for GateFs {
+        fn open(&self, p: &Path, m: OpenMode) -> io::Result<Arc<dyn VfsFile>> {
+            Ok(Arc::new(GateFile(StdVfs.open(p, m)?, self.0.clone())))
+        }
+        fn create(&self, p: &Path) -> io::Result<Arc<dyn VfsFile>> {
+            Ok(Arc::new(GateFile(StdVfs.create(p)?, self.0.clone())))
+        }
+        fn rename(&self, p: &Path, q: &Path) -> io::Result<()> {
+            StdVfs.rename(p, q)
+        }
+        fn remove(&self, p: &Path) -> io::Result<()> {
+            StdVfs.remove(p)
+        }
+        fn create_dir_all(&self, p: &Path) -> io::Result<()> {
+            StdVfs.create_dir_all(p)
+        }
+        fn read_dir(&self, p: &Path) -> io::Result<Vec<PathBuf>> {
+            StdVfs.read_dir(p)
+        }
+        fn exists(&self, p: &Path) -> io::Result<bool> {
+            StdVfs.exists(p)
+        }
+        fn sync_dir(&self, p: &Path) -> io::Result<()> {
+            StdVfs.sync_dir(p)
+        }
+        fn lock_exclusive(&self, p: &Path) -> io::Result<Box<dyn LockGuard>> {
+            StdVfs.lock_exclusive(p)
+        }
+    }
+    #[tokio::test]
+    async fn crc_lookup_holds_retention_but_releases_index_during_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = Arc::new(Gate::default());
+        let fs = Arc::new(GateFs(gate.clone()));
+        let mut cfg = StreamConfig::new(dir.path());
+        cfg.retention_interval = Duration::ZERO;
+        let log = StreamLog::open_with_vfs(fs, cfg).await.unwrap();
+        log.append(vec![Record {
+            value: vec![1],
+            ..Record::default()
+        }])
+        .await
+        .unwrap();
+        let release = Release(gate.clone());
+        gate.armed.store(true, Ordering::SeqCst);
+        let mut lookup = Box::pin(log.frame_crc(1, false));
+        tokio::select! {_=gate.entered.notified()=>{}, r=&mut lookup=>panic!("lookup bypassed header gate: {r:?}")};
+        assert!(
+            log.inner.retention_lock.try_write().is_none(),
+            "retention must be excluded through I/O"
+        );
+        assert!(
+            log.inner.index.try_write().is_some(),
+            "index must be unlocked before I/O"
+        );
+        // This append needs the index write lock in its commit hook: it must proceed.
+        log.append(vec![Record {
+            value: vec![2],
+            ..Record::default()
+        }])
+        .await
+        .unwrap();
+        gate.release();
+        assert!(lookup.await.unwrap().is_some());
+        drop(release);
+        assert!(log.inner.retention_lock.try_write().is_some());
+        log.close().unwrap();
+    }
+    #[tokio::test]
+    async fn cancelled_crc_lookup_keeps_retention_guard_until_blocking_io_settles() {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = Arc::new(Gate::default());
+        let fs = Arc::new(GateFs(gate.clone()));
+        let mut cfg = StreamConfig::new(dir.path());
+        cfg.retention_interval = Duration::ZERO;
+        let log = StreamLog::open_with_vfs(fs, cfg).await.unwrap();
+        log.append(vec![Record {
+            value: vec![1],
+            ..Record::default()
+        }])
+        .await
+        .unwrap();
+        let release = Release(gate.clone());
+        gate.armed.store(true, Ordering::SeqCst);
+        let mut lookup = Box::pin(log.frame_crc(1, false));
+        tokio::select! {_=gate.entered.notified()=>{},r=&mut lookup=>panic!("lookup bypassed gate: {r:?}")};
+        drop(lookup);
+        assert!(log.inner.retention_lock.try_write().is_none());
+        assert!(log.inner.index.try_write().is_some());
+        gate.release();
+        drop(release);
+        // A blocking write guard is a settlement barrier; no timeout or sleep is needed.
+        let inner = log.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let _settled = inner.retention_lock.write();
+        })
+        .await
+        .unwrap();
+        log.close().unwrap();
+    }
+    #[test]
+    fn queued_crc_lookup_samples_the_floor_after_retention_can_advance() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let mut cfg = StreamConfig::new(dir.path());
+            cfg.wal.segment_bytes = 4096;
+            cfg.wal.compression = prkdb_core::wal::CompressionConfig::none();
+            cfg.retention.max_bytes = Some(0);
+            cfg.retention_interval = Duration::ZERO;
+            let log = StreamLog::open(cfg).await.unwrap();
+            for _ in 0..2 {
+                log.append(vec![Record {
+                    value: vec![7; 3000],
+                    ..Record::default()
+                }])
+                .await
+                .unwrap();
+            }
+            assert_eq!(
+                log.inner.wal.segments().len(),
+                2,
+                "uncompressed fixture must roll a segment"
+            );
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            struct Unblock(Option<std::sync::mpsc::Sender<()>>);
+            impl Drop for Unblock {
+                fn drop(&mut self) {
+                    if let Some(tx) = self.0.take() {
+                        let _ = tx.send(());
+                    }
+                }
+            }
+            let mut unblock = Unblock(Some(release_tx));
+            let blocker = tokio::task::spawn_blocking(move || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            entered_rx.await.unwrap();
+            let mut read = Box::pin(log.frame_crc(1, false));
+            assert!(futures::poll!(&mut read).is_pending());
+            assert_eq!(log.apply_retention().unwrap().segments_removed, 1);
+            unblock.0.take().unwrap().send(()).unwrap();
+            blocker.await.unwrap();
+            assert_eq!(read.await.unwrap(), None);
+            log.close().unwrap();
+        });
     }
 }
