@@ -26,7 +26,7 @@ on:
         required: false
         default: none
         type: choice
-        options: [none, wal-bench, iai, stream-read-profile, stream-read-symbols, stream-durable-diagnostic]
+        options: [none, wal-bench, iai, stream-read-profile, stream-read-symbols, stream-durable-diagnostic, stream-durable-qualification]
       base_ref:
         description: "wal-bench only: also bench this ref first, in the same job"
         required: false
@@ -520,9 +520,9 @@ jobs:
           retention-days: 30
 
   probe-stream-durable-diagnostic:
-    name: Probe — finite Durable append diagnosis (not acceptance)
+    name: Probe — Durable recorder qualification or diagnosis (not acceptance)
     needs: resolve
-    if: ${{ inputs.probe == 'stream-durable-diagnostic' }}
+    if: ${{ inputs.probe == 'stream-durable-diagnostic' || inputs.probe == 'stream-durable-qualification' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -530,6 +530,7 @@ jobs:
       CARGO_BUILD_JOBS: '2'
       PYTHONDONTWRITEBYTECODE: '1'
       TOKIO_WORKER_THREADS: '4'
+      DIAGNOSTIC_MODE: ${{ inputs.probe == 'stream-durable-qualification' && 'qualify' || 'run' }}
     steps:
       - name: Free disk space
         run: |
@@ -571,8 +572,11 @@ jobs:
              scripts/wal_trace_qualification.py scripts/test_wal_trace_qualification.py "$evidence/tooling/scripts/"
           cp .github/workflows/remediation-gate.yml "$evidence/tooling/workflow.yml"
           cp docs/superpowers/specs/2026-10-14-durable-append-diagnostic-design.md \
-             docs/superpowers/plans/2026-10-14-durable-append-diagnostic.md "$evidence/tooling/docs/"
-          echo '**FINITE DIAGNOSTIC — no acceptance, waiver or production qualification**' >> "$GITHUB_STEP_SUMMARY"
+             docs/superpowers/plans/2026-10-14-durable-append-diagnostic.md \
+             docs/superpowers/specs/2026-10-15-durable-append-qualification-design.md \
+             docs/superpowers/plans/2026-10-15-durable-append-qualification.md "$evidence/tooling/docs/"
+          printf '%s\n' "$DIAGNOSTIC_MODE" > "$evidence/authorized-mode.txt"
+          echo '**BOUNDED QUALIFICATION/DIAGNOSTIC — no acceptance, waiver or production qualification**' >> "$GITHUB_STEP_SUMMARY"
           python3 -m unittest discover -s scripts -p 'test_*diagnostic.py' -v             > "$evidence/python-tests.stdout" 2> "$evidence/python-tests.stderr"
           python3 -m unittest discover -s scripts -p test_wal_trace_qualification.py -v             > "$evidence/qualification-tests.stdout" 2> "$evidence/qualification-tests.stderr"
       - name: Build and identify two original and two marked executables
@@ -696,7 +700,7 @@ jobs:
           if time.monotonic() - start > 60 * 60:
               raise SystemExit('insufficient fixed job budget for20minute cycle plus8minute artifact reserve; no native launch')
           PYTIME
-          if python3 scripts/stream_durable_diagnostic.py run             --manifest "$evidence/manifest.json" --output "$evidence/run"             > "$evidence/run.stdout" 2> "$evidence/run.stderr"; then
+          if python3 scripts/stream_durable_diagnostic.py "$DIAGNOSTIC_MODE"             --manifest "$evidence/manifest.json" --output "$evidence/run"             > "$evidence/run.stdout" 2> "$evidence/run.stderr"; then
             cat "$evidence/run.stdout"
           else
             result=$?
@@ -708,7 +712,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: stream-durable-diagnostic-${{ needs.resolve.outputs.sha }}
+          name: stream-durable-${{ inputs.probe == 'stream-durable-qualification' && 'qualification' || 'diagnostic' }}-${{ needs.resolve.outputs.sha }}
           path: |
             ${{ runner.temp }}/stream-durable-evidence/*.txt
             ${{ runner.temp }}/stream-durable-evidence/*.json
