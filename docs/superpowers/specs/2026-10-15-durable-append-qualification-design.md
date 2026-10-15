@@ -84,3 +84,14 @@ clean/build identities, every recorder's attributes/loss/clock/native resources/
 CPU or syscall or scheduler premises, zero DB invocations and final cleanup.
 Record full outcome and unresolved acceptance in decision/report/handoff. Clean
 only this task's cache/worktree after review; retain branch and all evidence.
+
+
+## Execution disposition
+
+2026-10-15: sole job38686445143 at e4c12d5 failed before any database timing.
+Four fresh compiled variants/provenance are verified. Actual CPU settings and
+lifecycle payloads were correct; perf6.17's configured event spelling was refused
+by the parser. Local strict-label fix7aa3424 is tested/reviewed but unpushed and
+not live-qualified. CPU reports and syscall/scheduler qualifications remain open.
+Finite attempt closed inconclusive, original performance hold unchanged. See
+matching decision and ignored evidence REPORT/NEXT. No automatic new job.
