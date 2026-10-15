@@ -19,6 +19,12 @@ import wal_stall_diagnostic as s
 from test_wal_descriptor_diagnostic import traces, sample
 
 
+# Actual run38374274969 evlist prefixes. Remove only old out-of-scope block/read
+# selectors when selecting this task's supported inventory; never alter attributes.
+ARCHIVED_SCHEDULER_ATTRIBUTES = "sched:sched_switch: type: 2 (PERF_TYPE_TRACEPOINT), size: 136, config: 0x117 (sched:sched_switch), { sample_period, sample_freq }: 1, sample_type: IP|TID|TIME|CPU|PERIOD|RAW|IDENTIFIER, read_format: ID|LOST, disabled: 1, sample_id_all: 1, use_clockid: 1, clockid: 1\nsched:sched_wakeup: type: 2 (PERF_TYPE_TRACEPOINT), size: 136, config: 0x119 (sched:sched_wakeup), { sample_period, sample_freq }: 1, sample_type: IP|TID|TIME|CPU|PERIOD|RAW|IDENTIFIER, read_format: ID|LOST, disabled: 1, sample_id_all: 1, use_clockid: 1, clockid: 1\nsched:sched_process_exec: type: 2 (PERF_TYPE_TRACEPOINT), size: 136, config: 0x110 (sched:sched_process_exec), { sample_period, sample_freq }: 1, sample_type: IP|TID|TIME|CPU|PERIOD|RAW|IDENTIFIER, read_format: ID|LOST, disabled: 1, sample_id_all: 1, use_clockid: 1, clockid: 1\nsched:sched_process_fork: type: 2 (PERF_TYPE_TRACEPOINT), size: 136, config: 0x111 (sched:sched_process_fork), { sample_period, sample_freq }: 1, sample_type: IP|TID|TIME|CPU|PERIOD|RAW|IDENTIFIER, read_format: ID|LOST, disabled: 1, sample_id_all: 1, use_clockid: 1, clockid: 1\nsched:sched_process_exit: type: 2 (PERF_TYPE_TRACEPOINT), size: 136, config: 0x114 (sched:sched_process_exit), { sample_period, sample_freq }: 1, sample_type: IP|TID|TIME|CPU|PERIOD|RAW|IDENTIFIER, read_format: ID|LOST, disabled: 1, sample_id_all: 1, use_clockid: 1, clockid: 1\ntask:task_rename: type: 2 (PERF_TYPE_TRACEPOINT), size: 136, config: 0x6b (task:task_rename), { sample_period, sample_freq }: 1, sample_type: IP|TID|TIME|CPU|PERIOD|RAW|IDENTIFIER, read_format: ID|LOST, disabled: 1, sample_id_all: 1, use_clockid: 1, clockid: 1\ndummy:u: type: 1 (PERF_TYPE_SOFTWARE), size: 136, config: 0x9 (PERF_COUNT_SW_DUMMY), { sample_period, sample_freq }: 1, sample_type: IP|TID|TIME|CPU|IDENTIFIER, read_format: ID|LOST, exclude_kernel: 1, exclude_hv: 1, mmap: 1, comm: 1, task: 1, sample_id_all: 1, exclude_guest: 1, mmap2: 1, comm_exec: 1, use_clockid: 1, ksymbol: 1, bpf_event: 1, build_id: 1, clockid: 1\n# Tip: use 'perf evlist --trace-fields' to show fields for tracepoint events"
+ARCHIVED_SYSCALL_ATTRIBUTES = "syscalls:sys_enter_futex: type: 2 (PERF_TYPE_TRACEPOINT), size: 136, config: 0x1bd (syscalls:sys_enter_futex), { sample_period, sample_freq }: 1, sample_type: IP|TID|TIME|ID|CPU|PERIOD|RAW, read_format: ID|LOST, disabled: 1, inherit: 1, mmap: 1, comm: 1, enable_on_exec: 1, task: 1, sample_id_all: 1, mmap2: 1, comm_exec: 1, use_clockid: 1, ksymbol: 1, bpf_event: 1, build_id: 1, clockid: 1\nsyscalls:sys_exit_futex: type: 2 (PERF_TYPE_TRACEPOINT), size: 136, config: 0x1bc (syscalls:sys_exit_futex), { sample_period, sample_freq }: 1, sample_type: IP|TID|TIME|ID|CPU|PERIOD|RAW, read_format: ID|LOST, disabled: 1, inherit: 1, enable_on_exec: 1, sample_id_all: 1, use_clockid: 1, clockid: 1\nsyscalls:sys_enter_read: type: 2 (PERF_TYPE_TRACEPOINT), size: 136, config: 0x30c (syscalls:sys_enter_read), { sample_period, sample_freq }: 1, sample_type: IP|TID|TIME|ID|CPU|PERIOD|RAW, read_format: ID|LOST, disabled: 1, inherit: 1, enable_on_exec: 1, sample_id_all: 1, use_clockid: 1, clockid: 1\nsyscalls:sys_exit_read: type: 2 (PERF_TYPE_TRACEPOINT), size: 136, config: 0x30b (syscalls:sys_exit_read), { sample_period, sample_freq }: 1, sample_type: IP|TID|TIME|ID|CPU|PERIOD|RAW, read_format: ID|LOST, disabled: 1, inherit: 1, enable_on_exec: 1, sample_id_all: 1, use_clockid: 1, clockid: 1\nsyscalls:sys_enter_pread64: type: 2 (PERF_TYPE_TRACEPOINT), size: 136, config: 0x308 (syscalls:sys_enter_pread64), { sample_period, sample_freq }: 1, sample_type: IP|TID|TIME|ID|CPU|PERIOD|RAW, read_format: ID|LOST, disabled: 1, inherit: 1, enable_on_exec: 1, sample_id_all: 1, use_clockid: 1, clockid: 1\nsyscalls:sys_exit_pread64: type: 2 (PERF_TYPE_TRACEPOINT), size: 136, config: 0x307 (syscalls:sys_exit_pread64), { sample_period, sample_freq }: 1, sample_type: IP|TID|TIME|ID|CPU|PERIOD|RAW, read_format: ID|LOST, disabled: 1, inherit: 1, enable_on_exec: 1, sample_id_all: 1, use_clockid: 1, clockid: 1\nsyscalls:sys_enter_write: type: 2 (PERF_TYPE_TRACEPOINT), size: 136, config: 0x30a (syscalls:sys_enter_write), { sample_period, sample_freq }: 1, sample_type: IP|TID|TIME|ID|CPU|PERIOD|RAW, read_format: ID|LOST, disabled: 1, inherit: 1, enable_on_exec: 1, sample_id_all: 1, use_clockid: 1, clockid: 1\nsyscalls:sys_exit_write: type: 2 (PERF_TYPE_TRACEPOINT), size: 136, config: 0x309 (syscalls:sys_exit_write), { sample_period, sample_freq }: 1, sample_type: IP|TID|TIME|ID|CPU|PERIOD|RAW, read_format: ID|LOST, disabled: 1, inherit: 1, enable_on_exec: 1, sample_id_all: 1, use_clockid: 1, clockid: 1\nsyscalls:sys_enter_pwrite64: type: 2 (PERF_TYPE_TRACEPOINT), size: 136, config: 0x306 (syscalls:sys_enter_pwrite64), { sample_period, sample_freq }: 1, sample_type: IP|TID|TIME|ID|CPU|PERIOD|RAW, read_format: ID|LOST, disabled: 1, inherit: 1, enable_on_exec: 1, sample_id_all: 1, use_clockid: 1, clockid: 1\nsyscalls:sys_exit_pwrite64: type: 2 (PERF_TYPE_TRACEPOINT), size: 136, config: 0x305 (syscalls:sys_exit_pwrite64), { sample_period, sample_freq }: 1, sample_type: IP|TID|TIME|ID|CPU|PERIOD|RAW, read_format: ID|LOST, disabled: 1, inherit: 1, enable_on_exec: 1, sample_id_all: 1, use_clockid: 1, clockid: 1\nsyscalls:sys_enter_fsync: type: 2 (PERF_TYPE_TRACEPOINT), size: 136, config: 0x3be (syscalls:sys_enter_fsync), { sample_period, sample_freq }: 1, sample_type: IP|TID|TIME|ID|CPU|PERIOD|RAW, read_format: ID|LOST, disabled: 1, inherit: 1, enable_on_exec: 1, sample_id_all: 1, use_clockid: 1, clockid: 1\nsyscalls:sys_exit_fsync: type: 2 (PERF_TYPE_TRACEPOINT), size: 136, config: 0x3bd (syscalls:sys_exit_fsync), { sample_period, sample_freq }: 1, sample_type: IP|TID|TIME|ID|CPU|PERIOD|RAW, read_format: ID|LOST, disabled: 1, inherit: 1, enable_on_exec: 1, sample_id_all: 1, use_clockid: 1, clockid: 1\nsyscalls:sys_enter_fdatasync: type: 2 (PERF_TYPE_TRACEPOINT), size: 136, config: 0x3bc (syscalls:sys_enter_fdatasync), { sample_period, sample_freq }: 1, sample_type: IP|TID|TIME|ID|CPU|PERIOD|RAW, read_format: ID|LOST, disabled: 1, inherit: 1, enable_on_exec: 1, sample_id_all: 1, use_clockid: 1, clockid: 1\nsyscalls:sys_exit_fdatasync: type: 2 (PERF_TYPE_TRACEPOINT), size: 136, config: 0x3bb (syscalls:sys_exit_fdatasync), { sample_period, sample_freq }: 1, sample_type: IP|TID|TIME|ID|CPU|PERIOD|RAW, read_format: ID|LOST, disabled: 1, inherit: 1, enable_on_exec: 1, sample_id_all: 1, use_clockid: 1, clockid: 1\n# Tip: use 'perf evlist --trace-fields' to show fields for tracepoint events\n"
+
+
 class DurableDiagnosticTests(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(d, 'finite Durable runner has not been implemented')
@@ -205,20 +211,132 @@ class DurableDiagnosticTests(unittest.TestCase):
         for category in ('cpu','syscalls','scheduler'):
             cmd=d.profile_command(category, '/tmp/wal-diag-A', '/tmp/run', '/tmp/proof', 'a'*64)
             self.assertEqual(cmd.count('record'), 1)
+            self.assertIn('-c',cmd);self.assertEqual(cmd[cmd.index('-c')+1],'1')
+            self.assertNotIn('-F',cmd)
             for flag in ('--clockid','--sample-cpu','--timestamp','--switch-events'):
                 self.assertIn(flag, cmd)
             for event in (*d.LIFECYCLE,d.RENAME):
-                self.assertIn(event, cmd)
+                self.assertIn(event+'/call-graph=no/', cmd)
             self.assertNotIn('block:block_rq_issue', cmd)
             if category=='cpu':
-                self.assertIn('dwarf,8192',cmd); self.assertIn('99',cmd)
+                self.assertIn('cpu-clock/freq=99,call-graph=dwarf,stack-size=8192/u',cmd)
+                self.assertIn('--strict-freq',cmd)
+                self.assertNotIn('--call-graph',cmd)
                 self.assertNotIn('syscalls:sys_enter_write',cmd)
             if category=='syscalls':
                 self.assertNotIn('--call-graph',cmd)
-                self.assertIn('syscalls:sys_exit_futex',cmd)
+                self.assertIn('syscalls:sys_exit_futex/call-graph=no/',cmd)
             if category=='scheduler':
                 self.assertIn('-a',cmd)
-                self.assertIn('sched:sched_switch',cmd)
+                self.assertIn('sched:sched_switch/call-graph=no/',cmd)
+
+    def test_cpu_frequency_limit_is_explicit_and_never_tuned(self):
+        self.assertTrue(hasattr(d,'cpu_frequency_limit'),'missing strict per-event frequency precheck')
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'perf_event_max_sample_rate'
+            for value in ('99\n','100000\n'):
+                path.write_text(value)
+                proof=d.cpu_frequency_limit(path)
+                self.assertEqual(proof['requested_hz'],99)
+                self.assertEqual(proof['kernel_max_sample_rate'],int(value))
+                self.assertEqual(path.read_text(),value)
+            for value in ('98','0','-1','unavailable','99 trailing',''):
+                path.write_text(value)
+                with self.subTest(value=value),self.assertRaises(s.DiagnosticError):d.cpu_frequency_limit(path)
+            path.unlink()
+            with self.assertRaises(OSError):d.cpu_frequency_limit(path)
+
+    def attributes(self,category):
+        events=([('cpu-clock:u',1)] if category=='cpu' else
+                [(f'syscalls:sys_{phase}_{name}',2) for name in d.SYSCALLS for phase in ('enter','exit')]
+                if category=='syscalls' else [('sched:sched_switch',2),('sched:sched_wakeup',2)])
+        events += [(name,2) for name in (*d.LIFECYCLE,d.RENAME)]
+        lines=[]
+        for index,(name,kind) in enumerate(events):
+            cpu=kind==1
+            fields='TID|TIME|CPU'+('|IP|CALLCHAIN|REGS_USER|STACK_USER' if cpu else '|RAW')
+            line=(f'{name}: type: {kind}, config: 0, {{ sample_period, sample_freq }}: {99 if cpu else 1}, '
+                  f'sample_type: {fields}, sample_id_all: 1, use_clockid: 1, clockid: 1')
+            if category!='scheduler':line+=', inherit: 1'
+            if cpu:line+=', freq: 1, exclude_kernel: 1, sample_regs_user: 0xff0fff, sample_stack_user: 8192'
+            if index==0:line+=', comm: 1, comm_exec: 1, task: 1'
+            lines.append(line)
+        return lines
+
+    def test_system_attachment_does_not_require_scheduler_inherit_zero(self):
+        # evsel.c1137 uses !opts.no_inherit, independently of system attachment.
+        lines=[line+', inherit: 1' for line in self.attributes('scheduler')]
+        d.validate_category_attributes('scheduler','\n'.join(lines))
+        for bad in ('2','3'):
+            broken=list(lines);broken[0]=broken[0].replace('inherit: 1','inherit: '+bad)
+            with self.assertRaises(s.DiagnosticError):d.validate_category_attributes('scheduler','\n'.join(broken))
+
+    def test_actual_saved_scheduler_dummy_tracks_native_identity(self):
+        d.validate_category_attributes('scheduler',ARCHIVED_SCHEDULER_ATTRIBUTES)
+        # Exact saved dummy:u is software config9, has no RAW payload, and
+        # carries timed tracking. Its global CPU map is qualified separately.
+        for original,replacement in (('config: 0x9','config: 0x0'),('dummy:u: type: 1','dummy:u: type: 2'),
+                                     ('comm_exec: 1','comm_exec: 0'),('exclude_kernel: 1','exclude_kernel: 0')):
+            with self.subTest(field=original),self.assertRaises(s.DiagnosticError):
+                d.validate_category_attributes('scheduler',ARCHIVED_SCHEDULER_ATTRIBUTES.replace(original,replacement))
+        lines=ARCHIVED_SCHEDULER_ATTRIBUTES.splitlines()
+        dummy=next(line for line in lines if line.startswith('dummy:u:'))
+        for category in ('cpu','syscalls'):
+            with self.assertRaises(s.DiagnosticError):
+                d.validate_category_attributes(category,'\n'.join(self.attributes(category)+[dummy]))
+
+    def test_actual_saved_syscall_attributes_preserve_inherited_raw_capture(self):
+        supported={f'syscalls:sys_{phase}_{name}' for name in d.SYSCALLS for phase in ('enter','exit')}
+        lines=[line for line in ARCHIVED_SYSCALL_ATTRIBUTES.splitlines() if line.split(': type:')[0] in supported]
+        self.assertEqual(len(lines),10)
+        # Older syscall recorder had no lifecycle selectors; use their exact
+        # saved scheduler attributes with inherited per-process attachment.
+        lines += [line+', inherit: 1' for line in ARCHIVED_SCHEDULER_ATTRIBUTES.splitlines()
+                  if line.split(': type:')[0] in {*d.LIFECYCLE,d.RENAME}]
+        d.validate_category_attributes('syscalls','\n'.join(lines))
+
+    def test_category_attributes_require_every_event_and_exact_sampling(self):
+        self.assertTrue(hasattr(d,'validate_category_attributes'),'missing category sampling qualification')
+        for category in ('cpu','syscalls','scheduler'):
+            lines=self.attributes(category)
+            d.validate_category_attributes(category,'\n'.join(lines))
+            for index,line in enumerate(lines):
+                mutations=[line.replace('clockid: 1','clockid: 0'),line.replace('TID|TIME|CPU','TID|TIME'),
+                           line.replace('sample_id_all: 1','sample_id_all: 0'),line.replace('type: 2','type: 1')]
+                if category!='scheduler':mutations.append(line.replace('inherit: 1','inherit: 0'))
+                if line.startswith('cpu-clock:u:'):
+                    mutations += [line.replace('freq: 1','freq: 0'),line.replace('}: 99','}: 98'),
+                                  line.replace('8192','4096'),line.replace('exclude_kernel: 1','exclude_kernel: 0'),
+                                  line.replace('|STACK_USER',''),line.replace('sample_regs_user: 0xff0fff','sample_regs_user: 0')]
+                else:
+                    mutations += [line.replace('}: 1','}: 2'),line+', freq: 1',line+' , sample_stack_user: 8192',
+                                  line.replace('|RAW',''),line.replace('|RAW','|RAW|CALLCHAIN')]
+                for bad in mutations:
+                    if bad==line:continue
+                    broken=list(lines);broken[index]=bad
+                    with self.subTest(category=category,event=index,bad=bad),self.assertRaises(s.DiagnosticError):
+                        d.validate_category_attributes(category,'\n'.join(broken))
+                with self.subTest(category=category,missing=index),self.assertRaises(s.DiagnosticError):
+                    d.validate_category_attributes(category,'\n'.join(lines[:index]+lines[index+1:]))
+            for broken in (lines+lines[:1],lines+['unrequested: type: 2'],[line.replace('comm_exec: 1','comm_exec: 0') for line in lines]):
+                with self.subTest(category=category,inventory=broken),self.assertRaises(s.DiagnosticError):
+                    d.validate_category_attributes(category,'\n'.join(broken))
+
+    def test_render_rejects_archived_frequency_sampled_lifecycle_before_native_analysis(self):
+        # run38569346117 had good tracking attrs but all four lifecycle tracepoints
+        # inherited global freq99 + DWARF8192. A complete smoke is insufficient.
+        lines=self.attributes('cpu')
+        lines=[line if i==0 else line.replace('}: 1','}: 99')+', freq: 1, sample_stack_user: 8192'
+               for i,line in enumerate(lines)]
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            def execute(command,env,child,*args):
+                (child/'stdout.txt').write_text('\n'.join(lines));(child/'stderr.txt').write_text('')
+            (root/'stderr.txt').write_text('')
+            with patch.object(d,'render_commands',return_value={'attributes':['fixture']}),patch.object(d,'execute',side_effect=execute),\
+                 patch.object(d.legacy,'validate_native_evidence',side_effect=AssertionError('bad attributes reached native analysis')):
+                with self.assertRaises(s.DiagnosticError):
+                    d.render_category('cpu',root,root,'/tmp/proof',d.Deadline(),{})
 
     def test_categories_do_not_require_other_category_evidence(self):
         common,calls,cpu=traces()

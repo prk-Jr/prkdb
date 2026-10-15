@@ -425,16 +425,21 @@ def profile_command(category,binary,directory,ordinary_path,sha256,arguments=())
     directory=Path(directory)
     require(category in ('cpu','syscalls','scheduler'),'unknown recorder category')
     require(Path(binary).name.startswith('wal-diag-') and len(Path(binary).name.encode())<=15,'native alias exceeds comm')
-    cmd=['perf','record','--clockid','mono','--sample-cpu','--timestamp','--switch-events','-m','8M','-o',str(directory/f'{category}.data')]
-    if category=='cpu':cmd+=['--strict-freq','-e','cpu-clock:u','-F','99','--call-graph','dwarf,8192']
+    cmd=['perf','record','--clockid','mono','--sample-cpu','--timestamp','--switch-events','-c','1','-m','8M','-o',str(directory/f'{category}.data')]
+    if category=='cpu':
+        # v6.8 accepts software freq/callgraph terms, but tracepoint terms
+        # reject period/freq (parse-events.c:config_term_tracepoint). Global
+        # -c1 captures every tracepoint; only this CPU event overrides it.
+        # cpu_frequency_limit checks the per-event max explicitly: perf's
+        # --strict-freq precheck only handles global -F. No sysctl is changed.
+        cmd+=['--strict-freq','-e','cpu-clock/freq=99,call-graph=dwarf,stack-size=8192/u']
     elif category=='syscalls':
-        cmd+=['-c','1']
         for name in SYSCALLS:
-            for phase in ('enter','exit'):cmd+=['-e',f'syscalls:sys_{phase}_{name}']
+            for phase in ('enter','exit'):cmd+=['-e',f'syscalls:sys_{phase}_{name}/call-graph=no/']
     else:
-        cmd+=['-a','-e','sched:sched_switch','--filter',legacy.filter_for(('prev_comm','next_comm')),
-              '-e','sched:sched_wakeup','--filter',legacy.filter_for(('comm',))]
-    for event in (*LIFECYCLE,RENAME):cmd+=['-e',event]
+        cmd+=['-a','-e','sched:sched_switch/call-graph=no/','--filter',legacy.filter_for(('prev_comm','next_comm')),
+              '-e','sched:sched_wakeup/call-graph=no/','--filter',legacy.filter_for(('comm',))]
+    for event in (*LIFECYCLE,RENAME):cmd+=['-e',event+'/call-graph=no/']
     return cmd+['--',*legacy.scoped_command(binary,directory,ordinary_path,sha256,arguments)]
 
 
@@ -753,6 +758,81 @@ def measured_cpu_quality(report,chains,count):
                     userspace_callchains_readable=False,error=str(error))
 
 
+def cpu_frequency_limit(path='/proc/sys/kernel/perf_event_max_sample_rate'):
+    value=Path(path).read_text().strip()
+    require(re.fullmatch(r'[0-9]+',value) is not None and int(value)>=99,
+            'kernel maximum sample rate cannot support required CPU99Hz; no tuning/fallback')
+    return dict(path=str(path),requested_hz=99,kernel_max_sample_rate=int(value),sysctl_changed=False)
+
+
+def validate_category_attributes(category,text):
+    """Qualify every saved evlist entry, not only its tracking event.
+
+    evlist omits zero fields; absent freq means fixed period, never absent period.
+    v6.8 evsel__newtp_idx names tracepoints sys:event independently of /terms/;
+    numeric software names derive from type/config/modifiers, retaining cpu-clock:u.
+    """
+    require(category in ('cpu','syscalls','scheduler'),'unknown recorder category')
+    expected=({'cpu-clock:u'} if category=='cpu' else
+              {f'syscalls:sys_{phase}_{name}' for name in SYSCALLS for phase in ('enter','exit')}
+              if category=='syscalls' else {'sched:sched_switch','sched:sched_wakeup'})
+    expected.update((*LIFECYCLE,RENAME))
+    # v6.8 builtin-record.c:record__config_tracking_events adds a software
+    # dummy tracking event for system-wide recording. It has no RAW payload.
+    optional={'dummy:u'} if category=='scheduler' else set()
+    entries={}
+    for line in text.splitlines():
+        if not line.strip() or line.startswith('#'):continue
+        header=re.fullmatch(r'(.+?): type:\s*(\d+)\b(.*)',line)
+        require(header is not None,'unparsed saved recorder attributes')
+        name=header.group(1)
+        require(name in expected|optional and name not in entries,'unexpected/duplicate recorder event attributes')
+        entries[name]=(int(header.group(2)),line)
+    require(set(entries)-optional==expected,'missing recorder event attributes')
+    tracking=False
+    for name,(kind,line) in entries.items():
+        def number(field,default=None):
+            values=re.findall(rf'(?<![\w]){re.escape(field)}\s*:\s*(0x[0-9a-fA-F]+|\d+)\b',line)
+            require(len(values)<=1 and (values or default is not None),f'{name}: missing/duplicate {field}')
+            return int(values[0],0) if values else default
+        sample=re.search(r'\bsample_type:\s*([A-Z0-9_|]+)(?:,|$)',line)
+        require(sample is not None,f'{name}: missing sample_type')
+        bits=set(sample.group(1).split('|'))
+        require({'TIME','TID','CPU'}<=bits,f'{name}: missing timed identity/CPU fields')
+        require(number('sample_id_all')==number('use_clockid')==number('clockid')==1,
+                f'{name}: missing complete monotonic sample IDs')
+        # -a is established by the saved global thread/CPU maps below, not
+        # by an assumed inherit value. evsel.c sets inherit=!opts.no_inherit.
+        require(number('inherit',0) in ((0,1) if category=='scheduler' else (1,)),f'{name}: wrong inheritance')
+        period=re.findall(r'\{ sample_period, sample_freq \}:\s*(\d+)\b',line)
+        require(len(period)==1,f'{name}: missing/duplicate sampling period/frequency')
+        if name=='cpu-clock:u':
+            require(kind==1 and number('config')==0 and number('freq',0)==1 and int(period[0])==99,
+                    'CPU recorder is not software CPU-clock at 99Hz')
+            require(number('exclude_kernel',0)==1 and number('exclude_user',0)==0,
+                    'CPU recorder is not userspace only')
+            require({'IP','CALLCHAIN','REGS_USER','STACK_USER'}<=bits and
+                    number('sample_stack_user')==8192 and number('sample_regs_user')>0,
+                    'CPU recorder lacks DWARF8192 userspace stack/register evidence')
+        elif name=='dummy:u':
+            require(kind==1 and number('config')==9 and number('exclude_kernel',0)==1 and
+                    number('freq',0)==0 and int(period[0])==1 and
+                    not bits.intersection({'CALLCHAIN','REGS_USER','STACK_USER','BRANCH_STACK'}) and
+                    number('sample_stack_user',0)==number('sample_regs_user',0)==0,
+                    'invalid system-wide software dummy tracking attributes')
+            require(all(number(field,0)==1 for field in ('comm','comm_exec','task')),
+                    'system-wide dummy is not a complete timed tracking event')
+        else:
+            require(kind==2 and number('freq',0)==0 and int(period[0])==1,
+                    f'{name}: tracepoint must capture every occurrence at period 1')
+            require('RAW' in bits and not bits.intersection({'CALLCHAIN','REGS_USER','STACK_USER','BRANCH_STACK'}) and
+                    number('sample_stack_user',0)==number('sample_regs_user',0)==0,
+                    f'{name}: tracepoint lacks raw payload or unexpectedly captures callgraphs')
+        tracking=tracking or all(number(field,0)==1 for field in ('comm','comm_exec','task'))
+    require(tracking,'missing complete timed COMM exec/FORK/EXIT tracking event')
+    legacy.validate_attributes(text,require_inherit=category!='scheduler')
+
+
 def render_category(category,directory,output,ordinary_path,deadline,ordinary,observed=None):
     directory=Path(directory)
     def render_one(name,command):
@@ -764,7 +844,7 @@ def render_category(category,directory,output,ordinary_path,deadline,ordinary,ob
         return (child/'stdout.txt').read_text()
     rendered={name:render_one(name,command) for name,command in render_commands(category,directory).items()}
     with (directory/'stderr.txt').open() as f:require(not any(LOSS.search(line) for line in f),'lost/throttled recording')
-    legacy.validate_attributes(rendered['attributes'],require_inherit=category!='scheduler')
+    validate_category_attributes(category,rendered['attributes'])
     if category=='scheduler':
         preflight=json.loads((output/'preflight.json').read_text())
         legacy.validate_system_attachment(rendered['raw-events'],preflight['host']['affinity'])
@@ -813,6 +893,7 @@ def qualified_supervisor(proof,directory,output,command,deadline):
 
 
 def qualify_recorders(output,runtime,ordinary_path,ordinary,deadline):
+    dump(output/'cpu-frequency-limit.json',cpu_frequency_limit())
     smoke_binary=output/'wal-diag-smoke'
     python=shutil.which('python3');require(python,'missing python3; install python3')
     shutil.copyfile(Path(python).resolve(),smoke_binary);smoke_binary.chmod(0o755)
