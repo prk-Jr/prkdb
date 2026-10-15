@@ -31,6 +31,10 @@ RAW_LIMITS = {'cpu.data':64<<20,'syscalls.data':128<<20,'scheduler.data':128<<20
 RAW_TOTAL, RENDER_FILE, RENDER_TOTAL, OBSERVER_LIMIT = 1<<30, 512<<20, 2<<30, 256<<20
 LIFECYCLE, RENAME = legacy.LIFECYCLE, legacy.RENAME
 SYSCALLS = ('write','pwrite64','fsync','fdatasync','futex')
+CPU_SELECTOR = 'cpu-clock/freq=99,call-graph=dwarf,stack-size=8192/u'
+# Actual perf retains this configured selector. Older retained perf output used
+# cpu-clock:u. Preserve the original exact label; never match a broad prefix.
+CPU_EVENTS = frozenset((CPU_SELECTOR,'cpu-clock:u'))
 SELF = str(Path(__file__).resolve())
 EVENT_FIELDS = ('kind','phase','operation_id','start_ns','append_start_ns','end_ns','tid','arg','amount','outcome','path_id')
 BUILD_COMMAND = ['cargo','bench','-p','prkdb','--bench','wal_write_path','--no-run','--message-format=json']
@@ -432,7 +436,7 @@ def profile_command(category,binary,directory,ordinary_path,sha256,arguments=())
         # -c1 captures every tracepoint; only this CPU event overrides it.
         # cpu_frequency_limit checks the per-event max explicitly: perf's
         # --strict-freq precheck only handles global -F. No sysctl is changed.
-        cmd+=['--strict-freq','-e','cpu-clock/freq=99,call-graph=dwarf,stack-size=8192/u']
+        cmd+=['--strict-freq','-e',CPU_SELECTOR]
     elif category=='syscalls':
         for name in SYSCALLS:
             for phase in ('enter','exit'):cmd+=['-e',f'syscalls:sys_{phase}_{name}/call-graph=no/']
@@ -550,7 +554,13 @@ def analyze_category(category,text,binary,pid):
     rows=[]
     for line in text.splitlines():
         if line.strip() and not line.startswith('#'):
-            rows.extend(legacy.parse_records(line,True))
+            header=legacy.PREFIX.fullmatch(line)
+            configured=None if header is None else re.fullmatch(re.escape(CPU_SELECTOR)+r':\s*(.*)',header.group(7))
+            if configured is None:rows.extend(legacy.parse_records(line,True))
+            else:
+                comm,pid_text,tid,cpu,seconds,fraction,_=header.groups()
+                rows.append(dict(stamp=int(seconds)*10**9+int(fraction),comm=comm.strip(),pid=int(pid_text),
+                                 tid=int(tid),cpu=int(cpu),event=CPU_SELECTOR,fields={},detail=configured.group(1)))
     require(rows,'empty category trace')
     # perf merges per-CPU streams; sort explicitly by the retained timestamps.
     rows.sort(key=lambda r:r['stamp'])
@@ -558,7 +568,7 @@ def analyze_category(category,text,binary,pid):
     births,deaths=life['births'],life['deaths']
     def inside(r,tid):return tid in births and births[tid]<=r['stamp']<=deaths[tid]
     common={*LIFECYCLE,RENAME,'COMM','FORK','EXIT','PERF_RECORD_SWITCH','PERF_RECORD_SWITCH_CPU_WIDE'}
-    category_events={'cpu':{'cpu-clock:u'},'syscalls':{f'syscalls:sys_{p}_{n}' for n in SYSCALLS for p in ('enter','exit')},
+    category_events={'cpu':CPU_EVENTS,'syscalls':{f'syscalls:sys_{p}_{n}' for n in SYSCALLS for p in ('enter','exit')},
                      'scheduler':{'sched:sched_switch','sched:sched_wakeup'}}[category]
     # Deterministic fixtures may retain scheduler metadata in another category;
     # recording command itself remains strictly separate. Ignore such samples.
@@ -569,9 +579,11 @@ def analyze_category(category,text,binary,pid):
                 thread_names={str(t):list(dict.fromkeys(n for _,n in history)) for t,history in life['names'].items()},
                 name_coverage_complete=True,timing_eligible=False)
     if category=='cpu':
-        samples=[r for r in rows if r['event']=='cpu-clock:u' and r['pid']==pid and inside(r,r['tid'])]
+        labels={r['event'] for r in rows if r['event'] in CPU_EVENTS}
+        require(len(labels)==1,'missing/mixed CPU event labels')
+        samples=[r for r in rows if r['event'] in CPU_EVENTS and r['pid']==pid and inside(r,r['tid'])]
         require(samples,'missing native CPU samples')
-        result.update(cpu_sample_count=len(samples),samples=samples,
+        result.update(cpu_sample_count=len(samples),samples=samples,cpu_event_name=next(iter(labels)),
                       limits='Sampling identifies executed functions; absence or inlining does not prove zero cost.')
     elif category=='syscalls':
         pending={};pairs=[]
@@ -711,29 +723,41 @@ def render_commands(category,directory):
 
 
 def cpu_quality(text,callchains):
-    rows=[];unknown=0.0;active=False;sections=0
+    rows=[];unknown=0.0;active=False;sections=0;report_event=None
     for line in text.splitlines():
         event=re.search(r"of event ['\"]([^'\"]+)['\"]",line)
         if event:
-            active=event.group(1)=='cpu-clock:u'
+            active=event.group(1) in CPU_EVENTS
+            if active:report_event=event.group(1)
             sections+=active
         match=re.match(r'^\s*(\d+(?:\.\d+)?)%\s+',line)
         if not match or not active:continue
         weight=float(match.group(1));rows.append(dict(weight_pct=weight,row=line))
         if re.search(r'\[unknown\]|\[\.\]\s+0x[0-9a-f]+\b',line,re.I):unknown+=weight
     require(sections==1 and rows,'CPU-clock native symbol report has no unique sample section')
-    active=False;readable=False;chain_samples=0
+    quality=cpu_callchain_quality(callchains)
+    require(quality['cpu_event_name']==report_event,'CPU report/callchain event labels differ')
+    return dict(symbol_rows=rows,unresolved_weight_pct=unknown,**quality,
+                limits='Relative CPU-clock sampled weight; sparse/inlined hook samples cannot establish exact function duration.')
+
+
+def cpu_callchain_quality(callchains):
+    """Validate retained callchains independently; this cannot qualify a report."""
+    active=False;readable=False;chain_samples=0;labels=set()
+    known=CPU_EVENTS|{*LIFECYCLE,RENAME}
+    pattern=re.compile('('+'|'.join(re.escape(name) for name in sorted(known))+r'):\s*(.*)')
     for line in callchains.splitlines():
         header=legacy.PREFIX.fullmatch(line)
         if header:
-            body=header.group(7);active=body.startswith('cpu-clock:u:')
-            if active:chain_samples+=1
-            candidate=body.removeprefix('cpu-clock:u:') if active else ''
+            match=pattern.fullmatch(header.group(7))
+            require(match is not None,'unexpected callchain recorder event')
+            name,candidate=match.groups();active=name in CPU_EVENTS
+            if active:chain_samples+=1;labels.add(name)
+            else:candidate=''
         else:candidate=line if active else ''
         if re.search(r'^\s*[0-9a-f]+\s+(?!\[unknown\])\S+.*\(',candidate):readable=True
-    require(readable and chain_samples>0,'no readable userspace CPU-clock callchains')
-    return dict(symbol_rows=rows,unresolved_weight_pct=unknown,userspace_callchains_readable=True,callchain_sample_count=chain_samples,
-                limits='Relative CPU-clock sampled weight; sparse/inlined hook samples cannot establish exact function duration.')
+    require(readable and chain_samples>0 and len(labels)==1,'no readable unique userspace CPU-clock callchains')
+    return dict(userspace_callchains_readable=True,callchain_sample_count=chain_samples,cpu_event_name=next(iter(labels)))
 
 
 def cpu_window_commands(directory,pid,window):
@@ -769,26 +793,28 @@ def validate_category_attributes(category,text):
     """Qualify every saved evlist entry, not only its tracking event.
 
     evlist omits zero fields; absent freq means fixed period, never absent period.
-    v6.8 evsel__newtp_idx names tracepoints sys:event independently of /terms/;
-    numeric software names derive from type/config/modifiers, retaining cpu-clock:u.
+    Actual perf preserves CPU_SELECTOR in its name. Accept only that exact name
+    or the older retained cpu-clock:u label, while checking identical attributes.
     """
     require(category in ('cpu','syscalls','scheduler'),'unknown recorder category')
-    expected=({'cpu-clock:u'} if category=='cpu' else
+    expected=(set() if category=='cpu' else
               {f'syscalls:sys_{phase}_{name}' for name in SYSCALLS for phase in ('enter','exit')}
               if category=='syscalls' else {'sched:sched_switch','sched:sched_wakeup'})
     expected.update((*LIFECYCLE,RENAME))
     # v6.8 builtin-record.c:record__config_tracking_events adds a software
     # dummy tracking event for system-wide recording. It has no RAW payload.
     optional={'dummy:u'} if category=='scheduler' else set()
+    cpu_names=CPU_EVENTS if category=='cpu' else set()
     entries={}
     for line in text.splitlines():
         if not line.strip() or line.startswith('#'):continue
         header=re.fullmatch(r'(.+?): type:\s*(\d+)\b(.*)',line)
         require(header is not None,'unparsed saved recorder attributes')
         name=header.group(1)
-        require(name in expected|optional and name not in entries,'unexpected/duplicate recorder event attributes')
+        require(name in expected|optional|cpu_names and name not in entries,'unexpected/duplicate recorder event attributes')
         entries[name]=(int(header.group(2)),line)
-    require(set(entries)-optional==expected,'missing recorder event attributes')
+    require(set(entries)-optional-cpu_names==expected and
+            (category!='cpu' or len(set(entries)&cpu_names)==1),'missing/duplicate recorder event attributes')
     tracking=False
     for name,(kind,line) in entries.items():
         def number(field,default=None):
@@ -806,7 +832,7 @@ def validate_category_attributes(category,text):
         require(number('inherit',0) in ((0,1) if category=='scheduler' else (1,)),f'{name}: wrong inheritance')
         period=re.findall(r'\{ sample_period, sample_freq \}:\s*(\d+)\b',line)
         require(len(period)==1,f'{name}: missing/duplicate sampling period/frequency')
-        if name=='cpu-clock:u':
+        if name in CPU_EVENTS:
             require(kind==1 and number('config')==0 and number('freq',0)==1 and int(period[0])==99,
                     'CPU recorder is not software CPU-clock at 99Hz')
             require(number('exclude_kernel',0)==1 and number('exclude_user',0)==0,
@@ -831,6 +857,7 @@ def validate_category_attributes(category,text):
         tracking=tracking or all(number(field,0)==1 for field in ('comm','comm_exec','task'))
     require(tracking,'missing complete timed COMM exec/FORK/EXIT tracking event')
     legacy.validate_attributes(text,require_inherit=category!='scheduler')
+    return next(iter(set(entries)&cpu_names)) if category=='cpu' else None
 
 
 def render_category(category,directory,output,ordinary_path,deadline,ordinary,observed=None):
@@ -844,13 +871,14 @@ def render_category(category,directory,output,ordinary_path,deadline,ordinary,ob
         return (child/'stdout.txt').read_text()
     rendered={name:render_one(name,command) for name,command in render_commands(category,directory).items()}
     with (directory/'stderr.txt').open() as f:require(not any(LOSS.search(line) for line in f),'lost/throttled recording')
-    validate_category_attributes(category,rendered['attributes'])
+    saved_cpu_event=validate_category_attributes(category,rendered['attributes'])
     if category=='scheduler':
         preflight=json.loads((output/'preflight.json').read_text())
         legacy.validate_system_attachment(rendered['raw-events'],preflight['host']['affinity'])
     launch=legacy.validate_native_evidence(directory,ordinary)
     summary=analyze_category(category,rendered['script'],launch['binary'],launch['pid'])
     if category=='cpu':
+        require(summary['cpu_event_name']==saved_cpu_event,'CPU trace/attribute event labels differ')
         commands=cpu_window_commands(directory,launch['pid'],summary['window_ns'])
         report=render_one('native-context-report',commands['report'])
         chains=render_one('native-context-callchains',commands['callchains'])
