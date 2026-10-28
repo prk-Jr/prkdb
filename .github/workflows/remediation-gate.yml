@@ -26,7 +26,7 @@ on:
         required: false
         default: none
         type: choice
-        options: [none, wal-bench, iai, stream-read-profile, stream-read-symbols, stream-durable-diagnostic, stream-durable-qualification]
+        options: [none, wal-bench, iai, stream-read-profile, stream-read-symbols, stream-durable-diagnostic, stream-durable-qualification, stream-recorder-smoke]
       base_ref:
         description: "wal-bench only: also bench this ref first, in the same job"
         required: false
@@ -724,5 +724,181 @@ jobs:
             ${{ runner.temp }}/stream-durable-evidence/overlay/
             ${{ runner.temp }}/stream-durable-evidence/tooling/
             ${{ runner.temp }}/stream-durable-evidence/run/
+          if-no-files-found: error
+          retention-days: 30
+
+
+  probe-recorder-smoke:
+    name: Probe — recorder qualification (no builds or DB timings)
+    needs: resolve
+    if: ${{ inputs.probe == 'stream-recorder-smoke' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      TOKIO_WORKER_THREADS: '4'
+    steps:
+      - name: Record fixed qualification job budget
+        run: python3 -c 'import time; print(time.monotonic())' > "$RUNNER_TEMP/recorder-smoke-started.txt"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Retain exact qualification tooling and test controls
+        timeout-minutes: 4
+        env:
+          TOOLING_SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/recorder-smoke-evidence"
+          mkdir -p "$evidence/tooling/scripts" "$evidence/tooling/docs"
+          git rev-parse HEAD > "$evidence/tooling-sha.txt"
+          test "$(cat "$evidence/tooling-sha.txt")" = "$TOOLING_SHA"
+          git status --porcelain=v1 > "$evidence/tooling-status.txt"
+          test ! -s "$evidence/tooling-status.txt"
+          cp scripts/stream_durable_*.py scripts/test_stream_durable_*.py \
+             scripts/wal_stall_diagnostic.py scripts/test_wal_stall_diagnostic.py \
+             scripts/wal_descriptor_diagnostic.py scripts/test_wal_descriptor_diagnostic.py \
+             scripts/wal_trace_qualification.py scripts/test_wal_trace_qualification.py "$evidence/tooling/scripts/"
+          cp .github/workflows/remediation-gate.yml "$evidence/tooling/workflow.yml"
+          cp docs/superpowers/specs/2026-10-28-stream-recorder-smoke-design.md \
+             docs/superpowers/plans/2026-10-28-stream-recorder-smoke.md "$evidence/tooling/docs/"
+          python3 -m unittest discover -s scripts -p 'test_*diagnostic.py' -v > "$evidence/tests.stdout" 2> "$evidence/tests.stderr"
+          python3 -m unittest discover -s scripts -p test_wal_trace_qualification.py -v > "$evidence/qualification-tests.stdout" 2> "$evidence/qualification-tests.stderr"
+          python3 -m unittest discover -s scripts -p test_stream_durable_restore.py -v > "$evidence/restore-tests.stdout" 2> "$evidence/restore-tests.stderr"
+      - name: Qualify three actual recorder chains without builds or DB calls
+        timeout-minutes: 22
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/recorder-smoke-evidence"
+          python3 - <<'PYBUDGET'
+          import os, time
+          from pathlib import Path
+          start = float((Path(os.environ['RUNNER_TEMP']) / 'recorder-smoke-started.txt').read_text())
+          if time.monotonic() - start > 180:
+              raise SystemExit('insufficient fixed qualification job budget; preserve upload reserve')
+          PYBUDGET
+          if python3 scripts/stream_durable_diagnostic.py qualify-recorders --output "$evidence/run" > "$evidence/run.stdout" 2> "$evidence/run.stderr"; then
+            cat "$evidence/run.stdout"
+          else
+            result=$?
+            cat "$evidence/run.stderr" >&2
+            exit "$result"
+          fi
+          python3 - "$evidence/run" <<'PYCHECK'
+          import json, sys
+          from pathlib import Path
+          root = Path(sys.argv[1])
+          result = json.loads((root / 'result.json').read_text())
+          assert result['complete'] and result['qualification_only']
+          assert result['mode'] == 'recorder-qualification'
+          assert result['benchmark_invocations'] == 0 and not result['build_provenance_checked']
+          proof = json.loads((root / 'qualification.json').read_text())
+          assert set(proof) == {'cpu', 'syscalls', 'scheduler'}
+          assert all(p['qualified'] for p in proof.values())
+          PYCHECK
+      - name: Retain qualification evidence including any failed prefix
+        if: always()
+        timeout-minutes: 8
+        uses: actions/upload-artifact@v4
+        with:
+          name: stream-recorder-smoke-${{ needs.resolve.outputs.sha }}
+          path: ${{ runner.temp }}/recorder-smoke-evidence/
+          if-no-files-found: error
+          retention-days: 30
+
+  probe-durable-reuse:
+    name: Probe — balanced Durable diagnostic using verified binaries
+    needs: [resolve, probe-recorder-smoke]
+    if: ${{ inputs.probe == 'stream-recorder-smoke' && needs.probe-recorder-smoke.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      TOKIO_WORKER_THREADS: '4'
+    steps:
+      - name: Record fixed balanced job budget
+        run: python3 -c 'import time; print(time.monotonic())' > "$RUNNER_TEMP/durable-reuse-started.txt"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Restore the exact previously verified build artifact
+        timeout-minutes: 5
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: '11950404099'
+          run-id: '38686445143'
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/stream-durable-evidence
+          merge-multiple: true
+      - name: Bind current tooling and verify exact archived source and runtime graph
+        timeout-minutes: 10
+        env:
+          TOOLING_SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/stream-durable-evidence"
+          mkdir -p "$evidence/current-tooling/scripts" "$evidence/current-tooling/docs"
+          test "$(git rev-parse HEAD)" = "$TOOLING_SHA"
+          test -z "$(git status --porcelain=v1)"
+          git rev-parse HEAD > "$evidence/current-tooling/sha.txt"
+          cp scripts/stream_durable_*.py scripts/test_stream_durable_*.py \
+             scripts/wal_stall_diagnostic.py scripts/test_wal_stall_diagnostic.py \
+             scripts/wal_descriptor_diagnostic.py scripts/test_wal_descriptor_diagnostic.py \
+             scripts/wal_trace_qualification.py scripts/test_wal_trace_qualification.py "$evidence/current-tooling/scripts/"
+          cp .github/workflows/remediation-gate.yml "$evidence/current-tooling/workflow.yml"
+          cp docs/superpowers/specs/2026-10-28-stream-recorder-smoke-design.md \
+             docs/superpowers/plans/2026-10-28-stream-recorder-smoke.md "$evidence/current-tooling/docs/"
+          if python3 scripts/stream_durable_restore.py --evidence "$evidence" --repo "$GITHUB_WORKSPACE" > "$evidence/restore.stdout" 2> "$evidence/restore.stderr"; then
+            cat "$evidence/restore.stdout"
+          else
+            result=$?
+            cat "$evidence/restore.stderr" >&2
+            exit "$result"
+          fi
+      - name: Requalify this host and execute the fixed balanced comparison
+        timeout-minutes: 22
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/stream-durable-evidence"
+          python3 - <<'PYBUDGET'
+          import os, time
+          from pathlib import Path
+          start = float((Path(os.environ['RUNNER_TEMP']) / 'durable-reuse-started.txt').read_text())
+          if time.monotonic() - start > 780:
+              raise SystemExit('insufficient fixed balanced job budget; preserve upload reserve')
+          PYBUDGET
+          if python3 scripts/stream_durable_diagnostic.py run --manifest "$evidence/manifest.json" --output "$evidence/balanced-run" > "$evidence/balanced.stdout" 2> "$evidence/balanced.stderr"; then
+            cat "$evidence/balanced.stdout"
+          else
+            result=$?
+            cat "$evidence/balanced.stderr" >&2
+            exit "$result"
+          fi
+      - name: Preserve original evidence plus all new outcomes
+        if: always()
+        timeout-minutes: 8
+        uses: actions/upload-artifact@v4
+        with:
+          name: stream-durable-reuse-${{ needs.resolve.outputs.sha }}
+          path: |
+            ${{ runner.temp }}/stream-durable-evidence/*.txt
+            ${{ runner.temp }}/stream-durable-evidence/*.json
+            ${{ runner.temp }}/stream-durable-evidence/*.jsonl
+            ${{ runner.temp }}/stream-durable-evidence/*.stdout
+            ${{ runner.temp }}/stream-durable-evidence/*.stderr
+            ${{ runner.temp }}/stream-durable-evidence/*.exit
+            ${{ runner.temp }}/stream-durable-evidence/bin/
+            ${{ runner.temp }}/stream-durable-evidence/overlay/
+            ${{ runner.temp }}/stream-durable-evidence/tooling/
+            ${{ runner.temp }}/stream-durable-evidence/current-tooling/
+            ${{ runner.temp }}/stream-durable-evidence/run/
+            ${{ runner.temp }}/stream-durable-evidence/balanced-run/
           if-no-files-found: error
           retention-days: 30

@@ -1084,25 +1084,60 @@ def summarize_controls(runs):
                 limits='Balanced within-source/order evidence on a shared runner; source association is not sole-cause proof.')
 
 
-def run(manifest_path,output,qualification_only=False):
+@contextmanager
+def diagnostic_session(output,mode,qualification_only):
     output=Path(output).resolve();require(not output.exists(),'fresh output required; no retries')
     output.mkdir(parents=True)
     deadline,final_deadline=run_deadlines()
     dump(output/'deadline.json',dict(begin_ns=time.monotonic_ns(),operation_deadline_ns=deadline.end_ns,
          deadline_ns=final_deadline.end_ns,aggregate_seconds=1200,operation_seconds=1140,finalization_reserve_seconds=60,per_command_seconds=120))
     result=dict(diagnostic_only=True,timing_eligible=False,verdict='inconclusive',complete=False,benchmark_invocations=0,
-                original_acceptance='FAILED, unchanged',qualification_only=qualification_only)
+                original_acceptance='FAILED, unchanged',qualification_only=qualification_only,
+                mode=mode,build_provenance_checked=False)
     runs=[];failure=None
     try:
+        yield output,deadline,result,runs
+    except (DiagnosticError,OSError,ValueError,KeyError,subprocess.SubprocessError) as error:
+        failure=error;result['error']=str(error)
+    finally:
+        # Prefix ownership has reserved time inside the original aggregate budget.
+        try:
+            if sys.platform.startswith('linux'):ownership_cleanup(output,final_deadline)
+        except (DiagnosticError,OSError,subprocess.SubprocessError) as error:
+            result.update(cleanup_error=str(error),complete=False,verdict='inconclusive');failure=failure or error
+        try:finalize_metadata(output,runs,result,final_deadline)
+        except (DiagnosticError,OSError) as error:failure=failure or error
+    if failure:raise DiagnosticError(str(failure)) from failure
+
+
+def qualify_native_recorders(output,deadline):
+    runtime=output/'runtime';runtime.mkdir()
+    dump(output/'preflight.json',legacy.preflight(runtime))
+    ordinary=legacy.resource_proof();ordinary_path=output/'ordinary-resources.json';dump(ordinary_path,ordinary)
+    proc_dir=output/'ordinary-live-proc';proc_dir.mkdir()
+    actual=legacy.proc_identity('self',proc_dir);legacy.validate_identity(actual,ordinary);dump(proc_dir/'identity.json',actual)
+    qualified=qualify_recorders(output,runtime,ordinary_path,ordinary,deadline)
+    require(isinstance(qualified,dict) and set(qualified)=={'cpu','syscalls','scheduler'} and
+            all(proof.get('qualified') is True for proof in qualified.values()),
+            'three actual recorder chains must qualify')
+    return runtime,ordinary_path,ordinary
+
+
+def qualify_recorders_only(output):
+    with diagnostic_session(output,'recorder-qualification',True) as (output,deadline,result,runs):
+        qualify_native_recorders(output,deadline)
+        result.update(complete=True,verdict='three actual recorder chains qualified; no benchmark timing')
+    return result
+
+
+def run(manifest_path,output,qualification_only=False):
+    mode='manifest-qualification' if qualification_only else 'database-diagnostic'
+    with diagnostic_session(output,mode,qualification_only) as (output,deadline,result,runs):
         manifest=verify_manifest(json.loads(Path(manifest_path).read_text()),deadline)
         seal=seal_manifest(manifest)
         dump(output/'manifest.json',manifest)
-        runtime=output/'runtime';runtime.mkdir()
-        dump(output/'preflight.json',legacy.preflight(runtime))
-        ordinary=legacy.resource_proof();ordinary_path=output/'ordinary-resources.json';dump(ordinary_path,ordinary)
-        proc_dir=output/'ordinary-live-proc';proc_dir.mkdir()
-        actual=legacy.proc_identity('self',proc_dir);legacy.validate_identity(actual,ordinary);dump(proc_dir/'identity.json',actual)
-        qualify_recorders(output,runtime,ordinary_path,ordinary,deadline)
+        result['build_provenance_checked']=True
+        runtime,ordinary_path,ordinary=qualify_native_recorders(output,deadline)
         if qualification_only:
             result.update(complete=True,verdict='three actual recorder chains qualified; no benchmark timing')
         else:
@@ -1143,17 +1178,6 @@ def run(manifest_path,output,qualification_only=False):
                 require(not budget_breach(directory,output),'post-exit evidence cap')
             dump(output/'control-summary.json',summarize_controls(runs))
             result.update(complete=True,verdict='finite evidence collected; causal attribution pending independent review')
-    except (DiagnosticError,OSError,ValueError,KeyError,subprocess.SubprocessError) as error:
-        failure=error;result['error']=str(error)
-    finally:
-        # Prefix ownership has reserved time inside the original aggregate budget.
-        try:
-            if sys.platform.startswith('linux'):ownership_cleanup(output,final_deadline)
-        except (DiagnosticError,OSError,subprocess.SubprocessError) as error:
-            result.update(cleanup_error=str(error),complete=False,verdict='inconclusive');failure=failure or error
-        try:finalize_metadata(output,runs,result,final_deadline)
-        except (DiagnosticError,OSError) as error:failure=failure or error
-    if failure:raise DiagnosticError(str(failure)) from failure
     return result
 
 
@@ -1164,6 +1188,7 @@ def main():
     for name in ('evidence','source-a','source-b','overlay','original-a','original-b','marked-a','marked-b','output'):p.add_argument('--'+name,required=True)
     for operation in ('run','qualify'):
         p=sub.add_parser(operation);p.add_argument('--manifest',required=True);p.add_argument('--output',required=True)
+    p=sub.add_parser('qualify-recorders');p.add_argument('--output',required=True)
     p=sub.add_parser('supervisor')
     for name in ('proof','directory','output'):p.add_argument('--'+name,required=True)
     p.add_argument('--deadline-ns',type=int,required=True);p.add_argument('command',nargs=argparse.REMAINDER)
@@ -1175,6 +1200,7 @@ def main():
         if args.operation=='snapshot-source':snapshot_source(args.root,args.side,args.output)
         elif args.operation=='build-manifest':build_manifest(args)
         elif args.operation=='ownership-supervisor':return ownership_supervisor(args.output,args.directory,args.owner,Deadline(args.deadline_ns))
+        elif args.operation=='qualify-recorders':print(json.dumps(qualify_recorders_only(args.output),indent=2))
         elif args.operation in ('run','qualify'):print(json.dumps(run(args.manifest,args.output,args.operation=='qualify'),indent=2))
         else:
             command=args.command[1:] if args.command[:1]==['--'] else args.command

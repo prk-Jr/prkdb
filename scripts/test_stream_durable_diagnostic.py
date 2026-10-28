@@ -1,6 +1,8 @@
 """Fail-closed controls for the finite Durable append diagnostic."""
 import copy
 import argparse
+from contextlib import ExitStack, contextmanager
+import io
 import subprocess
 from types import SimpleNamespace
 import json
@@ -835,5 +837,159 @@ class DurableDiagnosticTests(unittest.TestCase):
                 proof.write_bytes(saved)
                 binary=Path(args.original_a);binary.write_bytes(b'not ELF')
                 with self.assertRaises(s.DiagnosticError):d.verify_manifest(manifest)
+
+class RecorderOnlyTests(unittest.TestCase):
+    @contextmanager
+    def native_fixture(self, output, failed_category=None, cleanup_error=None, raw_cap=False):
+        ordinary={'pid':100,'uid':1000,'gid':1000}
+        calls=[]
+        def execute(command,env,directory,root,deadline,privileged=False):
+            self.assertTrue(privileged)
+            self.assertEqual(root,output)
+            self.assertLessEqual(deadline.timeout(),120)
+            self.assertIn('smoke-target',command)
+            self.assertNotIn('cargo',command)
+            calls.append((directory.name,deadline))
+            (directory/'stdout.txt').write_text('recorded prefix\n')
+            (directory/'stderr.txt').write_text('')
+            (directory/'smoke-thread.json').write_text(json.dumps(dict(tid=101,names=['tokio-smoke','prkdb-wal-smoke'])))
+            (directory/(directory.name.removeprefix('qualify-')+'.data')).write_bytes(b'raw prefix')
+        def render(category,directory,root,ordinary_path,deadline,proof):
+            self.assertEqual(proof,ordinary)
+            self.assertEqual(json.loads(ordinary_path.read_text()),ordinary)
+            self.assertIs(deadline,calls[-1][1])
+            if category==failed_category:raise s.DiagnosticError(category+' fixture qualification failed')
+            return dict(thread_ids=[100,101],thread_names={'101':['tokio-smoke','prkdb-wal-smoke']},
+                        native_pid=100,pairs=[dict(name=name) for name in d.SYSCALLS],
+                        offcpu=[1],wakeup_to_run=[1])
+        def cleanup(root,deadline):
+            self.assertEqual(root,output)
+            if calls:self.assertEqual(deadline.end_ns-calls[0][1].end_ns,60*10**9)
+            d.dump(root/'ownership.json',dict(qualified_cleanup=cleanup_error is None))
+            if cleanup_error:raise s.DiagnosticError(cleanup_error)
+        with ExitStack() as stack:
+            mocks={}
+            for name in ('verify_manifest','seal_manifest','verify_seal','collect_manifest','build_manifest',
+                         'snapshot_source','sequence','environment','parse_native'):
+                mocks[name]=stack.enter_context(patch.object(d,name,side_effect=AssertionError(name+' forbidden')))
+            for name in ('Popen','run','check_output'):
+                mocks['subprocess.'+name]=stack.enter_context(patch.object(d.subprocess,name,side_effect=AssertionError(name+' forbidden')))
+            stack.enter_context(patch.object(d.sys,'platform','linux'))
+            mocks['preflight']=stack.enter_context(patch.object(d.legacy,'preflight',return_value={'host':{'affinity':[0,1,2,3]}}))
+            stack.enter_context(patch.object(d.legacy,'resource_proof',return_value=ordinary))
+            mocks['proc_identity']=stack.enter_context(patch.object(d.legacy,'proc_identity',return_value=ordinary))
+            mocks['validate_identity']=stack.enter_context(patch.object(d.legacy,'validate_identity'))
+            stack.enter_context(patch.object(d,'host_snapshot',return_value={'host':'fixture'}))
+            stack.enter_context(patch.object(d,'cpu_frequency_limit',return_value={'qualified':True}))
+            mocks['execute']=stack.enter_context(patch.object(d,'execute',side_effect=execute))
+            mocks['render_category']=stack.enter_context(patch.object(d,'render_category',side_effect=render))
+            mocks['ownership_cleanup']=stack.enter_context(patch.object(d,'ownership_cleanup',side_effect=cleanup))
+            if raw_cap:stack.enter_context(patch.dict(d.RAW_LIMITS,{'cpu.data':1}))
+            yield mocks,calls
+
+    def test_recorder_only_cli_has_no_manifest_or_source_arguments(self):
+        with patch.object(d,'qualify_recorders_only',create=True,return_value={'complete':True}) as qualify,\
+             patch.object(d.sys,'argv',['diagnostic','qualify-recorders','--output','qualification']),\
+             patch.object(d.sys,'stdout',io.StringIO()),patch.object(d.sys,'stderr',io.StringIO()):
+            try:code=d.main()
+            except SystemExit as error:self.fail('recorder-only CLI rejected: '+str(error))
+            self.assertEqual(code,0)
+            qualify.assert_called_once_with('qualification')
+
+    def test_recorder_only_qualifies_three_chains_without_build_or_database(self):
+        self.assertTrue(hasattr(d,'qualify_recorders_only'),'explicit recorder-only entry point missing')
+        donor=(d.legacy.budget_breach,d.legacy.supervise)
+        with tempfile.TemporaryDirectory() as tmp:
+            output=Path(tmp).resolve()/'output'
+            with self.native_fixture(output) as (mocks,calls):
+                result=d.qualify_recorders_only(output)
+                self.assertEqual([name for name,_ in calls],['qualify-cpu','qualify-syscalls','qualify-scheduler'])
+                self.assertTrue(all(deadline is calls[0][1] for _,deadline in calls))
+                self.assertEqual(mocks['render_category'].call_count,3)
+                mocks['preflight'].assert_called_once_with(output/'runtime')
+                mocks['validate_identity'].assert_called_once()
+                mocks['ownership_cleanup'].assert_called_once()
+                for name,mock in mocks.items():
+                    if name not in ('preflight','proc_identity','validate_identity','execute','render_category','ownership_cleanup'):
+                        mock.assert_not_called()
+            self.assertTrue(result['complete'])
+            self.assertEqual(result['mode'],'recorder-qualification')
+            self.assertFalse(result['build_provenance_checked'])
+            self.assertTrue(result['qualification_only'])
+            self.assertEqual(result['benchmark_invocations'],0)
+            self.assertEqual(json.loads((output/'runs.json').read_text()),[])
+            self.assertEqual(set(json.loads((output/'qualification.json').read_text())),{'cpu','syscalls','scheduler'})
+            self.assertFalse((output/'manifest.json').exists())
+            self.assertFalse((output/'schedule.json').exists())
+            saved=json.loads((output/'deadline.json').read_text())
+            self.assertEqual(saved['operation_seconds'],1140)
+            self.assertEqual(saved['finalization_reserve_seconds'],60)
+            self.assertEqual(saved['per_command_seconds'],120)
+            self.assertTrue((output/'inventory.json').exists())
+            with self.assertRaisesRegex(s.DiagnosticError,'fresh output'):d.qualify_recorders_only(output)
+        self.assertEqual((d.legacy.budget_breach,d.legacy.supervise),donor)
+
+    def test_recorder_only_failed_chain_retains_prefix_and_prior_qualifications(self):
+        self.assertTrue(hasattr(d,'qualify_recorders_only'),'explicit recorder-only entry point missing')
+        for index,category in enumerate(('cpu','syscalls','scheduler')):
+            with self.subTest(category=category),tempfile.TemporaryDirectory() as tmp:
+                output=Path(tmp).resolve()/'output'
+                with self.native_fixture(output,failed_category=category) as (mocks,calls):
+                    with self.assertRaisesRegex(s.DiagnosticError,category+' fixture'):d.qualify_recorders_only(output)
+                    mocks['ownership_cleanup'].assert_called_once()
+                self.assertEqual(len(calls),index+1)
+                self.assertEqual((output/('qualify-'+category)/'stdout.txt').read_text(),'recorded prefix\n')
+                saved=json.loads((output/'result.json').read_text())
+                self.assertFalse(saved['complete']);self.assertEqual(saved['benchmark_invocations'],0)
+                self.assertIn(category+' fixture',saved['error'])
+                self.assertTrue((output/'inventory.json').exists())
+                if index:
+                    qualified=json.loads((output/'qualification.json').read_text())
+                    self.assertEqual(len(qualified),index)
+                    self.assertNotIn(category,qualified)
+
+    def test_recorder_only_cap_or_cleanup_failure_cannot_complete(self):
+        self.assertTrue(hasattr(d,'qualify_recorders_only'),'explicit recorder-only entry point missing')
+        for reason in ('raw cap','cleanup'):
+            with self.subTest(reason=reason),tempfile.TemporaryDirectory() as tmp:
+                output=Path(tmp).resolve()/'output'
+                with self.native_fixture(output,raw_cap=reason=='raw cap',
+                                         cleanup_error='ownership fixture failure' if reason=='cleanup' else None):
+                    with self.assertRaises(s.DiagnosticError):d.qualify_recorders_only(output)
+                saved=json.loads((output/'result.json').read_text())
+                self.assertFalse(saved['complete']);self.assertEqual(saved['verdict'],'inconclusive')
+                self.assertEqual(saved['benchmark_invocations'],0)
+                self.assertTrue((output/'qualify-cpu'/'cpu.data').exists())
+                self.assertTrue((output/'ownership.json').exists())
+                self.assertIn('finalization_error' if reason=='raw cap' else 'cleanup_error',saved)
+
+    def test_recorder_only_preflight_or_partial_qualification_cannot_complete(self):
+        self.assertTrue(hasattr(d,'qualify_recorders_only'),'explicit recorder-only entry point missing')
+        for partial in (None,{},dict(cpu=dict(qualified=True)),
+                        {category:dict(qualified=category!='scheduler') for category in ('cpu','syscalls','scheduler')}):
+            with self.subTest(partial=partial),tempfile.TemporaryDirectory() as tmp:
+                output=Path(tmp).resolve()/'output'
+                with self.native_fixture(output) as (mocks,_),patch.object(d,'qualify_recorders',return_value=partial) as qualify:
+                    if partial is None:mocks['preflight'].side_effect=s.DiagnosticError('preflight fixture failure')
+                    with self.assertRaises(s.DiagnosticError):d.qualify_recorders_only(output)
+                    mocks['ownership_cleanup'].assert_called_once()
+                    if partial is None:
+                        mocks['proc_identity'].assert_not_called();qualify.assert_not_called()
+                saved=json.loads((output/'result.json').read_text())
+                self.assertFalse(saved['complete']);self.assertEqual(saved['benchmark_invocations'],0)
+                self.assertTrue((output/'inventory.json').exists())
+
+    def test_manifest_modes_still_reject_missing_manifest_before_native_setup(self):
+        for qualification_only in (False,True):
+            with self.subTest(qualification_only=qualification_only),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp)
+                with patch.object(d.sys,'platform','darwin'),patch.object(d.legacy,'preflight') as preflight,\
+                     patch.object(d,'qualify_recorders') as qualify,patch.object(d,'sequence') as schedule:
+                    with self.assertRaises(s.DiagnosticError):d.run(root/'missing-manifest',root/'output',qualification_only)
+                    preflight.assert_not_called();qualify.assert_not_called();schedule.assert_not_called()
+            with patch.object(d.sys,'argv',['diagnostic','qualify' if qualification_only else 'run','--output','output']),\
+                 patch.object(d.sys,'stderr',io.StringIO()):
+                with self.assertRaises(SystemExit) as error:d.main()
+                self.assertEqual(error.exception.code,2)
 
 if __name__=='__main__': unittest.main()
