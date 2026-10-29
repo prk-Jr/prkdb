@@ -17,7 +17,6 @@ import tomllib
 
 import perf_measurement_gate as gate
 
-LEGACY_SHA = '55fcfa17855f7266d66a4b3002209778487d0423'
 LEGACY_HASH = '98f6fb5d44cfc8ef358472794e4031b5a01f8c34e3f48ed925443283dd53612b'
 BENCH = 'crates/prkdb/benches/iai_hot_paths.rs'
 SUPPORT = 'crates/prkdb/benches/support/perf_gate_measurement.rs'
@@ -151,8 +150,9 @@ class PairedRun:
         self.assets = {}
         for path in (BENCH, SUPPORT, CONTRACT, DEV_OVERLAY):
             self.assets[path] = subprocess.check_output(['git', '-C', str(self.repo), 'show', head + ':' + path])
-        self.legacy_required = needs_legacy(subprocess.check_output(['git', '-C', str(self.repo), 'show', base + ':' + BENCH]))
-        self.legacy = legacy_harness(subprocess.check_output(['git', '-C', str(self.repo), 'show', LEGACY_SHA + ':' + BENCH])) if self.legacy_required else None
+        base_harness = subprocess.check_output(['git', '-C', str(self.repo), 'show', base + ':' + BENCH])
+        self.legacy_required = needs_legacy(base_harness)
+        self.legacy = legacy_harness(base_harness) if self.legacy_required else None
         self.result['legacy_reproduction_required'] = self.legacy_required
         save(self.output / 'overlay.json', {p: hashlib.sha256(v).hexdigest() for p, v in self.assets.items()})
 

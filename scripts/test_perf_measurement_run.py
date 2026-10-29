@@ -1,4 +1,7 @@
 import hashlib
+import os
+import shutil
+import sys
 from pathlib import Path
 import subprocess
 import tempfile
@@ -9,7 +12,7 @@ import perf_measurement_gate as gate
 
 class OverlayTests(unittest.TestCase):
     def test_legacy_probe_is_derived_only_from_frozen_original(self):
-        original = subprocess.check_output(['git', 'show', run.LEGACY_SHA + ':' + run.BENCH])
+        original = Path('scripts/testdata/perf_measurement_legacy.rs.txt').read_bytes()
         result = run.legacy_harness(original)
         self.assertEqual(result.count('prove_legacy_canary();'), 4)
         self.assertIn('LEGACY_CANARY.store', result)
@@ -18,10 +21,32 @@ class OverlayTests(unittest.TestCase):
         with self.assertRaises(gate.GateError): run.legacy_harness(original + b'\n')
 
     def test_legacy_reproduction_is_only_needed_for_original_measurement_definition(self):
-        original = subprocess.check_output(['git', 'show', run.LEGACY_SHA + ':' + run.BENCH])
+        original = Path('scripts/testdata/perf_measurement_legacy.rs.txt').read_bytes()
         self.assertTrue(run.needs_legacy(original))
         self.assertFalse(run.needs_legacy(Path(run.BENCH).read_bytes()))
         with self.assertRaises(gate.GateError): run.needs_legacy(b'unknown benchmark definition')
+
+    def test_controls_work_in_clean_history_without_original_pr_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            shutil.copytree('scripts', root / 'scripts', ignore=shutil.ignore_patterns('__pycache__'))
+            target = root / run.BENCH
+            target.parent.mkdir(parents=True)
+            shutil.copy2(run.BENCH, target)
+            shutil.copy2('Cargo.lock', root / 'Cargo.lock')
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            subprocess.run(['git', '-C', str(root), 'add', '.'], check=True)
+            subprocess.run(['git', '-C', str(root), '-c', 'user.name=Control', '-c',
+                            'user.email=control@example.invalid', 'commit', '-qm', 'control'], check=True)
+            tests = ('test_legacy_probe_is_derived_only_from_frozen_original',
+                     'test_legacy_reproduction_is_only_needed_for_original_measurement_definition',
+                     'test_later_source_dependency_change_is_not_rejected_by_frozen_origin')
+            result = subprocess.run([sys.executable, '-m', 'unittest'] +
+                                    ['test_perf_measurement_run.OverlayTests.' + name for name in tests],
+                                    cwd=root, env=dict(os.environ, PYTHONPATH='scripts',
+                                                      PYTHONDONTWRITEBYTECODE='1'),
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_lock_overlay_preserves_old_versions_and_only_adds_dev_closure(self):
         before = '''version = 4
@@ -61,7 +86,6 @@ version = "0.2.2"
         with self.assertRaises(gate.GateError): run.overlay_lock_text(before, overlay.replace("valgrind-requests", "unrelated"))
 
     def test_later_source_dependency_change_is_not_rejected_by_frozen_origin(self):
-        original = subprocess.check_output(['git', 'show', run.LEGACY_SHA + ':Cargo.lock'], text=True)
         repaired = Path('Cargo.lock').read_text()
         changed = repaired.replace('name = "libc"\nversion = "0.2.189"', 'name = "libc"\nversion = "0.2.190"')
         self.assertNotEqual(changed, repaired)

@@ -28,7 +28,10 @@ operation tests; benchmark from_env always enables requests, with an explicit
 setup assertion and no environment setting to disable them. Native tests are not
 instruction-count evidence.
 
-The legacy canary reproduction derives from a frozen55fcfa1 benchmark SHA256,
+The legacy canary reproduction derives from benchmark bytes matching the frozen
+55fcfa1 SHA256, using the baseline bytes already loaded by the runner; native
+protocol tests use an identical tracked fixture so a future squash/delete cannot
+make them depend on an unavailable historical Git object. It
 retains its original async bodies/default toggle, and injects the same checked
 canary. It runs separately from fixed and normal baselines. If it already counts
 the index canary fully, do not claim this mechanism explains the exact index
