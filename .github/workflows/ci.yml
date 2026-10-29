@@ -44,7 +44,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - name: Run repo status snapshot
         run: cargo run -p xtask -- repo-status snapshot --fail-on-objective-drift
@@ -76,7 +76,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
@@ -129,6 +129,12 @@ jobs:
     # check, which is why that flag was removed from the chaos workflow.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    # Full-suite mutation builds exhausted the runner quota in run 40671318321.
+    # Dependency-only profile overrides leave workspace test binaries at debuginfo=2.
+    # These job-local overrides also reach cargo-mutants' temporary build trees.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     # Sharded because the unsharded job could never finish, and a job that cannot finish
     # reports nothing. Run 31329241574 found 100 mutants in the first step alone and spent
     # ~133s on each (75s build + 58s test), so that step alone needed ~3.7 hours against a
@@ -183,6 +189,11 @@ jobs:
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
     timeout-minutes: 90
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
       - uses: actions/checkout@v4
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
@@ -190,11 +201,14 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Isolate restore fallbacks from caches built with workspace debug info.
+          prefix-key: v1-mutation-no-debug
 
       # One invocation, not two: cargo-mutants shards the mutant list it is given, so two
       # separate commands would each shard their own list and the split would be uneven.
@@ -243,6 +257,12 @@ jobs:
     name: "🧬 Mutation Testing (diff) shard"
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    # Full-suite mutation builds exhausted the runner quota in run 40671318321.
+    # Dependency-only profile overrides leave workspace test binaries at debuginfo=2.
+    # These job-local overrides also reach cargo-mutants' temporary build trees.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     # Every run on PR #55 timed out. Run 31566656408 measured 134 mutants at 78s build +
     # 59s test each -- 5.1 hours of work in a 45-minute job, which got through 19 of them
     # and was killed. The four MISSED results it printed were the front of an alphabetical
@@ -282,6 +302,11 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
       # fetch-depth: 0 — the diff is computed against the merge base, which a shallow
       # clone does not contain.
       - uses: actions/checkout@v4
@@ -290,11 +315,14 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Isolate restore fallbacks from caches built with workspace debug info.
+          prefix-key: v1-mutation-no-debug
 
       # Three dots: the diff against the merge base, not against the current tip of the
       # base branch. Two dots would include everything that landed on main since this
@@ -438,7 +466,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       # The ledger is the only record of what is fixed. A finding cannot be marked
       # fixed without a regression test that exists and is not ignored (spec §4.2).
@@ -463,7 +491,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p prkdb --test load_tests -- --ignored --test-threads=1
       - run: cargo test -p prkdb --test chaos_tests chaos_test_memory_pressure -- --ignored --test-threads=1
@@ -497,7 +525,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo xtask verify --profile blocking --seeds 20000 --mode durable
       # profile=discovery currently and deliberately fails (it reproduces STO-01, see
@@ -532,7 +560,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       # --locked is required: newer cargo-audit/cargo-deny releases pull crates that
       # need a rustc above the version pinned in rust-toolchain.toml.
@@ -576,7 +604,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace
 
@@ -616,7 +644,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: rustfmt
       # A wrapper that forgets a StorageAdapter method compiles cleanly and fails at
@@ -647,7 +675,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -670,7 +698,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run --workspace --profile ci
@@ -698,7 +726,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       # 200 seeds measured at ~5s warm locally; well inside the 30-minute budget even
       # accounting for a cold cache building the debug profile from scratch.
@@ -716,7 +744,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -744,7 +772,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -772,7 +800,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -798,7 +826,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - name: Setup Go
         uses: actions/setup-go@v4
@@ -824,7 +852,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -937,7 +965,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       
       - name: Build benchmarks
@@ -1255,7 +1283,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       
       - name: Setup Python

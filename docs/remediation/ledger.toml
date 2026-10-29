@@ -633,13 +633,14 @@ evidence = ["crates/prkdb-core/src/wal/mmap_log_segment.rs:50", "crates/prkdb-co
 
 [[finding]]
 id = "TST-09"
-title = "Perf gate WAL benches count ~500 instructions: the WAL work is outside the measured region"
+title = "Perf gate async WAL and index benchmarks exclude operation work from instruction counts"
 area = "tests"
 severity = "high"
 phase = 2
-status = "open"
+status = "in_progress"
 sources = ["pr-80-perf-gate-first-run"]
-evidence = ["crates/prkdb/benches/iai_hot_paths.rs", "https://github.com/prk-Jr/prkdb/actions/runs/35961505566"]
+evidence = ["crates/prkdb/benches/iai_hot_paths.rs", "scripts/perf_measurement_run.py", "https://github.com/prk-Jr/prkdb/actions/runs/35961505566", "https://github.com/prk-Jr/prkdb/actions/runs/40823663027", "https://github.com/prk-Jr/prkdb/actions/runs/40838719175"]
+regression_tests = ["test:crates/prkdb/tests/perf_measurement_contract.rs::benchmark_controls_require_explicit_environment_values", "test:crates/prkdb/tests/perf_measurement_contract.rs::canary_returns_the_number_of_volatile_updates", "test:crates/prkdb/tests/perf_measurement_contract.rs::skipped_indexed_insert_fails_record_and_index_postconditions", "script:scripts/test_perf_measurement_gate.py", "script:scripts/test_perf_measurement_run.py"]
 
 [[phase]]
 id = 0

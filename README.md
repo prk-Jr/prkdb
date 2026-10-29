@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/prk-Jr/prkdb/actions/workflows/ci.yml/badge.svg)](https://github.com/prk-Jr/prkdb/actions/workflows/ci.yml)
 [![Chaos Tests](https://github.com/prk-Jr/prkdb/actions/workflows/chaos-tests.yml/badge.svg)](https://github.com/prk-Jr/prkdb/actions/workflows/chaos-tests.yml)
-[![Rust](https://img.shields.io/badge/Rust-1.98+-orange)](https://blog.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.99.1+-orange)](https://blog.rust-lang.org/)
 
 Docs: https://prk-jr.github.io/prkdb/
 
