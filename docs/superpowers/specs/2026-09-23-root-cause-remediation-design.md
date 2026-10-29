@@ -513,6 +513,7 @@ No unrelated refactoring.
 
 | Rev | Date | Change |
 |---|---|---|
+| 10 | 2026-10-29 | Maintainer approved focused TST-09 repair: identical benchmark-only measurement overlay on both sources, whole-process async instrumentation, fixed 0/4096 canary and postconditions, strict all-thread/raw/baseline evidence, unchanged 5% gate and 45-minute job cap. TST-09 remains in progress pending Linux qualification; no performance waiver. |
 | 9 | 2026-10-29 | Maintainer requested Rust 1.99.1 on the reviewed CI-repair branch before merging. Update active compiler/CI/documentation pins; record actual compiler identities for baseline/head performance comparisons. Existing benchmark thresholds, shard coverage, security policy and historical evidence remain unchanged. |
 | 1 | 2026-09-23 | Initial spec from the 2026-09-23 audits and the 2026-09-07 review; decisions D1–D9 (D9: publishing policy). |
 | 2 | 2026-09-23 | Spec review pass 1: `Vfs` seam defined in Phase 1, WAL routed through it in 2a; per-area `verified`; tripwires instead of expected-failure lists; single-phase IDs (DOC-11, DOC-12, TST-05..07 split out); harness op profiles per phase (§7.1); Fast mode from 2a; commit-based workflow with phase-PR CI sequence; private backup repo with Actions off; storage-compat timing; single globally ordered WAL; like-for-like Raft gate; madsim budget; DOC-11 interim wording. |
