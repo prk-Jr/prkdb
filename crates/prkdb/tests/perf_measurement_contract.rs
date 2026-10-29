@@ -40,7 +40,7 @@ fn controls_accept_only_the_documented_exact_values() {
 }
 
 #[test]
-fn native_controls_do_not_instrument_but_benchmark_controls_always_do() {
+fn native_controls_do_not_instrument() {
     for canary in [0, 4096] {
         for skip in [false, true] {
             assert!(!Controls::new(canary, skip)
@@ -51,9 +51,84 @@ fn native_controls_do_not_instrument_but_benchmark_controls_always_do() {
     assert!(!Controls::parse(None, None)
         .unwrap()
         .instrumentation_enabled());
-    // Reading the environment does not invoke any client requests or mutate global
-    // state. Benchmark setup uses this constructor exclusively.
-    assert!(Controls::from_env().unwrap().instrumentation_enabled());
+}
+
+#[test]
+fn benchmark_controls_require_explicit_environment_values() {
+    for (case, canary, skip) in [
+        ("missing_both", None, None),
+        ("missing_canary", None, Some("0")),
+        ("missing_skip", Some("0"), None),
+        ("explicit_zero", Some("0"), Some("0")),
+        ("explicit_canary", Some("4096"), Some("0")),
+        ("explicit_skip", Some("0"), Some("1")),
+    ] {
+        // Each child owns its environment. No process-wide env mutation can race
+        // with the operation tests or another control case in this test process.
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "benchmark_controls_env_child", "--nocapture"])
+            .env("PRKDB_PERF_CONTRACT_CHILD_CASE", case)
+            .env_remove("PRKDB_PERF_CANARY")
+            .env_remove("PRKDB_PERF_SKIP_OPERATION");
+        if let Some(value) = canary {
+            command.env("PRKDB_PERF_CANARY", value);
+        }
+        if let Some(value) = skip {
+            command.env("PRKDB_PERF_SKIP_OPERATION", value);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "control case {case} failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let receipts: Vec<_> = stderr
+            .lines()
+            .filter(|line| line.starts_with("PRKDB_PERF_EFFECTIVE "))
+            .collect();
+        if let (Some(canary), Some(skip)) = (canary, skip) {
+            assert_eq!(
+                receipts,
+                vec![format!("PRKDB_PERF_EFFECTIVE canary={canary} skip={skip}")],
+                "control case {case} must report the effective child controls"
+            );
+        } else {
+            assert!(receipts.is_empty(), "invalid control case {case}: {stderr}");
+        }
+    }
+}
+
+#[test]
+fn benchmark_controls_env_child() {
+    let Ok(case) = std::env::var("PRKDB_PERF_CONTRACT_CHILD_CASE") else {
+        return;
+    };
+    // Parsing benchmark controls never issues a client request, so this subprocess
+    // remains portable even though successful controls must enable instrumentation.
+    let result = Controls::from_env();
+    match case.as_str() {
+        "missing_both" | "missing_canary" => {
+            let error = result.expect_err("missing canary must fail before measurement");
+            assert!(error.contains("PRKDB_PERF_CANARY"), "{error}");
+        }
+        "missing_skip" => {
+            let error = result.expect_err("missing skip control must fail before measurement");
+            assert!(error.contains("PRKDB_PERF_SKIP_OPERATION"), "{error}");
+        }
+        "explicit_zero" | "explicit_canary" | "explicit_skip" => {
+            let controls = result.unwrap();
+            assert!(controls.instrumentation_enabled());
+            assert_eq!(
+                controls.canary_iterations,
+                if case == "explicit_canary" { 4096 } else { 0 }
+            );
+            assert_eq!(controls.skip_operation, case == "explicit_skip");
+        }
+        _ => panic!("unknown control subprocess case: {case}"),
+    }
 }
 
 #[test]

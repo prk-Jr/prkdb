@@ -148,7 +148,7 @@ Sources: **A** = 2026-09-23 correctness audit (A#n), **R** = 2026-09-07 senior r
 | TST-05 | MED | No power-loss (unsynced-data) testing; needs the WAL routed through `Vfs` (2a). | 2 |
 | TST-06 | MED | No deterministic simulation of the cluster. | 4 |
 | TST-07 | LOW | No fuzzing of WAL record, segment, snapshot, and proto decoding. | 2 |
-| TST-09 | HIGH | The instruction-count perf gate's WAL benches count ~500 instructions for 100 1 KiB puts (`bench_wal_put`), ~500 for a get and for a 100-entry batch: the measured region does not contain the WAL work (likely executed on a runtime thread outside callgrind's toggle-collect), so the gate would not catch WAL regressions. Found on its first real CI run (https://github.com/prk-Jr/prkdb/actions/runs/35961505566). | 2 |
+| TST-09 | HIGH | Async WAL benchmarks count about 500 instructions for 100 1 KiB puts, one get and a 100-entry batch; operation work is outside the effective measured region (first evidence: https://github.com/prk-Jr/prkdb/actions/runs/35961505566). The indexed-insert benchmark uses the same nested async-wrapper pattern; its 222→519 counter change after the compiler update is not a qualified full-path slowdown. The first bounded repair probe was inconclusive because Gungraun cleared control variables; coverage and a same-harness comparison remain required. | 2 |
 
 ### 3.8 Documentation (DOC)
 
@@ -513,6 +513,7 @@ No unrelated refactoring.
 
 | Rev | Date | Change |
 |---|---|---|
+| 11 | 2026-10-29 | First bounded TST-09 probe was inconclusive: cleared child controls caused zero-versus-zero canaries. Correct explicit control transport, reject absent settings, require effective receipts, preserve live temporary profiles and history-independent tests. Same workloads, floors, 5% gate and time caps; additional execution requires approval. |
 | 10 | 2026-10-29 | Maintainer approved focused TST-09 repair: identical benchmark-only measurement overlay on both sources, whole-process async instrumentation, fixed 0/4096 canary and postconditions, strict all-thread/raw/baseline evidence, unchanged 5% gate and 45-minute job cap. TST-09 remains in progress pending Linux qualification; no performance waiver. |
 | 9 | 2026-10-29 | Maintainer requested Rust 1.99.1 on the reviewed CI-repair branch before merging. Update active compiler/CI/documentation pins; record actual compiler identities for baseline/head performance comparisons. Existing benchmark thresholds, shard coverage, security policy and historical evidence remain unchanged. |
 | 1 | 2026-09-23 | Initial spec from the 2026-09-23 audits and the 2026-09-07 review; decisions D1–D9 (D9: publishing policy). |

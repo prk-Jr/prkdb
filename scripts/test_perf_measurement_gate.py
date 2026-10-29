@@ -84,6 +84,13 @@ class MeasurementGateTests(unittest.TestCase):
         profile['out_paths'] = [p['details']['Left']['path'] for p in profile['summaries']['parts']]
         result = gate.profile(summary, self.root, retained_dir=moved)
         self.assertEqual(result['ir'], 120)
+        # Successful Gungraun cleanup removes temp files even when TMPDIR was
+        # inside the evidence tree; the retained copy must still be resolved.
+        inside = copy.deepcopy(summary)
+        for part in inside['profiles'][0]['summaries']['parts']:
+            part['details']['Left']['path'] = part['details']['Left']['path'].replace('/tmp/', str(self.root / 'temporary') + '/')
+        inside['profiles'][0]['out_paths'] = [p['details']['Left']['path'] for p in inside['profiles'][0]['summaries']['parts']]
+        self.assertEqual(gate.profile(inside, self.root, retained_dir=moved)['ir'], 120)
         for malformed in ('/tmp/unrecognized/', '/tmp/gungraun.tmp0123456789another_bench/'):
             bad = copy.deepcopy(summary)
             for part in bad['profiles'][0]['summaries']['parts']:

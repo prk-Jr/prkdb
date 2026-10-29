@@ -1,7 +1,8 @@
 //! Fixtures, operation bodies and postconditions shared by the native contract and
 //! the Callgrind benchmarks. Native controls exercise the operation bodies and
 //! postconditions without issuing Valgrind client requests. Benchmark controls always
-//! instrument the process; only Linux execution can verify the measurement itself.
+//! instrument the process and require both controls explicitly in the environment;
+//! only Linux execution can verify the measurement itself.
 
 use prkdb::indexed_storage::IndexedStorage;
 use prkdb::storage::{InMemoryAdapter, WalStorageAdapter};
@@ -56,17 +57,25 @@ impl Controls {
     }
 
     pub fn from_env() -> Result<Self, String> {
-        fn read(name: &str) -> Result<Option<String>, String> {
+        fn read(name: &str) -> Result<String, String> {
             match std::env::var(name) {
-                Ok(value) => Ok(Some(value)),
-                Err(std::env::VarError::NotPresent) => Ok(None),
+                Ok(value) => Ok(value),
+                Err(std::env::VarError::NotPresent) => Err(format!(
+                    "{name} must be explicitly set for benchmark measurement"
+                )),
                 Err(error) => Err(format!("invalid {name}: {error}")),
             }
         }
         let canary = read("PRKDB_PERF_CANARY")?;
         let skip = read("PRKDB_PERF_SKIP_OPERATION")?;
-        let mut controls = Self::parse(canary.as_deref(), skip.as_deref())?;
+        let mut controls = Self::parse(Some(&canary), Some(&skip))?;
         controls.instrumentation = Instrumentation::Callgrind;
+        // from_env is called during setup, before any measured operation starts.
+        eprintln!(
+            "PRKDB_PERF_EFFECTIVE canary={} skip={}",
+            controls.canary_iterations,
+            usize::from(controls.skip_operation)
+        );
         Ok(controls)
     }
 

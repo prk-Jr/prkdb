@@ -94,7 +94,8 @@ def profile(summary, root, require_base=False, retained_dir=None):
     def retained_path(original):
         path = Path(original)
         require(path.is_absolute(), 'raw path must be absolute')
-        if path.resolve().is_relative_to(root):
+        require(not path.is_symlink(), 'symlink raw output path')
+        if path.resolve().is_relative_to(root) and path.exists():
             return path
         # Runner 0.19.4 copies temporary files verbatim, but does not rewrite
         # their summary paths. Only resolve that exact convention beside summary.json.

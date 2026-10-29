@@ -22,6 +22,9 @@ use measurement::{one_kib_value, Controls, IndexedFixture, WalFixture};
 
 fn measured_config() -> LibraryBenchmarkConfig {
     let mut config = LibraryBenchmarkConfig::default();
+    // Gungraun clears the child's environment by default. Forward only the two
+    // explicit measurement controls so the selected canary reaches benchmark setup.
+    config.pass_through_envs(["PRKDB_PERF_CANARY", "PRKDB_PERF_SKIP_OPERATION"]);
     config.tool(
         Callgrind::with_args(["--instr-atstart=no", "--collect-atstart=yes"])
             .entry_point(EntryPoint::None),

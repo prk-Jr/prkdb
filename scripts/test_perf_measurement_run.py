@@ -20,6 +20,13 @@ class OverlayTests(unittest.TestCase):
         self.assertNotIn('EntryPoint::None', result)
         with self.assertRaises(gate.GateError): run.legacy_harness(original + b'\n')
 
+    def test_legacy_probe_explicitly_forwards_both_controls_through_runner_env_clear(self):
+        original = Path('scripts/testdata/perf_measurement_legacy.rs.txt').read_bytes()
+        generated = run.legacy_harness(original)
+        group = generated[generated.index('library_benchmark_group!('):]
+        self.assertIn('pass_through_envs(["PRKDB_PERF_CANARY", "PRKDB_PERF_SKIP_OPERATION"])', group)
+        self.assertNotIn('env_clear(false)', generated)
+
     def test_legacy_reproduction_is_only_needed_for_original_measurement_definition(self):
         original = Path('scripts/testdata/perf_measurement_legacy.rs.txt').read_bytes()
         self.assertTrue(run.needs_legacy(original))
@@ -47,6 +54,14 @@ class OverlayTests(unittest.TestCase):
                                                       PYTHONDONTWRITEBYTECODE='1'),
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_effective_child_control_receipts_are_complete_and_match_selected_case(self):
+        valid = 'cargo build noise\n' + 'PRKDB_PERF_EFFECTIVE canary=4096 skip=0\n' * 4
+        self.assertEqual(len(run.control_receipts(valid, 4096)), 4)
+        for bad in ('', valid.replace('canary=4096', 'canary=0'),
+                    valid.replace('skip=0', 'skip=1'), valid + 'PRKDB_PERF_EFFECTIVE canary=4096 skip=0\n',
+                    valid.replace('PRKDB_PERF_EFFECTIVE', 'malformed', 1)):
+            with self.subTest(bad=bad), self.assertRaises(gate.GateError): run.control_receipts(bad, 4096)
 
     def test_lock_overlay_preserves_old_versions_and_only_adds_dev_closure(self):
         before = '''version = 4
@@ -111,6 +126,27 @@ version = "0.2.2"
             (root / 'unexpected').write_text('new')
             with self.assertRaises(gate.GateError): run.verify_dirty_paths(root)
 
+    def test_killed_command_keeps_live_temporary_raw_in_uploaded_case(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); work = root / 'source'; output = root / 'case'
+            (work / run.BENCH).parent.mkdir(parents=True)
+            runner = object.__new__(run.PairedRun)
+            runner.output = root
+            runner.assets = {run.BENCH: b'fixed harness'}
+            def command(*args, **kwargs):
+                temporary = Path(args[2]['TMPDIR'])
+                self.assertTrue(temporary.is_relative_to(output))
+                raw = temporary / 'gungraun.tmp0123456789bench_example' / 'callgrind.bench_example.out'
+                raw.parent.mkdir(parents=True)
+                raw.write_bytes(b'live partial profile')
+                raise gate.GateError('simulated command timeout')
+            runner.command = command
+            with self.assertRaisesRegex(gate.GateError, 'simulated command timeout'):
+                runner.benchmark(work, {}, output)
+            raw = output / 'temporary/gungraun.tmp0123456789bench_example/callgrind.bench_example.out'
+            self.assertEqual(raw.read_bytes(), b'live partial profile')
+            self.assertFalse((output / 'gungraun').exists(), 'control must test raw not yet moved to target')
+
     def test_failed_execution_or_bad_summary_retains_raw_prefix_and_binary(self):
         for failure in ('execution', 'validation'):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
@@ -120,6 +156,8 @@ version = "0.2.2"
                 runner.output = root
                 runner.assets = {run.BENCH: b'fixed harness'}
                 def command(*args, **kwargs):
+                    self.assertIn('--nocapture=stderr', args[0])
+                    (root / 'stderr').write_text('PRKDB_PERF_EFFECTIVE canary=0 skip=0\n' * 4)
                     raw = work / 'target' / 'gungraun'; raw.mkdir(parents=True)
                     (raw / 'partial.out').write_text('incomplete raw prefix')
                     binary = work / 'target' / 'release' / 'deps' / 'iai_hot_paths-control'

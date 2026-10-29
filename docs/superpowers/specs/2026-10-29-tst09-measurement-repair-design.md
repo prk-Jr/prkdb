@@ -26,7 +26,13 @@ instrumentation stops. Deliberately skipped operations must fail their native
 postconditions. Native constructors disable Valgrind requests solely for portable
 operation tests; benchmark from_env always enables requests, with an explicit
 setup assertion and no environment setting to disable them. Native tests are not
-instruction-count evidence.
+instruction-count evidence. Gungraun clears subprocess environments by default:
+fixed and legacy configs must explicitly forward exactly the two controls.
+Benchmark setup refuses missing values and emits effective child-control receipts
+outside instrumentation. The runner requires four matching receipts per case and
+forwards child stderr for their retention. Portable native new/parse defaults are
+not used to infer benchmark controls. Standalone execution must explicitly set
+PRKDB_PERF_CANARY=0 and PRKDB_PERF_SKIP_OPERATION=0 (or the fixed canary 4096).
 
 The legacy canary reproduction derives from benchmark bytes matching the frozen
 55fcfa1 SHA256, using the baseline bytes already loaded by the runner; native
@@ -77,7 +83,8 @@ is added.
 The existing45-minute job cap stays. Setup must leave its fixed reserve (at most
 240seconds before launch); the native step is35minutes, runner budget34minutes,
 and always-upload step5minutes. A timed-out command's process group is killed;
-any failure produces an inconclusive result. Every available raw prefix and binary
+any failure produces an inconclusive result. Each case sets TMPDIR inside its uploaded folder so live raw files survive a
+killed runner before the normal output copy. Every available raw prefix and binary
 candidate is copied to an uploaded case directory in finally BEFORE parsing or
 qualification, preserving the original error. Canary outputs and baseline files
 are isolated from normal comparisons. Do not overwrite an existing evidence root,
@@ -99,3 +106,12 @@ No production storage/index/WAL code, check threshold, mutation coverage or secu
 policy change. Local required checks include native RED/GREEN, Python RED/GREEN,
 actual-source overlay controls, both harness variants' no-run compile, full
 pre-push and scanners, then independent reviews. Linux alone establishes counters.
+
+## First bounded Linux outcome
+
+Run 40838719175 at a859c4c is inconclusive: controls were cleared before reaching
+benchmark children, so both nominal cases used zero. The sensitivity gate blocked
+qualification. No legacy-exclusion proof, normal base/head comparison or candidate
+performance verdict exists. Standard CI passed 30 jobs. The reviewed correction
+above preserves the protocol; a further push/job needs approval because the first
+execution boundary allowed one. No blind retry or budget/floor change is permitted.

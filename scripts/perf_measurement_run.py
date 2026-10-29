@@ -41,6 +41,9 @@ def legacy_harness(original):
         gate.require(boundary < 0 or position < boundary, 'legacy operation body not found')
         position += len('rt.block_on(async {')
         text = text[:position] + '\n        prove_legacy_canary();' + text[position:]
+    group = 'library_benchmark_group!(\n    name = hot_paths;'
+    gate.require(text.count(group) == 1, 'legacy benchmark group shape changed')
+    text = text.replace(group, group + '\n    config = gungraun::LibraryBenchmarkConfig::default().pass_through_envs(["PRKDB_PERF_CANARY", "PRKDB_PERF_SKIP_OPERATION"]);', 1)
     return text + '''
 // Canary-only reproduction of the frozen pre-repair measurement definition.
 #[path = "support/perf_gate_measurement.rs"]
@@ -51,6 +54,19 @@ fn prove_legacy_canary() {
     assert_eq!(legacy_measurement::canary(n), n, "legacy canary must actually execute");
 }
 '''
+
+
+def control_receipts(stderr, expected_count):
+    receipts = []
+    for line in stderr.splitlines():
+        if line.startswith('PRKDB_PERF_EFFECTIVE'):
+            match = re.fullmatch(r'PRKDB_PERF_EFFECTIVE canary=(0|4096) skip=(0|1)', line)
+            gate.require(match is not None, 'malformed effective child-control receipt')
+            receipts.append({'canary': int(match[1]), 'skip': int(match[2])})
+    gate.require(len(receipts) == 4, 'missing/duplicate effective child-control receipts')
+    gate.require(all(p == {'canary': expected_count, 'skip': 0} for p in receipts),
+                 'effective benchmark child controls differ from selected case')
+    return receipts
 
 
 def needs_legacy(base_harness):
@@ -232,15 +248,18 @@ class PairedRun:
         (work / BENCH).write_text(self.legacy if legacy else self.assets[BENCH].decode())
         folder.mkdir(parents=True)
         args = ['cargo', 'bench', '-p', 'prkdb', '--bench', 'iai_hot_paths', '--', '--save-summary=json',
-                '--callgrind-args=--separate-threads=yes']
+                '--callgrind-args=--separate-threads=yes', '--nocapture=stderr']
         if baseline is not None:
             args += ['--baseline=base', '--callgrind-limits=ir=5%']
         else:
             args += ['--save-baseline=' + ('base' if normal else 'coverage')]
-        case_env = dict(env, PRKDB_PERF_CANARY=str(count), PRKDB_PERF_SKIP_OPERATION='0')
-        code, original_error, binaries = None, None, []
+        temporary = folder / 'temporary'
+        temporary.mkdir()
+        case_env = dict(env, PRKDB_PERF_CANARY=str(count), PRKDB_PERF_SKIP_OPERATION='0',
+                        TMPDIR=str(temporary))
+        code, original_error, binaries, command_folder = None, None, [], None
         try:
-            code, _, _ = self.command(args, work, case_env, allowed=(0, 3) if baseline else (0,), label='benchmark')
+            code, _, command_folder = self.command(args, work, case_env, allowed=(0, 3) if baseline else (0,), label='benchmark')
         except BaseException as error:
             original_error = error
             raise
@@ -266,6 +285,10 @@ class PairedRun:
                 if original_error is None:
                     raise
         gate.require(len(binaries) == 1, 'ambiguous or missing benchmark executable')
+        gate.require(command_folder is not None and (command_folder / 'stderr').is_file(),
+                     'missing benchmark command stderr')
+        receipts = control_receipts((command_folder / 'stderr').read_text(), count)
+        save(folder / 'controls.json', {'expected_canary': count, 'receipts': receipts})
         names = LEGACY_NAMES + ('bench_log_record_encode', 'bench_log_record_decode') if legacy else gate.ALL_NAMES
         values = gate.collect(data, self.output, {gate.PREFIX + n for n in names}, require_base=baseline is not None)
         for value in values.values():
