@@ -54,3 +54,13 @@ and full required prepush in own Cargo target. Independent cross-reviews of both
 helpers and workflow before publish. Read actual job completion, download/audit
 all source/hash/library/resource/event/cap/cleanup evidence and controls; report
 qualified/partial/inconclusive honestly. Clean own target/worktree only.
+
+## Recorded outcome and postmortem amendment
+
+The single approved workflow qualified recorders, then the balanced job exceeded
+its native deadline and lost its artifact to an upload-permission failure.
+See `docs/remediation/decisions/2026-10-28-stream-recorder-smoke.md`. Local fixes
+index observer events once and recover evidence readability before upload.
+The bounded ownership step consumes one minute of the two-minute job margin;
+all native/upload budgets and qualification/performance rules stay unchanged.
+These corrections do not authorize a rerun or resolve the Durable regression.
