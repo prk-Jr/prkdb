@@ -674,15 +674,21 @@ def validate_observations(metadata,events,source,repetition,pid):
     ops=[e for e in measured if e['kind']==3]
     require(len(ops)==metadata['phase_totals']['measurement'] and ops,'operation total mismatch')
     require(sum(e['kind']==3 and e['phase']==0 for e in events)==metadata['phase_totals']['warmup'],'warmup total mismatch')
-    require(len({e['operation_id'] for e in ops})==len(ops) and all(e['operation_id']>0 for e in ops),'duplicate/invalid operation ID')
+    known_ids={e['operation_id'] for e in ops}
+    require(len(known_ids)==len(ops) and all(e['operation_id']>0 for e in ops),'duplicate/invalid operation ID')
     require(ends[0]['amount']==len(ops),'end marker total mismatch')
+    returns_by_op=collections.defaultdict(list);vfs_by_op=collections.defaultdict(list)
+    # Index the measured prefix once; retain input order within each operation.
+    for event in measured:
+        if event['kind']==7:returns_by_op[event['operation_id']].append(event)
+        elif event['kind'] in (4,5):vfs_by_op[event['operation_id']].append(event)
     paths=metadata.get('paths',[]);result=[]
     for op in ops:
         require(begin<=op['start_ns']<=op['append_start_ns']<=op['end_ns']<=end and op['outcome']==0 and op['amount']==1,
                 'operation interval/ack/error mismatch')
-        returns=[e for e in measured if e['kind']==7 and e['operation_id']==op['operation_id']]
+        returns=returns_by_op[op['operation_id']]
         require(len(returns)==1 and returns[0]['start_ns']==returns[0]['end_ns']==op['end_ns'],'missing/mismatched return TID witness')
-        vfs=[e for e in measured if e['kind'] in (4,5) and e['operation_id']==op['operation_id']]
+        vfs=vfs_by_op[op['operation_id']]
         sync=[e for e in vfs if e['kind']==5];write=[e for e in vfs if e['kind']==4]
         complete=len(sync)==1 and bool(write) and all(op['append_start_ns']<=e['start_ns']<=e['end_ns']<=op['end_ns'] and
                     1<=e['path_id']<=len(paths) and e['outcome']==0 for e in vfs)
@@ -695,7 +701,7 @@ def validate_observations(metadata,events,source,repetition,pid):
                            append_ns=op['end_ns']-op['append_start_ns'],sync_ns=sync_ns,write_ns=write_ns,
                            mixed_residual_ns=op['end_ns']-op['append_start_ns']-sync_ns-write_ns if complete else None,
                            attribution_complete=bool(complete),vfs=vfs))
-    extras=[e for e in measured if e['kind'] in (4,5) and e['operation_id'] not in {op['operation_id'] for op in ops}]
+    extras=[e for e in measured if e['kind'] in (4,5) and e['operation_id'] not in known_ids]
     if extras:
         for op in result:op['attribution_complete']=False;op['mixed_residual_ns']=None
     return dict(window_ns=[begin,end],operations=result,unmatched_vfs=extras,clock_witness=witness,

@@ -458,6 +458,71 @@ class DurableDiagnosticTests(unittest.TestCase):
         result=d.validate_observations(dict(self.metadata(),record_count=7),bad,d.SOURCES['A'],0,10)
         self.assertFalse(result['operations'][0]['attribution_complete'])
 
+    def multi_operation_events(self,count):
+        template=self.events();events=[dict(template[0])]
+        for operation_id in range(1,count+1):
+            for original in template[1:-1]:
+                event=dict(original,operation_id=operation_id)
+                for field in ('start_ns','append_start_ns','end_ns'):
+                    if event[field]:event[field]+=(operation_id-1)*100
+                events.append(event)
+        events.append(dict(template[-1],start_ns=151+(count-1)*100,end_ns=151+(count-1)*100,amount=count))
+        metadata=dict(self.metadata(),record_count=len(events),phase_totals=dict(warmup=0,measurement=count))
+        return metadata,events
+
+    def test_large_observer_validation_bounds_event_accesses_linearly(self):
+        reads=[0]
+        class CountedEvent(dict):
+            def __getitem__(self,key):
+                reads[0]+=1
+                return super().__getitem__(key)
+        for count in (64,512):
+            with self.subTest(count=count):
+                metadata,events=self.multi_operation_events(count)
+                events=[CountedEvent(event) for event in events];reads[0]=0
+                result=d.validate_observations(metadata,events,d.SOURCES['A'],0,10)
+                accesses=reads[0]
+                self.assertEqual(len(result['operations']),count)
+                self.assertEqual(result['window_ns'],[100,151+(count-1)*100])
+                self.assertEqual(result['unmatched_vfs'],[])
+                for operation_id,op in enumerate(result['operations'],1):
+                    self.assertEqual((op['operation_id'],op['preparation_ns'],op['sync_ns'],op['write_ns'],op['mixed_residual_ns']),
+                                     (operation_id,5,14,10,11))
+                    self.assertTrue(op['attribution_complete'])
+                # Deterministic event-access accounting, independent of wall-clock load.
+                self.assertLessEqual(accesses,64*len(events),f'{count} operations repeatedly rescan the full event prefix')
+
+    def test_observer_index_preserves_operation_vfs_and_unmatched_order(self):
+        metadata,events=self.multi_operation_events(2)
+        begin,write1,sync1,op1,return1,write2,sync2,op2,return2,end=events
+        orphan1=dict(write1,operation_id=901)
+        orphan2=dict(sync2,operation_id=902)
+        warmup_vfs=dict(write1,phase=0,operation_id=903)
+        orphan_return=dict(return1,operation_id=904)
+        # Records are associated by operation ID; timestamp order is validated
+        # separately without changing the caller's operation or VFS ordering.
+        events=[begin,op2,sync2,orphan2,return1,op1,sync1,orphan1,write2,return2,write1,
+                warmup_vfs,orphan_return,end]
+        metadata['record_count']=len(events)
+        result=d.validate_observations(metadata,events,d.SOURCES['A'],0,10)
+        self.assertEqual([o['operation_id'] for o in result['operations']],[2,1])
+        self.assertEqual([o['vfs'] for o in result['operations']],[[sync2,write2],[sync1,write1]])
+        self.assertEqual(result['unmatched_vfs'],[orphan2,orphan1])
+        for op in result['operations']:
+            self.assertFalse(op['attribution_complete']);self.assertIsNone(op['mixed_residual_ns'])
+            self.assertEqual((op['sync_ns'],op['write_ns']),(14,10))
+
+    def test_observer_index_retains_duplicate_and_missing_return_rejection(self):
+        for mutation in ('missing','duplicate','timestamp','duplicate-operation'):
+            metadata,events=self.multi_operation_events(2)
+            if mutation=='missing':events.pop(-2)
+            elif mutation=='duplicate':events.insert(-1,dict(events[-2]))
+            elif mutation=='timestamp':events[-2]['start_ns']-=1;events[-2]['end_ns']-=1
+            else:events[-3]['operation_id']=1
+            metadata['record_count']=len(events)
+            with self.subTest(mutation=mutation),self.assertRaises(s.DiagnosticError):
+                d.validate_observations(metadata,events,d.SOURCES['A'],0,10)
+
     def test_incomplete_marker_identity_clock_or_breach_fails(self):
         for field,value in [('failed',True),('complete',False),('clock','wall'),('source','wrong'),('pid',11),('record_count',7)]:
             with self.subTest(field=field), self.assertRaises(s.DiagnosticError):
