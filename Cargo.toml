@@ -54,7 +54,7 @@ subtle = "2.6"
 dashmap = "5.5"
 uuid = { version = "1.11", features = ["v4"] }
 prometheus = "0.14"
-axum = "0.7.9"
+axum = "0.8.9"
 lazy_static = "1.5"
 crossbeam = "0.8"
 mimalloc = { version = "0.1", default-features = false }
