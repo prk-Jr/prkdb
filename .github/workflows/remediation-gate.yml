@@ -798,6 +798,33 @@ jobs:
           assert set(proof) == {'cpu', 'syscalls', 'scheduler'}
           assert all(p['qualified'] for p in proof.values())
           PYCHECK
+      - name: Recover evidence readability for upload
+        if: always()
+        timeout-minutes: 1
+        run: |
+          python3 - <<'PYOWN'
+          import json, os, subprocess
+          from pathlib import Path
+          temp = Path(os.environ['RUNNER_TEMP']).resolve()
+          base = temp / 'recorder-smoke-evidence'
+          target = base / 'run'
+          if not target.exists():
+              print('No native evidence directory was created')
+          else:
+              assert os.getuid() != 0
+              assert base.resolve() == base and target.resolve() == target
+              owner = str(os.getuid()) + ':' + str(os.getgid())
+              command = ['sudo', '-n', 'timeout', '30', 'chown', '-R', '-h', '-P',
+                         '--preserve-root', owner, '--', str(target)]
+              result = subprocess.run(command, capture_output=True, text=True, timeout=35, check=False)
+              proof = dict(scope='postmortem artifact readability only; native result unchanged',
+                           target=str(target), owner=owner, exit_code=result.returncode,
+                           stdout=result.stdout, stderr=result.stderr)
+              print(json.dumps(proof, indent=2))
+              (base / 'upload-ownership.json').write_text(json.dumps(proof, indent=2) + '\n')
+              if result.returncode:
+                  raise SystemExit(result.returncode)
+          PYOWN
       - name: Retain qualification evidence including any failed prefix
         if: always()
         timeout-minutes: 8
@@ -881,6 +908,33 @@ jobs:
             cat "$evidence/balanced.stderr" >&2
             exit "$result"
           fi
+      - name: Recover evidence readability for upload
+        if: always()
+        timeout-minutes: 1
+        run: |
+          python3 - <<'PYOWN'
+          import json, os, subprocess
+          from pathlib import Path
+          temp = Path(os.environ['RUNNER_TEMP']).resolve()
+          base = temp / 'stream-durable-evidence'
+          target = base / 'balanced-run'
+          if not target.exists():
+              print('No native evidence directory was created')
+          else:
+              assert os.getuid() != 0
+              assert base.resolve() == base and target.resolve() == target
+              owner = str(os.getuid()) + ':' + str(os.getgid())
+              command = ['sudo', '-n', 'timeout', '30', 'chown', '-R', '-h', '-P',
+                         '--preserve-root', owner, '--', str(target)]
+              result = subprocess.run(command, capture_output=True, text=True, timeout=35, check=False)
+              proof = dict(scope='postmortem artifact readability only; native result unchanged',
+                           target=str(target), owner=owner, exit_code=result.returncode,
+                           stdout=result.stdout, stderr=result.stderr)
+              print(json.dumps(proof, indent=2))
+              (base / 'upload-ownership.json').write_text(json.dumps(proof, indent=2) + '\n')
+              if result.returncode:
+                  raise SystemExit(result.returncode)
+          PYOWN
       - name: Preserve original evidence plus all new outcomes
         if: always()
         timeout-minutes: 8
