@@ -58,7 +58,7 @@ reqwest = { workspace = true }
 
 [dev-dependencies]
 prkdb-proto = { path = "../prkdb-proto" }
-rand = "0.8"
+rand = "0.10"
 tempfile = "3.8"
 # Test certificates for the HTTPS listener test.
 #
