@@ -6,7 +6,7 @@
 
 **Architecture:** A finding ledger checked by `xtask` is the single tracking source. A model-based crash/restart harness (`crates/prkdb-verify`) proves fixes and finds unknown bugs. A new `Vfs` seam in `prkdb-core` makes power loss testable. Fixes land as local commits on `remediation/root-cause`; each phase ends in one public PR.
 
-**Tech Stack:** Rust 1.98.1, tokio, `toml` + `serde` (ledger), `rand` 0.8 + `rand_chacha` 0.3 (seeded ops), `cargo-nextest`, `iai-callgrind` (or successor `gungraun`), Criterion, GitHub Actions, VitePress.
+**Tech Stack:** Rust 1.99.1, tokio, `toml` + `serde` (ledger), `rand` 0.8 + `rand_chacha` 0.3 (seeded ops), `cargo-nextest`, `iai-callgrind` (or successor `gungraun`), Criterion, GitHub Actions, VitePress.
 
 **Spec sections are referenced as §N.** When this plan and the spec disagree, the spec wins; fix the plan.
 
@@ -44,10 +44,10 @@
       - uses: actions/checkout@v4          # add `with: ref: ${{ inputs.ref }}` in remediation-gate.yml
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@1.98.1   # never @stable: it overrides rust-toolchain.toml
+      - uses: dtolnay/rust-toolchain@1.99.1   # never @stable: it overrides rust-toolchain.toml
       - uses: Swatinem/rust-cache@v2
   ```
-  Jobs that only run `xtask` need checkout, `dtolnay/rust-toolchain@1.98.1`, and rust-cache. **`xtask` must never depend on `prkdb` or `prkdb-verify`**: `prkdb-proto`'s build script needs `protoc`, and the existing xtask-only jobs (`repo-status-snapshot`, `fmt`, `repo-audit.yml`) do not install it.
+  Jobs that only run `xtask` need checkout, `dtolnay/rust-toolchain@1.99.1`, and rust-cache. **`xtask` must never depend on `prkdb` or `prkdb-verify`**: `prkdb-proto`'s build script needs `protoc`, and the existing xtask-only jobs (`repo-status-snapshot`, `fmt`, `repo-audit.yml`) do not install it.
 
 ---
 
@@ -1213,7 +1213,7 @@ Also fix line 69 ("under Serializable Isolation") to say "when `IsolationLevel::
 
 - [ ] **Step 3: DOC-06 — Rust version**
 
-`README.md:7` badge → `Rust-1.98+`; `docs/guide/getting-started.md:7` → `Rust 1.98+`.
+`README.md:7` badge → `Rust-1.99.1+`; `docs/guide/getting-started.md:7` → `Rust 1.99.1+`.
 
 - [ ] **Step 4: DOC-09 — unsourced claims**
 
@@ -1307,7 +1307,7 @@ git commit -m "docs: mark clustering experimental and correct misleading claims"
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       # The ledger is the only record of what is fixed. A finding cannot be marked
       # fixed without a regression test that exists and is not ignored (spec §4.2).
@@ -1350,7 +1350,7 @@ jobs:
           ref: ${{ inputs.ref }}
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo xtask remediation check
       - run: cargo test --workspace --no-fail-fast
@@ -2660,7 +2660,7 @@ The job summary lists every delta either way.
     # A cold cache builds a separate release profile of prkdb for the harness binary.
     timeout-minutes: 30
     steps:
-      # CI preamble (plan Conventions): disk cleanup, checkout, protoc, rust 1.98.1, cache
+      # CI preamble (plan Conventions): disk cleanup, checkout, protoc, rust 1.99.1, cache
       - run: cargo xtask verify --profile blocking --seeds 200 --mode durable
 ```
 

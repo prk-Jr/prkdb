@@ -4,7 +4,7 @@
 **Status:** proposed — awaiting maintainer review
 **Baseline commit:** 6ce73a8 (main)
 **Program branch:** `remediation/root-cause`
-**Toolchain:** rustc 1.98.1
+**Toolchain:** rustc 1.99.1 (maintainer-requested upgrade; prior benchmark records retain their recorded compiler)
 **Supersedes for scheduling:** `2026-08-08-correctness-and-production-readiness.md` (its requirements R1–R16 stay in force)
 **Absorbs:** `docs/reviews/2026-09-07-senior-review.md` (R01–R12)
 **Phase 6 defers to:** `2026-09-07-ai-database-design.md`, `2026-09-07-embedded-ai-state-design.md`
@@ -513,6 +513,7 @@ No unrelated refactoring.
 
 | Rev | Date | Change |
 |---|---|---|
+| 9 | 2026-10-29 | Maintainer requested Rust 1.99.1 on the reviewed CI-repair branch before merging. Update active compiler/CI/documentation pins; record actual compiler identities for baseline/head performance comparisons. Existing benchmark thresholds, shard coverage, security policy and historical evidence remain unchanged. |
 | 1 | 2026-09-23 | Initial spec from the 2026-09-23 audits and the 2026-09-07 review; decisions D1–D9 (D9: publishing policy). |
 | 2 | 2026-09-23 | Spec review pass 1: `Vfs` seam defined in Phase 1, WAL routed through it in 2a; per-area `verified`; tripwires instead of expected-failure lists; single-phase IDs (DOC-11, DOC-12, TST-05..07 split out); harness op profiles per phase (§7.1); Fast mode from 2a; commit-based workflow with phase-PR CI sequence; private backup repo with Actions off; storage-compat timing; single globally ordered WAL; like-for-like Raft gate; madsim budget; DOC-11 interim wording. |
 | 8 | 2026-09-24 | Execution: TST-09 added (perf gate WAL benches measure ~500 instructions). |

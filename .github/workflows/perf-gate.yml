@@ -51,7 +51,7 @@ jobs:
           fetch-depth: 0
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
 
       - name: Install Valgrind
@@ -115,6 +115,8 @@ jobs:
         id: base_bench
         run: |
           git checkout "${{ steps.shas.outputs.base }}"
+          rustc --version --verbose
+          rustup show active-toolchain
           if [ -f crates/prkdb/benches/iai_hot_paths.rs ]; then
             cargo bench -p prkdb --bench iai_hot_paths -- \
               --save-baseline=base --save-summary=json
@@ -142,6 +144,8 @@ jobs:
         id: head_bench
         run: |
           git checkout "${{ steps.shas.outputs.head }}"
+          rustc --version --verbose
+          rustup show active-toolchain
           set +e
           cargo bench -p prkdb --bench iai_hot_paths -- \
             --baseline=base --callgrind-limits='ir=5%' --save-summary=json
