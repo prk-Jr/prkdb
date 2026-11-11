@@ -91,3 +91,7 @@ debug = 0
 
 [profile.test.package."*"]
 debug = 0
+
+# SQLx 0.8.6 pins vulnerable bundled SQLite; see vendor/sqlx-sqlite/README.prkdb.md.
+[patch.crates-io]
+sqlx-sqlite = { path = "vendor/sqlx-sqlite" }
