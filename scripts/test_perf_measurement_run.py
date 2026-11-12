@@ -102,13 +102,27 @@ version = "0.2.2"
 
     def test_later_source_dependency_change_is_not_rejected_by_frozen_origin(self):
         repaired = Path('Cargo.lock').read_text()
-        changed = repaired.replace('name = "libc"\nversion = "0.2.189"', 'name = "libc"\nversion = "0.2.190"')
+        _, blocks = run.lock_blocks(repaired)
+        libc_keys = [key for key in blocks if key[0] == 'libc']
+        self.assertEqual(len(libc_keys), 1)
+        libc = libc_keys[0]
+        version = libc[1].split('.')
+        version[-1] = str(int(version[-1]) + 1)
+        updated_version = '.'.join(version)
+        old_block = blocks[libc]
+        new_block = old_block.replace(f'version = "{libc[1]}"',
+                                      f'version = "{updated_version}"', 1)
+        changed = repaired.replace(old_block, new_block, 1)
         self.assertNotEqual(changed, repaired)
         try:
             result = run.overlay_lock_text(changed, Path(run.DEV_OVERLAY).read_text())
         except gate.GateError as error:
             self.fail(f'legitimate source dependency version was rejected: {error}')
-        self.assertIn('name = "libc"\nversion = "0.2.190"', result)
+        packages = gate.lock_packages(result)
+        updated_libc = (libc[0], updated_version, libc[2])
+        self.assertIn(updated_libc, packages)
+        self.assertNotIn(libc, packages)
+        self.assertEqual(packages[updated_libc], gate.lock_packages(changed)[updated_libc])
 
     def test_dirty_overlay_refuses_any_unexpected_tracked_or_untracked_file(self):
         with tempfile.TemporaryDirectory() as tmp:
