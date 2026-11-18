@@ -57,7 +57,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install Valgrind
-        run: sudo apt-get install -y valgrind libclang-dev
+        run: |
+          # Hosted images can retain package indexes for versions removed from mirrors.
+          sudo apt-get update
+          sudo apt-get install -y valgrind libclang-dev
 
       - name: Install gungraun-runner
         run: cargo install gungraun-runner --version "$GUNGRAUN_VERSION" --locked
