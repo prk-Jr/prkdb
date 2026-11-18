@@ -122,9 +122,13 @@ The ORM uses the maintained `time` crate. Replace `chrono::NaiveDateTime` fields
 The PostgreSQL mappings remain `TIMESTAMP` and `TIMESTAMPTZ`, respectively; SQLite
 and MySQL use `DATETIME` for both.
 
-Existing SQL values remain readable. Naive values retain `YYYY-MM-DD HH:MM:SS`
+For ordinary, non-leap dates in the supported range, existing SQL values remain
+readable. Naive values retain `YYYY-MM-DD HH:MM:SS`
 text with fractional seconds truncated. Offset values are normalized to UTC and
 retain RFC3339 text with `+00:00` and the existing fractional precision. This is a
-Rust API migration; no stored-data conversion is required. Applications that serialize
+Rust API migration; those values need no stored-data conversion. Chrono also
+supported extended years and leap seconds that these replacement types do not
+preserve. Applications storing such values must normalize or migrate them explicitly
+before using the new mappings. Applications that serialize
 their own model fields should select the appropriate `time::serde` adapter explicitly
 rather than assuming its default representation matches chrono's.
