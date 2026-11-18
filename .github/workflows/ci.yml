@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
@@ -50,7 +50,7 @@ jobs:
         run: cargo run -p xtask -- repo-status snapshot --fail-on-objective-drift
       - name: Upload repo status snapshot
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: repo-status-snapshot-${{ github.run_number }}
           path: target/repo-status/repo-status.snapshot.json
@@ -69,7 +69,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
@@ -95,7 +95,7 @@ jobs:
       - name: Upload lcov
         if: always()
         run: cargo llvm-cov report --lcov --output-path lcov.info
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: coverage-lcov-${{ github.run_number }}
@@ -194,7 +194,7 @@ jobs:
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
@@ -229,7 +229,7 @@ jobs:
             --file 'crates/prkdb-cli/src/admin_principals.rs' \
             --file 'crates/prkdb-cli/src/remote_client.rs'
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: mutants-${{ github.run_number }}-shard-${{ matrix.shard }}
@@ -309,7 +309,7 @@ jobs:
           sudo rm -rf /opt/ghc
       # fetch-depth: 0 — the diff is computed against the merge base, which a shallow
       # clone does not contain.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: taiki-e/install-action@nextest
@@ -404,7 +404,7 @@ jobs:
 
           exit $status
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: mutants-diff-${{ github.run_number }}-shard-${{ matrix.shard }}
@@ -441,7 +441,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # A switched-off test is one nobody will remember why they switched off. Three
       # corruption tests were disabled this way and turned out to pass in 0.7s.
       #
@@ -469,7 +469,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       # The ledger is the only record of what is fixed. A finding cannot be marked
@@ -488,7 +488,7 @@ jobs:
     # PR but trivial nightly.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
@@ -526,7 +526,7 @@ jobs:
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       - uses: dtolnay/rust-toolchain@1.99.1
@@ -559,7 +559,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
@@ -587,7 +587,7 @@ jobs:
     # blocking today's work. The chaos-tests use of it is removed in Plan A Task 9.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       - uses: dtolnay/rust-toolchain@nightly
@@ -601,7 +601,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
@@ -643,7 +643,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
@@ -672,7 +672,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
@@ -695,7 +695,7 @@ jobs:
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
@@ -723,7 +723,7 @@ jobs:
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
@@ -741,7 +741,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
@@ -751,7 +751,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v7
         with:
           python-version: '3.10'
       - name: Install Python dependencies
@@ -769,7 +769,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
@@ -779,7 +779,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v7
         with:
           python-version: '3.10'
       - name: Install Python dependencies
@@ -797,7 +797,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
@@ -807,7 +807,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '20'
       - name: Build PrkDB CLI
@@ -823,7 +823,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
@@ -833,7 +833,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - name: Setup Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v7
         with:
           go-version: '1.21'
       - name: Build PrkDB CLI
@@ -849,7 +849,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
@@ -859,15 +859,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v7
         with:
           python-version: '3.10'
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '20'
       - name: Setup Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v7
         with:
           go-version: '1.21'
       - name: Install Python dependencies
@@ -960,7 +960,7 @@ jobs:
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
           
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       
       - name: Install dependencies
         run: sudo apt-get install -y protobuf-compiler bc jq
@@ -1259,7 +1259,7 @@ jobs:
           cat benchmark_results/BENCHMARK_RESULTS.md
           
       - name: "📤 Upload Results"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: benchmark-results-${{ github.run_number }}
           path: benchmark_results/
@@ -1279,7 +1279,7 @@ jobs:
     env:
       PRKDB_ADMIN_TOKEN: benchmark_ci_admin_token
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
       
@@ -1291,17 +1291,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v7
         with:
           python-version: '3.10'
           
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '20'
 
       - name: Setup Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v7
         with:
           go-version: '1.21'
           
