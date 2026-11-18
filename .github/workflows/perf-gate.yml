@@ -29,7 +29,8 @@ env:
 jobs:
   instruction-count-gate:
     name: Instruction-count regression gate
-    runs-on: ubuntu-latest
+    # Keep the paired measurement environment stable across ubuntu-latest upgrades.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     defaults:
       run:
@@ -52,7 +53,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Install Protoc
-        run: sudo apt-get install -y protobuf-compiler
+        run: |
+          # Hosted images can retain indexes for package versions removed from mirrors.
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
 

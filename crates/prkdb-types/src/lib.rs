@@ -17,6 +17,7 @@
 //! 2. Allow mock implementations for testing
 //! 3. Provide clear separation between domain types and implementation
 
+pub mod clock;
 pub mod collection;
 pub mod consumer;
 pub mod error;

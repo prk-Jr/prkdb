@@ -184,10 +184,9 @@ impl WsConsumer {
                 match connect_async(request).await {
                     Ok((ws_stream, _)) => {
                         self.reconnect_count = 0;
-                        yield WsEvent::Connected {
-                            collection: self.config.collection.clone(),
-                        };
-
+                        // The HTTP upgrade precedes subscription initialization. The server's
+                        // `connected` message acknowledges its captured starting offset; emitting
+                        // it here lets callers write before that offset has been chosen.
                         let (mut _write, mut read) = ws_stream.split();
 
                         while let Some(msg_result) = read.next().await {
@@ -202,7 +201,7 @@ impl WsConsumer {
                                                 yield WsEvent::Update {
                                                     collection: self.config.collection.clone(),
                                                     data,
-                                                    timestamp: chrono::Utc::now().to_rfc3339(),
+                                                    timestamp: time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).expect("current UTC time is RFC 3339"),
                                                 };
                                             }
                                         }
@@ -316,5 +315,66 @@ mod tests {
             WsEvent::Update { collection, .. } => assert_eq!(collection, "orders"),
             _ => panic!("Expected Update event"),
         }
+    }
+
+    /// The HTTP upgrade does not mean the collection's latest offset was captured.
+    /// Only the server can announce that the subscription is ready for new writes.
+    #[tokio::test]
+    async fn connected_is_emitted_once_from_the_server_acknowledgement() {
+        use futures::SinkExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            for message in [
+                r#"{"type":"connected","collection":"orders"}"#,
+                r#"{"type":"update","collection":"orders","data":{"id":1},"timestamp":"2026-01-01T00:00:00Z"}"#,
+            ] {
+                websocket.send(Message::Text(message.into())).await.unwrap();
+            }
+        });
+
+        let mut consumer = WsConsumer::new(
+            WsConfig::new(format!("ws://{address}"), "orders").with_auto_reconnect(false),
+        );
+        let events = consumer.subscribe().await;
+        tokio::pin!(events);
+        assert!(
+            matches!(events.next().await, Some(WsEvent::Connected { collection }) if collection == "orders")
+        );
+        assert!(
+            matches!(events.next().await, Some(WsEvent::Update { data, .. }) if data == serde_json::json!({"id": 1}))
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_error_before_subscription_readiness_does_not_emit_connected() {
+        use futures::SinkExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut websocket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            websocket
+                .send(Message::Text(
+                    r#"{"type":"error","message":"subscription initialization failed"}"#.into(),
+                ))
+                .await
+                .unwrap();
+        });
+
+        let mut consumer = WsConsumer::new(
+            WsConfig::new(format!("ws://{address}"), "orders").with_auto_reconnect(false),
+        );
+        let events = consumer.subscribe().await;
+        tokio::pin!(events);
+        assert!(
+            matches!(events.next().await, Some(WsEvent::Error { message }) if message == "subscription initialization failed")
+        );
+        server.await.unwrap();
     }
 }

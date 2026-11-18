@@ -31,7 +31,6 @@ anyhow = { workspace = true }
 
 # Utilities
 tracing = { workspace = true }
-chrono = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

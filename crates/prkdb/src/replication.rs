@@ -219,7 +219,7 @@ impl ReplicationManager {
     /// Get replication health status
     pub async fn get_health(&self) -> ReplicationHealth {
         let state = self.state.read().await;
-        let now = chrono::Utc::now().timestamp_millis();
+        let now = prkdb_types::clock::unix_millis();
         let lag_seconds = if state.last_sync_ts > 0 {
             (now - state.last_sync_ts) as f64 / 1000.0
         } else {
@@ -338,7 +338,7 @@ impl ReplicationManager {
 
                             prkdb_metrics::exporter::REPLICATION_LAST_SYNC_TIMESTAMP
                                 .with_label_values(&[node_id])
-                                .set(chrono::Utc::now().timestamp() as f64);
+                                .set(time::OffsetDateTime::now_utc().unix_timestamp() as f64);
 
                             if changes_count > 0 {
                                 prkdb_metrics::exporter::REPLICATION_BATCH_SIZE
@@ -462,11 +462,11 @@ impl ReplicationManager {
             state.last_change_id = Some(last_change.id.clone());
         }
         state.changes_applied += changes_count as u64;
-        state.last_sync_ts = chrono::Utc::now().timestamp_millis();
+        state.last_sync_ts = prkdb_types::clock::unix_millis();
 
         #[cfg(feature = "metrics")]
         {
-            let now = chrono::Utc::now().timestamp_millis();
+            let now = prkdb_types::clock::unix_millis();
             let lag_ms = now - state.last_sync_ts;
             let lag_seconds = lag_ms as f64 / 1000.0;
 
@@ -603,7 +603,7 @@ impl ReplicationManager {
                 id: id.clone(),
                 collection,
                 data,
-                timestamp: chrono::Utc::now().timestamp_millis(),
+                timestamp: prkdb_types::clock::unix_millis(),
             });
 
             if changes.len() >= limit {
@@ -749,4 +749,54 @@ async fn health_handler(
 ) -> Result<Json<ReplicationHealth>, (StatusCode, String)> {
     let health = manager.get_health().await;
     Ok(Json(health))
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[tokio::test]
+    async fn health_lag_uses_wall_clock_milliseconds() {
+        let db = Arc::new(
+            PrkDb::builder()
+                .with_storage(crate::InMemoryAdapter::new())
+                .build()
+                .unwrap(),
+        );
+        let manager = ReplicationManager::new(
+            db,
+            ReplicationConfig {
+                self_node: ReplicaNode {
+                    id: "clock-test".into(),
+                    address: "127.0.0.1:0".into(),
+                },
+                leader_address: None,
+                followers: Vec::new(),
+                timing: ReplicationTiming::default(),
+            },
+        );
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let last_sync = before - 5_000;
+        {
+            let mut state = manager.state.write().await;
+            state.last_sync_ts = last_sync;
+            state.connected = true;
+        }
+        let health = manager.get_health().await;
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        assert!(health.healthy);
+        assert_eq!(health.last_sync, last_sync);
+        assert!(
+            (5.0..=((after - last_sync) as f64 / 1000.0)).contains(&health.lag_seconds),
+            "lag must use Unix milliseconds, got {}",
+            health.lag_seconds
+        );
+    }
 }

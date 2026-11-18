@@ -179,7 +179,7 @@ fn parse_column_sql_type(attrs: &[Attribute]) -> Result<ColumnHints, syn::Error>
 }
 
 /// Converts a `Type` to the last (unqualified) identifier string, if possible:
-/// e.g. `String` -> "String", `chrono::NaiveDateTime` -> "NaiveDateTime"
+/// e.g. `String` -> "String", `time::PrimitiveDateTime` -> "PrimitiveDateTime"
 fn simple_type_name(ty: &Type) -> Option<String> {
     if let Type::Path(tp) = ty {
         if tp.qself.is_none() && !tp.path.segments.is_empty() {

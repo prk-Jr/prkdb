@@ -122,7 +122,9 @@ async fn show_health_status(cli: &Cli) -> Result<()> {
         partitioning: "Unknown".to_string(), // Would check partitioning status
         replication: "Unknown".to_string(), // Would check replication status
         metrics: "Unknown".to_string(), // Would check metrics system status
-        timestamp: chrono::Utc::now().to_rfc3339(),
+        timestamp: time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .expect("current UTC time is RFC 3339"),
     };
 
     let json_value = serde_json::to_value(&health)?;

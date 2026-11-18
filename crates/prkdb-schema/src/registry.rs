@@ -101,7 +101,7 @@ impl<S: SchemaStorage> SchemaRegistry<S> {
         let schema_id = self.storage.next_schema_id().await?;
 
         // Create schema record
-        let now = chrono::Utc::now().timestamp_millis() as u64;
+        let now = prkdb_types::clock::unix_millis() as u64;
         let schema = Schema {
             schema_id,
             collection: collection.to_string(),

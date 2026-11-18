@@ -1,6 +1,6 @@
-use chrono::{DateTime, NaiveDateTime, Utc};
 use prkdb_orm::{dialect::SqlDialect, types::SqlValue, Table, TableHelpers};
 use prkdb_orm_macros::Table;
+use time::{OffsetDateTime, PrimitiveDateTime};
 
 #[derive(Debug, Clone, PartialEq, Table)]
 #[table(name = "orders", primary_key = "id")]
@@ -9,15 +9,14 @@ pub struct Order {
     pub customer_id: i64,
     #[column(sql_type = "JSONB")]
     pub metadata: String,
-    pub created_at: NaiveDateTime,
-    pub processed_at: DateTime<Utc>,
+    pub created_at: PrimitiveDateTime,
+    pub processed_at: OffsetDateTime,
 }
 
 fn sample_order() -> Order {
-    let created_at = DateTime::<Utc>::from_timestamp(1_650_000_000, 0)
-        .expect("valid timestamp")
-        .naive_utc();
-    let processed_at = DateTime::<Utc>::from_timestamp(1_650_100_000, 0).expect("valid timestamp");
+    let created = OffsetDateTime::from_unix_timestamp(1_650_000_000).expect("valid timestamp");
+    let created_at = PrimitiveDateTime::new(created.date(), created.time());
+    let processed_at = OffsetDateTime::from_unix_timestamp(1_650_100_000).expect("valid timestamp");
 
     Order {
         id: 100,
@@ -40,7 +39,7 @@ fn ddl_respects_column_override_and_datetime_mapping() {
     assert!(sql_pg.contains("JSONB"), "Expected override to be used");
     assert!(
         sql_pg.to_uppercase().contains("TIMESTAMP"),
-        "Expected NaiveDateTime mapped"
+        "Expected PrimitiveDateTime mapped"
     );
 
     let sql_sqlite = Order::create_table_sql(SqlDialect::Sqlite);

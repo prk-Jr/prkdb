@@ -1132,7 +1132,9 @@ impl PrkDb {
             (format!("__replication:state"), "Configured".to_string()),
             (
                 format!("__replication:last_sync"),
-                chrono::Utc::now().to_rfc3339(),
+                time::OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .expect("current UTC time is RFC 3339"),
             ),
             (format!("__replication:total_changes"), "0".to_string()),
             (format!("__replication:changes_applied"), "0".to_string()),
@@ -1191,7 +1193,7 @@ impl PrkDb {
             let metadata = serde_json::json!({
                 "num_partitions": num_partitions,
                 "replication_factor": replication_factor,
-                "created_at": chrono::Utc::now().to_rfc3339()
+                "created_at": time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).expect("current UTC time is RFC 3339")
             });
 
             let metadata_value = metadata.to_string().into_bytes();
@@ -1439,5 +1441,50 @@ impl PrkDb {
             Ok(registry) => registry.values().cloned().collect(),
             Err(_) => Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod replication_time_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn initializing_replication_persists_configuration_and_a_utc_timestamp() {
+        let db = PrkDb::builder()
+            .with_storage(crate::InMemoryAdapter::new())
+            .build()
+            .unwrap();
+        let before = time::OffsetDateTime::now_utc();
+        db.initialize_replication("clock-node", "leader")
+            .await
+            .unwrap();
+        let after = time::OffsetDateTime::now_utc();
+        for (key, expected) in [
+            ("node_id", "clock-node"),
+            ("role", "leader"),
+            ("state", "Configured"),
+            ("total_changes", "0"),
+            ("changes_applied", "0"),
+        ] {
+            let stored = db
+                .storage
+                .get(format!("__replication:{key}").as_bytes())
+                .await
+                .unwrap();
+            assert_eq!(stored, Some(expected.as_bytes().to_vec()), "{key}");
+        }
+        let stored = db
+            .storage
+            .get(b"__replication:last_sync")
+            .await
+            .unwrap()
+            .unwrap();
+        let timestamp = time::OffsetDateTime::parse(
+            std::str::from_utf8(&stored).unwrap(),
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert_eq!(timestamp.offset(), time::UtcOffset::UTC);
+        assert!((before..=after).contains(&timestamp));
     }
 }

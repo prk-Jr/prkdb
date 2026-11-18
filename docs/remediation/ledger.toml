@@ -642,6 +642,42 @@ sources = ["pr-80-perf-gate-first-run"]
 evidence = ["crates/prkdb/benches/iai_hot_paths.rs", "scripts/perf_measurement_run.py", "https://github.com/prk-Jr/prkdb/actions/runs/35961505566", "https://github.com/prk-Jr/prkdb/actions/runs/40823663027", "https://github.com/prk-Jr/prkdb/actions/runs/40838719175"]
 regression_tests = ["test:crates/prkdb/tests/perf_measurement_contract.rs::benchmark_controls_require_explicit_environment_values", "test:crates/prkdb/tests/perf_measurement_contract.rs::canary_returns_the_number_of_volatile_updates", "test:crates/prkdb/tests/perf_measurement_contract.rs::skipped_indexed_insert_fails_record_and_index_postconditions", "script:scripts/test_perf_measurement_gate.py", "script:scripts/test_perf_measurement_run.py"]
 
+[[finding]]
+id = "EVT-09"
+title = "WebSocket client announces readiness before the server captures the latest offset"
+area = "events"
+severity = "medium"
+phase = 2
+status = "fixed"
+sources = ["ci-43588912071-2026-11-18"]
+evidence = ["crates/prkdb-client/src/ws.rs", "crates/prkdb-cli/src/commands/serve.rs", "https://github.com/prk-Jr/prkdb/actions/runs/43588912071"]
+regression_tests = ["test:crates/prkdb-client/src/ws.rs::connected_is_emitted_once_from_the_server_acknowledgement", "test:crates/prkdb-client/src/ws.rs::an_error_before_subscription_readiness_does_not_emit_connected"]
+changes = ["bcdddca367c58bcd120f4c45663c143946204d76"]
+
+[[finding]]
+id = "TST-15"
+title = "Aggregate publish counter test compares snapshots before all writes are accounted"
+area = "tests"
+severity = "medium"
+phase = 2
+status = "fixed"
+sources = ["ci-43710386790-2026-11-18"]
+evidence = ["crates/prkdb/src/storage/collection_partitioned_adapter.rs", "https://github.com/prk-Jr/prkdb/actions/runs/43710386790"]
+regression_tests = ["test:crates/prkdb/src/storage/collection_partitioned_adapter.rs::the_aggregate_publish_total_sums_across_collections"]
+changes = ["bcdddca367c58bcd120f4c45663c143946204d76"]
+
+[[finding]]
+id = "TST-16"
+title = "Concurrent WebSocket test servers can choose the same random gRPC port"
+area = "tests"
+severity = "medium"
+phase = 2
+status = "fixed"
+sources = ["ci-43588912071-2026-11-18"]
+evidence = ["crates/prkdb-cli/tests/websocket_integration.rs", "https://github.com/prk-Jr/prkdb/actions/runs/43588912071"]
+regression_tests = ["test:crates/prkdb-cli/tests/websocket_integration.rs::parallel_websocket_servers_keep_their_databases_isolated", "test:crates/prkdb-cli/tests/websocket_integration.rs::test_websocket_streaming_flow", "test:crates/prkdb-cli/tests/websocket_integration.rs::test_websocket_resume_from_offset"]
+changes = ["bcdddca367c58bcd120f4c45663c143946204d76"]
+
 [[phase]]
 id = 0
 title = "Honesty and tracking"

@@ -172,7 +172,12 @@ where
             event.record(&mut visitor);
 
             let entry = LogEntry {
-                timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                timestamp: time::OffsetDateTime::now_local()
+                    .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+                    .format(time::macros::format_description!(
+                        "[hour]:[minute]:[second].[subsecond digits:3]"
+                    ))
+                    .expect("local clock format has all required components"),
                 level: event.metadata().level().to_string(),
                 target: event.metadata().target().to_string(),
                 message: visitor.message,
@@ -250,7 +255,12 @@ where
                     traces.pop_front();
                 }
                 traces.push_back(TraceEntry {
-                    timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                    timestamp: time::OffsetDateTime::now_local()
+                        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+                        .format(time::macros::format_description!(
+                            "[hour]:[minute]:[second].[subsecond digits:3]"
+                        ))
+                        .expect("local clock format has all required components"),
                     name: timing.name.clone(),
                     duration_ms: duration.as_millis() as u64,
                     fields: timing.fields.clone(),
@@ -881,3 +891,50 @@ const INDEX_HTML: &str = r#"<!doctype html>
     </script>
   </body>
 "#;
+
+#[cfg(test)]
+mod capture_time_tests {
+    use super::*;
+    use tracing_subscriber::prelude::*;
+
+    fn assert_clock_format(timestamp: &str) {
+        assert_eq!(timestamp.len(), 12);
+        time::Time::parse(
+            timestamp,
+            time::macros::format_description!("[hour]:[minute]:[second].[subsecond digits:3]"),
+        )
+        .expect("dashboard timestamps retain HH:MM:SS.mmm");
+    }
+
+    #[test]
+    fn log_capture_delivers_the_event_with_a_millisecond_timestamp() {
+        let mut events = get_shared_observability().log_tx.subscribe();
+        let subscriber = tracing_subscriber::registry().with(LogCaptureLayer);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "ci_clock_contract", "captured clock event");
+        });
+        let entry = events
+            .try_recv()
+            .expect("the capture layer must deliver the event");
+        assert_eq!(entry.level, "INFO");
+        assert_eq!(entry.target, "ci_clock_contract");
+        assert!(entry.message.contains("captured clock event"));
+        assert_clock_format(&entry.timestamp);
+    }
+
+    #[test]
+    fn closing_a_trace_records_its_name_fields_and_timestamp() {
+        let subscriber = tracing_subscriber::registry().with(TraceCaptureLayer::new(0));
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("ci_clock_trace", record = 17);
+            let _entered = span.enter();
+        });
+        let traces = get_shared_observability().traces.read().unwrap();
+        let entry = traces
+            .iter()
+            .find(|trace| trace.name == "ci_clock_trace")
+            .expect("closing a captured span must record its trace");
+        assert!(entry.fields.contains("record"));
+        assert_clock_format(&entry.timestamp);
+    }
+}

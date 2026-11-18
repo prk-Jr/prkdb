@@ -121,7 +121,9 @@ async fn show_system_metrics(cli: &Cli) -> Result<()> {
         avg_latency_ms: 0.0, // Latency tracking not yet implemented
         max_latency_ms: 0,   // Latency tracking not yet implemented
         uptime_seconds,
-        timestamp: chrono::Utc::now().to_rfc3339(),
+        timestamp: time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .expect("current UTC time is RFC 3339"),
     };
 
     display_single(&metrics, cli)?;

@@ -111,27 +111,57 @@ impl From<&bool> for SqlValue {
     }
 }
 
-// Chrono NaiveDateTime -> stored as "YYYY-MM-DD HH:MM:SS" string by default
-impl From<chrono::NaiveDateTime> for SqlValue {
-    fn from(dt: chrono::NaiveDateTime) -> Self {
-        SqlValue::DateTime(dt.format("%Y-%m-%d %H:%M:%S").to_string())
+// Preserve the legacy SQL text, including truncation to whole seconds for naive values.
+const NAIVE_DATETIME_FORMAT: &[time::format_description::FormatItem<'static>] =
+    time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
+
+/// Keep the former UTC representation: +00:00 and 0/3/6/9 fractional digits.
+/// The default time RFC3339 formatter uses Z and trims trailing fractional zeros.
+fn format_utc_datetime(dt: time::OffsetDateTime) -> String {
+    let dt = dt.to_offset(time::UtcOffset::UTC);
+    let base = dt
+        .format(time::macros::format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second]"
+        ))
+        .expect("datetime contains every required component");
+    let nanos = dt.nanosecond();
+    let fraction = if nanos == 0 {
+        String::new()
+    } else if nanos.is_multiple_of(1_000_000) {
+        format!(".{:03}", nanos / 1_000_000)
+    } else if nanos.is_multiple_of(1_000) {
+        format!(".{:06}", nanos / 1_000)
+    } else {
+        format!(".{nanos:09}")
+    };
+    format!("{base}{fraction}+00:00")
+}
+impl From<time::PrimitiveDateTime> for SqlValue {
+    fn from(dt: time::PrimitiveDateTime) -> Self {
+        SqlValue::DateTime(
+            dt.format(NAIVE_DATETIME_FORMAT)
+                .expect("datetime contains every required component"),
+        )
     }
 }
-impl From<&chrono::NaiveDateTime> for SqlValue {
-    fn from(dt: &chrono::NaiveDateTime) -> Self {
-        SqlValue::DateTime(dt.format("%Y-%m-%d %H:%M:%S").to_string())
+impl From<&time::PrimitiveDateTime> for SqlValue {
+    fn from(dt: &time::PrimitiveDateTime) -> Self {
+        SqlValue::DateTime(
+            dt.format(NAIVE_DATETIME_FORMAT)
+                .expect("datetime contains every required component"),
+        )
     }
 }
 
-// Chrono DateTime<Utc> -> RFC3339 string
-impl From<chrono::DateTime<chrono::Utc>> for SqlValue {
-    fn from(dt: chrono::DateTime<chrono::Utc>) -> Self {
-        SqlValue::DateTime(dt.to_rfc3339())
+// OffsetDateTime -> UTC RFC3339 string, matching the former DateTime<Utc> mapping
+impl From<time::OffsetDateTime> for SqlValue {
+    fn from(dt: time::OffsetDateTime) -> Self {
+        SqlValue::DateTime(format_utc_datetime(dt))
     }
 }
-impl From<&chrono::DateTime<chrono::Utc>> for SqlValue {
-    fn from(dt: &chrono::DateTime<chrono::Utc>) -> Self {
-        SqlValue::DateTime(dt.to_rfc3339())
+impl From<&time::OffsetDateTime> for SqlValue {
+    fn from(dt: &time::OffsetDateTime) -> Self {
+        SqlValue::DateTime(format_utc_datetime(*dt))
     }
 }
 
@@ -260,11 +290,11 @@ impl FromSqlValue for serde_json::Value {
     }
 }
 
-impl FromSqlValue for chrono::NaiveDateTime {
+impl FromSqlValue for time::PrimitiveDateTime {
     fn from_sql_value(v: &SqlValue) -> Result<Self, String> {
         match v {
             SqlValue::DateTime(s) | SqlValue::Text(s) => {
-                chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+                time::PrimitiveDateTime::parse(s, NAIVE_DATETIME_FORMAT)
                     .map_err(|e| format!("naive datetime parse error: {e}"))
             }
             other => Err(format!("expected DateTime/Text, got {:?}", other)),
@@ -272,12 +302,14 @@ impl FromSqlValue for chrono::NaiveDateTime {
     }
 }
 
-impl FromSqlValue for chrono::DateTime<chrono::Utc> {
+impl FromSqlValue for time::OffsetDateTime {
     fn from_sql_value(v: &SqlValue) -> Result<Self, String> {
         match v {
-            SqlValue::DateTime(s) | SqlValue::Text(s) => chrono::DateTime::parse_from_rfc3339(s)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .map_err(|e| format!("datetime parse error: {e}")),
+            SqlValue::DateTime(s) | SqlValue::Text(s) => {
+                time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
+                    .map(|dt| dt.to_offset(time::UtcOffset::UTC))
+                    .map_err(|e| format!("datetime parse error: {e}"))
+            }
             other => Err(format!("expected DateTime/Text, got {:?}", other)),
         }
     }
@@ -360,8 +392,8 @@ where
     }
 }
 
-// NaiveDateTime mapping
-impl OrmType for chrono::NaiveDateTime {
+// PrimitiveDateTime mapping
+impl OrmType for time::PrimitiveDateTime {
     fn sql_type_name(dialect: SqlDialect) -> &'static str {
         match dialect {
             SqlDialect::Postgres => "TIMESTAMP",
@@ -371,8 +403,8 @@ impl OrmType for chrono::NaiveDateTime {
     }
 }
 
-// DateTime<Utc> mapping
-impl OrmType for chrono::DateTime<chrono::Utc> {
+// OffsetDateTime mapping
+impl OrmType for time::OffsetDateTime {
     fn sql_type_name(dialect: SqlDialect) -> &'static str {
         match dialect {
             SqlDialect::Postgres => "TIMESTAMPTZ",
@@ -389,6 +421,92 @@ impl OrmType for serde_json::Value {
             SqlDialect::Postgres => "JSONB",
             SqlDialect::MySql => "JSON",
             SqlDialect::Sqlite => "TEXT", // sqlite doesn't have a native JSON column type (store as TEXT)
+        }
+    }
+}
+
+#[cfg(test)]
+mod datetime_tests {
+    use super::*;
+
+    #[test]
+    fn naive_datetime_preserves_legacy_sql_text() {
+        let stored = SqlValue::DateTime("2022-04-15 05:20:00".into());
+        let value = time::PrimitiveDateTime::from_sql_value(&stored).unwrap();
+        assert_eq!(SqlValue::from(value), stored);
+        assert_eq!(SqlValue::from(&value), stored);
+        assert_eq!(
+            SqlValue::from(value.replace_nanosecond(123_456_789).unwrap()),
+            stored
+        );
+        assert_eq!(
+            time::PrimitiveDateTime::sql_type_name(SqlDialect::Postgres),
+            "TIMESTAMP"
+        );
+        assert_eq!(
+            time::PrimitiveDateTime::sql_type_name(SqlDialect::MySql),
+            "DATETIME"
+        );
+        assert_eq!(
+            time::PrimitiveDateTime::sql_type_name(SqlDialect::Sqlite),
+            "DATETIME"
+        );
+    }
+
+    #[test]
+    fn utc_datetime_preserves_legacy_rfc3339_text_and_precision() {
+        for text in [
+            "2022-04-15T05:20:00+00:00",
+            "2022-04-15T05:20:00.120+00:00",
+            "2022-04-15T05:20:00.123400+00:00",
+            "2022-04-15T05:20:00.123456789+00:00",
+        ] {
+            let stored = SqlValue::DateTime(text.into());
+            let value = time::OffsetDateTime::from_sql_value(&stored).unwrap();
+            assert_eq!(SqlValue::from(value), stored);
+            assert_eq!(SqlValue::from(&value), stored);
+        }
+        assert_eq!(
+            time::OffsetDateTime::sql_type_name(SqlDialect::Postgres),
+            "TIMESTAMPTZ"
+        );
+        assert_eq!(
+            time::OffsetDateTime::sql_type_name(SqlDialect::MySql),
+            "DATETIME"
+        );
+        assert_eq!(
+            time::OffsetDateTime::sql_type_name(SqlDialect::Sqlite),
+            "DATETIME"
+        );
+    }
+
+    #[test]
+    fn offset_datetime_inputs_normalize_to_utc() {
+        for text in ["2022-04-15T10:50:00+05:30", "2022-04-15T05:20:00Z"] {
+            let value = time::OffsetDateTime::from_sql_value(&SqlValue::Text(text.into())).unwrap();
+            assert_eq!(value.offset(), time::UtcOffset::UTC);
+            let original =
+                time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339)
+                    .unwrap();
+            assert_eq!(SqlValue::from(original), SqlValue::from(value));
+            assert_eq!(SqlValue::from(&original), SqlValue::from(value));
+            assert_eq!(
+                SqlValue::from(value),
+                SqlValue::DateTime("2022-04-15T05:20:00+00:00".into())
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_datetime_values_are_rejected() {
+        for stored in [
+            SqlValue::Text("not-a-date".into()),
+            SqlValue::Text("2022-02-30 05:20:00".into()),
+            SqlValue::Int(0),
+            SqlValue::Null,
+        ] {
+            assert!(time::PrimitiveDateTime::from_sql_value(&stored).is_err());
+            assert!(time::OffsetDateTime::from_sql_value(&stored).is_err());
         }
     }
 }

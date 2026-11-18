@@ -18,7 +18,7 @@ async-trait = { workspace = true }
 
 # Utilities
 dashmap = { workspace = true }
-chrono = { workspace = true, features = ["serde"] }
+time = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

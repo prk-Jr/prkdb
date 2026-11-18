@@ -371,14 +371,18 @@ jobs:
           # feature and is not compiled either. That is what failed shard 2 of run
           # 35327050707 on `RpcClientPool::check_chaos`.
           #
-          # Package-qualified because two packages are selected and `prkdb-cli` declares
-          # no features; a bare `--features chaos` is rejected in that shape.
+          # Package-qualified because multiple packages are selected; `prkdb-cli` and
+          # `prkdb-types` declare no features; a bare `--features chaos` is rejected in that shape.
+          # Baselines use the shard's mutated packages even with --test-package.
+          # Keep the chaos feature owner selected in every Cargo invocation.
           cargo mutants --no-shuffle --timeout 300 \
             --test-tool nextest --jobs 2 \
+            --cargo-arg=--package=prkdb \
             --features prkdb/chaos \
             --shard ${{ matrix.shard }}/8 \
             --in-diff /tmp/pr.diff \
-            --package prkdb --package prkdb-cli 2>&1 | tee /tmp/mutants.log
+            --test-package prkdb --test-package prkdb-cli --test-package prkdb-types \
+            --package prkdb --package prkdb-cli --package prkdb-types 2>&1 | tee /tmp/mutants.log
           status=$?
 
           {
@@ -386,7 +390,7 @@ jobs:
             echo
             if grep -q "no Rust source files" /tmp/mutants.log; then
               echo "**No mutants generated.** The diff touches no mutable Rust in"
-              echo '`prkdb` or `prkdb-cli` — test code, comments, or another package.'
+              echo '`prkdb`, `prkdb-cli`, or `prkdb-types` — test code, comments, or another package.'
               echo "Nothing was verified here, which is the correct outcome for this"
               echo "diff rather than a clean bill of health."
             elif grep -qE "[0-9]+ mutants? tested" /tmp/mutants.log; then
