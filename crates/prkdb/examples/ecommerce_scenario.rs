@@ -182,7 +182,7 @@ async fn generate_orders(db: PrkDb, count: u32) {
             product_id,
             quantity,
             total_price,
-            ts: chrono::Utc::now().timestamp(),
+            ts: time::OffsetDateTime::now_utc().unix_timestamp(),
         };
         println!("[Generator] Creating Order: {:?}", order.id);
         order_handle.put(order).await.unwrap();
@@ -197,7 +197,7 @@ async fn generate_shipments(db: PrkDb, count: u32) {
             order_id: i as u64,
             shipping_provider: "PrkShipping".into(),
             tracking_number: format!("PRK-{}", 1000 + i),
-            ts: chrono::Utc::now().timestamp(),
+            ts: time::OffsetDateTime::now_utc().unix_timestamp(),
         };
         println!(
             "[Generator] Creating Shipment for Order: {:?}",

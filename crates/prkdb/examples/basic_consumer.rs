@@ -64,7 +64,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 id: i,
                 event_type: "user.signup".to_string(),
                 payload: format!("{{\"user_id\": {}}}", i),
-                timestamp: chrono::Utc::now().timestamp_millis(),
+                timestamp: (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)
+                    as i64,
             })
             .await?;
         events_produced += 1;

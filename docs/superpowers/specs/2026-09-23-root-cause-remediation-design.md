@@ -103,6 +103,7 @@ Sources: **A** = 2026-09-23 correctness audit (A#n), **R** = 2026-09-07 senior r
 | EVT-04 | HIGH | Sled "atomic" outbox methods apply two independent tree batches. | `prkdb-storage-sled/src/lib.rs:263-268,285-290` (R05) | Reported | 3 |
 | EVT-05 | HIGH | Any `put_with_outbox` error falls back to a non-atomic path; real errors hidden. | `collection_handle.rs:282-299,608-625` (R07) | Reported | 3 |
 | EVT-06 | HIGH | Auto-commit commits inside `poll()` before processing (at-most-once); no generation fencing; unassigned consumer falls back to partition 0; `let _ = self.commit()`. | `consumer.rs:71,422,435,667` (A#16) | Reported | 3 |
+| EVT-09 | MED | WebSocket client emits Connected after HTTP upgrade, before server chooses latest offset; a subsequent write can be skipped. | `prkdb-client/src/ws.rs`; CI 43588912071 | Reproduced | 2 |
 
 ### 3.4 Transactions and TTL (TXN, TTL)
 
@@ -149,6 +150,8 @@ Sources: **A** = 2026-09-23 correctness audit (A#n), **R** = 2026-09-07 senior r
 | TST-06 | MED | No deterministic simulation of the cluster. | 4 |
 | TST-07 | LOW | No fuzzing of WAL record, segment, snapshot, and proto decoding. | 2 |
 | TST-09 | HIGH | Async WAL benchmarks count about 500 instructions for 100 1 KiB puts, one get and a 100-entry batch; operation work is outside the effective measured region (first evidence: https://github.com/prk-Jr/prkdb/actions/runs/35961505566). The indexed-insert benchmark uses the same nested async-wrapper pattern; its 222→519 counter change after the compiler update is not a qualified full-path slowdown. The first bounded repair probe was inconclusive because Gungraun cleared control variables; coverage and a same-harness comparison remain required. | 2 |
+| TST-15 | MED | Aggregate publish-counter test samples moving counters before all three writes are recorded, intermittently comparing 2 with 3. | 2 |
+| TST-16 | MED | Native concurrent WebSocket tests choose the same random gRPC port, so one child fails to bind and its client writes to the other database. | 2 |
 
 ### 3.8 Documentation (DOC)
 
@@ -524,3 +527,5 @@ No unrelated refactoring.
 | 5 | 2026-09-23 | Plan review: TST-01 moved to Phase 4 (random chaos loss cannot be a deterministic tripwire, and the test is `#[ignore]`d for needing a server binary). |
 | 4 | 2026-09-23 | Spec review pass 3: `remediation-gate.yml` ships in Phase 0 so it is dispatchable from `main`; Phases 0 and 5 use the phase-PR CI run as `gate_evidence`; noted that evidence checks prove existence, not execution. |
 | 3 | 2026-09-23 | Spec review pass 2: evidence kinds for non-code findings (`script:`, `ci-job:`, `xtask:`); TST-01 redefined as the allowance; `remediation-gate` workflow as the only source of gate evidence; cluster event identity = Raft index behind opaque `EventSeq`; Raft log as separate `raft/` store with suffix truncation; blocking-op demotion rule; dedicated WAL writer thread; KEY-03 harness exemption. |
+
+| 9 | 2026-11-18 | Record EVT-09 WebSocket subscription readiness and TST-15 aggregate-counter test race, and TST-16 concurrent WebSocket test port collision from main CI failures. |

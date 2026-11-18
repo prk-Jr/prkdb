@@ -803,7 +803,7 @@ async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
                     "oldest_unpublished_age_ms": write_path.oldest_unpublished_age_ms,
                     "last_publish_age_ms": write_path.last_publish_age_ms,
                 },
-                "timestamp": chrono::Utc::now().to_rfc3339()
+                "timestamp": time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).expect("current UTC time is RFC 3339")
             });
 
             if write_path.healthy {
@@ -818,7 +818,7 @@ async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
                 "status": "unhealthy",
                 "database": "error",
                 "error": e.to_string(),
-                "timestamp": chrono::Utc::now().to_rfc3339()
+                "timestamp": time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).expect("current UTC time is RFC 3339")
             })),
         )
             .into_response(),
@@ -1453,7 +1453,7 @@ async fn websocket_connection(
             json!({
                 "type": "connected",
                 "collection": collection_name,
-                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "timestamp": time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).expect("current UTC time is RFC 3339"),
                 "start_offset": last_sequence
             })
             .to_string(),
@@ -1514,7 +1514,7 @@ async fn websocket_connection(
                                 "collection": collection_name,
                                 "data": data,
                                 "offset": seq,
-                                "timestamp": chrono::Utc::now().to_rfc3339()
+                                "timestamp": time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).expect("current UTC time is RFC 3339")
                             });
 
                             if socket.send(Message::Text(message.to_string())).await.is_err() {

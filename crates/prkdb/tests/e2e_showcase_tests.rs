@@ -94,13 +94,13 @@ async fn test_e2e_collection_crud() {
         id: 1,
         name: "Alice".to_string(),
         email: "alice@example.com".to_string(),
-        created_at: chrono::Utc::now().timestamp(),
+        created_at: time::OffsetDateTime::now_utc().unix_timestamp(),
     };
     let user2 = User {
         id: 2,
         name: "Bob".to_string(),
         email: "bob@example.com".to_string(),
-        created_at: chrono::Utc::now().timestamp(),
+        created_at: time::OffsetDateTime::now_utc().unix_timestamp(),
     };
 
     users.put(user1.clone()).await.unwrap();
@@ -333,7 +333,8 @@ async fn test_e2e_event_streaming() {
             event_type: event_types[i % event_types.len()].to_string(),
             entity_type: entity_types[i % entity_types.len()].to_string(),
             entity_id: format!("{}", i % 20),
-            timestamp: chrono::Utc::now().timestamp_millis() + i as i64,
+            timestamp: (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
+                + i as i64,
             details: format!("Event {} details", i),
         };
 
@@ -405,7 +406,7 @@ async fn test_e2e_ecommerce_workflow() {
             id: *id,
             name: format!("User-{}", id),
             email: format!("user{}@shop.com", id),
-            created_at: chrono::Utc::now().timestamp(),
+            created_at: time::OffsetDateTime::now_utc().unix_timestamp(),
         };
         users.put(user).await.unwrap();
 
@@ -416,7 +417,8 @@ async fn test_e2e_ecommerce_workflow() {
                 event_type: "USER_CREATED".to_string(),
                 entity_type: "User".to_string(),
                 entity_id: id.to_string(),
-                timestamp: chrono::Utc::now().timestamp_millis(),
+                timestamp: (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)
+                    as i64,
                 details: format!("User {} registered", id),
             })
             .await
@@ -450,7 +452,8 @@ async fn test_e2e_ecommerce_workflow() {
                     event_type: "ORDER_PLACED".to_string(),
                     entity_type: "Order".to_string(),
                     entity_id: order_id.to_string(),
-                    timestamp: chrono::Utc::now().timestamp_millis(),
+                    timestamp: (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)
+                        as i64,
                     details: format!("Order {} placed by user {}", order_id, user_id),
                 })
                 .await

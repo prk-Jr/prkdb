@@ -62,7 +62,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sensor_id: sensor_id.to_string(),
                 temperature: 20.0 + (i as f64 * 5.0) + (round as f64),
                 humidity: 50.0 + (i as f64 * 3.0),
-                timestamp: chrono::Utc::now().timestamp_millis(),
+                timestamp: (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)
+                    as i64,
             };
 
             let partition = db.get_partition::<SensorReading>(reading.id()).unwrap_or(0);

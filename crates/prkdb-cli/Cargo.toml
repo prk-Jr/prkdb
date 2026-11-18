@@ -43,13 +43,12 @@ bincode = { workspace = true }
 # Utilities
 anyhow = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
-humantime = "2.1"
 # Backup archive manifests. Already in the tree transitively; declared directly so the
 # verification path does not depend on another crate keeping it.
 sha2 = "0.10"
 # Constant-time credential comparison.
 subtle = { workspace = true }
-chrono = { workspace = true, features = ["serde"] }
+time = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 prost.workspace = true

@@ -172,7 +172,12 @@ where
             event.record(&mut visitor);
 
             let entry = LogEntry {
-                timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                timestamp: time::OffsetDateTime::now_local()
+                    .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+                    .format(time::macros::format_description!(
+                        "[hour]:[minute]:[second].[subsecond digits:3]"
+                    ))
+                    .expect("local clock format has all required components"),
                 level: event.metadata().level().to_string(),
                 target: event.metadata().target().to_string(),
                 message: visitor.message,
@@ -250,7 +255,12 @@ where
                     traces.pop_front();
                 }
                 traces.push_back(TraceEntry {
-                    timestamp: chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                    timestamp: time::OffsetDateTime::now_local()
+                        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+                        .format(time::macros::format_description!(
+                            "[hour]:[minute]:[second].[subsecond digits:3]"
+                        ))
+                        .expect("local clock format has all required components"),
                     name: timing.name.clone(),
                     duration_ms: duration.as_millis() as u64,
                     fields: timing.fields.clone(),

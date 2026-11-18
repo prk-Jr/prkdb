@@ -50,7 +50,7 @@ pub async fn save_outbox_event<C: Collection + Serialize + DeserializeOwned>(
     event: &OutboxRecord<C>,
 ) -> Result<(), StorageError> {
     let env = OutboxEnvelope {
-        ts_millis: chrono::Utc::now().timestamp_millis(),
+        ts_millis: (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64,
         event: event.clone(),
     };
     let bytes = encode_to_vec(&env, config::standard())

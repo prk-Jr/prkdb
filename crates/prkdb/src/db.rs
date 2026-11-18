@@ -1132,7 +1132,9 @@ impl PrkDb {
             (format!("__replication:state"), "Configured".to_string()),
             (
                 format!("__replication:last_sync"),
-                chrono::Utc::now().to_rfc3339(),
+                time::OffsetDateTime::now_utc()
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .expect("current UTC time is RFC 3339"),
             ),
             (format!("__replication:total_changes"), "0".to_string()),
             (format!("__replication:changes_applied"), "0".to_string()),
@@ -1191,7 +1193,7 @@ impl PrkDb {
             let metadata = serde_json::json!({
                 "num_partitions": num_partitions,
                 "replication_factor": replication_factor,
-                "created_at": chrono::Utc::now().to_rfc3339()
+                "created_at": time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).expect("current UTC time is RFC 3339")
             });
 
             let metadata_value = metadata.to_string().into_bytes();

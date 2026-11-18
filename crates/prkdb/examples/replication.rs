@@ -177,7 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             customer_id: i % 5,
             amount: i * 100,
             status: "pending".to_string(),
-            timestamp: chrono::Utc::now().timestamp_millis(),
+            timestamp: (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64,
         };
         orders_collection.put(order).await?;
 
@@ -191,7 +191,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             id: i,
             name: format!("User {}", i),
             email: format!("user{}@example.com", i),
-            created_at: chrono::Utc::now().timestamp_millis(),
+            created_at: (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64,
         };
         users_collection.put(user).await?;
     }
@@ -278,7 +278,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "pending"
                     }
                     .to_string(),
-                    timestamp: chrono::Utc::now().timestamp_millis(),
+                    timestamp: (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)
+                        as i64,
                 };
                 let _ = orders.put(order).await;
                 order_id += 1;
@@ -291,7 +292,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     id: user_id,
                     name: format!("User {}", user_id),
                     email: format!("user{}@example.com", user_id),
-                    created_at: chrono::Utc::now().timestamp_millis(),
+                    created_at: (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)
+                        as i64,
                 };
                 let _ = users.put(user).await;
                 user_id += 1;

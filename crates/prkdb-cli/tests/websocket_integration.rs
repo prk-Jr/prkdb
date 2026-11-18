@@ -1,6 +1,5 @@
 use futures_util::StreamExt;
 use prkdb_client::{ClientConfig, PrkDbClient, WsConfig, WsConsumer, WsEvent};
-use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tokio::time::sleep;
@@ -9,25 +8,28 @@ struct TestServer {
     process: Child,
     http_port: u16,
     grpc_port: u16,
-    db_path: PathBuf,
+    _database: tempfile::TempDir,
 }
 
 impl TestServer {
     async fn start() -> Self {
-        let http_port = 18080 + (rand::random::<u16>() % 1000);
-        let grpc_port = 50051 + (rand::random::<u16>() % 1000);
-        let db_path = PathBuf::from(format!("test_prkdb_{}.db", http_port));
-
-        // Ensure clean slate
-        if db_path.exists() {
-            let _ = std::fs::remove_dir_all(&db_path);
-        }
+        // Hold the startup lock through readiness: releasing ephemeral reservations
+        // before the child binds must not let another test select the same endpoints.
+        static STARTUP: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _startup = STARTUP.lock().await;
+        let http_reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let grpc_reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let http_port = http_reservation.local_addr().unwrap().port();
+        let grpc_port = grpc_reservation.local_addr().unwrap().port();
+        let database = tempfile::tempdir().unwrap();
+        let db_path = database.path().join("database");
 
         // Use the binary built by cargo for integration tests
         let binary_path = env!("CARGO_BIN_EXE_prkdb-cli");
         println!("Using binary: {}", binary_path);
         println!("Using database: {:?}", db_path);
 
+        drop((http_reservation, grpc_reservation));
         let child = Command::new(binary_path)
             .arg("--database")
             .arg(&db_path)
@@ -47,6 +49,14 @@ impl TestServer {
             .stderr(Stdio::inherit())
             .spawn()
             .expect("Failed to spawn prkdb-cli");
+
+        // Own the child before polling so startup failures also kill and reap it.
+        let server = Self {
+            process: child,
+            http_port,
+            grpc_port,
+            _database: database,
+        };
 
         // Wait for server to start
         let client = reqwest::Client::new();
@@ -86,12 +96,7 @@ impl TestServer {
             grpc_attempts += 1;
         }
 
-        Self {
-            process: child,
-            http_port,
-            grpc_port,
-            db_path,
-        }
+        server
     }
 }
 
@@ -99,11 +104,6 @@ impl Drop for TestServer {
     fn drop(&mut self) {
         let _ = self.process.kill();
         let _ = self.process.wait();
-
-        // Clean up database directory
-        if self.db_path.exists() {
-            let _ = std::fs::remove_dir_all(&self.db_path);
-        }
     }
 }
 
@@ -238,4 +238,43 @@ async fn test_websocket_resume_from_offset() {
     // But we waited 1s.
     // If serve.rs polling uses prefix scan, it should find them.
     assert_eq!(items.len(), 5, "Should have received all 5 items");
+}
+
+/// cargo-mutants runs this native test binary concurrently, unlike nextest's
+/// per-test server group. Each endpoint must still reach its own database.
+#[tokio::test]
+async fn parallel_websocket_servers_keep_their_databases_isolated() {
+    let (first, second) = tokio::join!(TestServer::start(), TestServer::start());
+    let mut ports = vec![
+        first.http_port,
+        first.grpc_port,
+        second.http_port,
+        second.grpc_port,
+    ];
+    ports.sort_unstable();
+    ports.dedup();
+    assert_eq!(ports.len(), 4, "every listener must have its own port");
+
+    let first_client = PrkDbClient::with_config(
+        vec![format!("http://127.0.0.1:{}", first.grpc_port)],
+        ClientConfig::default(),
+    )
+    .await
+    .unwrap();
+    let second_client = PrkDbClient::with_config(
+        vec![format!("http://127.0.0.1:{}", second.grpc_port)],
+        ClientConfig::default(),
+    )
+    .await
+    .unwrap();
+    first_client.put(b"isolated:key", b"first").await.unwrap();
+    second_client.put(b"isolated:key", b"second").await.unwrap();
+    assert_eq!(
+        first_client.get(b"isolated:key").await.unwrap(),
+        Some(b"first".to_vec())
+    );
+    assert_eq!(
+        second_client.get(b"isolated:key").await.unwrap(),
+        Some(b"second".to_vec())
+    );
 }

@@ -1606,32 +1606,34 @@ mod tests {
             }
         }
 
-        // A caller is answered from inside `publish_batch`, and the publish is recorded
-        // by `flush_accumulator_inner` after it returns — so the writes completing above
-        // says nothing about the counter yet. Reading it here without waiting sees zeros.
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        let per_collection = loop {
-            let counts: Vec<u64> = adapter
-                .collections
-                .iter()
-                .map(|entry| entry.value().write_path_health().publishes_total)
-                .collect();
-            if counts.len() >= 2 && counts.iter().all(|c| *c > 0) {
-                break counts;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "timed out waiting for both collections to record a publish; saw {counts:?}"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        };
-        let expected: u64 = per_collection.iter().sum();
-
-        assert!(
-            per_collection.len() >= 2 && expected > 0,
-            "the fold needs at least two collections that have published something, or it \
-             is not being exercised; saw {per_collection:?}"
-        );
+        // Callers are answered before publish accounting completes. Wait for every
+        // acknowledged write to be counted, rather than accepting any nonzero count:
+        // orders can otherwise move from one to two between the part and aggregate reads.
+        wait_until(
+            "all three writes to reach their collection's publish counter",
+            Duration::from_secs(10),
+            || {
+                [("users", 1), ("orders", 2)]
+                    .iter()
+                    .all(|(name, expected)| {
+                        adapter
+                            .collections
+                            .get(*name)
+                            .unwrap()
+                            .write_path_health()
+                            .publishes_total
+                            == *expected
+                    })
+            },
+        )
+        .await;
+        let per_collection: Vec<u64> = adapter
+            .collections
+            .iter()
+            .map(|entry| entry.value().write_path_health().publishes_total)
+            .collect();
+        let expected = 3;
+        assert_eq!(per_collection.iter().sum::<u64>(), expected);
 
         assert_eq!(
             adapter.write_path_health().publishes_total,

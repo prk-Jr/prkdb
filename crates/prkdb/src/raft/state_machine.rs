@@ -102,7 +102,7 @@ impl StateMachine for PrkDbStateMachine {
                     let metadata = serde_json::json!({
                         "num_partitions": num_partitions,
                         "replication_factor": replication_factor,
-                        "created_at": chrono::Utc::now().to_rfc3339()
+                        "created_at": time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).expect("current UTC time is RFC 3339")
                     });
 
                     let metadata_value = metadata.to_string().into_bytes();
