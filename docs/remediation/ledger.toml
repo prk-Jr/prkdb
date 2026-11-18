@@ -648,10 +648,11 @@ title = "WebSocket client announces readiness before the server captures the lat
 area = "events"
 severity = "medium"
 phase = 2
-status = "in_progress"
+status = "fixed"
 sources = ["ci-43588912071-2026-11-18"]
 evidence = ["crates/prkdb-client/src/ws.rs", "crates/prkdb-cli/src/commands/serve.rs", "https://github.com/prk-Jr/prkdb/actions/runs/43588912071"]
 regression_tests = ["test:crates/prkdb-client/src/ws.rs::connected_is_emitted_once_from_the_server_acknowledgement", "test:crates/prkdb-client/src/ws.rs::an_error_before_subscription_readiness_does_not_emit_connected"]
+changes = ["bcdddca367c58bcd120f4c45663c143946204d76"]
 
 [[finding]]
 id = "TST-15"
@@ -659,10 +660,11 @@ title = "Aggregate publish counter test compares snapshots before all writes are
 area = "tests"
 severity = "medium"
 phase = 2
-status = "in_progress"
+status = "fixed"
 sources = ["ci-43710386790-2026-11-18"]
 evidence = ["crates/prkdb/src/storage/collection_partitioned_adapter.rs", "https://github.com/prk-Jr/prkdb/actions/runs/43710386790"]
 regression_tests = ["test:crates/prkdb/src/storage/collection_partitioned_adapter.rs::the_aggregate_publish_total_sums_across_collections"]
+changes = ["bcdddca367c58bcd120f4c45663c143946204d76"]
 
 [[finding]]
 id = "TST-16"
@@ -670,10 +672,11 @@ title = "Concurrent WebSocket test servers can choose the same random gRPC port"
 area = "tests"
 severity = "medium"
 phase = 2
-status = "in_progress"
+status = "fixed"
 sources = ["ci-43588912071-2026-11-18"]
 evidence = ["crates/prkdb-cli/tests/websocket_integration.rs", "https://github.com/prk-Jr/prkdb/actions/runs/43588912071"]
 regression_tests = ["test:crates/prkdb-cli/tests/websocket_integration.rs::parallel_websocket_servers_keep_their_databases_isolated", "test:crates/prkdb-cli/tests/websocket_integration.rs::test_websocket_streaming_flow", "test:crates/prkdb-cli/tests/websocket_integration.rs::test_websocket_resume_from_offset"]
+changes = ["bcdddca367c58bcd120f4c45663c143946204d76"]
 
 [[phase]]
 id = 0

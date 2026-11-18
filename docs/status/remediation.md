@@ -54,7 +54,7 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | DOC-07 | medium | 5 | open | prkdb_writer_healthy alert only exported by prkdb-cli serve; /metrics needs Admin; capability split undocumented |
 | DOC-08 | medium | 5 | open | Missing pages: consumer groups, Docker, CLI reference, Raft ops, troubleshooting, Python client, upgrade |
 | DOC-12 | medium | 5 | open | Nothing in CI runs the documented deploy recipes (docker compose up, 3-node setup) |
-| EVT-09 | medium | 2 | in_progress | WebSocket client announces readiness before the server captures the latest offset |
+| EVT-09 | medium | 2 | fixed | WebSocket client announces readiness before the server captures the latest offset |
 | RFT-08 | medium | 4 | open | RPC client never sends x-prkdb-cluster-secret; mTLS mode configures no server TLS, so cluster cannot elect |
 | RFT-09 | medium | 4 | open | a_committed_write_replicates_to_every_node failed the unmutated baseline in CI run 34021601202 |
 | STO-03 | medium | 2 | open | WAL append outside publish_barrier can leave the live index pointing at a stale offset |
@@ -63,8 +63,8 @@ Tracks the root-cause remediation program. A finding is **verified** only when i
 | TST-02 | medium | 4 | open | Linearizability workloads use 1 writer, 1 reader, ~25 ops; failed reads dropped |
 | TST-05 | medium | 2 | open | No power-loss (unsynced-data) testing; needs the WAL routed through Vfs |
 | TST-06 | medium | 4 | open | No deterministic simulation of the cluster |
-| TST-15 | medium | 2 | in_progress | Aggregate publish counter test compares snapshots before all writes are accounted |
-| TST-16 | medium | 2 | in_progress | Concurrent WebSocket test servers can choose the same random gRPC port |
+| TST-15 | medium | 2 | fixed | Aggregate publish counter test compares snapshots before all writes are accounted |
+| TST-16 | medium | 2 | fixed | Concurrent WebSocket test servers can choose the same random gRPC port |
 | TTL-01 | medium | 3 | open | Expiry deletes without re-checking the version; value and TTL metadata written non-atomically |
 | TXN-04 | medium | 3 | open | Default isolation is ReadCommitted; D5 makes Serializable the default |
 | DOC-10 | low | 5 | open | ignoreDeadLinks: true hides orphaned methodology/status pages |
