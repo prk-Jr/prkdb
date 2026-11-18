@@ -378,6 +378,7 @@ jobs:
             --features prkdb/chaos \
             --shard ${{ matrix.shard }}/8 \
             --in-diff /tmp/pr.diff \
+            --test-package prkdb --test-package prkdb-cli --test-package prkdb-types \
             --package prkdb --package prkdb-cli --package prkdb-types 2>&1 | tee /tmp/mutants.log
           status=$?
 
