@@ -36,7 +36,7 @@ fn create_test_record(
             id: value,
             name: collection_name.to_string(),
         },
-        (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64,
+        prkdb_types::clock::unix_millis(),
     ))
 }
 
@@ -277,7 +277,7 @@ async fn test_error_handling() {
                 id: 100,
                 name: "left".to_string(),
             },
-            (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64,
+            prkdb_types::clock::unix_millis(),
         )),
         Err(Error::Internal("test error".to_string())),
     ]);
@@ -291,7 +291,7 @@ async fn test_error_handling() {
             id: 1000,
             name: "right".to_string(),
         },
-        (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64,
+        prkdb_types::clock::unix_millis(),
     ))]);
 
     let joined = left_stream.inner_join(

@@ -333,8 +333,7 @@ async fn test_e2e_event_streaming() {
             event_type: event_types[i % event_types.len()].to_string(),
             entity_type: entity_types[i % entity_types.len()].to_string(),
             entity_id: format!("{}", i % 20),
-            timestamp: (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
-                + i as i64,
+            timestamp: prkdb_types::clock::unix_millis() + i as i64,
             details: format!("Event {} details", i),
         };
 
@@ -417,8 +416,7 @@ async fn test_e2e_ecommerce_workflow() {
                 event_type: "USER_CREATED".to_string(),
                 entity_type: "User".to_string(),
                 entity_id: id.to_string(),
-                timestamp: (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)
-                    as i64,
+                timestamp: prkdb_types::clock::unix_millis(),
                 details: format!("User {} registered", id),
             })
             .await
@@ -452,8 +450,7 @@ async fn test_e2e_ecommerce_workflow() {
                     event_type: "ORDER_PLACED".to_string(),
                     entity_type: "Order".to_string(),
                     entity_id: order_id.to_string(),
-                    timestamp: (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000)
-                        as i64,
+                    timestamp: prkdb_types::clock::unix_millis(),
                     details: format!("Order {} placed by user {}", order_id, user_id),
                 })
                 .await

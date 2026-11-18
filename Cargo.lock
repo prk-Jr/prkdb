@@ -2706,7 +2706,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
- "time",
  "tokio",
  "tracing",
 ]
@@ -2762,6 +2761,7 @@ dependencies = [
  "dashmap",
  "serde",
  "thiserror 2.0.21",
+ "time",
  "tokio",
 ]
 

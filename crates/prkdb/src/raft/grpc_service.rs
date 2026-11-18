@@ -1329,8 +1329,7 @@ impl<S: prkdb_schema::SchemaStorage> PrkDbGrpcService<S> {
             key: key.to_vec(),
             value,
             offset,
-            timestamp: (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
-                as u64,
+            timestamp: prkdb_types::clock::unix_millis() as u64,
         };
         let _ = self.watch_tx.send(event);
     }

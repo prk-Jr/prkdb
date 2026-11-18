@@ -368,8 +368,7 @@ mod tests {
             compatibility: CompatibilityMode::Backward,
             is_breaking: false,
             migration_id: None,
-            created_at: (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
-                as u64,
+            created_at: prkdb_types::clock::unix_millis() as u64,
         }
     }
 

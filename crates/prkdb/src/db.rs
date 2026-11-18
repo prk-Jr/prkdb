@@ -1443,3 +1443,48 @@ impl PrkDb {
         }
     }
 }
+
+#[cfg(test)]
+mod replication_time_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn initializing_replication_persists_configuration_and_a_utc_timestamp() {
+        let db = PrkDb::builder()
+            .with_storage(crate::InMemoryAdapter::new())
+            .build()
+            .unwrap();
+        let before = time::OffsetDateTime::now_utc();
+        db.initialize_replication("clock-node", "leader")
+            .await
+            .unwrap();
+        let after = time::OffsetDateTime::now_utc();
+        for (key, expected) in [
+            ("node_id", "clock-node"),
+            ("role", "leader"),
+            ("state", "Configured"),
+            ("total_changes", "0"),
+            ("changes_applied", "0"),
+        ] {
+            let stored = db
+                .storage
+                .get(format!("__replication:{key}").as_bytes())
+                .await
+                .unwrap();
+            assert_eq!(stored, Some(expected.as_bytes().to_vec()), "{key}");
+        }
+        let stored = db
+            .storage
+            .get(b"__replication:last_sync")
+            .await
+            .unwrap()
+            .unwrap();
+        let timestamp = time::OffsetDateTime::parse(
+            std::str::from_utf8(&stored).unwrap(),
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert_eq!(timestamp.offset(), time::UtcOffset::UTC);
+        assert!((before..=after).contains(&timestamp));
+    }
+}

@@ -107,7 +107,7 @@ impl RetentionPolicy {
         
         let total_events = matching.len();
         let mut to_delete = Vec::new();
-        let now_millis = (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
+        let now_millis = prkdb_types::clock::unix_millis();
         
         // Apply time-based retention
         if let Some(ttl) = self.config.time_to_live {
