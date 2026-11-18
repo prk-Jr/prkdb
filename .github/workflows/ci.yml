@@ -373,8 +373,11 @@ jobs:
           #
           # Package-qualified because multiple packages are selected; `prkdb-cli` and
           # `prkdb-types` declare no features; a bare `--features chaos` is rejected in that shape.
+          # Baselines use the shard's mutated packages even with --test-package.
+          # Keep the chaos feature owner selected in every Cargo invocation.
           cargo mutants --no-shuffle --timeout 300 \
             --test-tool nextest --jobs 2 \
+            --cargo-arg=--package=prkdb \
             --features prkdb/chaos \
             --shard ${{ matrix.shard }}/8 \
             --in-diff /tmp/pr.diff \
