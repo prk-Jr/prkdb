@@ -1,0 +1,35 @@
+{
+  "source": "Immutable recorder-only artifacts, no database measurements; original byte-for-byte fixtures, not regenerated",
+  "fixtures": [
+    {
+      "file": "linux7-syscalls.perf",
+      "sha256": "129a535da6ecbadbb6e4d17c2584602f2f6426ee64c3f8ae85eedfe9a4795935",
+      "bytes": 86624,
+      "workflow": 40854574502,
+      "category": "syscalls",
+      "native_pid": 3188,
+      "samples": 114,
+      "database_invocations": 0
+    },
+    {
+      "file": "linux617-syscalls.perf",
+      "sha256": "7590e4155c622f3c1a5bc7c92f3f3a463c1008a816601407afbd0e4035fd2dce",
+      "bytes": 82870,
+      "workflow": 40722095223,
+      "category": "syscalls",
+      "native_pid": 3037,
+      "samples": 120,
+      "database_invocations": 0
+    },
+    {
+      "file": "linux617-scheduler.perf",
+      "sha256": "06c09fabd0ee7e61e8c31abd95f9228bfdd044c3cede4b20434a0a4f083c19f8",
+      "bytes": 404852,
+      "workflow": 40722095223,
+      "category": "scheduler",
+      "native_pid": 3067,
+      "samples": 36,
+      "database_invocations": 0
+    }
+  ]
+}

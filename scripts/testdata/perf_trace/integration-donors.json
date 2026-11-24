@@ -1,0 +1,120 @@
+{
+  "files": {
+    "scripts/perf_trace_decode.py": {
+      "donor": "a5a836776b7582ef973203e23ce2bdd2c0b92cf7",
+      "immutable": true,
+      "sha256": "9e468d9dd374d05f70c31e1d55c3dda871dd95c542c30c944122b63621bae505"
+    },
+    "scripts/perf_trace_format.py": {
+      "donor": "a5a836776b7582ef973203e23ce2bdd2c0b92cf7",
+      "immutable": true,
+      "sha256": "d9605aac4b54aca6d4ab8b62e0abcc663dead6acf121534d0343e40428d65583"
+    },
+    "scripts/perf_trace_records.py": {
+      "donor": "a5a836776b7582ef973203e23ce2bdd2c0b92cf7",
+      "immutable": true,
+      "sha256": "ef9fe57135be2e3f92bbb7e14f45c3317ad3a5d39952387f35da185aa9aaf357"
+    },
+    "scripts/stream_durable_diagnostic.py": {
+      "donor": "a6791bd526d71c279d715241bc454bb646f6748c",
+      "immutable": false,
+      "sha256": "b0bbc106389760a944b014e1990503231b71e172158f6f2bf24976b53cbef5ed"
+    },
+    "scripts/stream_durable_restore.py": {
+      "donor": "a6791bd526d71c279d715241bc454bb646f6748c",
+      "immutable": true,
+      "sha256": "f6e23a4e791e222d200d59e5e98af15ef68e8ff90884b1a61de159d20b5b5e01"
+    },
+    "scripts/test_perf_trace_decode.py": {
+      "donor": "a5a836776b7582ef973203e23ce2bdd2c0b92cf7",
+      "immutable": true,
+      "sha256": "45946ef8f9f5118d26c420c34cabf5df35704dfdb7f6e11771cb94781f06634c"
+    },
+    "scripts/test_perf_trace_format.py": {
+      "donor": "a5a836776b7582ef973203e23ce2bdd2c0b92cf7",
+      "immutable": true,
+      "sha256": "38c5e3260154119eb917f59a87ac09420d06c38da3c82008eccbd204e036f2d6"
+    },
+    "scripts/test_perf_trace_records.py": {
+      "donor": "a5a836776b7582ef973203e23ce2bdd2c0b92cf7",
+      "immutable": true,
+      "sha256": "7986bb11206170593ea7aa5aa2eadf7377d3bbb5c9b5055c83c889811bcc42b5"
+    },
+    "scripts/test_stream_durable_diagnostic.py": {
+      "donor": "a6791bd526d71c279d715241bc454bb646f6748c",
+      "immutable": false,
+      "sha256": "c3564a2efac24a1b751a3ce8d64483fa7525d8c2b8ea4c984aa83a7094f6d117"
+    },
+    "scripts/test_stream_durable_restore.py": {
+      "donor": "a6791bd526d71c279d715241bc454bb646f6748c",
+      "immutable": true,
+      "sha256": "9e8a3615203201128cb7a2b78bb18efd226cfdc643eebb86f6de786e09505538"
+    },
+    "scripts/test_wal_descriptor_diagnostic.py": {
+      "donor": "a6791bd526d71c279d715241bc454bb646f6748c",
+      "immutable": true,
+      "sha256": "2cb695d004deac074d5b21fab198aace54e01a5935b9808f4af9002cb4526411"
+    },
+    "scripts/test_wal_stall_diagnostic.py": {
+      "donor": "a6791bd526d71c279d715241bc454bb646f6748c",
+      "immutable": true,
+      "sha256": "ac0258b6da041645f027bee1116a9683d24d7ec25606b0d3a51ab1701157e529"
+    },
+    "scripts/test_wal_trace_qualification.py": {
+      "donor": "a6791bd526d71c279d715241bc454bb646f6748c",
+      "immutable": true,
+      "sha256": "5970299a265142e3b70876b77fc2ecff12937f02416e0633929bf22ad68083f2"
+    },
+    "scripts/testdata/perf_trace/README.md": {
+      "donor": "a5a836776b7582ef973203e23ce2bdd2c0b92cf7",
+      "immutable": true,
+      "sha256": "0d7b5deb5d2e158d45d26c853729e75a04a8b7791595c40cfa35b32761514383"
+    },
+    "scripts/testdata/perf_trace/linux617-scheduler.perf": {
+      "donor": "a5a836776b7582ef973203e23ce2bdd2c0b92cf7",
+      "immutable": true,
+      "sha256": "06c09fabd0ee7e61e8c31abd95f9228bfdd044c3cede4b20434a0a4f083c19f8"
+    },
+    "scripts/testdata/perf_trace/linux617-scheduler.perf.expected.json": {
+      "donor": "a5a836776b7582ef973203e23ce2bdd2c0b92cf7",
+      "immutable": true,
+      "sha256": "68d51dc9cff7571d81eb734abb8712fa09f733c8c6110b3a68e11ff2a4b4208a"
+    },
+    "scripts/testdata/perf_trace/linux617-syscalls.perf": {
+      "donor": "a5a836776b7582ef973203e23ce2bdd2c0b92cf7",
+      "immutable": true,
+      "sha256": "7590e4155c622f3c1a5bc7c92f3f3a463c1008a816601407afbd0e4035fd2dce"
+    },
+    "scripts/testdata/perf_trace/linux617-syscalls.perf.expected.json": {
+      "donor": "a5a836776b7582ef973203e23ce2bdd2c0b92cf7",
+      "immutable": true,
+      "sha256": "5bf862691747278fa7fda60160a8a0b7f705b52522fb12a7f10b5f4eab3c8202"
+    },
+    "scripts/testdata/perf_trace/linux7-syscalls.perf": {
+      "donor": "a5a836776b7582ef973203e23ce2bdd2c0b92cf7",
+      "immutable": true,
+      "sha256": "129a535da6ecbadbb6e4d17c2584602f2f6426ee64c3f8ae85eedfe9a4795935"
+    },
+    "scripts/testdata/perf_trace/provenance.json": {
+      "donor": "a5a836776b7582ef973203e23ce2bdd2c0b92cf7",
+      "immutable": true,
+      "sha256": "7757dccd44d00a99a0d8efd0275984cfdef729c5bb1cedda2eb507e63484ff5d"
+    },
+    "scripts/wal_descriptor_diagnostic.py": {
+      "donor": "a6791bd526d71c279d715241bc454bb646f6748c",
+      "immutable": true,
+      "sha256": "7397fab89dd3bfe884cc02ecc98bc746e9c2dc2c99dbf1c27ada586736ee790a"
+    },
+    "scripts/wal_stall_diagnostic.py": {
+      "donor": "a6791bd526d71c279d715241bc454bb646f6748c",
+      "immutable": true,
+      "sha256": "2ad3cdf2d78befb7d7b100abac18b8cb78034d17eba7690defd953dc7229a68a"
+    },
+    "scripts/wal_trace_qualification.py": {
+      "donor": "a6791bd526d71c279d715241bc454bb646f6748c",
+      "immutable": true,
+      "sha256": "612c46dbb32c74e47d43b25819f5b2356b9dbcaabd0a8146571c48fa669f989a"
+    }
+  },
+  "version": 1
+}

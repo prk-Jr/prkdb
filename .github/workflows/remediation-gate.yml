@@ -2,7 +2,7 @@ name: Remediation Gate
 
 # Dispatched by the maintainer against a phase PR's head ref (spec §5, step 3).
 # Must exist on main to be dispatchable, which is why it ships in Phase 0.
-run-name: Remediation gate — phase ${{ inputs.phase }} @ ${{ inputs.ref }}
+run-name: ${{ inputs.probe == 'stream-framed-qualification' && 'DIAGNOSTIC recorder-only qualification' || 'Remediation gate' }} — phase ${{ inputs.phase }} @ ${{ inputs.ref }}
 
 on:
   workflow_dispatch:
@@ -15,6 +15,11 @@ on:
         required: true
         type: choice
         options: ['0', '1', '2', '3', '4', '5']
+      probe:
+        description: Manual diagnostic probe (no database invocation)
+        type: choice
+        default: none
+        options: [none, stream-framed-qualification]
 
 permissions:
   contents: read
@@ -45,13 +50,25 @@ jobs:
         env:
           REF: ${{ inputs.ref }}
           PHASE: ${{ inputs.phase }}
+          PROBE: ${{ inputs.probe }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          SELECTED_REF: ${{ github.ref }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           sha="$(git rev-parse HEAD)"
+          if [ "$PROBE" = "stream-framed-qualification" ]; then
+            [[ "$REF" =~ ^[0-9a-f]{40}$ ]] || { echo "Exact lowercase 40-hex SHA required" >&2; exit 1; }
+            [ "$REF" = "$sha" ] && [ "$WORKFLOW_SHA" = "$sha" ] || { echo "Workflow/source SHA mismatch" >&2; exit 1; }
+            [ "$WORKFLOW_REF" = "$REPOSITORY/.github/workflows/remediation-gate.yml@$SELECTED_REF" ] || { echo "Workflow ref mismatch" >&2; exit 1; }
+            echo "Diagnostic workflow $WORKFLOW_REF resolved to $sha" >> "$GITHUB_STEP_SUMMARY"
+          fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "Gate phase $PHASE @ $sha (ref $REF)" >> "$GITHUB_STEP_SUMMARY"
 
   ledger-and-tests:
     name: Ledger and Tests
+    if: ${{ inputs.probe != 'stream-framed-qualification' }}
     needs: resolve
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -80,7 +97,7 @@ jobs:
     # Phases 0 and 5 don't touch the storage/WAL path this harness exercises: phase 0
     # only stands the gate workflow up, and phase 5 is close-out. Every other phase
     # gate runs it.
-    if: ${{ inputs.phase != '0' && inputs.phase != '5' }}
+    if: ${{ inputs.probe != 'stream-framed-qualification' && inputs.phase != '0' && inputs.phase != '5' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     # Ten shards, not because ten are needed to fit the time budget, but for headroom
@@ -127,7 +144,7 @@ jobs:
   # set still produces a red result instead of being skipped itself.
   harness-result:
     name: Harness result
-    if: always()
+    if: ${{ always() && inputs.probe != 'stream-framed-qualification' }}
     needs: harness
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -148,3 +165,145 @@ jobs:
           echo "Harness result: $RESULT (phase $PHASE) — failing" >> "$GITHUB_STEP_SUMMARY"
           echo "::error::Harness did not pass and was not a legitimate phase 0/5 skip: $RESULT"
           exit 1
+
+  stream-framed-recorders:
+    name: DIAGNOSTIC recorder qualification (no database)
+    needs: resolve
+    if: ${{ inputs.probe == 'stream-framed-qualification' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      TOKIO_WORKER_THREADS: '4'
+    steps:
+      - name: Start nonresetting preparation clock and fresh prefix
+        run: |
+          python3 - <<'PY'
+          import os, time, uuid
+          nonce = uuid.uuid4().hex
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              out.write(f"PREPARATION_BEGIN_NS={time.monotonic_ns()}\nNONCE={nonce}\nROOT={os.environ['RUNNER_TEMP']}/qualification-{nonce}\n")
+          PY
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Package exact tooling and run selected local contracts
+        timeout-minutes: 3
+        run: |
+          python3 scripts/perf_trace_linux_qualification.py package --repo "$GITHUB_WORKSPACE" --output "$ROOT" --nonce "$NONCE"
+          set +e
+          PYTHONPATH="$ROOT/tooling/scripts" python3 -m unittest test_stream_durable_diagnostic test_stream_durable_restore test_wal_descriptor_diagnostic test_wal_stall_diagnostic test_wal_trace_qualification test_perf_trace_format test_perf_trace_records test_perf_trace_decode test_perf_trace_integration test_perf_trace_linux_qualification > "$ROOT/preparation.stdout.txt" 2> "$ROOT/preparation.stderr.txt"
+          code=$?
+          printf '%s\n' "$code" > "$ROOT/preparation.exit.txt"
+          [ "$code" -eq 0 ] || exit "$code"
+          set -e
+          python3 - <<'PY'
+          import os,time
+          assert time.monotonic_ns()-int(os.environ['PREPARATION_BEGIN_NS']) <= 180*10**9, '180s preparation cutoff exceeded'
+          PY
+      - name: Qualify three actual recorder chains exactly once
+        id: native
+        timeout-minutes: 22
+        run: |
+          set +e
+          python3 "$ROOT/tooling/scripts/stream_durable_diagnostic.py" qualify-recorders --output "$ROOT/recorders" > "$ROOT/native.stdout.txt" 2> "$ROOT/native.stderr.txt"
+          code=$?
+          printf '%s\n' "$code" > "$ROOT/native.exit.txt"
+          exit "$code"
+      - name: Reconcile recorder receipt and before-after source bindings
+        if: always()
+        id: receipts
+        timeout-minutes: 1
+        env:
+          NATIVE_OUTCOME: ${{ steps.native.outcome }}
+        run: |
+          python3 - <<'PY'
+          import json,os,pathlib
+          root=pathlib.Path(os.environ['ROOT'])
+          root.mkdir(mode=0o700,exist_ok=True)
+          (root/'workflow-status.json').write_text(json.dumps({'native':os.environ['NATIVE_OUTCOME'],'diagnostic_only':True,'timing_eligible':False}))
+          PY
+          python3 scripts/perf_trace_linux_qualification.py check-recorders --repo "$GITHUB_WORKSPACE" --root "$ROOT" --nonce "$NONCE"
+      - name: Bounded postmortem upload ownership rescue
+        if: always()
+        timeout-minutes: 1
+        run: python3 scripts/perf_trace_linux_qualification.py rescue-upload --root "$ROOT" --nonce "$NONCE"
+      - name: Upload complete recorder prefix including failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        timeout-minutes: 8
+        with:
+          name: stream-framed-recorders-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.ROOT }}
+          if-no-files-found: error
+          retention-days: 30
+          include-hidden-files: true
+
+  stream-framed-controls:
+    name: DIAGNOSTIC root cleanup controls (no timing)
+    needs: [resolve, stream-framed-recorders]
+    if: ${{ always() && inputs.probe == 'stream-framed-qualification' && needs.resolve.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      TOKIO_WORKER_THREADS: '4'
+    steps:
+      - name: Start nonresetting preparation clock and fresh prefix
+        run: |
+          python3 - <<'PY'
+          import os, time, uuid
+          nonce = uuid.uuid4().hex
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              out.write(f"PREPARATION_BEGIN_NS={time.monotonic_ns()}\nNONCE={nonce}\nROOT={os.environ['RUNNER_TEMP']}/qualification-{nonce}\n")
+          PY
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Package exact control tooling before two-minute setup cutoff
+        timeout-minutes: 2
+        run: |
+          python3 scripts/perf_trace_linux_qualification.py package --repo "$GITHUB_WORKSPACE" --output "$ROOT" --nonce "$NONCE"
+          python3 - <<'PY'
+          import os,time
+          assert time.monotonic_ns()-int(os.environ['PREPARATION_BEGIN_NS']) <= 120*10**9, '120s setup cutoff exceeded'
+          PY
+      - name: Run three fixed real Linux controls stopping on first unexpected result
+        id: controls
+        timeout-minutes: 2
+        run: |
+          set +e
+          python3 scripts/perf_trace_linux_qualification.py controls --repo "$GITHUB_WORKSPACE" --root "$ROOT" --nonce "$NONCE" > "$ROOT/controls.stdout.txt" 2> "$ROOT/controls.stderr.txt"
+          code=$?
+          printf '%s\n' "$code" > "$ROOT/controls.exit.txt"
+          exit "$code"
+      - name: Retain raw control step outcome
+        if: always()
+        env:
+          CONTROL_OUTCOME: ${{ steps.controls.outcome }}
+          RECORDER_RESULT: ${{ needs.stream-framed-recorders.result }}
+        run: |
+          python3 - <<'PY'
+          import json,os,pathlib
+          root=pathlib.Path(os.environ['ROOT'])
+          root.mkdir(mode=0o700,exist_ok=True)
+          (root/'workflow-status.json').write_text(json.dumps({'controls':os.environ['CONTROL_OUTCOME'],'recorders':os.environ['RECORDER_RESULT'],'diagnostic_only':True,'timing_eligible':False}))
+          PY
+      - name: Bounded postmortem upload ownership rescue
+        if: always()
+        timeout-minutes: 1
+        run: python3 scripts/perf_trace_linux_qualification.py rescue-upload --root "$ROOT" --nonce "$NONCE"
+      - name: Upload complete root-control prefix including failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        timeout-minutes: 5
+        with:
+          name: stream-framed-controls-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.ROOT }}
+          if-no-files-found: error
+          retention-days: 30
+          include-hidden-files: true

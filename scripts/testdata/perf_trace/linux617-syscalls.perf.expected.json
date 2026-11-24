@@ -1,0 +1,285 @@
+{
+  "native_pid": 3037,
+  "thread_ids": [
+    3037,
+    3039
+  ],
+  "window_ns": [
+    152000799589,
+    152396061089
+  ],
+  "thread_lifetimes_ns": {
+    "3037": [
+      152000799589,
+      152396061089
+    ],
+    "3039": [
+      152039072525,
+      152390375670
+    ]
+  },
+  "thread_names": {
+    "3037": [
+      "wal-diag-smoke"
+    ],
+    "3039": [
+      "wal-diag-smoke",
+      "tokio-smoke",
+      "prkdb-wal-smoke"
+    ]
+  },
+  "pairs": [
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152001333316,
+      "end_ns": 152001334788,
+      "return_value": 0
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152033947588,
+      "end_ns": 152033949451,
+      "return_value": 0
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152033962400,
+      "end_ns": 152033963281,
+      "return_value": 0
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152033965595,
+      "end_ns": 152033966346,
+      "return_value": 0
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152033968479,
+      "end_ns": 152033969260,
+      "return_value": 0
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152033970032,
+      "end_ns": 152033970733,
+      "return_value": 0
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152033976752,
+      "end_ns": 152033977523,
+      "return_value": 0
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152034034179,
+      "end_ns": 152034035100,
+      "return_value": 0
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152034045946,
+      "end_ns": 152034046708,
+      "return_value": 0
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152034259349,
+      "end_ns": 152034260210,
+      "return_value": 0
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152034261342,
+      "end_ns": 152034262073,
+      "return_value": 0
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152034263345,
+      "end_ns": 152034264056,
+      "return_value": 0
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152034404268,
+      "end_ns": 152034405099,
+      "return_value": 0
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152034496548,
+      "end_ns": 152034497429,
+      "return_value": 0
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152034501365,
+      "end_ns": 152034502176,
+      "return_value": 0
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152034503718,
+      "end_ns": 152034504460,
+      "return_value": 0
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152034506062,
+      "end_ns": 152034506943,
+      "return_value": 0
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152034522196,
+      "end_ns": 152034523008,
+      "return_value": 0
+    },
+    {
+      "name": "futex",
+      "tid": 3039,
+      "begin_ns": 152039164439,
+      "end_ns": 152039169627,
+      "return_value": 1
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152039088769,
+      "end_ns": 152039182701,
+      "return_value": 0
+    },
+    {
+      "name": "futex",
+      "tid": 3039,
+      "begin_ns": 152039187974,
+      "end_ns": 152039190538,
+      "return_value": 1
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152039185375,
+      "end_ns": 152039198335,
+      "return_value": 0
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152039199747,
+      "end_ns": 152039200659,
+      "return_value": 0
+    },
+    {
+      "name": "write",
+      "tid": 3037,
+      "begin_ns": 152039263033,
+      "end_ns": 152039275572,
+      "return_value": 4096
+    },
+    {
+      "name": "pwrite64",
+      "tid": 3037,
+      "begin_ns": 152039278286,
+      "end_ns": 152039280309,
+      "return_value": 1
+    },
+    {
+      "name": "fdatasync",
+      "tid": 3037,
+      "begin_ns": 152039288832,
+      "end_ns": 152039881007,
+      "return_value": 0
+    },
+    {
+      "name": "fsync",
+      "tid": 3037,
+      "begin_ns": 152039883801,
+      "end_ns": 152039884963,
+      "return_value": 0
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152389903801,
+      "end_ns": 152389908018,
+      "return_value": 1
+    },
+    {
+      "name": "futex",
+      "tid": 3039,
+      "begin_ns": 152039191780,
+      "end_ns": 152389947533,
+      "return_value": 0
+    },
+    {
+      "name": "write",
+      "tid": 3039,
+      "begin_ns": 152390234747,
+      "end_ns": 152390256129,
+      "return_value": 77
+    },
+    {
+      "name": "futex",
+      "tid": 3039,
+      "begin_ns": 152390318644,
+      "end_ns": 152390324572,
+      "return_value": 1
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152389924733,
+      "end_ns": 152390335935,
+      "return_value": 0
+    },
+    {
+      "name": "futex",
+      "tid": 3039,
+      "begin_ns": 152390353306,
+      "end_ns": 152390356130,
+      "return_value": 1
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152390337577,
+      "end_ns": 152390366331,
+      "return_value": 0
+    },
+    {
+      "name": "futex",
+      "tid": 3037,
+      "begin_ns": 152390367963,
+      "end_ns": 152390368844,
+      "return_value": 0
+    },
+    {
+      "name": "write",
+      "tid": 3037,
+      "begin_ns": 152390401864,
+      "end_ns": 152390415174,
+      "return_value": 39
+    }
+  ]
+}

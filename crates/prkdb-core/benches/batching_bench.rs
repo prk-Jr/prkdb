@@ -1,5 +1,5 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use prkdb_core::wal::{LogOperation, LogRecord, WalConfig, WriteAheadLog};
+use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
+use prkdb_core::wal::{LogOperation, LogRecord, LogSegment, WalConfig, WriteAheadLog};
 use std::sync::Arc;
 
 /// Benchmark baseline: single append
@@ -101,10 +101,42 @@ fn bench_wal_throughput_comparison(c: &mut Criterion) {
     group.finish();
 }
 
+/// Durable sparse-index batch path matching the short-record regression.
+/// Setup and output destruction are outside Criterion's measured routine.
+fn bench_sparse_index_durable(c: &mut Criterion) {
+    let mut group = c.benchmark_group("wal/sparse_index_durable");
+    group.throughput(Throughput::Elements(100));
+    group.bench_function("batch_100_short", |b| {
+        b.iter_batched(
+            || {
+                let dir = tempfile::tempdir().unwrap();
+                let segment = LogSegment::create(dir.path(), 0, 1024).unwrap();
+                let records = (0..100)
+                    .map(|offset| {
+                        LogRecord::new(LogOperation::Put {
+                            collection: "test".to_string(),
+                            id: format!("key{offset}").into_bytes(),
+                            data: format!("value{offset}").into_bytes(),
+                        })
+                    })
+                    .collect();
+                (segment, dir, records)
+            },
+            |(segment, dir, records)| {
+                let offset = segment.append_batch(records).unwrap();
+                black_box((segment, dir, offset))
+            },
+            BatchSize::PerIteration,
+        );
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_wal_single_append,
     bench_wal_batch_append,
-    bench_wal_throughput_comparison
+    bench_wal_throughput_comparison,
+    bench_sparse_index_durable
 );
 criterion_main!(benches);

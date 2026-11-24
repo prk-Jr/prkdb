@@ -1,0 +1,35 @@
+{
+  "base_revision": "e4542a1d1e3aac00bc949d99a0442c258a08e348",
+  "files": {
+    "scripts/stream_durable_diagnostic.py": {
+      "base_blob": "33b521a70997d04ee11a71d64bc247668c326fdd",
+      "base_sha256": "acb44f1d50227fe168b2f7429bb05032e202f8e7bf44b24a3800aa80eb49ebce",
+      "blob": "394d2adfe47907fbf67b2d16e7984986dec21f86",
+      "bytes": 79214,
+      "sha256": "989d7c274d8bfcde1c0e95993e508346797087b882a1e8a5066db6bab12e32bf"
+    },
+    "scripts/wal_descriptor_diagnostic.py": {
+      "base_blob": "2a238da1e24e6ed69b72bc168f3fef7cea920f51",
+      "base_sha256": "7397fab89dd3bfe884cc02ecc98bc746e9c2dc2c99dbf1c27ada586736ee790a",
+      "blob": "34e5b9e513a94d715e407f5d8b6a36de4ed91429",
+      "bytes": 53214,
+      "sha256": "d51a50f90064da8a3b272a701b7ff54d3472a69c5783b170e9c78c13cb127f81"
+    },
+    "scripts/wal_stall_diagnostic.py": {
+      "base_blob": "55bf61d544853b0cfde00f3e4e51b95563ab08a3",
+      "base_sha256": "2ad3cdf2d78befb7d7b100abac18b8cb78034d17eba7690defd953dc7229a68a",
+      "blob": "e7ed38987af3ed3065ed28acbe682e226240190e",
+      "bytes": 32074,
+      "sha256": "2add2da493c1234bd567f054bf0580a7b5f88c83ff32352d48f5cc3f4a359011"
+    },
+    "scripts/wal_trace_qualification.py": {
+      "base_blob": "3a424378e1be1e6c79073997f47fba92c7663641",
+      "base_sha256": "612c46dbb32c74e47d43b25819f5b2356b9dbcaabd0a8146571c48fa669f989a",
+      "blob": "64ca23b7c9f339af4453dec1c1eb65eecf562e71",
+      "bytes": 4061,
+      "sha256": "00ad28064d5144ceb7e816334544e5aaf1b4f006e89f1fb64d284b51a68668fb"
+    }
+  },
+  "reason": "explicit-python-bytecode-suppression",
+  "version": 1
+}
