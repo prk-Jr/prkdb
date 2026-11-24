@@ -34,6 +34,19 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  workflow-policy:
+    name: Workflow contracts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install PyYAML==6.0.3
+      - run: python3 -m unittest discover -s scripts -p test_ci_workflows.py -v
+
   repo-status-snapshot:
     name: Repo Status Snapshot
     runs-on: ubuntu-latest
@@ -44,7 +57,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - name: Run repo status snapshot
         run: cargo run -p xtask -- repo-status snapshot --fail-on-objective-drift
@@ -76,7 +89,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
@@ -201,7 +214,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants
@@ -315,7 +328,7 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants
@@ -470,7 +483,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       # The ledger is the only record of what is fixed. A finding cannot be marked
       # fixed without a regression test that exists and is not ignored (spec §4.2).
@@ -495,7 +508,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p prkdb --test load_tests -- --ignored --test-threads=1
       - run: cargo test -p prkdb --test chaos_tests chaos_test_memory_pressure -- --ignored --test-threads=1
@@ -529,7 +542,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Protoc
         run: sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo xtask verify --profile blocking --seeds 20000 --mode durable
       # profile=discovery currently and deliberately fails (it reproduces STO-01, see
@@ -564,7 +577,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       # --locked is required: newer cargo-audit/cargo-deny releases pull crates that
       # need a rustc above the version pinned in rust-toolchain.toml.
@@ -608,7 +621,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace
 
@@ -648,7 +661,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt
       # A wrapper that forgets a StorageAdapter method compiles cleanly and fails at
@@ -679,7 +692,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -702,7 +715,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run --workspace --profile ci
@@ -730,7 +743,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       # 200 seeds measured at ~5s warm locally; well inside the 30-minute budget even
       # accounting for a cold cache building the debug profile from scratch.
@@ -748,7 +761,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -776,7 +789,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -804,7 +817,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -830,7 +843,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - name: Setup Go
         uses: actions/setup-go@v4
@@ -856,7 +869,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -887,10 +900,8 @@ jobs:
   # ═══════════════════════════════════════════════════════════════════════════
   chaos-tests:
     name: "🐵 Chaos Tests"
-    # Runs on pushes to main as well as PRs. Gating only on PRs meant main could sit
-    # broken indefinitely, and the badge advertised results nothing enforced.
-    # Excluded from the nightly schedule, which has its own slow-test job.
-    if: github.event_name != 'schedule'
+    # Run on every CI event, including schedule: slow tests do not replace the
+    # chaos-feature cluster suites. Successful check/test jobs remain prerequisites.
     needs: [check, test]
     uses: ./.github/workflows/chaos-tests.yml
 
@@ -904,370 +915,10 @@ jobs:
   # ═══════════════════════════════════════════════════════════════════════════
   benchmark:
     name: "📊 Benchmarks: Local PrkDB + Kafka Reference"
-    # Push and pull request only, so the numbers from two runs can be compared.
-    #
-    # The mutation sweep below runs on `schedule` and `workflow_dispatch`, twenty shards
-    # four at a time, in this same workflow run. A benchmark measured next to it is
-    # measuring the sweep as much as the database, and nothing in the output said which
-    # trigger produced a given figure.
-    #
-    # That is not a hypothetical. Comparing a dispatch run against a push run showed
-    # producer throughput apparently falling from 418 to 176 MB/s and p99 batch latency
-    # rising from 30ms to 361ms — reproduced across two runs each, with the Kafka
-    # reference steady enough to look like a controlled comparison. It read as an obvious
-    # regression in the commit between them. Building both commits locally and running
-    # them alternately on one machine put them within 5% of each other: 503 against 530
-    # MB/s, p99 overlapping. The commit was innocent and the afternoon was not.
-    #
-    # A benchmark nobody can compare across runs is worse than no benchmark, because it
-    # invites exactly that investigation. Restricting it to the two triggers that measure
-    # under the same conditions is what makes the numbers mean something.
+    # Scheduled/manual measurements have their own entry points in benchmarks.yml,
+    # separate from this workflow's heavy nightly mutation sweep.
     if: github.event_name == 'push' || github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    
-    services:
-      zookeeper:
-        image: confluentinc/cp-zookeeper:7.5.0
-        ports:
-          - 2181:2181
-        env:
-          ZOOKEEPER_CLIENT_PORT: 2181
-          ZOOKEEPER_TICK_TIME: 2000
-          
-      kafka:
-        image: confluentinc/cp-kafka:7.5.0
-        ports:
-          - 9092:9092
-        env:
-          KAFKA_BROKER_ID: 1
-          KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
-          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-        options: >-
-          --health-cmd "kafka-broker-api-versions --bootstrap-server localhost:9092"
-          --health-interval 10s
-          --health-timeout 10s
-          --health-retries 10
-
-    steps:
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          
-      - uses: actions/checkout@v4
-      
-      - name: Install dependencies
-        run: sudo apt-get install -y protobuf-compiler bc jq
-        
-      # Honour rust-toolchain.toml. `@stable` overrides it, so CI was building with a
-      # newer compiler than the repository declares — and failing on lints no
-      # contributor could reproduce locally. `nightly-check` keeps the forward-looking
-      # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.99.1
-      - uses: Swatinem/rust-cache@v2
-      
-      - name: Build benchmarks
-        run: cargo build --release --example comprehensive_bench --example partitioned_bench
-          
-      - name: Wait for Kafka
-        run: |
-          echo "Waiting for Kafka to be ready..."
-          for i in {1..30}; do
-            if docker exec $(docker ps -q -f ancestor=confluentinc/cp-kafka:7.5.0) \
-               kafka-broker-api-versions --bootstrap-server localhost:9092 2>/dev/null; then
-              echo "Kafka is ready!"
-              break
-            fi
-            echo "Attempt $i/30..."
-            sleep 2
-          done
-          
-      - name: Create Kafka topic
-        run: |
-          docker exec $(docker ps -q -f ancestor=confluentinc/cp-kafka:7.5.0) \
-            kafka-topics --create \
-            --topic benchmark-test \
-            --bootstrap-server localhost:9092 \
-            --partitions 4 \
-            --replication-factor 1 || true
-          sleep 2
-
-      # ═══════════════════════════════════════════════════════════════════════
-      # KAFKA BENCHMARKS (3 RUNS)
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: "🔵 Kafka Producer Benchmark (3 runs)"
-        id: kafka_producer
-        run: |
-          echo "Running Kafka producer benchmark (3 runs)..."
-          KAFKA_CONTAINER=$(docker ps -q -f ancestor=confluentinc/cp-kafka:7.5.0)
-          
-          TOTAL_MBPS=0
-          TOTAL_RPS=0
-          declare -a LATENCIES_AVG
-          declare -a LATENCIES_P99
-          
-          for run in 1 2 3; do
-            echo "--- Run $run/3 ---"
-            
-            RESULT=$(docker exec $KAFKA_CONTAINER \
-              kafka-producer-perf-test \
-              --topic benchmark-test \
-              --num-records 1000000 \
-              --record-size 100 \
-              --throughput -1 \
-              --producer-props bootstrap.servers=localhost:9092 batch.size=10000 linger.ms=50 \
-              2>&1 | tail -1)
-            echo "$RESULT"
-            
-            MBPS=$(echo "$RESULT" | grep -oE '[0-9]+\.[0-9]+ MB/sec' | grep -oE '[0-9]+\.[0-9]+' || echo "0")
-            RPS=$(echo "$RESULT" | grep -oE '[0-9]+\.[0-9]+ records/sec' | grep -oE '[0-9]+\.[0-9]+' || echo "0")
-            AVG_LAT=$(echo "$RESULT" | grep -oE '[0-9]+\.[0-9]+ ms avg' | grep -oE '[0-9]+\.[0-9]+' || echo "0")
-            P99_LAT=$(echo "$RESULT" | grep -oE '[0-9]+ ms 99th' | grep -oE '[0-9]+' | head -1 || echo "0")
-            
-            TOTAL_MBPS=$(echo "$TOTAL_MBPS + $MBPS" | bc)
-            TOTAL_RPS=$(echo "$TOTAL_RPS + $RPS" | bc)
-            LATENCIES_AVG+=($AVG_LAT)
-            LATENCIES_P99+=($P99_LAT)
-            
-            sleep 2
-          done
-          
-          AVG_MBPS=$(echo "scale=2; $TOTAL_MBPS / 3" | bc)
-          AVG_RPS=$(echo "scale=2; $TOTAL_RPS / 3" | bc)
-          
-          echo "kafka_producer_mbps=$AVG_MBPS" >> $GITHUB_OUTPUT
-          echo "kafka_producer_rps=$AVG_RPS" >> $GITHUB_OUTPUT
-          echo "kafka_latency_avg=${LATENCIES_AVG[1]}" >> $GITHUB_OUTPUT
-          echo "kafka_latency_p99=${LATENCIES_P99[1]}" >> $GITHUB_OUTPUT
-          
-      - name: "🔵 Kafka Consumer Benchmark (3 runs)"
-        id: kafka_consumer
-        run: |
-          echo "Running Kafka consumer benchmark (3 runs)..."
-          KAFKA_CONTAINER=$(docker ps -q -f ancestor=confluentinc/cp-kafka:7.5.0)
-          
-          TOTAL_MBPS=0
-          
-          for run in 1 2 3; do
-            echo "--- Run $run/3 ---"
-            
-            RESULT=$(docker exec $KAFKA_CONTAINER \
-              kafka-consumer-perf-test \
-              --topic benchmark-test \
-              --bootstrap-server localhost:9092 \
-              --messages 1000000 \
-              --timeout 60000 \
-              2>&1 | tail -1)
-            echo "$RESULT"
-            
-            # Extract MB/sec from consumer output (different format)
-            MBPS=$(echo "$RESULT" | awk -F',' '{print $4}' | tr -d ' ' || echo "0")
-            if [ -z "$MBPS" ] || [ "$MBPS" = "0" ]; then
-              MBPS=$(echo "$RESULT" | grep -oE '[0-9]+\.[0-9]+' | head -3 | tail -1 || echo "0")
-            fi
-            
-            TOTAL_MBPS=$(echo "$TOTAL_MBPS + $MBPS" | bc 2>/dev/null || echo "0")
-            sleep 2
-          done
-          
-          AVG_MBPS=$(echo "scale=2; $TOTAL_MBPS / 3" | bc 2>/dev/null || echo "0")
-          echo "kafka_consumer_mbps=$AVG_MBPS" >> $GITHUB_OUTPUT
-
-      # ═══════════════════════════════════════════════════════════════════════
-      # PRKDB COMPREHENSIVE BENCHMARK
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: "🟢 PrkDB Comprehensive Benchmark (Producer + Consumer + Latency)"
-        id: prkdb_comprehensive
-        run: |
-          echo "Running PrkDB comprehensive benchmark..."
-          OUTPUT=$(./target/release/examples/comprehensive_bench 2>&1)
-          echo "$OUTPUT"
-          
-          # Extract metrics from output
-          PRODUCER_AVG=$(echo "$OUTPUT" | grep "producer_avg_mbps=" | cut -d= -f2)
-          CONSUMER_AVG=$(echo "$OUTPUT" | grep "consumer_avg_mbps=" | cut -d= -f2)
-          LATENCY_AVG=$(echo "$OUTPUT" | grep "latency_avg_us=" | cut -d= -f2)
-          LATENCY_P50=$(echo "$OUTPUT" | grep "latency_p50_us=" | cut -d= -f2)
-          LATENCY_P95=$(echo "$OUTPUT" | grep "latency_p95_us=" | cut -d= -f2)
-          LATENCY_P99=$(echo "$OUTPUT" | grep "latency_p99_us=" | cut -d= -f2)
-          
-          echo "prkdb_producer_mbps=$PRODUCER_AVG" >> $GITHUB_OUTPUT
-          echo "prkdb_consumer_mbps=$CONSUMER_AVG" >> $GITHUB_OUTPUT
-          echo "prkdb_latency_avg_us=$LATENCY_AVG" >> $GITHUB_OUTPUT
-          echo "prkdb_latency_p50_us=$LATENCY_P50" >> $GITHUB_OUTPUT
-          echo "prkdb_latency_p95_us=$LATENCY_P95" >> $GITHUB_OUTPUT
-          echo "prkdb_latency_p99_us=$LATENCY_P99" >> $GITHUB_OUTPUT
-          
-      # ═══════════════════════════════════════════════════════════════════════
-      # SUSTAINED LOAD TEST (10M Records, ~1GB)
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: "🔵 Kafka Sustained Load (10M records)"
-        id: kafka_sustained
-        run: |
-          echo "Running Kafka sustained load test (10M records)..."
-          KAFKA_CONTAINER=$(docker ps -q -f ancestor=confluentinc/cp-kafka:7.5.0)
-          
-          RESULT=$(docker exec $KAFKA_CONTAINER \
-            kafka-producer-perf-test \
-            --topic benchmark-test \
-            --num-records 10000000 \
-            --record-size 100 \
-            --throughput -1 \
-            --producer-props bootstrap.servers=localhost:9092 batch.size=10000 linger.ms=50 \
-            2>&1 | tail -1)
-          echo "$RESULT"
-          
-          MBPS=$(echo "$RESULT" | grep -oE '[0-9]+\.[0-9]+ MB/sec' | grep -oE '[0-9]+\.[0-9]+' || echo "0")
-          echo "kafka_sustained_mbps=$MBPS" >> $GITHUB_OUTPUT
-
-      - name: "🟢 PrkDB Sustained Load (10M records)"
-        id: prkdb_sustained
-        run: |
-          echo "Running PrkDB sustained load test (10M records)..."
-          OUTPUT=$(./target/release/examples/comprehensive_bench 10000000 2>&1)
-          echo "$OUTPUT"
-          
-          MBPS=$(echo "$OUTPUT" | grep "producer_avg_mbps=" | cut -d= -f2)
-          echo "prkdb_sustained_mbps=$MBPS" >> $GITHUB_OUTPUT
-
-      - name: "🟢 PrkDB Partitioned Benchmark"
-        id: prkdb_partitioned
-        run: |
-          echo "Running PrkDB partitioned benchmark..."
-          OUTPUT=$(./target/release/examples/partitioned_bench 2>&1)
-          echo "$OUTPUT"
-          
-          PEAK_MBPS=$(echo "$OUTPUT" | grep "Peak throughput" | grep -oE '[0-9]+\.[0-9]+' || echo "0")
-          echo "prkdb_peak_mbps=$PEAK_MBPS" >> $GITHUB_OUTPUT
-
-      # ═══════════════════════════════════════════════════════════════════════
-      # GENERATE COMPREHENSIVE REPORT
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: "📊 Generate Benchmark Report"
-        run: |
-          mkdir -p benchmark_results
-          
-          KAFKA_PROD="${{ steps.kafka_producer.outputs.kafka_producer_mbps }}"
-          KAFKA_CONS="${{ steps.kafka_consumer.outputs.kafka_consumer_mbps }}"
-          KAFKA_LAT="${{ steps.kafka_producer.outputs.kafka_latency_avg }}"
-          KAFKA_P99="${{ steps.kafka_producer.outputs.kafka_latency_p99 }}"
-          
-          PRKDB_PROD="${{ steps.prkdb_comprehensive.outputs.prkdb_producer_mbps }}"
-          PRKDB_CONS="${{ steps.prkdb_comprehensive.outputs.prkdb_consumer_mbps }}"
-          PRKDB_LAT="${{ steps.prkdb_comprehensive.outputs.prkdb_latency_avg_us }}"
-          PRKDB_P50="${{ steps.prkdb_comprehensive.outputs.prkdb_latency_p50_us }}"
-          PRKDB_P95="${{ steps.prkdb_comprehensive.outputs.prkdb_latency_p95_us }}"
-          PRKDB_P99="${{ steps.prkdb_comprehensive.outputs.prkdb_latency_p99_us }}"
-          PRKDB_PEAK="${{ steps.prkdb_partitioned.outputs.prkdb_peak_mbps }}"
-          
-          KAFKA_SUST="${{ steps.kafka_sustained.outputs.kafka_sustained_mbps }}"
-          PRKDB_SUST="${{ steps.prkdb_sustained.outputs.prkdb_sustained_mbps }}"
-          
-          # Generate JSON
-          cat > benchmark_results/results.json << EOF
-          {
-            "timestamp": "$(date -Iseconds)",
-            "runner": "${{ runner.os }}-${{ runner.arch }}",
-            "runs": 3,
-            "notes": "Kafka results are single-broker perf-tool reference runs. PrkDB results are local native storage-engine benchmarks. These numbers are not apples-to-apples product comparisons.",
-            "kafka": {
-              "producer_mbps": $KAFKA_PROD,
-              "consumer_mbps": ${KAFKA_CONS:-0},
-              "sustained_mbps": ${KAFKA_SUST:-0},
-              "latency_avg_ms": $KAFKA_LAT,
-              "latency_p99_ms": $KAFKA_P99
-            },
-            "prkdb": {
-              "producer_mbps": $PRKDB_PROD,
-              "consumer_mbps": $PRKDB_CONS,
-              "sustained_mbps": ${PRKDB_SUST:-0},
-              "latency_avg_us": $PRKDB_LAT,
-              "latency_p50_us": $PRKDB_P50,
-              "latency_p95_us": $PRKDB_P95,
-              "latency_p99_us": $PRKDB_P99,
-              "partitioned_peak_mbps": ${PRKDB_PEAK:-0}
-            }
-          }
-          EOF
-          
-          # Generate Markdown summary
-          cat > benchmark_results/BENCHMARK_RESULTS.md << 'EOF'
-          # 🔬 Benchmark Results
-          
-          **Important:** these results combine two different reference lanes:
-          - Kafka single-broker runs using the official perf tools
-          - local PrkDB native storage-engine benchmarks
-
-          They are useful for regression tracking in this repo, but they are **not** an apples-to-apples product comparison.
-
-          Produced by a **${{ github.event_name }}** run. Compare figures only against runs
-          with the same trigger: a run that also carries the twenty-shard mutation sweep is
-          measuring that sweep as much as the database, and the difference is large enough
-          to look convincingly like a regression.
-
-          **Test Configuration:**
-          - Records: 1,000,000 (Standard) / 10,000,000 (Sustained)
-          - Record Size: 100 bytes
-          - Batch Size: 10,000
-          - Runs: 3 (averaged)
-          
-          ## Kafka Reference
-          
-          | Metric | Value |
-          |--------|-------|
-          EOF
-          
-          echo "| **Producer (1M)** | ${KAFKA_PROD} MB/s |" >> benchmark_results/BENCHMARK_RESULTS.md
-          echo "| **Sustained (10M)** | ${KAFKA_SUST:-N/A} MB/s |" >> benchmark_results/BENCHMARK_RESULTS.md
-          echo "| **Consumer** | ${KAFKA_CONS:-N/A} MB/s |" >> benchmark_results/BENCHMARK_RESULTS.md
-          echo "| **Average latency** | ${KAFKA_LAT} ms |" >> benchmark_results/BENCHMARK_RESULTS.md
-          echo "| **p99 latency** | ${KAFKA_P99} ms |" >> benchmark_results/BENCHMARK_RESULTS.md
-          
-          cat >> benchmark_results/BENCHMARK_RESULTS.md << EOF
-          
-          ## PrkDB Local Benchmarks
-          
-          | Metric | Value |
-          |--------|-------|
-          | **Producer (1M)** | ${PRKDB_PROD} MB/s |
-          | **Sustained (10M)** | ${PRKDB_SUST:-N/A} MB/s |
-          | **Consumer** | ${PRKDB_CONS} MB/s |
-          | **Partitioned peak** | ${PRKDB_PEAK:-N/A} MB/s |
-          | **Average batch latency** | ${PRKDB_LAT} μs |
-          | **p50 batch latency** | ${PRKDB_P50} μs |
-          | **p95 batch latency** | ${PRKDB_P95} μs |
-          | **p99 batch latency** | ${PRKDB_P99} μs |
-          
-          ## 🔬 Methodology
-          
-          - **Kafka**: Official \`kafka-producer-perf-test\` and \`kafka-consumer-perf-test\`
-          - **PrkDB**: Native Rust local benchmarks with mmap WAL
-          - **Environment**: GitHub Actions ubuntu-latest
-          - **Runs**: 3 runs per test, results averaged
-          - **Interpretation**: use for trend tracking, not apples-to-apples claims
-          
-          ---
-          *Generated: $(date -Iseconds)*
-          EOF
-          
-          cat benchmark_results/BENCHMARK_RESULTS.md
-          
-      - name: "📤 Upload Results"
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmark-results-${{ github.run_number }}
-          path: benchmark_results/
-          retention-days: 90
-          
-      - name: "📝 Post to Step Summary"
-        run: |
-          cat benchmark_results/BENCHMARK_RESULTS.md >> $GITHUB_STEP_SUMMARY
+    uses: ./.github/workflows/benchmarks.yml
 
   # ═══════════════════════════════════════════════════════════════════════════
   # CROSS-LANGUAGE BENCHMARKS
@@ -1287,7 +938,7 @@ jobs:
       # newer compiler than the repository declares — and failing on lints no
       # contributor could reproduce locally. `nightly-check` keeps the forward-looking
       # signal, on purpose and out of the gating path.
-      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       
       - name: Setup Python
