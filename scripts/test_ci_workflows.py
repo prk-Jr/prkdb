@@ -1,9 +1,12 @@
 """Contract checks for CI entry points, shared measurements and compiler selection.
 
-Run with Python >=3.11 and PyYAML 6.0.3. These inspect YAML structure;
-actionlint and hosted Actions separately validate execution semantics.
+Run with Python >=3.11 and PyYAML 6.0.3. These inspect YAML structure and
+execute the required status script's outcome table. Actionlint and hosted
+Actions separately validate Actions execution semantics.
 """
+import os
 import pathlib
+import subprocess
 import tomllib
 import unittest
 
@@ -57,6 +60,31 @@ class WorkflowContracts(unittest.TestCase):
         self.assertEqual(caller["uses"], "./.github/workflows/benchmarks.yml")
         self.assertEqual(caller["if"], "github.event_name == 'push' || github.event_name == 'pull_request'")
         self.assertNotIn("steps", caller)
+
+    def test_required_benchmark_context_tracks_shared_measurements(self):
+        jobs = workflow("ci.yml")["jobs"]
+        required = "📊 Benchmarks: Local PrkDB + Kafka Reference"
+        caller = jobs["benchmark"]
+        self.assertEqual(caller["name"], "Benchmark measurements")
+        gate = jobs["benchmark-status"]
+        self.assertEqual(gate["name"], required)
+        self.assertEqual(gate["needs"], ["benchmark"])
+        self.assertEqual(gate["if"], "always() && (github.event_name == 'push' || github.event_name == 'pull_request')")
+        self.assertNotIn("uses", gate, "required context must be an ordinary job without reusable-name prefixes")
+        self.assertEqual([job["name"] for job in jobs.values() if job.get("name") == required], [required])
+        step, = gate["steps"]
+        self.assertEqual(step["env"], {"BENCHMARK_RESULT": "${{ needs.benchmark.result }}"})
+        self.assertEqual(step["shell"], "bash")
+
+    def test_required_benchmark_status_only_succeeds_for_successful_measurement(self):
+        gate = workflow("ci.yml")["jobs"]["benchmark-status"]
+        step, = gate["steps"]
+        for result in ("success", "failure", "cancelled", "skipped", "", "unexpected"):
+            with self.subTest(result=result):
+                process = subprocess.run(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", step["run"]],
+                                         env=dict(os.environ, BENCHMARK_RESULT=result),
+                                         capture_output=True, text=True)
+                self.assertEqual(process.returncode == 0, result == "success", process.stdout + process.stderr)
 
     def test_measurement_provenance_is_retained_with_results(self):
         steps = workflow("benchmarks.yml")["jobs"]["benchmark"]["steps"]

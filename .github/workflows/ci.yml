@@ -914,11 +914,28 @@ jobs:
   #   - Explicit caveat: not an apples-to-apples system comparison
   # ═══════════════════════════════════════════════════════════════════════════
   benchmark:
-    name: "📊 Benchmarks: Local PrkDB + Kafka Reference"
+    name: Benchmark measurements
     # Scheduled/manual measurements have their own entry points in benchmarks.yml,
     # separate from this workflow's heavy nightly mutation sweep.
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     uses: ./.github/workflows/benchmarks.yml
+
+  benchmark-status:
+    # An ordinary job preserves the exact required status context; reusable jobs
+    # report a caller/child name that does not match the repository ruleset.
+    name: "📊 Benchmarks: Local PrkDB + Kafka Reference"
+    needs: [benchmark]
+    if: always() && (github.event_name == 'push' || github.event_name == 'pull_request')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Require successful benchmark measurements
+        shell: bash
+        env:
+          BENCHMARK_RESULT: ${{ needs.benchmark.result }}
+        run: test "$BENCHMARK_RESULT" = success
 
   # ═══════════════════════════════════════════════════════════════════════════
   # CROSS-LANGUAGE BENCHMARKS
