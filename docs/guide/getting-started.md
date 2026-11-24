@@ -4,7 +4,7 @@ This guide uses the binaries and APIs that currently ship in this repository.
 
 ## Prerequisites
 
-- Rust 1.99.1+
+- Rust 1.100.0+
 - `protoc`
 - `cargo`
 

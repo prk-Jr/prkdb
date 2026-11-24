@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import shutil
 import sys
@@ -142,7 +143,7 @@ version = "0.2.2"
 
     def test_killed_command_keeps_live_temporary_raw_in_uploaded_case(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); work = root / 'source'; output = root / 'case'
+            root = Path(tmp).resolve(); work = root / 'source'; output = root / 'case'
             (work / run.BENCH).parent.mkdir(parents=True)
             runner = object.__new__(run.PairedRun)
             runner.output = root
@@ -162,21 +163,27 @@ version = "0.2.2"
             self.assertFalse((output / 'gungraun').exists(), 'control must test raw not yet moved to target')
 
     def test_failed_execution_or_bad_summary_retains_raw_prefix_and_binary(self):
-        for failure in ('execution', 'validation'):
-            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp); work = root / 'source'; output = root / 'case'
+        for failure, layout in ((failure, layout) for failure in ('execution', 'validation')
+                                for layout in ('deps', 'build/prkdb/hash/out')):
+            with self.subTest(failure=failure, layout=layout), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve(); work = root / 'source'; output = root / 'case'
                 (work / run.BENCH).parent.mkdir(parents=True)
                 runner = object.__new__(run.PairedRun)
                 runner.output = root
                 runner.assets = {run.BENCH: b'fixed harness'}
                 def command(*args, **kwargs):
                     self.assertIn('--nocapture=stderr', args[0])
+                    self.assertIn('--message-format=json', args[0])
                     (root / 'stderr').write_text('PRKDB_PERF_EFFECTIVE canary=0 skip=0\n' * 4)
                     raw = work / 'target' / 'gungraun'; raw.mkdir(parents=True)
                     (raw / 'partial.out').write_text('incomplete raw prefix')
-                    binary = work / 'target' / 'release' / 'deps' / 'iai_hot_paths-control'
+                    binary = work / 'target' / 'release' / layout / 'iai_hot_paths-control'
                     binary.parent.mkdir(parents=True); binary.write_bytes(b'partial binary'); binary.chmod(0o755)
                     if failure == 'execution': raise gate.GateError('original execution failure')
+                    (root / 'stdout').write_text(json.dumps({
+                        'reason': 'compiler-artifact', 'manifest_path': str(work / run.MANIFEST),
+                        'target': {'name': 'iai_hot_paths', 'kind': ['bench'],
+                                   'src_path': str(work / run.BENCH)}, 'executable': str(binary)}))
                     return 0, '', root
                 runner.command = command
                 with self.assertRaises(gate.GateError): runner.benchmark(work, {}, output)
@@ -185,6 +192,61 @@ version = "0.2.2"
                 self.assertEqual((output / 'benchmark').read_bytes(), b'partial binary')
                 self.assertTrue((output / 'binary.json').exists())
                 self.assertFalse(__import__('json').loads((output / 'binary.json').read_text())['raw_profile_validated'])
+
+    def test_failed_execution_keeps_distinct_binaries_with_same_basename(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve(); work = root / 'source'; output = root / 'case'
+            (work / run.BENCH).parent.mkdir(parents=True)
+            runner = object.__new__(run.PairedRun)
+            runner.output = root
+            runner.assets = {run.BENCH: b'fixed harness'}
+            binaries = {'deps/iai_hot_paths-same': b'old binary',
+                        'build/prkdb/hash/out/iai_hot_paths-same': b'new binary'}
+            def command(*args, **kwargs):
+                for relative, contents in binaries.items():
+                    binary = work / 'target/release' / relative
+                    binary.parent.mkdir(parents=True, exist_ok=True)
+                    binary.write_bytes(contents); binary.chmod(0o755)
+                raise gate.GateError('original execution failure')
+            runner.command = command
+            with self.assertRaisesRegex(gate.GateError, 'original execution failure'):
+                runner.benchmark(work, {}, output)
+            for relative, contents in binaries.items():
+                self.assertEqual((output / 'binaries' / relative).read_bytes(), contents)
+            self.assertEqual(len(json.loads((output / 'binary.json').read_text())['candidates']), 2)
+
+    def test_cargo_reported_benchmark_executable_accepts_both_compiler_layouts(self):
+        for relative in ('target/release/deps/iai_hot_paths-old',
+                         'target/release/build/prkdb/hash/out/iai_hot_paths-new'):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as tmp:
+                work = Path(tmp).resolve()
+                binary = work / relative
+                binary.parent.mkdir(parents=True)
+                binary.write_bytes(b'benchmark'); binary.chmod(0o755)
+                artifact = {'reason': 'compiler-artifact',
+                            'manifest_path': str(work / run.MANIFEST),
+                            'target': {'name': 'iai_hot_paths', 'kind': ['bench'],
+                                       'src_path': str(work / run.BENCH)},
+                            'executable': str(binary)}
+                output = json.dumps(artifact) + '\nbenchmark output\n'
+                self.assertEqual(run.benchmark_executables(work, output), [binary])
+                for invalid in ('missing', 'duplicate', 'wrong-manifest', 'wrong-source',
+                                'wrong-kind', 'outside-target', 'symlink', 'not-executable', 'malformed-target'):
+                    with self.subTest(invalid=invalid):
+                        altered = json.loads(json.dumps(artifact))
+                        if invalid == 'wrong-manifest': altered['manifest_path'] = str(work / 'other/Cargo.toml')
+                        if invalid == 'wrong-source': altered['target']['src_path'] = str(work / 'other.rs')
+                        if invalid == 'wrong-kind': altered['target']['kind'] = ['bin']
+                        if invalid == 'outside-target': altered['executable'] = str(work / 'elsewhere')
+                        if invalid == 'symlink':
+                            link = binary.with_name('link'); link.symlink_to(binary)
+                            altered['executable'] = str(link)
+                        if invalid == 'not-executable': binary.chmod(0o644)
+                        if invalid == 'malformed-target': altered['target'] = []
+                        text = '' if invalid == 'missing' else json.dumps(altered)
+                        if invalid == 'duplicate': text += '\n' + text
+                        with self.assertRaises(gate.GateError): run.benchmark_executables(work, text)
+                        binary.chmod(0o755)
 
     def test_overlay_feature_patch_does_not_copy_head_production_dependencies(self):
         old = '[dependencies]\nnormal="1"\n[dev-dependencies]\ngungraun = { version = "=0.19.4" }\n'

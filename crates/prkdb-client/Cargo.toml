@@ -20,7 +20,7 @@ tokio-stream = "0.1"
 
 # WebSocket support
 tokio-tungstenite = "0.30"
-url = "2.5"
+url = "2.5.9"
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-stream = "0.3"

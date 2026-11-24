@@ -142,6 +142,37 @@ def verify_dirty_paths(root):
     gate.require(set(tracked + untracked) <= set(OVERLAY), f'unexpected overlay source changes: {set(tracked + untracked) - set(OVERLAY)}')
 
 
+def benchmark_executables(work, stdout):
+    """Use Cargo's artifact identity, independent of its version-specific layout."""
+    work = Path(work).resolve()
+    candidates = []
+    for line in stdout.splitlines():
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # The benchmark's own output shares Cargo's stdout stream.
+        if not isinstance(message, dict) or message.get('reason') != 'compiler-artifact':
+            continue
+        target = message.get('target', {})
+        gate.require(isinstance(target, dict), 'malformed Cargo artifact target')
+        if target.get('name') != 'iai_hot_paths':
+            continue
+        gate.require(target.get('kind') == ['bench'] and
+                     target.get('src_path') == str(work / BENCH) and
+                     message.get('manifest_path') == str(work / MANIFEST),
+                     'unexpected benchmark artifact identity')
+        executable = message.get('executable')
+        gate.require(isinstance(executable, str) and Path(executable).is_absolute(),
+                     'missing benchmark executable path')
+        binary = Path(executable)
+        gate.require(binary.resolve().is_relative_to(work / 'target') and
+                     binary.resolve() == binary and binary.is_file() and os.access(binary, os.X_OK),
+                     'invalid benchmark executable path')
+        candidates.append(binary)
+    gate.require(len(candidates) == 1, 'ambiguous or missing benchmark executable')
+    return candidates
+
+
 def save(path, data):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text(json.dumps(data, indent=2, sort_keys=True) + '\n')
@@ -247,7 +278,7 @@ class PairedRun:
             shutil.copytree(baseline, data)
         (work / BENCH).write_text(self.legacy if legacy else self.assets[BENCH].decode())
         folder.mkdir(parents=True)
-        args = ['cargo', 'bench', '-p', 'prkdb', '--bench', 'iai_hot_paths', '--', '--save-summary=json',
+        args = ['cargo', 'bench', '-p', 'prkdb', '--bench', 'iai_hot_paths', '--message-format=json', '--', '--save-summary=json',
                 '--callgrind-args=--separate-threads=yes', '--nocapture=stderr']
         if baseline is not None:
             args += ['--baseline=base', '--callgrind-limits=ir=5%']
@@ -269,10 +300,15 @@ class PairedRun:
                 if data.exists():
                     gate.require(not any(p.is_symlink() for p in data.rglob('*')), 'symlink in raw prefix')
                     shutil.copytree(data, folder / 'gungraun')
-                binaries = [p for p in (work / 'target' / 'release' / 'deps').glob('iai_hot_paths-*')
-                            if p.is_file() and not p.is_symlink() and os.access(p, os.X_OK)]
+                if command_folder is not None:
+                    binaries = benchmark_executables(work, (command_folder / 'stdout').read_text())
+                else:
+                    # Failed execution has no admissible result, but retain any built
+                    # executable with the raw prefix for diagnosing the original error.
+                    binaries = [p for p in (work / 'target' / 'release').rglob('iai_hot_paths-*')
+                                if p.is_file() and not p.is_symlink() and os.access(p, os.X_OK)]
                 for binary in binaries:
-                    target = folder / 'benchmark' if len(binaries) == 1 else folder / 'binaries' / binary.name
+                    target = folder / 'benchmark' if len(binaries) == 1 else folder / 'binaries' / binary.relative_to(work / 'target' / 'release')
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(binary, target)
                 save(folder / 'binary.json', {'candidates': [{'path': str(p), 'sha256': gate.digest(p)} for p in binaries],
