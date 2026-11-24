@@ -91,6 +91,20 @@ evidence = [
   "crates/prkdb/src/collection_handle.rs:177-187",
 ]
 
+
+[[finding]]
+id = "STO-25"
+title = "Legacy batch WAL interval accounting emits excess synchronous index entries"
+area = "storage"
+severity = "medium"
+phase = 2
+status = "fixed"
+sources = ["local-regression-2026-11-24"]
+evidence = ["crates/prkdb-core/src/wal/log_segment.rs:267-294", "test:crates/prkdb-core/tests/wal_batch_index_interval.rs::batch_index_interval_matches_single_appends_across_batches"]
+regression_tests = ["test:crates/prkdb-core/tests/wal_batch_index_interval.rs::batch_index_interval_matches_single_appends_across_batches", "test:crates/prkdb-core/tests/wal_batch_index_interval.rs::mixed_single_and_batch_appends_preserve_interval_remainder"]
+changes = ["2cc8a3c0b4b680e7179e6b1096575129361936d8"]
+
+
 # ---------------------------------------------------------------------------
 # 3.2 Keys, indexes, partitioning (KEY)
 # ---------------------------------------------------------------------------

@@ -84,6 +84,7 @@ Sources: **A** = 2026-09-23 correctness audit (A#n), **R** = 2026-09-07 senior r
 | STO-06 | HIGH | Four WAL implementations in use; fixes do not propagate. The "parallel" WAL gives no parallelism for data: shards are chosen by hashing the collection name, but every data write passes `collection: String::new()` (`wal_adapter.rs:470,540`), so all user data lands in one shard and only `__raft_log` goes elsewhere. | `ParallelWal`, `AsyncParallelWal`, `MmapParallelWal`, `WriteAheadLog` referenced outside `wal/` | Verified | 2 |
 | STO-07 | HIGH | `BatchAccumulator::flush()` sleeps `linger_ms+10` and returns Ok; executor errors dropped; queue unbounded. | `batch_accumulator.rs:49,81,92,131-135`, `collection_handle.rs:177-187` (R06) | Reported | 2 |
 | STO-08 | LOW | `WalConfig::segment_bytes` is ignored by the WAL `WalStorageAdapter` uses: `MmapLogSegment` hardcodes `INITIAL_SEGMENT_SIZE`/`GROWTH_STEP` = 64 MB; only the legacy `WriteAheadLog` reads `segment_bytes`. Another config knob that does not do what it says (root cause 4). | `wal/mmap_log_segment.rs:50-51,77` (found by the Task 1.10 SIGKILL work) | Verified | 2 |
+| STO-25 | MED | Legacy LogSegment batch interval accounting never resets after indexing;100shortrecords create80synchronous index entries versus4single-append entries, and subsequent batches retain excess accounting. | `wal/log_segment.rs:267-294`; `wal_batch_index_interval.rs` deterministic RED/GREEN | Fixed locally (2cc8a3c), performance concern and Linux gate outstanding | 2 |
 
 ### 3.2 Keys, indexes, partitioning (KEY)
 
@@ -516,6 +517,8 @@ No unrelated refactoring.
 
 | Rev | Date | Change |
 |---|---|---|
+| 13 | 2026-11-24 | Locally fix STO-25 interval accounting with unchanged sync/error behavior, two passing index regressions and required paired Durable Criterion. Rust1.100 short-record mean133.97ms to14.25ms; large-record control244.79ms to288.15ms(+17.71%) is an unresolved local performance concern. No waiver, Linux qualification or historical replication-failure attribution. |
+| 12 | 2026-11-24 | Record STO-25 legacy public-source batch sparse-index accounting defect and deterministic regression. Local correction requires preserved durability and real before/after Criterion; no attribution of historical aggregate replication failure. |
 | 11 | 2026-10-29 | First bounded TST-09 probe was inconclusive: cleared child controls caused zero-versus-zero canaries. Correct explicit control transport, reject absent settings, require effective receipts, preserve live temporary profiles and history-independent tests. Same workloads, floors, 5% gate and time caps; additional execution requires approval. |
 | 10 | 2026-10-29 | Maintainer approved focused TST-09 repair: identical benchmark-only measurement overlay on both sources, whole-process async instrumentation, fixed 0/4096 canary and postconditions, strict all-thread/raw/baseline evidence, unchanged 5% gate and 45-minute job cap. TST-09 remains in progress pending Linux qualification; no performance waiver. |
 | 9 | 2026-10-29 | Maintainer requested Rust 1.99.1 on the reviewed CI-repair branch before merging. Update active compiler/CI/documentation pins; record actual compiler identities for baseline/head performance comparisons. Existing benchmark thresholds, shard coverage, security policy and historical evidence remain unchanged. |
