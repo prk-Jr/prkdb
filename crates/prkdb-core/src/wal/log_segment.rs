@@ -257,25 +257,19 @@ impl LogSegment {
             // Write to file (we hold the lock)
             file.write_all(&serialized)?;
 
-            // Update index if needed
-            // Note: We can't easily update index inside this loop if we want to be super efficient,
-            // but for now let's just update it.
-            // Actually, we need to track position.
+            // Batch position and sparse-index interval are separate counters.
+            // Account each record exactly as append does, retaining only bytes
+            // written since the last successful index insertion.
             let position = self.file_position.load(Ordering::SeqCst) + total_bytes;
-
-            // Check index interval
-            let bytes_since = self.bytes_since_last_index.load(Ordering::SeqCst) + total_bytes;
+            let bytes_since = self
+                .bytes_since_last_index
+                .fetch_add(record_size, Ordering::SeqCst);
             if bytes_since + record_size >= self.index_interval_bytes {
                 let mut index = self.index.lock().expect(
                     "RwLock/Mutex is only poisoned if another thread panicked while holding it",
                 );
-                // We need to handle the fact that we might be writing multiple index entries
-                // But index.append might fail if we don't handle it right.
-                // For simplicity, let's just update index here.
                 index.append(offset, position)?;
-                // Reset bytes since last index is tricky because we are accumulating.
-                // Let's simplify: just update the atomic at the end?
-                // No, we need to update index correctly.
+                self.bytes_since_last_index.store(0, Ordering::SeqCst);
             }
 
             total_bytes += record_size;
@@ -286,12 +280,6 @@ impl LogSegment {
 
         // Update file position once
         self.file_position.fetch_add(total_bytes, Ordering::SeqCst);
-
-        // Update bytes since last index (approximate is fine, or we can track it better)
-        // For now, let's just add total_bytes. If we missed an index entry in the middle, it's okay,
-        // the index is sparse.
-        self.bytes_since_last_index
-            .fetch_add(total_bytes, Ordering::SeqCst);
 
         Ok(last_offset)
     }
